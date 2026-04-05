@@ -1,0 +1,470 @@
+"""
+Truth Reconciler for Sovereign Trading System
+
+This module performs snapshot-based reconciliation of the five truths
+and detects divergence across truth domains.
+
+Responsibilities:
+- Compare five truths for consistency (snapshot-based)
+- Detect divergence across truth domains
+- Determine overall TruthStatus (RECONCILED, DRIFTING, BROKEN)
+- Generate divergence reasons for reporting
+- Provide status to TruthKernel for TruthFrame production
+
+Boundaries:
+- Owns: Divergence detection, status determination
+- Does NOT own: Truth state (TruthKernel)
+- Does NOT own: Invariant enforcement (invariant_checker.py)
+- Does NOT own: Timing-based drift detection (deferred to Stage 2+)
+- Consumes: Five truths as inputs, produces status and reasons
+
+Note: This reconciler is snapshot-based. Timing-based drift detection
+(divergence duration thresholds) is deferred to Stage 2+ enhancements
+and will be implemented in the invariant checker layer.
+"""
+
+import logging
+from typing import Optional, Tuple, List, Dict, Any
+from dataclasses import dataclass
+
+from app.models.contracts import (
+    ExchangeTruth, ExecutionTruth, PortfolioTruth,
+    StrategyTruth, RiskTruth
+)
+from app.models.enums import TruthStatus
+
+logger = logging.getLogger(__name__)
+
+
+class TruthReconcilerError(Exception):
+    """Base exception for truth reconciler errors."""
+    pass
+
+
+def _safe_str(value: Any) -> str:
+    """
+    Safely convert enum or string to string representation.
+    
+    Args:
+        value: Value that may be an enum or string
+    
+    Returns:
+        String representation
+    """
+    if hasattr(value, "value"):
+        return value.value
+    return str(value)
+
+
+@dataclass
+class DivergenceInfo:
+    """Information about a detected divergence."""
+    domain_pair: str
+    field: str
+    expected: Any
+    observed: Any
+    severity: str = "warning"  # "info", "warning", "critical"
+
+    def to_reason(self) -> str:
+        """Convert to human-readable reason string."""
+        return f"{self.domain_pair}: {self.field} mismatch (expected {self.expected}, got {self.observed})"
+
+
+class TruthReconciler:
+    """
+    Truth Reconciler - Detects divergence across the five truths.
+    
+    Features:
+    - Compares ExchangeTruth vs ExecutionTruth (order presence)
+    - Compares ExchangeTruth vs PortfolioTruth (positions, balances)
+    - Compares PortfolioTruth vs StrategyTruth (strategy expectations)
+    - Compares StrategyTruth vs RiskTruth (risk mode compatibility)
+    - Determines overall TruthStatus based on divergence severity
+    - Thread-safe (stateless, pure functions)
+    
+    The reconciler is stateless; all divergence detection is performed
+    on the provided truth snapshots.
+    
+    Timing-based drift detection (divergence duration thresholds) is
+    deferred to the invariant checker layer in Stage 2+.
+    """
+    
+    def __init__(self):
+        """Initialize truth reconciler."""
+        logger.info("TruthReconciler initialized (snapshot-based, no timing thresholds)")
+    
+    # ============================================
+    # Reconciliation Methods
+    # ============================================
+    
+    def reconcile(
+        self,
+        exchange_truth: ExchangeTruth,
+        execution_truth: ExecutionTruth,
+        portfolio_truth: PortfolioTruth,
+        strategy_truth: StrategyTruth,
+        risk_truth: RiskTruth
+    ) -> Tuple[TruthStatus, List[str]]:
+        """
+        Reconcile the five truths and determine status.
+        
+        Args:
+            exchange_truth: Exchange truth snapshot
+            execution_truth: Execution truth snapshot
+            portfolio_truth: Portfolio truth snapshot
+            strategy_truth: Strategy truth snapshot
+            risk_truth: Risk truth snapshot
+        
+        Returns:
+            Tuple of (TruthStatus, list of divergence reasons)
+        """
+        divergences: List[DivergenceInfo] = []
+        
+        # Compare Exchange vs Execution
+        divergences.extend(self._compare_exchange_execution(exchange_truth, execution_truth))
+        
+        # Compare Exchange vs Portfolio
+        divergences.extend(self._compare_exchange_portfolio(exchange_truth, portfolio_truth))
+        
+        # Compare Portfolio vs Strategy
+        divergences.extend(self._compare_portfolio_strategy(portfolio_truth, strategy_truth))
+        
+        # Compare Strategy vs Risk
+        divergences.extend(self._compare_strategy_risk(strategy_truth, risk_truth))
+        
+        # Determine status based on divergences
+        status, reasons = self._determine_status(divergences)
+        
+        # Log critical divergences
+        for d in divergences:
+            if d.severity == "critical":
+                logger.warning(f"Critical divergence: {d.to_reason()}")
+        
+        return status, reasons
+    
+    def get_truth_status(
+        self,
+        exchange_truth: ExchangeTruth,
+        execution_truth: ExecutionTruth,
+        portfolio_truth: PortfolioTruth,
+        strategy_truth: StrategyTruth,
+        risk_truth: RiskTruth
+    ) -> Tuple[TruthStatus, List[str]]:
+        """
+        Alias for reconcile() for compatibility with TruthKernel.
+        
+        Args:
+            exchange_truth: Exchange truth snapshot
+            execution_truth: Execution truth snapshot
+            portfolio_truth: Portfolio truth snapshot
+            strategy_truth: Strategy truth snapshot
+            risk_truth: Risk truth snapshot
+        
+        Returns:
+            Tuple of (TruthStatus, list of divergence reasons)
+        """
+        return self.reconcile(
+            exchange_truth=exchange_truth,
+            execution_truth=execution_truth,
+            portfolio_truth=portfolio_truth,
+            strategy_truth=strategy_truth,
+            risk_truth=risk_truth
+        )
+    
+    # ============================================
+    # Domain Pair Comparisons
+    # ============================================
+    
+    def _compare_exchange_execution(
+        self,
+        exchange: ExchangeTruth,
+        execution: ExecutionTruth
+    ) -> List[DivergenceInfo]:
+        """
+        Compare ExchangeTruth vs ExecutionTruth.
+        
+        Detects:
+        - Orders acknowledged by exchange but not recorded by execution
+        - Orders recorded by execution but not acknowledged by exchange
+        """
+        divergences: List[DivergenceInfo] = []
+        
+        # Get sets of order IDs from each truth
+        exchange_order_ids = {order.order_id for order in exchange.open_orders}
+        execution_order_ids = {order.client_order_id for order in execution.submitted_orders}
+        
+        # Orders in exchange but not in execution
+        missing_in_execution = exchange_order_ids - execution_order_ids
+        for order_id in missing_in_execution:
+            divergences.append(DivergenceInfo(
+                domain_pair="exchange/execution",
+                field="order_presence",
+                expected=f"order {order_id} in execution",
+                observed=f"order {order_id} only in exchange",
+                severity="warning"
+            ))
+        
+        # Orders in execution but not in exchange
+        missing_in_exchange = execution_order_ids - exchange_order_ids
+        for order_id in missing_in_exchange:
+            divergences.append(DivergenceInfo(
+                domain_pair="exchange/execution",
+                field="order_presence",
+                expected=f"order {order_id} acknowledged by exchange",
+                observed=f"order {order_id} only in execution",
+                severity="critical"
+            ))
+        
+        return divergences
+    
+    def _compare_exchange_portfolio(
+        self,
+        exchange: ExchangeTruth,
+        portfolio: PortfolioTruth
+    ) -> List[DivergenceInfo]:
+        """
+        Compare ExchangeTruth vs PortfolioTruth.
+        
+        Detects:
+        - Position quantity mismatches
+        - Balance mismatches
+        """
+        divergences: List[DivergenceInfo] = []
+        
+        # Build position maps
+        exchange_positions = {pos.symbol: pos for pos in exchange.positions}
+        portfolio_positions = {pos.symbol: pos for pos in portfolio.positions}
+        
+        all_symbols = set(exchange_positions.keys()) | set(portfolio_positions.keys())
+        
+        for symbol in all_symbols:
+            exchange_pos = exchange_positions.get(symbol)
+            portfolio_pos = portfolio_positions.get(symbol)
+            
+            if exchange_pos is None and portfolio_pos is not None:
+                divergences.append(DivergenceInfo(
+                    domain_pair="exchange/portfolio",
+                    field=f"position.{symbol}",
+                    expected="no position",
+                    observed=f"position {portfolio_pos.quantity} in portfolio",
+                    severity="critical"
+                ))
+            elif exchange_pos is not None and portfolio_pos is None:
+                divergences.append(DivergenceInfo(
+                    domain_pair="exchange/portfolio",
+                    field=f"position.{symbol}",
+                    expected=f"position {exchange_pos.quantity} in exchange",
+                    observed="no position in portfolio",
+                    severity="critical"
+                ))
+            elif exchange_pos is not None and portfolio_pos is not None:
+                # Compare quantities (allow small tolerance for rounding)
+                qty_diff = abs(exchange_pos.quantity - portfolio_pos.quantity)
+                if qty_diff > 0.00000001:  # 1e-8 tolerance for crypto
+                    divergences.append(DivergenceInfo(
+                        domain_pair="exchange/portfolio",
+                        field=f"position.{symbol}.quantity",
+                        expected=exchange_pos.quantity,
+                        observed=portfolio_pos.quantity,
+                        severity="critical"
+                    ))
+        
+        # Compare cash balances
+        for currency in set(exchange.balances.keys()) | set(portfolio.cash.keys()):
+            exchange_balance = exchange.balances.get(currency, 0)
+            portfolio_cash = portfolio.cash.get(currency, 0)
+            balance_diff = abs(exchange_balance - portfolio_cash)
+            if balance_diff > 0.01:  # $0.01 tolerance for USD, 1e-8 for crypto
+                divergences.append(DivergenceInfo(
+                    domain_pair="exchange/portfolio",
+                    field=f"balance.{currency}",
+                    expected=exchange_balance,
+                    observed=portfolio_cash,
+                    severity="critical"
+                ))
+        
+        return divergences
+    
+    def _compare_portfolio_strategy(
+        self,
+        portfolio: PortfolioTruth,
+        strategy: StrategyTruth
+    ) -> List[DivergenceInfo]:
+        """
+        Compare PortfolioTruth vs StrategyTruth.
+        
+        Detects:
+        - Strategy expects position that portfolio doesn't have
+        - Portfolio has position that strategy doesn't expect
+        
+        Note: This is a simplified snapshot-based check. Full reconciliation
+        requires strategy-symbol mapping and will be enhanced in Stage 3.
+        """
+        divergences: List[DivergenceInfo] = []
+        
+        # Build set of strategy IDs that claim to be in position
+        active_strategies_with_exposure = [
+            s.strategy_id for s in strategy.active_strategies
+            if s.entry_price is not None and s.current_exposure > 0
+        ]
+        
+        # Check if any strategy expects exposure when portfolio has no positions
+        if active_strategies_with_exposure and not portfolio.positions:
+            divergences.append(DivergenceInfo(
+                domain_pair="portfolio/strategy",
+                field="strategy_expectations",
+                expected=f"strategies {active_strategies_with_exposure} expect positions",
+                observed="no positions in portfolio",
+                severity="warning"
+            ))
+        
+        # Check if portfolio has positions when no strategies claim to be active
+        if portfolio.positions and not active_strategies_with_exposure:
+            divergences.append(DivergenceInfo(
+                domain_pair="portfolio/strategy",
+                field="portfolio_positions",
+                expected="no active strategies expecting positions",
+                observed=f"{len(portfolio.positions)} positions in portfolio",
+                severity="warning"
+            ))
+        
+        return divergences
+    
+    def _compare_strategy_risk(
+        self,
+        strategy: StrategyTruth,
+        risk: RiskTruth
+    ) -> List[DivergenceInfo]:
+        """
+        Compare StrategyTruth vs RiskTruth.
+        
+        Detects:
+        - Strategy active when risk is HARD_FLAT
+        - Strategy risk appetite exceeds risk limits
+        
+        Note: Risk appetite comparison is simplified for Stage 2.
+        Full risk limit enforcement belongs in invariant_checker.py.
+        """
+        divergences: List[DivergenceInfo] = []
+        
+        # Safely get risk mode string
+        risk_mode_str = _safe_str(risk.mode)
+        
+        # Check if any strategy is active when risk is HARD_FLAT
+        if risk_mode_str == "hard_flat" and strategy.active_strategies:
+            divergences.append(DivergenceInfo(
+                domain_pair="strategy/risk",
+                field="active_strategies",
+                expected="no active strategies in HARD_FLAT mode",
+                observed=f"{len(strategy.active_strategies)} active strategies",
+                severity="critical"
+            ))
+        
+        # Check if any strategy exposure exceeds risk max leverage
+        for strat in strategy.active_strategies:
+            if strat.current_exposure > risk.max_leverage:
+                divergences.append(DivergenceInfo(
+                    domain_pair="strategy/risk",
+                    field=f"strategy.{strat.strategy_id}.exposure",
+                    expected=f"exposure <= {risk.max_leverage}",
+                    observed=strat.current_exposure,
+                    severity="warning"
+                ))
+        
+        return divergences
+    
+    # ============================================
+    # Status Determination
+    # ============================================
+    
+    def _determine_status(
+        self,
+        divergences: List[DivergenceInfo]
+    ) -> Tuple[TruthStatus, List[str]]:
+        """
+        Determine overall TruthStatus based on divergence severity.
+        
+        Rules:
+        - No divergences: RECONCILED
+        - Warnings only: DRIFTING
+        - Critical divergences: BROKEN
+        
+        Note: Timing-based drift detection (divergence duration) is deferred
+        to the invariant checker layer in Stage 2+.
+        
+        Args:
+            divergences: List of detected divergences
+        
+        Returns:
+            Tuple of (TruthStatus, list of reason strings)
+        """
+        reasons = [d.to_reason() for d in divergences]
+        
+        critical_divergences = [d for d in divergences if d.severity == "critical"]
+        warning_divergences = [d for d in divergences if d.severity == "warning"]
+        
+        if critical_divergences:
+            return TruthStatus.BROKEN, reasons
+        
+        if warning_divergences:
+            return TruthStatus.DRIFTING, reasons
+        
+        return TruthStatus.RECONCILED, reasons
+    
+    def is_reconciled(self, status: TruthStatus) -> bool:
+        """
+        Check if status indicates reconciled state.
+        
+        Args:
+            status: TruthStatus to check
+        
+        Returns:
+            True if status is RECONCILED
+        """
+        return status == TruthStatus.RECONCILED
+    
+    def is_drifting(self, status: TruthStatus) -> bool:
+        """
+        Check if status indicates drifting state.
+        
+        Args:
+            status: TruthStatus to check
+        
+        Returns:
+            True if status is DRIFTING
+        """
+        return status == TruthStatus.DRIFTING
+    
+    def is_broken(self, status: TruthStatus) -> bool:
+        """
+        Check if status indicates broken state.
+        
+        Args:
+            status: TruthStatus to check
+        
+        Returns:
+            True if status is BROKEN
+        """
+        return status == TruthStatus.BROKEN
+
+
+# ============================================
+# Convenience Functions
+# ============================================
+
+def create_truth_reconciler() -> TruthReconciler:
+    """
+    Create a configured truth reconciler.
+    
+    Returns:
+        Configured TruthReconciler instance
+    """
+    return TruthReconciler()
+
+
+__all__ = [
+    'TruthReconciler',
+    'TruthReconcilerError',
+    'DivergenceInfo',
+    'create_truth_reconciler',
+]

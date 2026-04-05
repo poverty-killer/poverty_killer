@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0A0C12">
+    <title>Poverty Killer | Sovereign Command Terminal</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js for live equity curve -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    
+    <style>
+        /* ============================================
+           SOVEREIGN STYLE SYSTEM
+           Neon Cyan/Magenta accents, dark zinc/slate
+           ============================================ */
+        
+        @import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0A0C12;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        
+        /* Custom scrollbar - ultra thin */
+        ::-webkit-scrollbar {
+            width: 3px;
+            height: 3px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2A2E3A;
+            border-radius: 2px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3A3E4A;
+        }
+        
+        /* Card styling - zinc slate */
+        .card {
+            background: rgba(20, 22, 30, 0.92);
+            backdrop-filter: blur(0px);
+            border: 1px solid #2A2E3A;
+            border-radius: 10px;
+            transition: border-color 0.15s ease;
+        }
+        .card:hover {
+            border-color: #3F4A6B;
+        }
+        
+        /* Monospace for numbers */
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+            font-feature-settings: "tnum";
+            font-variant-numeric: tabular-nums;
+        }
+        
+        /* Neon accents - cyan and magenta */
+        .neon-cyan {
+            color: #06b6d4;
+            text-shadow: 0 0 6px rgba(6, 182, 212, 0.3);
+        }
+        .neon-magenta {
+            color: #ec489a;
+            text-shadow: 0 0 6px rgba(236, 72, 154, 0.3);
+        }
+        .neon-green {
+            color: #22c55e;
+            text-shadow: 0 0 4px rgba(34, 197, 94, 0.2);
+        }
+        
+        /* Status indicators */
+        .status-ok {
+            background: #22c55e;
+            box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+        }
+        .status-warning {
+            background: #eab308;
+            box-shadow: 0 0 6px rgba(234, 179, 8, 0.4);
+        }
+        .status-critical {
+            background: #ef4444;
+            box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+        }
+        
+        /* Signal entry animation */
+        @keyframes signalPulse {
+            0% { opacity: 0; transform: translateX(-4px); }
+            100% { opacity: 1; transform: translateX(0); }
+        }
+        .signal-entry {
+            animation: signalPulse 0.2s ease-out;
+        }
+        
+        /* Button hover effects */
+        .action-btn {
+            transition: all 0.15s ease;
+        }
+        .action-btn:active {
+            transform: scale(0.98);
+        }
+        
+        /* Ticker tape marquee */
+        .ticker-tape {
+            overflow: hidden;
+            white-space: nowrap;
+            position: relative;
+        }
+        .ticker-content {
+            display: inline-block;
+            animation: tickerScroll 90s linear infinite;
+            will-change: transform;
+        }
+        @keyframes tickerScroll {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-50%); }
+        }
+        
+        /* Canvas containers */
+        canvas {
+            display: block;
+            width: 100%;
+            background: #050608;
+            border-radius: 6px;
+        }
+        
+        /* Typography density */
+        .text-2xs { font-size: 9px; line-height: 12px; }
+    </style>
+</head>
+<body class="bg-[#0A0C12] text-gray-300">
+    <div class="h-screen w-screen flex flex-col p-2 gap-1.5 overflow-hidden">
+        
+        <!-- ============================================
+             HEADER: Global Ticker Tape + Status Bar
+             ============================================ -->
+        <div class="card px-4 py-2 flex items-center justify-between">
+            <div class="flex items-center gap-4">
+                <h1 class="text-base font-semibold tracking-wide text-gray-200">POVERTY KILLER</h1>
+                <div class="ticker-tape w-96">
+                    <div id="ticker-content" class="ticker-content text-xs font-mono text-gray-400 whitespace-nowrap">
+                        BTC/USD $49,234 ▲ 2.3% &nbsp;&nbsp;|&nbsp;&nbsp; ETH/USD $3,124 ▲ 1.8% &nbsp;&nbsp;|&nbsp;&nbsp; SOL/USD $98.45 ▼ 0.4%
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <div id="ws-dot" class="w-2 h-2 rounded-full bg-green-500"></div>
+                    <span id="ws-status" class="text-2xs text-gray-500">SYNC</span>
+                </div>
+                <div id="update-counter" class="text-2xs text-gray-600">updates: 0</div>
+            </div>
+        </div>
+        
+        <!-- ============================================
+             MAIN GRID: 4 Columns (Left, Center, Right)
+             ============================================ -->
+        <div class="flex-1 grid grid-cols-12 gap-1.5 min-h-0 overflow-hidden">
+            
+            <!-- LEFT COLUMN (4 cols) - Governor Matrix + Control Deck -->
+            <div class="col-span-4 flex flex-col gap-1.5 overflow-y-auto custom-scroll pr-0.5">
+                
+                <!-- Control Deck -->
+                <div class="card p-3">
+                    <div class="text-2xs text-gray-500 tracking-wider mb-2">⚡ CONTROL DECK</div>
+                    <div class="flex gap-2">
+                        <button id="attack-toggle" class="flex-1 py-2 rounded-md bg-cyan-900/30 border border-cyan-500/50 text-cyan-400 text-xs font-mono font-medium transition-all action-btn">
+                            ⚔️ ATTACK
+                        </button>
+                        <button id="emergency-halt" class="flex-1 py-2 rounded-md bg-red-900/30 border border-red-500/50 text-red-400 text-xs font-mono font-medium transition-all action-btn">
+                            🔴 HALT
+                        </button>
+                    </div>
+                    <div id="attack-status" class="mt-2 text-2xs text-center py-1 rounded bg-gray-800/50 text-gray-400">SAFE MODE</div>
+                </div>
+                
+                <!-- Governor Matrix: Portfolio Health -->
+                <div class="card p-3">
+                    <div class="text-2xs text-gray-500 tracking-wider mb-2">🏛️ GOVERNOR MATRIX</div>
+                    <div class="grid grid-cols-2 gap-2 mb-3">
+                        <div>
+                            <div class="text-2xs text-gray-500">EQUITY</div>
+                            <div class="text-xl font-bold mono text-cyan-400" id="equity">$20,000</div>
+                        </div>
+                        <div>
+                            <div class="text-2xs text-gray-500">DRAWDOWN</div>
+                            <div class="text-xl font-bold mono" id="drawdown">0.00%</div>
+                        </div>
+                        <div>
+                            <div class="text-2xs text-gray-500">CASH RESERVE</div>
+                            <div class="text-sm font-bold mono" id="cash-reserve">$6,000</div>
+                        </div>
+                        <div>
+                            <div class="text-2xs text-gray-500">HEAT</div>
+                            <div class="text-sm font-bold mono" id="heat">0%</div>
+                        </div>
+                    </div>
+                    <div id="governor-matrix" class="space-y-2 max-h-48 overflow-y-auto custom-scroll">
+                        <div class="text-center text-gray-600 text-2xs py-2">Loading strategy data...</div>
+                    </div>
+                </div>
+                
+                <!-- VPIN Toxicity Gauge -->
+                <div class="card p-3">
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-2xs text-gray-500 tracking-wider">VPIN TOXICITY</span>
+                        <span class="text-2xs font-mono text-gray-400" id="vpin-value">0%</span>
+                    </div>
+                    <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                        <div id="vpin-bar" class="h-full rounded-full transition-all duration-200" style="width: 0%; background: linear-gradient(90deg, #06b6d4, #ec489a);"></div>
+                    </div>
+                </div>
+                
+                <!-- Signal Fusion Pane -->
+                <div class="card p-3">
+                    <div class="text-2xs text-gray-500 tracking-wider mb-2">🎯 SIGNAL FUSION</div>
+                    <div class="space-y-1.5">
+                        <div class="flex justify-between">
+                            <span class="text-2xs text-gray-500">CONFIDENCE</span>
+                            <span class="text-2xs font-mono" id="fusion-confidence">0%</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-2xs text-gray-500">ACTIVE SLEEVE</span>
+                            <span class="text-2xs font-mono text-cyan-400" id="fusion-sleeve">NONE</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-2xs text-gray-500">REGIME</span>
+                            <span class="text-2xs font-mono" id="fusion-regime">UNKNOWN</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-2xs text-gray-500">SHAN'S SCORE</span>
+                            <span class="text-2xs font-mono" id="fusion-shans">0.00</span>
+                        </div>
+                        <div class="mt-2 pt-2 border-t border-gray-800">
+                            <div class="text-2xs text-gray-500">RECENT FUSION</div>
+                            <div id="fusion-reason" class="text-2xs text-gray-400 mt-1 break-words">--</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- CENTER COLUMN (5 cols) - Topography Radar + Alpha Stream -->
+            <div class="col-span-5 flex flex-col gap-1.5 overflow-hidden">
+                
+                <!-- Topography Radar (Betti-1 Voids) -->
+                <div class="card p-3 flex-1 flex flex-col min-h-0">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-2xs text-gray-500 tracking-wider">📡 TOPOGRAPHY RADAR | Betti-1 Voids</span>
+                        <span class="text-2xs text-gray-600" id="radar-fps">60 fps</span>
+                    </div>
+                    <canvas id="radar-canvas" class="w-full h-full rounded-md" style="min-height: 180px; background: #050608;"></canvas>
+                </div>
+                
+                <!-- Equity Curve (Chart.js) -->
+                <div class="card p-3">
+                    <div class="text-2xs text-gray-500 tracking-wider mb-2">📈 P&L MATRIX | 24h Equity Curve</div>
+                    <canvas id="equity-chart" class="w-full h-28 rounded-md" style="background: #050608;"></canvas>
+                </div>
+                
+                <!-- Alpha Stream (Scrolling Alerts) -->
+                <div class="card p-3 flex-1 flex flex-col min-h-0">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-2xs text-gray-500 tracking-wider">📡 ALPHA STREAM | Whale/VPIN Alerts</span>
+                        <span class="text-2xs text-gray-600" id="signal-count">0 signals</span>
+                    </div>
+                    <div id="alpha-stream" class="flex-1 overflow-y-auto space-y-1 font-mono text-xs custom-scroll">
+                        <div class="text-center text-gray-600 py-4">Waiting for signals...</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- RIGHT COLUMN (3 cols) - Execution Ledger -->
+            <div class="col-span-3 flex flex-col gap-1.5 overflow-y-auto custom-scroll">
+                
+                <!-- Execution Ledger -->
+                <div class="card p-3 flex-1 flex flex-col min-h-0">
+                    <div class="text-2xs text-gray-500 tracking-wider mb-2">📋 EXECUTION LEDGER</div>
+                    <div id="execution-ledger" class="flex-1 overflow-y-auto space-y-1.5 font-mono text-2xs custom-scroll">
+                        <div class="text-center text-gray-600 py-2">No executions</div>
+                    </div>
+                </div>
+                
+                <!-- Quick Stats -->
+                <div class="card p-3">
+                    <div class="text-2xs text-gray-500 tracking-wider mb-2">📊 SYSTEM STATS</div>
+                    <div class="space-y-1">
+                        <div class="flex justify-between text-2xs">
+                            <span class="text-gray-500">UPDATES</span>
+                            <span id="update-count">0</span>
+                        </div>
+                        <div class="flex justify-between text-2xs">
+                            <span class="text-gray-500">CONNECTED</span>
+                            <span id="connected-since">--:--:--</span>
+                        </div>
+                        <div class="flex justify-between text-2xs">
+                            <span class="text-gray-500">DELTA MODE</span>
+                            <span class="text-cyan-400">ACTIVE</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // ============================================
+        // SOVEREIGN COMMAND TERMINAL
+        // Delta Reconstruction | Chart.js | Memory-Efficient
+        // ============================================
+        
+        // ---------- DOM Elements ----------
+        const wsDot = document.getElementById('ws-dot');
+        const wsStatus = document.getElementById('ws-status');
+        const equityEl = document.getElementById('equity');
+        const drawdownEl = document.getElementById('drawdown');
+        const cashReserveEl = document.getElementById('cash-reserve');
+        const heatEl = document.getElementById('heat');
+        const vpinBar = document.getElementById('vpin-bar');
+        const vpinValue = document.getElementById('vpin-value');
+        const governorMatrix = document.getElementById('governor-matrix');
+        const alphaStream = document.getElementById('alpha-stream');
+        const executionLedger = document.getElementById('execution-ledger');
+        const fusionConfidence = document.getElementById('fusion-confidence');
+        const fusionSleeve = document.getElementById('fusion-sleeve');
+        const fusionRegime = document.getElementById('fusion-regime');
+        const fusionShans = document.getElementById('fusion-shans');
+        const fusionReason = document.getElementById('fusion-reason');
+        const attackStatus = document.getElementById('attack-status');
+        const attackToggle = document.getElementById('attack-toggle');
+        const emergencyHalt = document.getElementById('emergency-halt');
+        const signalCountSpan = document.getElementById('signal-count');
+        const updateCounter = document.getElementById('update-counter');
+        const updateCountSpan = document.getElementById('update-count');
+        const connectedSinceSpan = document.getElementById('connected-since');
+        
+        // ---------- Canvas & Chart ----------
+        const radarCanvas = document.getElementById('radar-canvas');
+        let radarCtx, radarWidth, radarHeight;
+        let radarAnimationId = null;
+        
+        // Chart.js for equity curve
+        let equityChart = null;
+        let equityData = [];
+        
+        // ---------- State Management ----------
+        let localState = {
+            bot: { equity: 20000, drawdown: 0, positions: 0, heat_multiplier: 0, mode: "SAFE" },
+            risk: { toxicity_score: 0 },
+            signals: { confidence: 0, preferred_sleeve: "NONE", regime: "UNKNOWN", shans_score: 0, bias: "neutral", reason: "" },
+            execution: { pending_orders_count: 0, filled_orders_count: 0 },
+            governor: { strategy_health: {} }
+        };
+        
+        let curvatureHistory = [];
+        let signalHistory = [];
+        let executionHistory = [];
+        let updateCount = 0;
+        let connectedAt = null;
+        
+        // Limits for memory efficiency
+        const MAX_EQUITY_POINTS = 200;
+        const MAX_SIGNALS = 150;
+        const MAX_EXECUTIONS = 80;
+        const MAX_CURVATURE = 200;
+        
+        // WebSocket
+        let ws = null;
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 10;
+        let reconnectDelay = 1000;
+        
+        // ============================================
+        // DELTA RECONSTRUCTION ENGINE
+        // ============================================
+        
+        function applyDelta(delta) {
+            // Recursively apply delta to localState
+            function apply(obj, path, value) {
+                const parts = path.split('.');
+                let current = obj;
+                for (let i = 0; i < parts.length - 1; i++) {
+                    const part = parts[i];
+                    if (!current[part]) current[part] = {};
+                    current = current[part];
+                }
+                const lastPart = parts[parts.length - 1];
+                current[lastPart] = value;
+            }
+            
+            for (const [path, value] of Object.entries(delta)) {
+                apply(localState, path, value);
+            }
+        }
+        
+        function mergeFullState(fullState) {
+            localState = fullState;
+        }
+        
+        // ============================================
+        // UI UPDATE (requestAnimationFrame optimized)
+        // ============================================
+        
+        let pendingRender = false;
+        let renderScheduled = false;
+        
+        function scheduleRender() {
+            if (!renderScheduled) {
+                renderScheduled = true;
+                requestAnimationFrame(() => {
+                    renderUI();
+                    renderScheduled = false;
+                });
+            }
+        }
+        
+        function renderUI() {
+            // Update portfolio metrics
+            const equity = localState.bot.equity || 20000;
+            equityEl.innerText = `$${equity.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+            
+            const drawdown = localState.bot.drawdown || 0;
+            drawdownEl.innerText = `${(drawdown * 100).toFixed(1)}%`;
+            drawdownEl.className = `text-xl font-bold mono ${drawdown < 0 ? 'text-red-400' : 'text-green-400'}`;
+            
+            const cashReserve = equity * 0.1; // 10% cash reserve
+            cashReserveEl.innerText = `$${cashReserve.toFixed(0)}`;
+            
+            const heat = (localState.bot.heat_multiplier || 0) * 100;
+            heatEl.innerText = `${Math.round(heat)}%`;
+            
+            // VPIN
+            const vpin = (localState.risk.toxicity_score || 0) * 100;
+            vpinBar.style.width = `${Math.min(100, Math.max(0, vpin))}%`;
+            vpinValue.innerText = `${Math.round(vpin)}%`;
+            
+            // Attack mode status
+            const isAttack = localState.bot.mode === 'ATTACK';
+            attackStatus.innerText = isAttack ? '⚡ ATTACK MODE' : '🛡️ SAFE MODE';
+            attackStatus.className = `mt-2 text-2xs text-center py-1 rounded ${isAttack ? 'bg-cyan-900/30 text-cyan-400' : 'bg-gray-800/50 text-gray-400'}`;
+            
+            // Signal Fusion
+            fusionConfidence.innerText = `${Math.round((localState.signals.confidence || 0) * 100)}%`;
+            fusionSleeve.innerText = localState.signals.preferred_sleeve || 'NONE';
+            fusionRegime.innerText = localState.signals.regime || 'UNKNOWN';
+            fusionShans.innerText = (localState.signals.shans_score || 0).toFixed(1);
+            if (localState.signals.reason) {
+                fusionReason.innerText = localState.signals.reason;
+            }
+            
+            // Governor Matrix
+            renderGovernorMatrix(localState.governor.strategy_health || {});
+            
+            // Update count
+            updateCount++;
+            updateCounter.innerText = `updates: ${updateCount}`;
+            if (updateCountSpan) updateCountSpan.innerText = updateCount;
+        }
+        
+        function renderGovernorMatrix(strategies) {
+            if (!strategies || Object.keys(strategies).length === 0) {
+                governorMatrix.innerHTML = '<div class="text-center text-gray-600 text-2xs py-2">No strategy data</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const [name, data] of Object.entries(strategies)) {
+                const usage = (data.usage_pct || 0) * 100;
+                const winRate = ((data.win_rate || 0.5) * 100).toFixed(0);
+                const healthColor = data.health === 'red' ? '#ef4444' : (data.health === 'yellow' ? '#eab308' : '#06b6d4');
+                html += `
+                    <div>
+                        <div class="flex justify-between text-2xs">
+                            <span class="text-gray-400">${name.toUpperCase()}</span>
+                            <span class="text-gray-500">${Math.round(usage)}%</span>
+                        </div>
+                        <div class="h-1 bg-gray-800 rounded-full mt-0.5 overflow-hidden">
+                            <div class="h-full rounded-full" style="width: ${Math.min(100, usage)}%; background: ${healthColor};"></div>
+                        </div>
+                        <div class="flex justify-between text-2xs text-gray-600 mt-0.5">
+                            <span>WR ${winRate}%</span>
+                            <span>PnL ${(data.pnl || 0).toFixed(0)}</span>
+                        </div>
+                    </div>
+                `;
+            }
+            governorMatrix.innerHTML = html;
+        }
+        
+        // ============================================
+        // ALPHA STREAM (Memory-Efficient)
+        // ============================================
+        
+        function addSignalToStream(signal) {
+            const time = new Date().toLocaleTimeString();
+            const sideClass = signal.bias === 'long' ? 'text-cyan-400' : (signal.bias === 'short' ? 'text-magenta-400' : 'text-gray-400');
+            const sleeve = signal.preferred_sleeve || 'NONE';
+            const confidence = Math.round((signal.confidence || 0.5) * 100);
+            
+            const signalHtml = `
+                <div class="signal-entry flex justify-between text-2xs py-1 border-b border-gray-800">
+                    <span class="text-gray-500 w-16">${time}</span>
+                    <span class="${sideClass} w-24">${sleeve}</span>
+                    <span class="text-yellow-400 w-12">${confidence}%</span>
+                    <span class="text-gray-500">${signal.regime || '??'}</span>
+                </div>
+            `;
+            
+            signalHistory.unshift(signalHtml);
+            if (signalHistory.length > MAX_SIGNALS) signalHistory.pop();
+            alphaStream.innerHTML = signalHistory.join('');
+            signalCountSpan.innerText = `${signalHistory.length} signals`;
+            alphaStream.scrollTop = 0;
+        }
+        
+        function addExecutionToLedger(exec) {
+            const time = new Date().toLocaleTimeString();
+            const execHtml = `
+                <div class="flex justify-between text-2xs py-1 border-b border-gray-800">
+                    <span class="text-gray-500">${time}</span>
+                    <span class="text-gray-400">${exec.pending || 0} pending</span>
+                    <span class="text-green-400">${exec.filled || 0} filled</span>
+                </div>
+            `;
+            executionHistory.unshift(execHtml);
+            if (executionHistory.length > MAX_EXECUTIONS) executionHistory.pop();
+            executionLedger.innerHTML = executionHistory.join('');
+        }
+        
+        // ============================================
+        // RADAR DRAWING (Canvas)
+        // ============================================
+        
+        function drawRadar() {
+            if (!radarCtx || radarWidth === 0) return;
+            
+            radarCtx.clearRect(0, 0, radarWidth, radarHeight);
+            
+            // Background
+            const grad = radarCtx.createLinearGradient(0, 0, 0, radarHeight);
+            grad.addColorStop(0, '#0A0C12');
+            grad.addColorStop(1, '#050608');
+            radarCtx.fillStyle = grad;
+            radarCtx.fillRect(0, 0, radarWidth, radarHeight);
+            
+            // Grid
+            radarCtx.strokeStyle = '#1E2128';
+            radarCtx.lineWidth = 0.5;
+            for (let i = 0; i <= 4; i++) {
+                const y = radarHeight * (i / 4);
+                radarCtx.beginPath();
+                radarCtx.moveTo(0, y);
+                radarCtx.lineTo(radarWidth, y);
+                radarCtx.stroke();
+            }
+            
+            if (curvatureHistory.length < 2) {
+                radarCtx.fillStyle = '#2A2E3A';
+                radarCtx.font = '9px monospace';
+                radarCtx.fillText('Waiting for Betti-1 data...', radarWidth/2 - 70, radarHeight/2);
+                return;
+            }
+            
+            // Draw curvature line
+            const points = curvatureHistory.slice(-radarWidth);
+            const step = radarWidth / Math.max(points.length, 1);
+            
+            radarCtx.beginPath();
+            radarCtx.strokeStyle = '#06b6d4';
+            radarCtx.lineWidth = 1.5;
+            radarCtx.shadowBlur = 3;
+            radarCtx.shadowColor = '#06b6d4';
+            
+            for (let i = 0; i < points.length; i++) {
+                const x = i * step;
+                const normalized = Math.min(1, Math.max(0, points[i]));
+                const y = radarHeight * (1 - normalized);
+                if (i === 0) radarCtx.moveTo(x, y);
+                else radarCtx.lineTo(x, y);
+            }
+            radarCtx.stroke();
+            radarCtx.shadowBlur = 0;
+            
+            // Fill under curve
+            radarCtx.beginPath();
+            for (let i = 0; i < points.length; i++) {
+                const x = i * step;
+                const normalized = Math.min(1, Math.max(0, points[i]));
+                const y = radarHeight * (1 - normalized);
+                if (i === 0) radarCtx.moveTo(x, y);
+                else radarCtx.lineTo(x, y);
+            }
+            radarCtx.lineTo(radarWidth, radarHeight);
+            radarCtx.lineTo(0, radarHeight);
+            radarCtx.closePath();
+            radarCtx.fillStyle = 'rgba(6, 182, 212, 0.08)';
+            radarCtx.fill();
+        }
+        
+        // ============================================
+        // EQUITY CHART (Chart.js)
+        // ============================================
+        
+        function initEquityChart() {
+            const ctx = document.getElementById('equity-chart').getContext('2d');
+            equityChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Equity',
+                        data: [],
+                        borderColor: '#06b6d4',
+                        backgroundColor: 'rgba(6, 182, 212, 0.05)',
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        fill: true,
+                        tension: 0.2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    plugins: { legend: { display: false }, tooltip: { enabled: false } },
+                    scales: { x: { display: false }, y: { display: true, ticks: { color: '#6B7280', font: { size: 8 } } } },
+                    elements: { line: { borderJoin: 'round' } }
+                }
+            });
+        }
+        
+        function updateEquityChart(equity) {
+            if (!equityChart) return;
+            equityData.push(equity);
+            if (equityData.length > MAX_EQUITY_POINTS) equityData.shift();
+            
+            equityChart.data.labels = equityData.map((_, i) => i);
+            equityChart.data.datasets[0].data = equityData;
+            equityChart.update('none'); // no animation for performance
+        }
+        
+        // ============================================
+        // CANVAS RESIZE
+        // ============================================
+        
+        function resizeRadarCanvas() {
+            const container = radarCanvas.parentElement;
+            radarWidth = container.clientWidth - 24;
+            radarHeight = 180;
+            radarCanvas.width = radarWidth;
+            radarCanvas.height = radarHeight;
+        }
+        
+        // ============================================
+        // WEB SOCKET (Delta Reconstruction)
+        // ============================================
+        
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                wsDot.className = 'w-2 h-2 rounded-full bg-green-500';
+                wsStatus.innerText = 'LIVE';
+                connectedAt = new Date();
+                connectedSinceSpan.innerText = connectedAt.toLocaleTimeString();
+                reconnectAttempts = 0;
+                
+                // Heartbeat
+                setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+                }, 30000);
+            };
+            
+            ws.onmessage = (event) => {
+                if (event.data === 'pong') return;
+                
+                try {
+                    const message = JSON.parse(event.data);
+                    
+                    if (message.type === 'delta') {
+                        applyDelta(message.data);
+                    } else if (message.type === 'full') {
+                        mergeFullState(message.data);
+                    }
+                    
+                    // Update derived data
+                    const equity = localState.bot.equity || 20000;
+                    updateEquityChart(equity);
+                    
+                    // Curvature for radar
+                    const shansScore = localState.signals.shans_score || 0;
+                    curvatureHistory.push(Math.min(1, Math.max(0, shansScore / 10)));
+                    if (curvatureHistory.length > MAX_CURVATURE) curvatureHistory.shift();
+                    
+                    // Alpha stream for signals
+                    if (localState.signals.preferred_sleeve && localState.signals.preferred_sleeve !== 'NONE') {
+                        addSignalToStream(localState.signals);
+                    }
+                    
+                    // Execution ledger
+                    addExecutionToLedger({
+                        pending: localState.execution.pending_orders_count || 0,
+                        filled: localState.execution.filled_orders_count || 0
+                    });
+                    
+                    scheduleRender();
+                    
+                } catch (e) { console.error('Parse error:', e); }
+            };
+            
+            ws.onclose = () => {
+                wsDot.className = 'w-2 h-2 rounded-full bg-red-500';
+                wsStatus.innerText = 'OFFLINE';
+                reconnect();
+            };
+            
+            ws.onerror = (err) => console.error('WS error:', err);
+        }
+        
+        function reconnect() {
+            if (reconnectAttempts >= maxReconnectAttempts) return;
+            const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts), 30000);
+            reconnectAttempts++;
+            setTimeout(() => connectWebSocket(), delay);
+        }
+        
+        // ============================================
+        // API CALLS
+        // ============================================
+        
+        async function apiCall(endpoint, method = 'POST') {
+            try { await fetch(endpoint, { method }); } catch (e) { console.error('API call failed:', e); }
+        }
+        
+        attackToggle.onclick = () => {
+            const isAttack = localState.bot.mode === 'ATTACK';
+            apiCall(isAttack ? '/api/mode/SAFE' : '/api/mode/ATTACK');
+        };
+        
+        emergencyHalt.onclick = () => {
+            if (confirm('EMERGENCY HALT: Liquidate all positions? This action is irreversible.')) {
+                apiCall('/api/flatten');
+                apiCall('/api/mode/EMERGENCY_HALT');
+            }
+        };
+        
+        // ============================================
+        // ANIMATION LOOP
+        // ============================================
+        
+        function animateRadar() {
+            drawRadar();
+            requestAnimationFrame(animateRadar);
+        }
+        
+        // ============================================
+        // INITIALIZATION
+        // ============================================
+        
+        function init() {
+            radarCtx = radarCanvas.getContext('2d');
+            resizeRadarCanvas();
+            window.addEventListener('resize', resizeRadarCanvas);
+            initEquityChart();
+            connectWebSocket();
+            animateRadar();
+            
+            // FPS counter
+            let lastTime = 0;
+            let frameCount = 0;
+            function updateFPS() {
+                frameCount++;
+                const now = performance.now();
+                if (now - lastTime >= 1000) {
+                    const fps = Math.round(frameCount * 1000 / (now - lastTime));
+                    document.getElementById('radar-fps').innerText = `${Math.min(60, fps)} fps`;
+                    frameCount = 0;
+                    lastTime = now;
+                }
+                requestAnimationFrame(updateFPS);
+            }
+            requestAnimationFrame(updateFPS);
+        }
+        
+        init();
+    </script>
+</body>
+</html>
