@@ -1,570 +1,442 @@
 ﻿"""
-Regime Detector - Deterministic Market State Classification
-CITADEL GRADE — CONTRACT-COMPLIANT · REPLAY-SAFE · DETERMINISTIC
+app/brain/regime_detector.py
 
-ANALYTICAL/NON-MONETARY BOUNDARY:
-This file performs analytical regime detection using float64 for performance.
-It is NOT used for monetary truth, risk, or accounting calculations.
+Deterministic, replay-safe regime detection for Poverty Killer.
+Classifies market structure into operationally meaningful regimes that drive
+sleeve authorization, risk modification, and transition discipline.
 
-CORE INNOVATIONS (NONE EXIST IN STANDARD LIBRARIES):
-1. Multi-timescale trend persistence fingerprinting
-2. Volatility regime with structural breakdown detection
-3. Range-bound with micro-structure confirmation
-4. Hysteresis-based transition gating (prevents flip-flop)
-5. Confidence-weighted output with stability scoring
+Role: Sleeve authorization system + risk modifier.
+NOT: decorative labeler, entropy duplicate, direction engine.
 """
 
-import logging
-import math
-from typing import Optional, Dict, Any, Tuple, List
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Deque, Union
 from collections import deque
-from enum import Enum
+import numpy as np
 
-logger = logging.getLogger(__name__)
+from app.models.enums import RegimeType
 
 
-class MacroRegime(Enum):
-    """Market regime classification."""
-    TRENDING_BULL = "trending_bull"
-    TRENDING_BEAR = "trending_bear"
-    RANGING = "ranging"
-    CRISIS = "crisis"
-    UNKNOWN = "unknown"
+# Bounded local defaults (not dependent on unproven constants)
+DEFAULT_HYSTERESIS_BARS = 3
+DEFAULT_MIN_HISTORY_BARS = 20
 
 
 @dataclass
-class RegimeState:
-    """Internal state container."""
-    regime: MacroRegime
+class RegimeEvidence:
+    """Raw evidence for regime classification."""
+    price_trend: float          # Normalized trend strength [-1, 1]
+    volatility: float           # Normalized volatility [0, 1]
+    volume_trend: float         # Normalized volume trend [-1, 1]
+    spread_widening: float      # Normalized spread change [0, 1]
+    liquidity_depth: float      # Normalized liquidity [0, 1]
+    exchange_ts_ns: int         # Timestamp of evidence
+
+
+@dataclass
+class CachedRegimeState:
+    """Internal state for deterministic regime tracking."""
+    regime: RegimeType
     confidence: float
-    timestamp_ns: int
-    transition_count: int
-    stability_score: float
-    persistence_bars: int
+    exchange_ts_ns: int
+    persistence_count: int
+    trend_strength: float
+    volatility_level: float
 
 
 class RegimeDetector:
     """
-    Deterministic market regime detector.
+    Deterministic regime classifier for sleeve authorization and risk modification.
     
-    UNIQUE FEATURES:
-    - Multi-timescale trend persistence (short + medium + long)
-    - Volatility regime with structural breakdown flags
-    - Range-bound with micro-structure confirmation
-    - Hysteresis gating (requires sustained evidence)
-    - Confidence degradation under ambiguity
+    Regime types:
+    - TRENDING_BULL: Sustained upward movement with volume confirmation
+    - TRENDING_BEAR: Sustained downward movement with volume confirmation
+    - RANGING: Sideways market with bounded volatility
+    - CRISIS: Extreme volatility, spread widening, liquidity collapse
+    - UNKNOWN: Insufficient evidence or ambiguous conditions
+    
+    Transition discipline:
+    - Hysteresis prevents twitchy one-tick flapping
+    - Persistence requirements for regime changes
+    - Confidence reflects evidence quality and stability
     """
-    
-    # ========== TREND PARAMETERS ==========
-    TREND_WINDOW_SHORT = 20
-    TREND_WINDOW_MEDIUM = 50
-    TREND_WINDOW_LONG = 100
-    
-    TREND_STRONG_THRESHOLD = 0.65
-    TREND_WEAK_THRESHOLD = 0.45
-    
-    # ========== VOLATILITY PARAMETERS ==========
-    VOL_HIGH_THRESHOLD = 0.35
-    VOL_LOW_THRESHOLD = 0.12
-    VOL_SPIKE_FACTOR = 2.5
-    
-    # ========== CRISIS PARAMETERS ==========
-    CRISIS_DRAWDOWN_THRESHOLD = -0.08
-    CRISIS_CONSECUTIVE_DOWN = 4
-    CRISIS_VOL_EXPANSION = 1.8
-    
-    # ========== RANGE PARAMETERS ==========
-    RANGE_WIDTH_MAX = 0.08
-    RANGE_POSITION_IDEAL = 0.3
-    RANGE_BOUNCE_CONSISTENCY = 0.6
-    
-    # ========== HYSTERESIS ==========
-    TRANSITION_PERSISTENCE = 3
-    STABILITY_WINDOW = 10
-    
-    # ========== CONFIDENCE ==========
-    MIN_SAMPLES = 30
-    HIGH_CONF_SAMPLES = 100
-    
-    # ========== HISTORY MANAGEMENT ==========
-    MAX_HISTORY_SECONDS = 600
-    PRICE_HISTORY_MAXLEN = 2000
-    
-    def __init__(self):
-        """Initialize deterministic regime detector."""
-        self._price_history: Dict[str, deque] = {}
-        self._return_history: Dict[str, deque] = {}
-        self._timestamp_history: Dict[str, deque] = {}
-        self._high_history: Dict[str, deque] = {}
-        self._low_history: Dict[str, deque] = {}
-        
-        self._current_state: Dict[str, Optional[RegimeState]] = {}
-        self._state_history: Dict[str, deque] = {}
-        self._signal_buffer: Dict[str, List[MacroRegime]] = {}
-        
-        logger.info("RegimeDetector v3 initialized")
-    
-    def update(
-        self,
-        symbol: str,
-        price: float,
-        high: Optional[float],
-        low: Optional[float],
-        timestamp_ns: int
-    ) -> RegimeState:
+
+    def __init__(self, config: Optional[Union[Dict[str, any], any]] = None):
         """
-        Update regime detection with new price data.
+        Initialize regime detector with optional configuration.
         
         Args:
-            symbol: Trading symbol
-            price: Current price
-            high: High price for period (optional, for range detection)
-            low: Low price for period (optional, for range detection)
-            timestamp_ns: Nanosecond timestamp (replay-safe)
+            config: Either a dict with configuration keys or an object with
+                    attribute-style configuration. Supports both calling patterns.
         """
-        self._init_symbol(symbol)
+        # Configuration with bounded defaults
+        self.hysteresis_bars = DEFAULT_HYSTERESIS_BARS
+        self.min_history_bars = DEFAULT_MIN_HISTORY_BARS
+        self.trend_threshold = 0.3
+        self.crisis_volatility_threshold = 0.7
+        self.ranging_volatility_cap = 0.4
+        self.crisis_spread_threshold = 0.6
+        self.crisis_liquidity_threshold = 0.3
         
-        # Store price data with aligned timestamps
-        self._price_history[symbol].append(price)
-        self._timestamp_history[symbol].append(timestamp_ns)
+        if config is not None:
+            if isinstance(config, dict):
+                self.hysteresis_bars = config.get('hysteresis_bars', DEFAULT_HYSTERESIS_BARS)
+                self.min_history_bars = config.get('min_history_bars', DEFAULT_MIN_HISTORY_BARS)
+                self.trend_threshold = config.get('trend_threshold', 0.3)
+                self.crisis_volatility_threshold = config.get('crisis_volatility_threshold', 0.7)
+                self.ranging_volatility_cap = config.get('ranging_volatility_cap', 0.4)
+                self.crisis_spread_threshold = config.get('crisis_spread_threshold', 0.6)
+                self.crisis_liquidity_threshold = config.get('crisis_liquidity_threshold', 0.3)
+            else:
+                if hasattr(config, 'hysteresis_bars'):
+                    self.hysteresis_bars = getattr(config, 'hysteresis_bars', DEFAULT_HYSTERESIS_BARS)
+                if hasattr(config, 'min_history_bars'):
+                    self.min_history_bars = getattr(config, 'min_history_bars', DEFAULT_MIN_HISTORY_BARS)
+                if hasattr(config, 'trend_threshold'):
+                    self.trend_threshold = getattr(config, 'trend_threshold', 0.3)
+                if hasattr(config, 'crisis_volatility_threshold'):
+                    self.crisis_volatility_threshold = getattr(config, 'crisis_volatility_threshold', 0.7)
+                if hasattr(config, 'ranging_volatility_cap'):
+                    self.ranging_volatility_cap = getattr(config, 'ranging_volatility_cap', 0.4)
+                if hasattr(config, 'crisis_spread_threshold'):
+                    self.crisis_spread_threshold = getattr(config, 'crisis_spread_threshold', 0.6)
+                if hasattr(config, 'crisis_liquidity_threshold'):
+                    self.crisis_liquidity_threshold = getattr(config, 'crisis_liquidity_threshold', 0.3)
         
-        if high is not None:
-            self._high_history[symbol].append(high)
-        if low is not None:
-            self._low_history[symbol].append(low)
+        # Rolling history for evidence
+        self._price_history: Deque[float] = deque(maxlen=self.min_history_bars * 2)
+        self._volatility_history: Deque[float] = deque(maxlen=self.min_history_bars * 2)
+        self._volume_history: Deque[float] = deque(maxlen=self.min_history_bars * 2)
+        self._spread_history: Deque[float] = deque(maxlen=self.min_history_bars * 2)
+        self._liquidity_history: Deque[float] = deque(maxlen=self.min_history_bars * 2)
+        self._timestamp_history: Deque[int] = deque(maxlen=self.min_history_bars * 2)
         
-        # Calculate return using aligned price sequence
-        if len(self._price_history[symbol]) >= 2:
-            prev_price = self._price_history[symbol][-2]
-            ret = (price - prev_price) / prev_price if prev_price > 0 else 0.0
-            self._return_history[symbol].append(ret)
+        # Current regime state
+        self._current_state: Optional[CachedRegimeState] = None
+        self._pending_regime: Optional[RegimeType] = None
+        self._pending_count: int = 0
         
-        # Prune old data (aligned across all sequences)
-        self._prune_history(symbol, timestamp_ns)
+        # Transition tracking
+        self._regime_history: Deque[RegimeType] = deque(maxlen=self.hysteresis_bars)
         
-        n_prices = len(self._price_history[symbol])
+        # Last output cache
+        self._last_regime: RegimeType = RegimeType.UNKNOWN
+        self._last_confidence: float = 0.0
+        self._last_timestamp_ns: int = 0
+
+    # ========================================================================
+    # Public API
+    # ========================================================================
+
+    def update(
+        self,
+        price: float,
+        volume: float,
+        bid_price: float,
+        ask_price: float,
+        bid_depth: float,
+        ask_depth: float,
+        exchange_ts_ns: int,
+    ) -> Tuple[RegimeType, float]:
+        """
+        Update regime detector with new market data.
         
-        if n_prices < self.MIN_SAMPLES:
-            confidence = max(0.0, min(0.4, n_prices / self.MIN_SAMPLES))
-            regime = MacroRegime.UNKNOWN
-        else:
-            # Compute evidence components
-            trend_scores = self._compute_multi_timescale_trend(symbol)
-            vol_regime = self._compute_volatility_regime(symbol)
-            range_score = self._compute_enhanced_range_score(symbol)
-            crisis_evidence = self._compute_crisis_evidence(symbol)
-            
-            # Classify
-            regime, confidence = self._classify_regime_enhanced(
-                symbol, trend_scores, vol_regime, range_score, crisis_evidence
-            )
+        Args:
+            price: Current mid price or last price
+            volume: Current volume (or volume profile)
+            bid_price: Best bid price
+            ask_price: Best ask price
+            bid_depth: Cumulative bid depth at best
+            ask_depth: Cumulative ask depth at best
+            exchange_ts_ns: Exchange timestamp in nanoseconds
         
-        # Apply hysteresis with signal buffer
-        regime, persistence_bars = self._apply_hysteresis_buffered(symbol, regime)
+        Returns:
+            Tuple of (regime, confidence)
+        """
+        # Update histories
+        self._price_history.append(price)
+        self._volume_history.append(volume)
+        self._timestamp_history.append(exchange_ts_ns)
         
-        # Compute stability
-        stability_score = self._compute_stability_score(symbol)
+        # Compute spread and liquidity
+        spread = (ask_price - bid_price) / price if price > 0 else 0.0
+        total_depth = bid_depth + ask_depth
+        liquidity = min(1.0, total_depth / 1_000_000.0)  # Normalize, 1M as full
         
-        # Track transitions
-        transition_count = 0
-        current = self._current_state.get(symbol)
-        if current and current.regime != regime:
-            transition_count = current.transition_count + 1
-            logger.info(f"Regime transition for {symbol}: {current.regime.value} -> {regime.value}")
+        self._spread_history.append(spread)
+        self._liquidity_history.append(liquidity)
         
-        state = RegimeState(
-            regime=regime,
-            confidence=confidence,
-            timestamp_ns=timestamp_ns,
-            transition_count=transition_count,
-            stability_score=stability_score,
-            persistence_bars=persistence_bars
+        # Compute rolling volatility if enough history
+        volatility = 0.0
+        if len(self._price_history) >= 10:
+            prices = list(self._price_history)[-10:]
+            if len(prices) > 1:
+                returns = [(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices)) if prices[i-1] > 0]
+                returns = [r for r in returns if not np.isnan(r)]
+                if returns:
+                    volatility = min(1.0, np.std(returns) * 100.0)
+        self._volatility_history.append(volatility)
+        
+        # Compute evidence
+        evidence = self._compute_evidence(volatility)
+        
+        # Classify regime from evidence
+        raw_regime, raw_confidence = self._classify_from_evidence(evidence)
+        
+        # Apply hysteresis and persistence
+        final_regime, final_confidence = self._apply_transition_discipline(raw_regime, raw_confidence)
+        
+        # Store state
+        self._current_state = CachedRegimeState(
+            regime=final_regime,
+            confidence=final_confidence,
+            exchange_ts_ns=exchange_ts_ns,
+            persistence_count=self._pending_count,
+            trend_strength=evidence.price_trend,
+            volatility_level=evidence.volatility,
         )
         
-        self._current_state[symbol] = state
-        self._state_history[symbol].append(state)
+        self._last_regime = final_regime
+        self._last_confidence = final_confidence
+        self._last_timestamp_ns = exchange_ts_ns
         
-        return state
-    
-    def _init_symbol(self, symbol: str) -> None:
-        """Initialize history containers for a symbol."""
-        if symbol not in self._price_history:
-            self._price_history[symbol] = deque(maxlen=self.PRICE_HISTORY_MAXLEN)
-            self._return_history[symbol] = deque(maxlen=self.PRICE_HISTORY_MAXLEN)
-            self._timestamp_history[symbol] = deque(maxlen=self.PRICE_HISTORY_MAXLEN)
-            self._high_history[symbol] = deque(maxlen=500)
-            self._low_history[symbol] = deque(maxlen=500)
-            self._signal_buffer[symbol] = []
-            self._state_history[symbol] = deque(maxlen=100)
-            self._current_state[symbol] = None
-    
-    def _prune_history(self, symbol: str, current_time_ns: int) -> None:
-        """
-        Prune old data outside lookback window.
-        Maintains alignment across price, return, and timestamp sequences.
-        """
-        cutoff_ns = current_time_ns - (self.MAX_HISTORY_SECONDS * 1_000_000_000)
-        timestamps = self._timestamp_history[symbol]
-        
-        # Find first index to keep
-        keep_idx = 0
-        for i, ts in enumerate(timestamps):
-            if ts >= cutoff_ns:
-                keep_idx = i
-                break
-        else:
-            keep_idx = len(timestamps)
-        
-        # Prune all aligned sequences simultaneously
-        if keep_idx > 0:
-            # Convert deques to lists for slicing, then back to deques
-            price_list = list(self._price_history[symbol])
-            return_list = list(self._return_history[symbol])
-            timestamp_list = list(self._timestamp_history[symbol])
-            high_list = list(self._high_history[symbol]) if self._high_history[symbol] else None
-            low_list = list(self._low_history[symbol]) if self._low_history[symbol] else None
-            
-            # Slice keeping only recent data
-            self._price_history[symbol] = deque(price_list[keep_idx:], maxlen=self.PRICE_HISTORY_MAXLEN)
-            self._timestamp_history[symbol] = deque(timestamp_list[keep_idx:], maxlen=self.PRICE_HISTORY_MAXLEN)
-            
-            # Returns are one shorter than prices, adjust offset
-            return_keep_idx = max(0, keep_idx - 1)
-            if return_list and return_keep_idx < len(return_list):
-                self._return_history[symbol] = deque(return_list[return_keep_idx:], maxlen=self.PRICE_HISTORY_MAXLEN)
-            else:
-                self._return_history[symbol] = deque(maxlen=self.PRICE_HISTORY_MAXLEN)
-            
-            if high_list:
-                self._high_history[symbol] = deque(high_list[keep_idx:], maxlen=500)
-            if low_list:
-                self._low_history[symbol] = deque(low_list[keep_idx:], maxlen=500)
-    
-    def _compute_multi_timescale_trend(self, symbol: str) -> Dict[str, float]:
-        """
-        Multi-timescale trend fingerprinting.
-        Returns scores for short, medium, long term trends.
-        """
-        prices = list(self._price_history[symbol])
-        
-        def trend_at_window(window: int) -> float:
-            if len(prices) < window:
-                return 0.5
-            
-            recent = prices[-window:]
-            x = list(range(len(recent)))
-            n = len(recent)
-            
-            sum_x = sum(x)
-            sum_y = sum(recent)
-            sum_xy = sum(x[i] * recent[i] for i in range(n))
-            sum_x2 = sum(xi * xi for xi in x)
-            
-            denominator = n * sum_x2 - sum_x * sum_x
-            if denominator == 0:
-                return 0.5
-            
-            slope = (n * sum_xy - sum_x * sum_y) / denominator
-            slope_normalized = slope / (sum(recent) / n + 1e-10)
-            
-            # Directional consistency
-            returns = [recent[i] - recent[i-1] for i in range(1, len(recent))]
-            if not returns:
-                return 0.5
-            
-            positive = sum(1 for r in returns if r > 0)
-            consistency = max(positive, len(returns) - positive) / len(returns)
-            
-            trend = (abs(slope_normalized) * 0.5 + consistency * 0.5)
-            return min(1.0, max(0.0, trend))
-        
-        return {
-            "short": trend_at_window(self.TREND_WINDOW_SHORT),
-            "medium": trend_at_window(self.TREND_WINDOW_MEDIUM),
-            "long": trend_at_window(self.TREND_WINDOW_LONG)
-        }
-    
-    def _compute_volatility_regime(self, symbol: str) -> Dict[str, float]:
-        """
-        Compute volatility regime with structural breakdown detection.
-        """
-        returns = list(self._return_history[symbol])
-        if len(returns) < 20:
-            return {"level": 0.5, "spiking": 0.0, "expanding": 0.0}
-        
-        recent = returns[-20:]
-        mean_ret = sum(recent) / len(recent)
-        variance = sum((r - mean_ret) ** 2 for r in recent) / len(recent)
-        std = math.sqrt(variance)
-        
-        # Annualized volatility (252 trading days)
-        annualized_vol = std * math.sqrt(252)
-        vol_level = min(1.0, annualized_vol / 0.4)
-        
-        # Volatility spike detection
-        spiking = 0.0
-        if len(returns) >= 40:
-            prev = returns[-40:-20]
-            if prev:
-                prev_mean = sum(prev) / len(prev)
-                prev_variance = sum((r - prev_mean) ** 2 for r in prev) / len(prev)
-                prev_std = math.sqrt(prev_variance)
-                if prev_std > 0:
-                    spike_ratio = std / prev_std
-                    spiking = min(1.0, max(0.0, (spike_ratio - 1.0) / 2.0))
-        
-        # Volatility expansion
-        expanding = 0.0
-        if len(returns) >= 30:
-            first = returns[-30:-15]
-            second = returns[-15:]
-            if first and second:
-                first_variance = sum((r - sum(first)/len(first)) ** 2 for r in first) / len(first)
-                second_variance = sum((r - sum(second)/len(second)) ** 2 for r in second) / len(second)
-                if first_variance > 0:
-                    expanding = min(1.0, max(0.0, (second_variance - first_variance) / (first_variance + 1e-10) / 2.0))
-        
-        return {"level": vol_level, "spiking": spiking, "expanding": expanding}
-    
-    def _compute_enhanced_range_score(self, symbol: str) -> float:
-        """
-        Enhanced range-bound detection with micro-structure confirmation.
-        """
-        prices = list(self._price_history[symbol])
-        highs = list(self._high_history.get(symbol, []))
-        lows = list(self._low_history.get(symbol, []))
-        
-        if len(prices) < 40:
-            return 0.5
-        
-        recent_prices = prices[-40:]
-        recent_highs = highs[-40:] if len(highs) >= 40 else None
-        recent_lows = lows[-40:] if len(lows) >= 40 else None
-        
-        high = max(recent_prices)
-        low = min(recent_prices)
-        range_width = (high - low) / ((high + low) / 2 + 1e-10)
-        
-        # Width penalty
-        if range_width > self.RANGE_WIDTH_MAX:
-            width_score = 0.0
-        else:
-            width_score = 1.0 - (range_width / self.RANGE_WIDTH_MAX)
-        
-        # Position score (price near middle = good for ranging)
-        current = recent_prices[-1]
-        position = (current - low) / (high - low + 1e-10)
-        position_score = 1.0 - abs(position - 0.5) * 2.0
-        
-        # Bounce consistency
-        bounce_score = 0.5
-        if recent_highs and recent_lows and len(recent_highs) >= 20:
-            bounces = 0
-            for i in range(1, len(recent_highs) - 1):
-                if recent_highs[i] > recent_highs[i-1] and recent_highs[i] > recent_highs[i+1]:
-                    bounces += 1
-                if recent_lows[i] < recent_lows[i-1] and recent_lows[i] < recent_lows[i+1]:
-                    bounces += 1
-            bounce_score = min(1.0, bounces / 20)
-        
-        combined = (width_score * 0.4 + position_score * 0.3 + bounce_score * 0.3)
-        return min(1.0, max(0.0, combined))
-    
-    def _compute_crisis_evidence(self, symbol: str) -> Dict[str, float]:
-        """
-        Compute crisis-specific evidence.
-        """
-        prices = list(self._price_history[symbol])
-        returns = list(self._return_history[symbol])
-        
-        if len(prices) < 30:
-            return {"drawdown": 0.0, "momentum_break": 0.0, "vol_expansion": 0.0}
-        
-        # Drawdown severity
-        peak = max(prices[-30:])
-        current = prices[-1]
-        drawdown = (current - peak) / peak if peak > 0 else 0
-        drawdown_score = min(1.0, max(0.0, -drawdown / self.CRISIS_DRAWDOWN_THRESHOLD))
-        
-        # Momentum breakdown
-        breakdown_score = 0.0
-        if len(returns) >= 10:
-            recent_returns = returns[-10:]
-            consecutive_down = 0
-            for r in reversed(recent_returns):
-                if r < 0:
-                    consecutive_down += 1
-                else:
-                    break
-            breakdown_score = min(1.0, consecutive_down / self.CRISIS_CONSECUTIVE_DOWN)
-        
-        # Volatility expansion
-        vol_regime = self._compute_volatility_regime(symbol)
-        vol_expansion = vol_regime.get("expanding", 0.0)
-        
-        return {
-            "drawdown": drawdown_score,
-            "momentum_break": breakdown_score,
-            "vol_expansion": vol_expansion
-        }
-    
-    def _classify_regime_enhanced(
+        return final_regime, final_confidence
+
+    def update_candles(
         self,
-        symbol: str,
-        trend_scores: Dict[str, float],
-        vol_regime: Dict[str, float],
-        range_score: float,
-        crisis_evidence: Dict[str, float]
-    ) -> Tuple[MacroRegime, float]:
+        candles: List[Dict[str, any]],
+        exchange_ts_ns: int,
+    ) -> Tuple[RegimeType, float]:
         """
-        Enhanced regime classification with weighted evidence.
+        Alternative update method for candle-based callers.
+        
+        Args:
+            candles: List of candle dicts with 'close', 'volume' keys
+            exchange_ts_ns: Exchange timestamp in nanoseconds
+        
+        Returns:
+            Tuple of (regime, confidence)
+        """
+        if not candles:
+            return self._last_regime, self._last_confidence
+        
+        # Use latest candle data
+        latest = candles[-1]
+        price = latest.get('close', 0.0)
+        volume = latest.get('volume', 0.0)
+        
+        # Estimate bid/ask from price (simple spread estimate)
+        spread_estimate = 0.001  # 10bps default spread
+        bid_price = price * (1 - spread_estimate / 2)
+        ask_price = price * (1 + spread_estimate / 2)
+        
+        # Estimate depth from volume
+        bid_depth = volume * 0.5
+        ask_depth = volume * 0.5
+        
+        return self.update(price, volume, bid_price, ask_price, bid_depth, ask_depth, exchange_ts_ns)
+
+    def get_current_regime(self) -> RegimeType:
+        """Get the most recent regime classification."""
+        return self._last_regime
+
+    def get_current_confidence(self) -> float:
+        """Get the confidence of the most recent classification."""
+        return self._last_confidence
+
+    def get_regime_state(self) -> Optional[CachedRegimeState]:
+        """Get full cached regime state."""
+        return self._current_state
+
+    def should_authorize_sleeve(self, sleeve_name: str, regime: Optional[RegimeType] = None) -> bool:
+        """
+        Determine if a sleeve should be authorized based on current regime.
+        
+        Sleeve authorization rules:
+        - shadow_front: Authorized in all non-crisis regimes (requires entropy unlock separately)
+        - liquidity_void: Authorized in ranging and crisis regimes
+        - gamma_front: Authorized in trending regimes
+        - sector_rotation: Authorized in trending regimes
+        """
+        effective_regime = regime if regime is not None else self._last_regime
+        
+        if sleeve_name == "shadow_front":
+            return effective_regime != RegimeType.CRISIS
+        elif sleeve_name == "liquidity_void":
+            return effective_regime in (RegimeType.RANGING, RegimeType.CRISIS)
+        elif sleeve_name == "gamma_front":
+            return effective_regime in (RegimeType.TRENDING_BULL, RegimeType.TRENDING_BEAR)
+        elif sleeve_name == "sector_rotation":
+            return effective_regime in (RegimeType.TRENDING_BULL, RegimeType.TRENDING_BEAR)
+        
+        return False
+
+    def get_risk_modifier(self, regime: Optional[RegimeType] = None) -> float:
+        """
+        Get risk multiplier based on current regime.
+        
+        Returns:
+            Risk modifier in [0, 1], where 1 = full risk, 0 = no risk.
+        """
+        effective_regime = regime if regime is not None else self._last_regime
+        
+        if effective_regime == RegimeType.CRISIS:
+            return 0.1
+        elif effective_regime == RegimeType.RANGING:
+            return 0.5
+        elif effective_regime in (RegimeType.TRENDING_BULL, RegimeType.TRENDING_BEAR):
+            return 1.0
+        else:
+            return 0.3
+
+    # ========================================================================
+    # Internal Methods
+    # ========================================================================
+
+    def _compute_evidence(self, current_volatility: float) -> RegimeEvidence:
+        """Compute regime evidence from historical data."""
+        n = len(self._price_history)
+        
+        # Price trend using linear regression on last N points
+        price_trend = 0.0
+        if n >= self.min_history_bars:
+            prices = list(self._price_history)[-self.min_history_bars:]
+            x = np.arange(len(prices))
+            slope = np.polyfit(x, prices, 1)[0]
+            price_range = max(prices) - min(prices)
+            if price_range > 0:
+                price_trend = np.clip(slope / price_range * 10.0, -1.0, 1.0)
+        
+        # Volume trend
+        volume_trend = 0.0
+        if len(self._volume_history) >= self.min_history_bars:
+            volumes = list(self._volume_history)[-self.min_history_bars:]
+            x = np.arange(len(volumes))
+            slope = np.polyfit(x, volumes, 1)[0]
+            vol_mean = np.mean(volumes) if volumes else 1.0
+            if vol_mean > 0:
+                volume_trend = np.clip(slope / vol_mean * 5.0, -1.0, 1.0)
+        
+        # Spread widening trend
+        spread_widening = 0.0
+        if len(self._spread_history) >= self.min_history_bars:
+            spreads = list(self._spread_history)[-self.min_history_bars:]
+            if len(spreads) > 1 and spreads[0] > 0:
+                spread_widening = np.clip((spreads[-1] - spreads[0]) / spreads[0], 0.0, 1.0)
+        
+        # Current liquidity depth
+        liquidity_depth = self._liquidity_history[-1] if self._liquidity_history else 0.5
+        
+        return RegimeEvidence(
+            price_trend=price_trend,
+            volatility=current_volatility,
+            volume_trend=volume_trend,
+            spread_widening=spread_widening,
+            liquidity_depth=liquidity_depth,
+            exchange_ts_ns=self._timestamp_history[-1] if self._timestamp_history else 0,
+        )
+
+    def _classify_from_evidence(self, evidence: RegimeEvidence) -> Tuple[RegimeType, float]:
+        """
+        Classify regime from evidence with confidence scoring.
         """
         # Crisis detection (highest priority)
-        crisis_severity = (
-            crisis_evidence["drawdown"] * 0.4 +
-            crisis_evidence["momentum_break"] * 0.3 +
-            crisis_evidence["vol_expansion"] * 0.3
-        )
+        crisis_score = 0.0
+        if evidence.volatility > self.crisis_volatility_threshold:
+            crisis_score += 0.5
+        if evidence.spread_widening > self.crisis_spread_threshold:
+            crisis_score += 0.3
+        if evidence.liquidity_depth < self.crisis_liquidity_threshold:
+            crisis_score += 0.2
         
-        if crisis_severity > 0.6:
-            confidence = 0.7 + crisis_severity * 0.25
-            return MacroRegime.CRISIS, min(0.95, confidence)
+        if crisis_score > 0.6:
+            confidence = min(0.9, 0.5 + crisis_score * 0.4)
+            return RegimeType.CRISIS, confidence
         
-        # Multi-timescale trend consensus
-        trend_consensus = (
-            trend_scores["short"] * 0.4 +
-            trend_scores["medium"] * 0.35 +
-            trend_scores["long"] * 0.25
-        )
+        # Trending detection
+        trend_abs = abs(evidence.price_trend)
+        volume_confirmation = evidence.volume_trend * np.sign(evidence.price_trend) if evidence.price_trend != 0 else 0
         
-        # Volatility adjustment
-        vol_penalty = vol_regime["level"] * 0.3
-        trend_adjusted = trend_consensus * (1.0 - vol_penalty)
-        
-        if trend_adjusted > self.TREND_STRONG_THRESHOLD:
-            # Determine direction using symbol-local price data
-            prices = list(self._price_history.get(symbol, []))
-            if len(prices) >= 10:
-                recent_prices = prices[-10:]
-                if recent_prices[-1] > recent_prices[0]:
-                    regime = MacroRegime.TRENDING_BULL
-                else:
-                    regime = MacroRegime.TRENDING_BEAR
-            else:
-                regime = MacroRegime.TRENDING_BULL
+        if trend_abs > self.trend_threshold and evidence.volatility < self.crisis_volatility_threshold:
+            trend_confidence = 0.5 + trend_abs * 0.4 + max(0, volume_confirmation) * 0.1
+            trend_confidence = min(0.9, trend_confidence)
             
-            confidence = 0.65 + trend_adjusted * 0.25
-            return regime, min(0.9, confidence)
+            if evidence.price_trend > 0:
+                return RegimeType.TRENDING_BULL, trend_confidence
+            else:
+                return RegimeType.TRENDING_BEAR, trend_confidence
         
         # Ranging detection
-        vol_acceptable = vol_regime["level"] < 0.25
-        if range_score > 0.65 and vol_acceptable:
-            confidence = 0.55 + range_score * 0.25
-            return MacroRegime.RANGING, min(0.85, confidence)
+        if evidence.volatility <= self.ranging_volatility_cap and trend_abs < self.trend_threshold:
+            ranging_confidence = 0.4 + (1.0 - evidence.volatility / self.ranging_volatility_cap) * 0.3
+            ranging_confidence = min(0.7, ranging_confidence)
+            return RegimeType.RANGING, ranging_confidence
         
-        # Unknown / weak evidence
-        if trend_adjusted > self.TREND_WEAK_THRESHOLD:
-            confidence = 0.4
-            return MacroRegime.UNKNOWN, confidence
-        
-        # Very weak - return unknown with low confidence
-        confidence = max(0.2, trend_adjusted * 0.5)
-        return MacroRegime.UNKNOWN, min(0.5, confidence)
-    
-    def _apply_hysteresis_buffered(
-        self, 
-        symbol: str, 
-        proposed_regime: MacroRegime
-    ) -> Tuple[MacroRegime, int]:
+        # Unknown / insufficient evidence
+        unknown_confidence = 0.3
+        return RegimeType.UNKNOWN, unknown_confidence
+
+    def _apply_transition_discipline(self, new_regime: RegimeType, new_confidence: float) -> Tuple[RegimeType, float]:
         """
-        Hysteresis with signal buffer. Prevents flip-flop.
+        Apply hysteresis and persistence to prevent regime flapping.
+        During pending transitions, confidence is truthfully reduced.
         """
-        buffer = self._signal_buffer.get(symbol, [])
-        buffer.append(proposed_regime)
+        current_regime = self._last_regime
         
-        # Keep last N signals
-        if len(buffer) > self.TRANSITION_PERSISTENCE:
-            buffer = buffer[-self.TRANSITION_PERSISTENCE:]
+        # No previous state
+        if current_regime == RegimeType.UNKNOWN and self._current_state is None:
+            self._regime_history.append(new_regime)
+            self._pending_regime = new_regime
+            self._pending_count = 1
+            return new_regime, new_confidence
         
-        self._signal_buffer[symbol] = buffer
+        # Same regime: accumulate persistence, restore confidence
+        if new_regime == current_regime:
+            self._regime_history.append(new_regime)
+            self._pending_regime = None
+            self._pending_count = 0
+            return new_regime, new_confidence
         
-        if len(buffer) < self.TRANSITION_PERSISTENCE:
-            current = self._current_state.get(symbol)
-            if current:
-                return current.regime, len(buffer)
-            return MacroRegime.UNKNOWN, len(buffer)
+        # Regime change: require hysteresis
+        self._regime_history.append(new_regime)
         
-        # Check consensus
-        unique_regimes = set(buffer)
-        if len(unique_regimes) == 1:
-            return proposed_regime, self.TRANSITION_PERSISTENCE
+        # Check if we have enough consecutive evidence for the new regime
+        if self._pending_regime == new_regime:
+            self._pending_count += 1
+        else:
+            self._pending_regime = new_regime
+            self._pending_count = 1
         
-        # Most frequent regime in buffer
-        from collections import Counter
-        counts = Counter(buffer)
-        most_common = counts.most_common(1)[0][0]
+        # During pending transition, confidence is truthfully reduced
+        # This prevents stale certainty while regime is ambiguous
+        pending_confidence = new_confidence * (self._pending_count / self.hysteresis_bars)
         
-        current = self._current_state.get(symbol)
-        if current and most_common == current.regime:
-            return current.regime, self.TRANSITION_PERSISTENCE
+        # Require persistence before switching
+        if self._pending_count >= self.hysteresis_bars:
+            # Also verify the majority of recent history agrees
+            recent_hist = list(self._regime_history)[-self.hysteresis_bars:]
+            agreement = sum(1 for r in recent_hist if r == new_regime) / len(recent_hist)
+            
+            if agreement >= 0.6:
+                self._pending_count = 0
+                self._pending_regime = None
+                return new_regime, new_confidence
         
-        return most_common, self.TRANSITION_PERSISTENCE
-    
-    def _compute_stability_score(self, symbol: str) -> float:
-        """
-        Compute stability score based on recent transition rate.
-        """
-        history = self._state_history.get(symbol)
-        if not history or len(history) < self.STABILITY_WINDOW:
-            return 1.0
-        
-        recent = list(history)[-self.STABILITY_WINDOW:]
-        transitions = sum(1 for i in range(1, len(recent)) if recent[i].regime != recent[i-1].regime)
-        
-        stability = 1.0 - (transitions / self.STABILITY_WINDOW)
-        return max(0.0, min(1.0, stability))
-    
-    def get_current_regime(self, symbol: str) -> MacroRegime:
-        """Get current regime for symbol."""
-        state = self._current_state.get(symbol)
-        return state.regime if state else MacroRegime.UNKNOWN
-    
-    def get_confidence(self, symbol: str) -> float:
-        """Get current confidence for symbol."""
-        state = self._current_state.get(symbol)
-        return state.confidence if state else 0.0
-    
-    def get_stability_score(self, symbol: str) -> float:
-        """Get current stability score for symbol."""
-        state = self._current_state.get(symbol)
-        return state.stability_score if state else 1.0
-    
-    def get_stats(self, symbol: str) -> Dict[str, Any]:
-        """Get detailed statistics for symbol."""
-        state = self._current_state.get(symbol)
-        if not state:
-            return {"symbol": symbol, "has_data": False}
-        
-        return {
-            "symbol": symbol,
-            "has_data": True,
-            "current_regime": state.regime.value,
-            "confidence": state.confidence,
-            "stability_score": state.stability_score,
-            "transition_count": state.transition_count,
-            "persistence_bars": state.persistence_bars,
-            "state_history_length": len(self._state_history.get(symbol, [])),
-            "timestamp_ns": state.timestamp_ns
-        }
-    
-    def reset(self, symbol: str) -> None:
-        """Reset all data for a symbol."""
-        keys_to_reset = [
-            self._price_history, self._return_history, self._timestamp_history,
-            self._high_history, self._low_history, self._signal_buffer,
-            self._state_history, self._current_state
-        ]
-        for store in keys_to_reset:
-            if symbol in store:
-                del store[symbol]
+        # Not enough evidence yet: stay in current regime with pending confidence
+        return current_regime, self._last_confidence * 0.8 if self._pending_count > 0 else self._last_confidence
+
+    def reset(self) -> None:
+        """Reset all internal state for deterministic replay safety."""
+        self._price_history.clear()
+        self._volatility_history.clear()
+        self._volume_history.clear()
+        self._spread_history.clear()
+        self._liquidity_history.clear()
+        self._timestamp_history.clear()
+        self._regime_history.clear()
+        self._current_state = None
+        self._pending_regime = None
+        self._pending_count = 0
+        self._last_regime = RegimeType.UNKNOWN
+        self._last_confidence = 0.0
+        self._last_timestamp_ns = 0
