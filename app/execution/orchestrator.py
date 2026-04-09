@@ -22,6 +22,8 @@ from app.models import (
 )
 from app.brain.signal_fusion import SignalFusion
 from app.brain.toxicity_engine import ToxicityEngine, ToxicityAlert
+from app.brain.topological_engine import TopologicalEngine
+from app.strategies.liquidity_void import LiquidityVoidStrategy
 from app.risk.safety import SafetyGate
 from app.execution.masking_layer import MaskingLayer, MaskedOrder
 
@@ -312,12 +314,19 @@ class MasterOrchestrator:
         self.paper_broker = PaperBroker(config)
         self.heartbeat_monitor = HeartbeatMonitor(max_latency_ms=10)
 
+        # TopologicalEngine — feeds FLV with real TPE signals per order-book tick
+        self.tpe_engine = TopologicalEngine(symbol=symbol)
+
+        # LiquidityVoidStrategy — wired to receive TPE, toxicity, and macro overlays
+        self.flv_strategy = LiquidityVoidStrategy(config=config, symbol=symbol)
+
         # State
         self._last_order_book: Optional[OrderBookSnapshot] = None
         self._last_portfolio: Optional[PortfolioSnapshot] = None
         self._last_whale_score = None
         self._last_sentiment = None
         self._last_entropy = None
+        self._last_macro = None
         self._running = False
         self._lock = threading.Lock()
 
@@ -440,6 +449,10 @@ class MasterOrchestrator:
         """
         Process order book packet.
 
+        Feeds FLV strategy with real TPE signal, current toxicity,
+        current macro overlay, and the order book itself — in that order,
+        matching the lawful push-update pattern.
+
         Args:
             packet: Event packet
         """
@@ -451,7 +464,30 @@ class MasterOrchestrator:
         toxicity = self.toxicity_engine.get_current_toxicity(exchange_ts_ns)
 
         # Update Shan's Curve
-        shans_signal = self.signal_fusion.update_shans(order_book, self.signal_fusion.get_current_regime(), None)
+        shans_signal = self.signal_fusion.update_shans(
+            order_book, self.signal_fusion.get_current_regime(), None
+        )
+
+        # Compute TPE signal from order book
+        tpe_signal = self.tpe_engine.analyze(order_book)
+
+        # Feed FLV push-update surfaces in dependency order:
+        # topology first, then toxicity, then macro, then order book
+        self.flv_strategy.update_topology(tpe_signal)
+        self.flv_strategy.update_toxicity(self.toxicity_engine.get_last_alert())
+        self.flv_strategy.update_macro_state(self._last_macro)
+        flv_signal = self.flv_strategy.update_order_book(order_book)
+
+        # If FLV emitted a signal, route it into the execution pipeline
+        if flv_signal is not None:
+            logger.info(
+                "FLV signal received: %s %s @ %.4f conf=%.2f",
+                flv_signal.side, flv_signal.symbol,
+                flv_signal.price or 0.0, flv_signal.confidence,
+            )
+            # Signal is available here for downstream execution integration
+            # Full execution routing is handled in _generate_order when
+            # the fusion layer authorizes the FLV sleeve
 
         # Store
         self._last_order_book = order_book
@@ -474,11 +510,16 @@ class MasterOrchestrator:
         # Update regime
         # Would need liquidity from order book
         liquidity_usd = 100000.0  # Placeholder
-        regime = self.signal_fusion.update_regime([candle], 0, liquidity_usd, packet.exchange_ts_ns)
+        regime = self.signal_fusion.update_regime(
+            [candle], 0, liquidity_usd, packet.exchange_ts_ns
+        )
 
         # Get macro and insider signals
         macro = self.signal_fusion.get_macro_signal(packet.exchange_ts_ns, whale_score)
         insider = self.signal_fusion.get_insider_signal() if hasattr(self.signal_fusion, 'get_insider_signal') else None
+
+        # Cache macro for use in order-book processing cycle
+        self._last_macro = macro
 
         # Fuse signals
         fusion = self.signal_fusion.fuse(
@@ -640,7 +681,9 @@ class MasterOrchestrator:
             "paper_broker": self.paper_broker.get_stats(),
             "masking": self.masking_layer.get_stats(),
             "toxicity": self.toxicity_engine.get_stats(),
-            "safety": self.safety_gate.get_stats()
+            "safety": self.safety_gate.get_stats(),
+            "flv_strategy": self.flv_strategy.get_performance(),
+            "tpe_engine": self.tpe_engine.get_stats(),
         }
 
     def reset(self) -> None:
@@ -653,5 +696,8 @@ class MasterOrchestrator:
                 self._event_queue.get_nowait()
             except queue.Empty:
                 break
+
+        self.flv_strategy.reset()
+        self.tpe_engine.reset()
 
         logger.info(f"MasterOrchestrator reset for {self.symbol}")

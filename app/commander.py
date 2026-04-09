@@ -24,9 +24,6 @@ class AttackState:
     mode_reason: str = ""
     last_mode_toggle_ns: Optional[int] = None
 
-    __slots__ = ("is_attack_mode", "initial_equity", "current_equity",
-                 "peak_equity", "target_equity", "mode_reason", "last_mode_toggle_ns")
-
 
 class Commander:
     """
