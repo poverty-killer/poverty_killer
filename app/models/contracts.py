@@ -1,7 +1,7 @@
 """
 Canonical Contracts for Sovereign Trading System
 
-All cross-module communication uses these Pydantic models (v1 compatible).
+All cross-module communication uses these Pydantic models (v2 native).
 Enforces type safety, validation, and serialization.
 
 Contract Coverage:
@@ -24,7 +24,7 @@ from decimal import Decimal
 from typing import Optional, Dict, List, Any, Union
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import (
     RegimeType, TruthStatus, RiskMode, OrderSide, OrderType,
@@ -52,35 +52,38 @@ class ExchangePosition(BaseModel):
     quantity: Decimal
     entry_price: Decimal
 
-    @validator('quantity')
+    @field_validator('quantity', mode='before')
+    @classmethod
     def validate_quantity(cls, v):
         return crypto(v)
 
-    @validator('entry_price')
+    @field_validator('entry_price', mode='before')
+    @classmethod
     def validate_price(cls, v):
         return price(v)
 
 
 class ExchangeOpenOrder(BaseModel):
     """Open order as reported by exchange."""
+    model_config = ConfigDict(use_enum_values=True)
+
     order_id: str
     symbol: str
     side: OrderSide
     quantity: Decimal
     limit_price: Optional[Decimal] = None
 
-    @validator('quantity')
+    @field_validator('quantity', mode='before')
+    @classmethod
     def validate_quantity(cls, v):
         return crypto(v)
 
-    @validator('limit_price')
+    @field_validator('limit_price', mode='before')
+    @classmethod
     def validate_limit_price(cls, v):
         if v is not None:
             return price(v)
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 class ExchangeFill(BaseModel):
@@ -91,34 +94,37 @@ class ExchangeFill(BaseModel):
     quantity: Decimal
     fee: Decimal
 
-    @validator('price')
+    @field_validator('price', mode='before')
+    @classmethod
     def validate_price(cls, v):
         return price(v)
 
-    @validator('quantity')
+    @field_validator('quantity', mode='before')
+    @classmethod
     def validate_quantity(cls, v):
         return crypto(v)
 
-    @validator('fee')
+    @field_validator('fee', mode='before')
+    @classmethod
     def validate_fee(cls, v):
         return fee(v)
 
 
 class SubmittedOrder(BaseModel):
     """Order submitted by execution layer."""
+    model_config = ConfigDict(use_enum_values=True)
+
     client_order_id: str
     venue_order_id: Optional[str] = None
     status: InternalOrderStatus
     submitted_ts_ns: int
 
-    @validator('submitted_ts_ns')
+    @field_validator('submitted_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"submitted_ts_ns must be positive: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 class PendingCancel(BaseModel):
@@ -126,7 +132,8 @@ class PendingCancel(BaseModel):
     client_order_id: str
     cancel_submitted_ts_ns: int
 
-    @validator('cancel_submitted_ts_ns')
+    @field_validator('cancel_submitted_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"cancel_submitted_ts_ns must be positive: {v}")
@@ -139,7 +146,8 @@ class Acknowledgement(BaseModel):
     venue_order_id: str
     ack_ts_ns: int
 
-    @validator('ack_ts_ns')
+    @field_validator('ack_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"ack_ts_ns must be positive: {v}")
@@ -152,7 +160,8 @@ class Rejection(BaseModel):
     reason: str
     reject_ts_ns: int
 
-    @validator('reject_ts_ns')
+    @field_validator('reject_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"reject_ts_ns must be positive: {v}")
@@ -167,15 +176,18 @@ class PortfolioPosition(BaseModel):
     mark_price: Decimal
     unrealized_pnl: Decimal
 
-    @validator('quantity')
+    @field_validator('quantity', mode='before')
+    @classmethod
     def validate_quantity(cls, v):
         return crypto(v)
 
-    @validator('avg_price', 'mark_price')
+    @field_validator('avg_price', 'mark_price', mode='before')
+    @classmethod
     def validate_price(cls, v):
         return price(v)
 
-    @validator('unrealized_pnl')
+    @field_validator('unrealized_pnl', mode='before')
+    @classmethod
     def validate_pnl(cls, v):
         return usd(v)
 
@@ -185,7 +197,8 @@ class KillSwitchRecord(BaseModel):
     switch: str
     triggered_at_ns: int
 
-    @validator('triggered_at_ns')
+    @field_validator('triggered_at_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"triggered_at_ns must be positive: {v}")
@@ -194,18 +207,18 @@ class KillSwitchRecord(BaseModel):
 
 class DivergenceBlock(BaseModel):
     """Divergence block record."""
+    model_config = ConfigDict(use_enum_values=True)
+
     symbol: str
     divergence_type: DivergenceType
     blocked_until_ns: int
 
-    @validator('blocked_until_ns')
+    @field_validator('blocked_until_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"blocked_until_ns must be positive: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 class StaleDataBlock(BaseModel):
@@ -213,7 +226,8 @@ class StaleDataBlock(BaseModel):
     symbol: str
     blocked_until_ns: int
 
-    @validator('blocked_until_ns')
+    @field_validator('blocked_until_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"blocked_until_ns must be positive: {v}")
@@ -226,13 +240,15 @@ class ReplayPosition(BaseModel):
     sequence: int
     timestamp_ns: int
 
-    @validator('sequence')
+    @field_validator('sequence', mode='before')
+    @classmethod
     def validate_sequence(cls, v):
         if v < 0:
             raise ValueError(f"sequence cannot be negative: {v}")
         return v
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v < 0:
             raise ValueError(f"timestamp_ns cannot be negative: {v}")
@@ -260,18 +276,23 @@ class FeaturePayload(BaseModel):
     cascade_risk: Optional[Decimal] = None
     toxicity: Optional[Decimal] = None
 
-    @validator('topological_coherence', 'persistence_score', 'entropy',
-               'void_depth', 'whale_score', 'insider_confidence',
-               'regime_confidence', 'cascade_risk', 'toxicity')
+    @field_validator(
+        'topological_coherence', 'persistence_score', 'entropy',
+        'void_depth', 'whale_score', 'insider_confidence',
+        'regime_confidence', 'cascade_risk', 'toxicity',
+        mode='before',
+    )
+    @classmethod
     def validate_score(cls, v):
         if v is not None:
             return confidence(v)
         return v
 
-    @validator('curvature', 'sentiment_velocity')
+    @field_validator('curvature', 'sentiment_velocity', mode='before')
+    @classmethod
     def validate_continuous(cls, v):
         if v is not None:
-            return v.quantize(Decimal('0.000001'))
+            return Decimal(str(v)).quantize(Decimal('0.000001'))
         return v
 
 
@@ -282,24 +303,25 @@ class FeaturePayload(BaseModel):
 class EventEnvelope(BaseModel):
     """
     Wrapper for all events in the system.
-    
+
     RAW EXTERNAL EVENTS (market data):
     - decision_uuid = None
     - decision_ts_ns = 0
     - parent_uuid = None
-    
+
     DERIVED EVENTS (system decisions):
     - decision_uuid required
     - decision_ts_ns > 0
     - parent_uuid optional
-    
+
     PAYLOAD DISCIPLINE:
     - For raw events: payload contains the raw market data structure
     - For derived events: payload contains one of the typed contracts from this module
     - Payload must be JSON-serializable
     - This is validated by the validator below
     """
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     event_id: str = Field(default_factory=lambda: str(uuid4()))
     decision_uuid: Optional[str] = Field(None, description="Causal decision ID (null for raw external events)")
     parent_uuid: Optional[str] = Field(None, description="Parent event ID")
@@ -312,46 +334,46 @@ class EventEnvelope(BaseModel):
     payload: Dict[str, Any]
     schema_version: int = Field(default=1)
 
-    @validator('exchange_ts_ns', 'receive_ts_ns', 'decision_ts_ns')
+    @field_validator('exchange_ts_ns', 'receive_ts_ns', 'decision_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp_non_negative(cls, v):
         if v < 0:
             raise ValueError(f"Timestamp cannot be negative: {v}")
         return v
 
-    @validator('receive_ts_ns')
-    def validate_receive_after_exchange(cls, v, values):
-        if 'exchange_ts_ns' in values and v < values['exchange_ts_ns']:
-            raise ValueError(f"receive_ts_ns ({v}) < exchange_ts_ns ({values['exchange_ts_ns']})")
-        return v
-
-    @validator('sequence')
+    @field_validator('sequence', mode='before')
+    @classmethod
     def validate_sequence(cls, v):
         if v < 0:
             raise ValueError(f"sequence cannot be negative: {v}")
         return v
 
-    @validator('schema_version')
+    @field_validator('schema_version', mode='before')
+    @classmethod
     def validate_version(cls, v):
         if v <= 0:
             raise ValueError(f"schema_version must be positive: {v}")
         return v
 
-    @root_validator
-    def validate_causality(cls, values):
-        decision_uuid = values.get('decision_uuid')
-        decision_ts_ns = values.get('decision_ts_ns', 0)
-        
-        if decision_uuid is not None:
-            if decision_ts_ns <= 0:
-                raise ValueError(f"Derived event with decision_uuid must have decision_ts_ns > 0, got {decision_ts_ns}")
+    @model_validator(mode='after')
+    def validate_causality_and_ordering(self):
+        if self.receive_ts_ns < self.exchange_ts_ns:
+            raise ValueError(
+                f"receive_ts_ns ({self.receive_ts_ns}) < exchange_ts_ns ({self.exchange_ts_ns})"
+            )
+        if self.decision_uuid is not None:
+            if self.decision_ts_ns <= 0:
+                raise ValueError(
+                    f"Derived event with decision_uuid must have decision_ts_ns > 0, "
+                    f"got {self.decision_ts_ns}"
+                )
         else:
-            if decision_ts_ns != 0:
-                raise ValueError(f"Raw event (decision_uuid=None) must have decision_ts_ns=0, got {decision_ts_ns}")
-        
-        return values
-
-    class Config:
-        use_enum_values = True
+            if self.decision_ts_ns != 0:
+                raise ValueError(
+                    f"Raw event (decision_uuid=None) must have decision_ts_ns=0, "
+                    f"got {self.decision_ts_ns}"
+                )
+        return self
 
 
 # ============================================
@@ -360,7 +382,8 @@ class EventEnvelope(BaseModel):
 
 class DecisionRecord(BaseModel):
     """Single source of truth for all system decisions."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     decision_uuid: str = Field(default_factory=lambda: str(uuid4()))
     timestamp_ns: int = Field(default_factory=now_ns)
     decision_type: DecisionType
@@ -369,20 +392,19 @@ class DecisionRecord(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     schema_version: int = Field(default=1)
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @validator('schema_version')
+    @field_validator('schema_version', mode='before')
+    @classmethod
     def validate_version(cls, v):
         if v <= 0:
             raise ValueError(f"schema_version must be positive: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================
@@ -391,7 +413,8 @@ class DecisionRecord(BaseModel):
 
 class ExchangeTruth(BaseModel):
     """What the exchange believes exists."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     venue: str
     balances: Dict[str, Decimal] = Field(default_factory=dict)
     positions: List[ExchangePosition] = Field(default_factory=list)
@@ -399,13 +422,15 @@ class ExchangeTruth(BaseModel):
     fills_since_last_truth: List[ExchangeFill] = Field(default_factory=list)
     exchange_ts_ns: int
 
-    @validator('exchange_ts_ns')
+    @field_validator('exchange_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"exchange_ts_ns must be positive: {v}")
         return v
 
-    @validator('balances')
+    @field_validator('balances', mode='before')
+    @classmethod
     def validate_balances(cls, v):
         result = {}
         for currency, amount in v.items():
@@ -415,45 +440,42 @@ class ExchangeTruth(BaseModel):
                 result[currency] = crypto(amount)
         return result
 
-    class Config:
-        use_enum_values = True
-
 
 class ExecutionTruth(BaseModel):
     """What the execution layer believes."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     submitted_orders: List[SubmittedOrder] = Field(default_factory=list)
     pending_cancels: List[PendingCancel] = Field(default_factory=list)
     acks_received: List[Acknowledgement] = Field(default_factory=list)
     rejections: List[Rejection] = Field(default_factory=list)
     last_reconciliation_ts_ns: int = Field(default_factory=now_ns)
 
-    @validator('last_reconciliation_ts_ns')
+    @field_validator('last_reconciliation_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"last_reconciliation_ts_ns must be positive: {v}")
         return v
 
-    class Config:
-        use_enum_values = True
-
 
 class PortfolioTruth(BaseModel):
     """What the internal ledger believes."""
-    
     cash: Dict[str, Decimal] = Field(default_factory=dict)
     positions: List[PortfolioPosition] = Field(default_factory=list)
     reserved_buying_power: Decimal = Field(default=Decimal('0'))
     total_equity: Decimal = Field(default=Decimal('0'))
     last_update_ts_ns: int = Field(default_factory=now_ns)
 
-    @validator('last_update_ts_ns')
+    @field_validator('last_update_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"last_update_ts_ns must be positive: {v}")
         return v
 
-    @validator('cash')
+    @field_validator('cash', mode='before')
+    @classmethod
     def validate_cash(cls, v):
         result = {}
         for currency, amount in v.items():
@@ -463,7 +485,8 @@ class PortfolioTruth(BaseModel):
                 result[currency] = crypto(amount)
         return result
 
-    @validator('reserved_buying_power', 'total_equity')
+    @field_validator('reserved_buying_power', 'total_equity', mode='before')
+    @classmethod
     def validate_equity(cls, v):
         return usd(v)
 
@@ -473,7 +496,6 @@ class StrategyTruthEntry(BaseModel):
     Individual strategy state.
     State is a generic string; validation occurs at strategy layer.
     """
-    
     strategy_id: StrategyID
     state: str
     entry_price: Optional[Decimal] = None
@@ -483,17 +505,20 @@ class StrategyTruthEntry(BaseModel):
     invalidation_state: str = "valid"
     ttl_ns: Optional[int] = None
 
-    @validator('entry_price')
+    @field_validator('entry_price', mode='before')
+    @classmethod
     def validate_entry_price(cls, v):
         if v is not None:
             return price(v)
         return v
 
-    @validator('target_exposure', 'current_exposure')
+    @field_validator('target_exposure', 'current_exposure', mode='before')
+    @classmethod
     def validate_exposure(cls, v):
         return crypto(v)
 
-    @validator('ttl_ns')
+    @field_validator('ttl_ns', mode='before')
+    @classmethod
     def validate_ttl(cls, v):
         if v is not None and v <= 0:
             raise ValueError(f"ttl_ns must be positive if present: {v}")
@@ -502,11 +527,11 @@ class StrategyTruthEntry(BaseModel):
 
 class StrategyTruth(BaseModel):
     """What each strategy believes."""
-    
     active_strategies: List[StrategyTruthEntry] = Field(default_factory=list)
     last_update_ts_ns: int = Field(default_factory=now_ns)
 
-    @validator('last_update_ts_ns')
+    @field_validator('last_update_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"last_update_ts_ns must be positive: {v}")
@@ -515,7 +540,8 @@ class StrategyTruth(BaseModel):
 
 class RiskTruth(BaseModel):
     """What the risk system permits."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     mode: RiskMode = RiskMode.NORMAL
     max_leverage: Decimal = Field(default=Decimal('1.0'))
     hard_flat_triggered: bool = False
@@ -525,17 +551,16 @@ class RiskTruth(BaseModel):
     kill_switches_active: List[KillSwitchRecord] = Field(default_factory=list)
     marketability_limits: Dict[str, Decimal] = Field(default_factory=dict)
 
-    @validator('max_leverage')
+    @field_validator('max_leverage', mode='before')
+    @classmethod
     def validate_leverage(cls, v):
-        return v.quantize(Decimal('0.01'))
-
-    class Config:
-        use_enum_values = True
+        return Decimal(str(v)).quantize(Decimal('0.01'))
 
 
 class TruthFrame(BaseModel):
     """Complete truth frame with all five truths."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     truth_frame_id: str = Field(default_factory=lambda: str(uuid4()))
     timestamp_ns: int = Field(default_factory=now_ns)
     exchange_truth: ExchangeTruth
@@ -548,26 +573,26 @@ class TruthFrame(BaseModel):
     divergence_reasons: List[str] = Field(default_factory=list)
     schema_version: int = Field(default=1)
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @validator('divergence_ns')
+    @field_validator('divergence_ns', mode='before')
+    @classmethod
     def validate_divergence(cls, v):
         if v < 0:
             raise ValueError(f"divergence_ns cannot be negative: {v}")
         return v
 
-    @validator('schema_version')
+    @field_validator('schema_version', mode='before')
+    @classmethod
     def validate_version(cls, v):
         if v <= 0:
             raise ValueError(f"schema_version must be positive: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================
@@ -576,7 +601,8 @@ class TruthFrame(BaseModel):
 
 class OrderIntent(BaseModel):
     """Legal order intent from DecisionCompiler."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     order_intent_id: str = Field(default_factory=lambda: str(uuid4()))
     decision_uuid: str
     symbol: str
@@ -591,32 +617,34 @@ class OrderIntent(BaseModel):
     risk_approved: bool
     risk_approval_decision_uuid: str
 
-    @validator('quantity')
+    @field_validator('quantity', mode='before')
+    @classmethod
     def validate_quantity(cls, v):
         return crypto(v)
 
-    @validator('limit_price')
+    @field_validator('limit_price', mode='before')
+    @classmethod
     def validate_limit_price(cls, v):
         if v is not None:
             return price(v)
         return v
 
-    @validator('confidence')
+    @field_validator('confidence', mode='before')
+    @classmethod
     def validate_confidence(cls, v):
         return confidence(v)
 
-    @validator('expected_cost_bps')
+    @field_validator('expected_cost_bps', mode='before')
+    @classmethod
     def validate_cost(cls, v):
         return bps(v)
 
-    @validator('ttl_ns')
+    @field_validator('ttl_ns', mode='before')
+    @classmethod
     def validate_ttl(cls, v):
         if v <= 0:
             raise ValueError(f"ttl_ns must be positive: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================
@@ -625,7 +653,8 @@ class OrderIntent(BaseModel):
 
 class ExecutionEvent(BaseModel):
     """Execution layer events."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     execution_event_id: str = Field(default_factory=lambda: str(uuid4()))
     order_intent_id: str
     event_type: ExecutionEventType
@@ -636,20 +665,19 @@ class ExecutionEvent(BaseModel):
     error: Optional[str] = None
     retry_count: int = Field(default=0)
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @validator('retry_count')
+    @field_validator('retry_count', mode='before')
+    @classmethod
     def validate_retry(cls, v):
         if v < 0:
             raise ValueError(f"retry_count cannot be negative: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================
@@ -658,7 +686,8 @@ class ExecutionEvent(BaseModel):
 
 class FillEvent(BaseModel):
     """Fill confirmation from venue."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     fill_event_id: str = Field(default_factory=lambda: str(uuid4()))
     execution_event_id: str
     order_intent_id: str
@@ -673,32 +702,35 @@ class FillEvent(BaseModel):
     exchange_ts_ns: int
     receive_ts_ns: int = Field(default_factory=now_ns)
 
-    @validator('quantity')
+    @field_validator('quantity', mode='before')
+    @classmethod
     def validate_quantity(cls, v):
         return crypto(v)
 
-    @validator('price')
+    @field_validator('price', mode='before')
+    @classmethod
     def validate_price(cls, v):
         return price(v)
 
-    @validator('fee')
+    @field_validator('fee', mode='before')
+    @classmethod
     def validate_fee(cls, v):
         return fee(v)
 
-    @validator('exchange_ts_ns', 'receive_ts_ns')
+    @field_validator('exchange_ts_ns', 'receive_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp_positive(cls, v):
         if v <= 0:
             raise ValueError(f"Timestamp must be positive: {v}")
         return v
 
-    @validator('receive_ts_ns')
-    def validate_receive_after_exchange(cls, v, values):
-        if 'exchange_ts_ns' in values and v < values['exchange_ts_ns']:
-            raise ValueError(f"receive_ts_ns ({v}) < exchange_ts_ns ({values['exchange_ts_ns']})")
-        return v
-
-    class Config:
-        use_enum_values = True
+    @model_validator(mode='after')
+    def validate_receive_after_exchange(self):
+        if self.receive_ts_ns < self.exchange_ts_ns:
+            raise ValueError(
+                f"receive_ts_ns ({self.receive_ts_ns}) < exchange_ts_ns ({self.exchange_ts_ns})"
+            )
+        return self
 
 
 # ============================================
@@ -707,7 +739,8 @@ class FillEvent(BaseModel):
 
 class CancelEvent(BaseModel):
     """Cancel request events."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     cancel_event_id: str = Field(default_factory=lambda: str(uuid4()))
     execution_event_id: str
     order_intent_id: str
@@ -719,28 +752,28 @@ class CancelEvent(BaseModel):
     cancel_confirmed_ns: Optional[int] = None
     status: CancelStatus
 
-    @validator('cancel_submitted_ns', 'cancel_acked_ns', 'cancel_confirmed_ns')
+    @field_validator('cancel_submitted_ns', 'cancel_acked_ns', 'cancel_confirmed_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v is not None and v <= 0:
             raise ValueError(f"Timestamp must be positive: {v}")
         return v
 
-    @root_validator
-    def validate_ordering(cls, values):
-        submitted = values.get('cancel_submitted_ns')
-        acked = values.get('cancel_acked_ns')
-        confirmed = values.get('cancel_confirmed_ns')
-        
-        if acked is not None and submitted is not None and acked < submitted:
-            raise ValueError(f"cancel_acked_ns ({acked}) < cancel_submitted_ns ({submitted})")
-        
-        if confirmed is not None and acked is not None and confirmed < acked:
-            raise ValueError(f"cancel_confirmed_ns ({confirmed}) < cancel_acked_ns ({acked})")
-        
-        return values
+    @model_validator(mode='after')
+    def validate_ordering(self):
+        submitted = self.cancel_submitted_ns
+        acked = self.cancel_acked_ns
+        confirmed = self.cancel_confirmed_ns
 
-    class Config:
-        use_enum_values = True
+        if acked is not None and submitted is not None and acked < submitted:
+            raise ValueError(
+                f"cancel_acked_ns ({acked}) < cancel_submitted_ns ({submitted})"
+            )
+        if confirmed is not None and acked is not None and confirmed < acked:
+            raise ValueError(
+                f"cancel_confirmed_ns ({confirmed}) < cancel_acked_ns ({acked})"
+            )
+        return self
 
 
 # ============================================
@@ -749,7 +782,6 @@ class CancelEvent(BaseModel):
 
 class PortfolioSnapshot(BaseModel):
     """Complete portfolio state."""
-    
     snapshot_id: str = Field(default_factory=lambda: str(uuid4()))
     timestamp_ns: int = Field(default_factory=now_ns)
     cash: Dict[str, Decimal] = Field(default_factory=dict)
@@ -759,13 +791,15 @@ class PortfolioSnapshot(BaseModel):
     available_buying_power: Decimal = Field(default=Decimal('0'))
     leverage: Decimal = Field(default=Decimal('0'))
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @validator('cash')
+    @field_validator('cash', mode='before')
+    @classmethod
     def validate_cash(cls, v):
         result = {}
         for currency, amount in v.items():
@@ -775,13 +809,15 @@ class PortfolioSnapshot(BaseModel):
                 result[currency] = crypto(amount)
         return result
 
-    @validator('total_equity', 'reserved_buying_power', 'available_buying_power')
+    @field_validator('total_equity', 'reserved_buying_power', 'available_buying_power', mode='before')
+    @classmethod
     def validate_equity(cls, v):
         return usd(v)
 
-    @validator('leverage')
+    @field_validator('leverage', mode='before')
+    @classmethod
     def validate_leverage(cls, v):
-        return v.quantize(Decimal('0.01'))
+        return Decimal(str(v)).quantize(Decimal('0.01'))
 
 
 # ============================================
@@ -790,7 +826,8 @@ class PortfolioSnapshot(BaseModel):
 
 class RiskDecision(BaseModel):
     """Risk system decisions."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     risk_decision_id: str = Field(default_factory=lambda: str(uuid4()))
     decision_uuid: str
     timestamp_ns: int = Field(default_factory=now_ns)
@@ -804,20 +841,20 @@ class RiskDecision(BaseModel):
     truth_frame_id: str
     violations: List[str] = Field(default_factory=list)
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @validator('max_leverage', 'sizing_multiplier')
+    @field_validator('max_leverage', 'sizing_multiplier', mode='before')
+    @classmethod
     def validate_positive(cls, v):
-        if v <= 0:
+        d = Decimal(str(v))
+        if d <= 0:
             raise ValueError(f"Value must be positive: {v}")
-        return v.quantize(Decimal('0.01'))
-
-    class Config:
-        use_enum_values = True
+        return d.quantize(Decimal('0.01'))
 
 
 # ============================================
@@ -826,7 +863,8 @@ class RiskDecision(BaseModel):
 
 class StrategyVote(BaseModel):
     """Strategy voting output."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     vote_id: str = Field(default_factory=lambda: str(uuid4()))
     decision_uuid: str
     strategy_id: StrategyID
@@ -839,22 +877,22 @@ class StrategyVote(BaseModel):
     invalidation_conditions: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-    @validator('timestamp_ns', 'expected_duration_ns')
+    @field_validator('timestamp_ns', 'expected_duration_ns', mode='before')
+    @classmethod
     def validate_positive(cls, v):
         if v <= 0:
             raise ValueError(f"Value must be positive: {v}")
         return v
 
-    @validator('confidence', 'risk_appetite')
+    @field_validator('confidence', 'risk_appetite', mode='before')
+    @classmethod
     def validate_confidence(cls, v):
         return confidence(v)
 
-    @validator('expected_move_bps')
+    @field_validator('expected_move_bps', mode='before')
+    @classmethod
     def validate_move(cls, v):
         return bps(v)
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================
@@ -863,14 +901,14 @@ class StrategyVote(BaseModel):
 
 class FeatureVector(BaseModel):
     """Feature engine outputs with typed payload."""
-    
     feature_vector_id: str = Field(default_factory=lambda: str(uuid4()))
     decision_uuid: str
     timestamp_ns: int = Field(default_factory=now_ns)
     symbol: str
     features: FeaturePayload = Field(default_factory=FeaturePayload)
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
@@ -883,7 +921,8 @@ class FeatureVector(BaseModel):
 
 class RecoveryCheckpoint(BaseModel):
     """Recovery state checkpoint."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     checkpoint_id: str = Field(default_factory=lambda: str(uuid4()))
     timestamp_ns: int = Field(default_factory=now_ns)
     checkpoint_type: CheckpointType
@@ -893,20 +932,19 @@ class RecoveryCheckpoint(BaseModel):
     checksum: str
     replay_position: Optional[ReplayPosition] = None
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @validator('wal_seq')
+    @field_validator('wal_seq', mode='before')
+    @classmethod
     def validate_wal_seq(cls, v):
         if v < 0:
             raise ValueError(f"wal_seq cannot be negative: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================
@@ -915,7 +953,8 @@ class RecoveryCheckpoint(BaseModel):
 
 class DivergenceEvent(BaseModel):
     """Truth divergence detection."""
-    
+    model_config = ConfigDict(use_enum_values=True)
+
     divergence_id: str = Field(default_factory=lambda: str(uuid4()))
     timestamp_ns: int = Field(default_factory=now_ns)
     divergence_type: DivergenceType
@@ -927,20 +966,19 @@ class DivergenceEvent(BaseModel):
     resolution: ResolutionType = ResolutionType.PENDING
     resolution_action: Optional[str] = None
 
-    @validator('timestamp_ns')
+    @field_validator('timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v <= 0:
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @validator('duration_ns')
+    @field_validator('duration_ns', mode='before')
+    @classmethod
     def validate_duration(cls, v):
         if v < 0:
             raise ValueError(f"duration_ns cannot be negative: {v}")
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================

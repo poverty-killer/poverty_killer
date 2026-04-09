@@ -86,7 +86,7 @@ class SovereignHeartbeat:
             max_timestamp_gap_sec=2.0,
             max_stale_age_sec=5.0,
             recovery_required_good=3,
-            heartbeat_interval_sec=30.0
+            websocket_heartbeat_timeout_sec=30.0
         )
         
         # Initialize order router
@@ -100,8 +100,7 @@ class SovereignHeartbeat:
             pcv_max_attempts=5,
             pcv_retry_delay_sec=0.5,
             rest_fallback_enabled=True,
-            paper_mode=config.broker_mode == "paper",
-            margin_mode=False
+            paper_mode=config.broker_mode == "paper"
         )
         
         # Initialize masking layer
@@ -117,7 +116,7 @@ class SovereignHeartbeat:
         )
         
         # Initialize signal fusion
-        self.signal_fusion = SignalFusion(config, self.commander)
+        self.signal_fusion = SignalFusion(config)
         
         # Initialize recalibrator (topological brain)
         self.recalibrator = Recalibrator(

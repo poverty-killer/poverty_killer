@@ -8,6 +8,25 @@ into bounded directional pressure, confidence, freshness, contradiction,
 invalidation, and actionable symbol snapshots.
 All values are analytical estimates, not legal/compliance truth.
 No privileged data access. No SEC/news/congressional connectors.
+
+ROLE: Urgency / Escalation Source for Fusion
+- Primary output: urgency = confidence * (1 + cluster_strength), capped at 2.0
+- Secondary outputs: directional_bias, net_pressure, confidence
+- NOT: primary direction oracle (whale_flow_engine owns that)
+- NOT: generic market activity detector
+- NOT: replacement for entropy or regime detection
+
+What this engine can truthfully detect (from observable data):
+- Unusual trade clustering (cluster_strength)
+- Cross-entity alignment (multiple entities acting similarly)
+- Sustained directional pressure (net_pressure, directional_bias)
+- Freshness decay (older evidence weighs less)
+
+What this engine cannot truthfully claim:
+- Actual insider knowledge (no privileged data)
+- Entity resolution beyond placeholder IDs
+- Event catalyst detection (requires external event feed)
+- Production-calibrated source reliability (weights are provisional)
 """
 
 from __future__ import annotations
@@ -53,10 +72,16 @@ class DirectionalBias(Enum):
 
 
 class SymbolTier(Enum):
-    """Tier for dead-zone and threshold configuration."""
-    LIQUID = auto()    # High liquidity, lower thresholds
-    MID = auto()       # Medium liquidity, standard thresholds
-    ILLIQUID = auto()  # Low liquidity, higher thresholds
+    """
+    Tier for dead-zone and threshold configuration.
+    
+    PERSISTENCE NOTE: Uses stable symbolic names (value property) for
+    serialization, NOT auto() integer values. This ensures schema stability
+    across Python versions and enum reorderings.
+    """
+    LIQUID = "liquid"      # High liquidity, lower thresholds
+    MID = "mid"            # Medium liquidity, standard thresholds
+    ILLIQUID = "illiquid"  # Low liquidity, higher thresholds
 
 
 # ============================================================================
@@ -150,7 +175,7 @@ CONTRADICTION_MAX = DECIMAL_ONE
 DEAD_ZONE_DECAY_FACTOR = Decimal('0.95')
 
 # State schema version
-STATE_SCHEMA_VERSION = 5
+STATE_SCHEMA_VERSION = 6  # Incremented: SymbolTier now uses stable symbolic names
 
 # Direction code for persistence
 DIRECTION_CODE_BUY = 1
@@ -194,6 +219,14 @@ class InsiderObservation:
 class InsiderSignalSnapshot:
     """
     Immutable snapshot of a symbol's informed-participant state.
+    
+    PRIMARY OUTPUT FOR FUSION: urgency property (Decimal) and to_float() bridge.
+    
+    Urgency interpretation:
+        - 0.0-0.5: Low urgency, normal conditions
+        - 0.5-1.0: Elevated urgency, consider escalation
+        - 1.0-1.5: High urgency, escalate
+        - 1.5-2.0: Extreme urgency, attack mode co-trigger
     """
     symbol: str
     timestamp_ns: int
@@ -213,6 +246,67 @@ class InsiderSignalSnapshot:
     degraded: bool
     invalidated: bool
     supporting_observation_count: int
+
+    @property
+    def urgency(self) -> Decimal:
+        """
+        Primary output for fusion as Decimal (precision-preserving).
+        
+        urgency = confidence * (1 + cluster_strength), capped at 2.0.
+        This is the scalar that should be passed to fusion for:
+        - Confidence boosting (insider_mult, insider_factor)
+        - Attack mode co-trigger (with shans_superfluid > 0.8)
+        
+        Returns:
+            Decimal urgency in [0, 2.0]
+        """
+        raw = self.confidence * (DECIMAL_ONE + self.cluster_strength)
+        if raw > Decimal('2.0'):
+            return Decimal('2.0')
+        if raw < DECIMAL_ZERO:
+            return DECIMAL_ZERO
+        return raw
+
+    def to_float(self) -> float:
+        """
+        Explicit float bridge for downstream compatibility.
+        
+        SignalFusion.update_insider() expects float. This method makes
+        the precision boundary explicit rather than implicit.
+        
+        Returns:
+            Float representation of urgency, clamped to [0.0, 2.0]
+        """
+        return float(self.urgency)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Explicit serialization for snapshot export.
+        
+        Returns a JSON-serializable dictionary with stable field names
+        and stringified Decimal values.
+        """
+        return {
+            "symbol": self.symbol,
+            "timestamp_ns": self.timestamp_ns,
+            "last_observation_ns": self.last_observation_ns,
+            "last_directional_observation_ns": self.last_directional_observation_ns,
+            "last_state_transition_ns": self.last_state_transition_ns,
+            "bullish_score": str(self.bullish_score),
+            "bearish_score": str(self.bearish_score),
+            "net_pressure": str(self.net_pressure),
+            "confidence": str(self.confidence),
+            "freshness": str(self.freshness),
+            "cluster_strength": str(self.cluster_strength),
+            "contradiction_pressure": str(self.contradiction_pressure),
+            "invalidation_pressure": str(self.invalidation_pressure),
+            "directional_bias": self.directional_bias.value,
+            "active": self.active,
+            "degraded": self.degraded,
+            "invalidated": self.invalidated,
+            "supporting_observation_count": self.supporting_observation_count,
+            "urgency_float": self.to_float(),
+        }
 
 
 # ============================================================================
@@ -260,7 +354,7 @@ class _SymbolState:
     last_invalidation_ns: int = 0
     last_invalidation_reason: str = ""
     
-    # Tier configuration
+    # Tier configuration (persisted by stable symbolic name)
     tier: SymbolTier = SymbolTier.MID
     
     # Supporting data
@@ -383,6 +477,28 @@ class InsiderSignalEngine:
     
     Transforms structured observations into bounded directional pressure,
     confidence, freshness, contradiction, invalidation, and actionable snapshots.
+    
+    PRIMARY OUTPUT: InsiderSignalSnapshot.urgency (Decimal) and .to_float()
+    This is the scalar that downstream fusion should consume for:
+        - Confidence boosting (insider_mult, insider_factor)
+        - Attack mode co-trigger (with shans_superfluid > 0.8)
+    
+    SECONDARY OUTPUTS:
+        - directional_bias: BULLISH/BEARISH/NEUTRAL (use with caution)
+        - net_pressure: signed directional strength
+        - confidence: analytical confidence in the snapshot
+    
+    TRUTHFUL CAPABILITIES (from observable data):
+        - Detects unusual trade clustering (cluster_strength)
+        - Detects cross-entity alignment (multiple entities acting similarly)
+        - Tracks sustained directional pressure (net_pressure)
+        - Applies exponential decay to age out stale evidence
+    
+    LIMITATIONS (explicit, not hidden):
+        - Entity IDs are placeholders without external resolution
+        - Source reliability weights are provisional
+        - No event catalyst detection (requires external feed)
+        - No actual privileged data access
     
     All operations are replay-safe, nanosecond-timestamped, and Decimal-only.
     No external dependencies on peer engines.
@@ -1090,8 +1206,11 @@ class InsiderSignalEngine:
             # Sort recent observations by timestamp (already ordered, but ensure)
             recent_obs_payload = [(ts, direction_code) for ts, direction_code in state.recent_observations]
             
+            # Persist tier by stable symbolic name (value property), not auto() integer
+            tier_value = state.tier.value if state.tier else SymbolTier.MID.value
+            
             symbol_payload = {
-                "tier": state.tier.value,
+                "tier": tier_value,
                 "bullish_score": str(state.bullish_score),
                 "bearish_score": str(state.bearish_score),
                 "active": state.active,
@@ -1128,10 +1247,14 @@ class InsiderSignalEngine:
         Raises:
             ValueError: If payload schema version mismatches or structure is invalid
         """
-        if payload.get("schema_version") != STATE_SCHEMA_VERSION:
+        schema_version = payload.get("schema_version")
+        
+        # Support both version 5 (legacy auto() integers) and version 6 (stable symbolic names)
+        # Version 5 is still loadable; version 6 is the current format
+        if schema_version not in (5, 6):
             raise ValueError(
-                f"Schema version mismatch: expected {STATE_SCHEMA_VERSION}, "
-                f"got {payload.get('schema_version')}"
+                f"Schema version mismatch: expected 5 or 6, "
+                f"got {schema_version}"
             )
         
         symbols_data = payload.get("symbols", {})
@@ -1151,13 +1274,29 @@ class InsiderSignalEngine:
             try:
                 state = _SymbolState()
                 
-                # Tier
+                # Tier: handle both legacy (int) and current (str) formats
                 tier_value = sym_data.get("tier")
                 if tier_value is not None:
-                    try:
-                        state.tier = SymbolTier(tier_value)
-                    except ValueError:
-                        raise ValueError(f"Invalid tier value for {symbol}: {tier_value}")
+                    if isinstance(tier_value, int):
+                        # Legacy format: convert int to SymbolTier via value mapping
+                        # Legacy mapping: 0=Liquid, 1=Mid, 2=Illiquid (auto() order)
+                        legacy_map = {
+                            0: SymbolTier.LIQUID,
+                            1: SymbolTier.MID,
+                            2: SymbolTier.ILLIQUID,
+                        }
+                        if tier_value in legacy_map:
+                            state.tier = legacy_map[tier_value]
+                        else:
+                            raise ValueError(f"Invalid legacy tier value for {symbol}: {tier_value}")
+                    elif isinstance(tier_value, str):
+                        # Current format: stable symbolic name
+                        try:
+                            state.tier = SymbolTier(tier_value)
+                        except ValueError:
+                            raise ValueError(f"Invalid tier string for {symbol}: {tier_value}")
+                    else:
+                        raise ValueError(f"Invalid tier type for {symbol}: {type(tier_value)}")
                 
                 # Decimal fields - validate bounds
                 bullish_score = Decimal(str(sym_data.get("bullish_score", "0")))
@@ -1275,3 +1414,8 @@ class InsiderSignalEngine:
         
         self._symbols = new_symbols
         logger.info(f"Loaded state payload for {len(self._symbols)} symbols")
+    
+    def reset(self) -> None:
+        """Reset all internal state for deterministic replay safety."""
+        self._symbols.clear()
+        logger.info("InsiderSignalEngine reset")

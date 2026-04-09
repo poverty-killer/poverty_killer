@@ -45,7 +45,7 @@ class Commander:
             peak_equity=initial_equity,
             target_equity=target_equity
         )
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._mode_change_callbacks = []
 
         logger.info(f"Commander initialized: initial=${initial_equity:,.0f}, target=${target_equity:,.0f}")
@@ -145,7 +145,8 @@ class Commander:
         Returns:
             Kelly multiplier (0.4 for SAFE, 0.85 for ATTACK)
         """
-        return 0.85 if self._state.is_attack_mode else 0.4
+        with self._lock:
+            return 0.85 if self._state.is_attack_mode else 0.4
 
     def get_vpin_threshold(self) -> float:
         """
@@ -154,7 +155,8 @@ class Commander:
         Returns:
             VPIN threshold (0.8 for SAFE, 0.65 for ATTACK)
         """
-        return 0.65 if self._state.is_attack_mode else 0.8
+        with self._lock:
+            return 0.65 if self._state.is_attack_mode else 0.8
 
     def get_confidence_threshold(self) -> float:
         """
@@ -163,7 +165,8 @@ class Commander:
         Returns:
             Confidence threshold (0.95 for SAFE, 0.70 for ATTACK)
         """
-        return 0.70 if self._state.is_attack_mode else 0.95
+        with self._lock:
+            return 0.70 if self._state.is_attack_mode else 0.95
 
     def get_aggression_multiplier(self) -> float:
         """
@@ -172,7 +175,8 @@ class Commander:
         Returns:
             Aggression multiplier (1.0 for SAFE, 1.5 for ATTACK)
         """
-        return 1.5 if self._state.is_attack_mode else 1.0
+        with self._lock:
+            return 1.5 if self._state.is_attack_mode else 1.0
 
     def can_trade(self, expected_net_profit_pct: float, confidence: float) -> bool:
         """
@@ -203,7 +207,8 @@ class Commander:
 
     def register_mode_change_callback(self, callback) -> None:
         """Register callback for mode changes."""
-        self._mode_change_callbacks.append(callback)
+        with self._lock:
+            self._mode_change_callbacks.append(callback)
 
     def get_status(self) -> Dict[str, Any]:
         """Get commander status."""

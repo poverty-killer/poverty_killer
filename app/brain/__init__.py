@@ -3,7 +3,7 @@ Brain - Intelligence Layer
 Market regime detection, whale flow, sentiment, entropy, and Shan's Curve.
 """
 
-from app.brain.regime_detector import NovelRegimeDetector
+from app.brain.regime_detector import RegimeDetector
 from app.brain.whale_flow_engine import WhaleFlowEngine
 from app.brain.sentiment_engine import SentimentEngine
 from app.brain.signal_fusion import SignalFusion
@@ -20,8 +20,14 @@ from app.brain.sentiment_velocity import SentimentVelocityEngine, MacroSignal
 from app.brain.insider_signal_engine import InsiderSignalEngine, InsiderSignalSnapshot
 from app.brain.toxicity_engine import ToxicityEngine, ToxicityAlert
 
+# RegimeDetector is defined in regime_detector.py.
+# NovelRegimeDetector is the package-level compatibility alias.
+# The alias preserves the exported name expected by package consumers.
+NovelRegimeDetector = RegimeDetector
+
 __all__ = [
     "NovelRegimeDetector",
+    "RegimeDetector",
     "WhaleFlowEngine",
     "SentimentEngine",
     "SignalFusion",

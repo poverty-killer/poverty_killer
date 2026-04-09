@@ -15,6 +15,7 @@ from typing import Dict, Optional, Any, List, Tuple
 from dataclasses import dataclass, field
 from collections import deque
 from datetime import datetime
+from decimal import Decimal
 
 from app.models import (
     OrderBookSnapshot, Candle, OrderRequest, StrategySignal,
@@ -23,6 +24,12 @@ from app.models import (
 from app.brain.signal_fusion import SignalFusion
 from app.brain.toxicity_engine import ToxicityEngine, ToxicityAlert
 from app.brain.topological_engine import TopologicalEngine
+from app.brain.insider_signal_engine import (
+    InsiderSignalEngine,
+    InsiderObservation,
+    ObservationDirection,
+    ObservationSourceType,
+)
 from app.strategies.liquidity_void import LiquidityVoidStrategy
 from app.risk.safety import SafetyGate
 from app.execution.masking_layer import MaskingLayer, MaskedOrder
@@ -314,6 +321,9 @@ class MasterOrchestrator:
         self.paper_broker = PaperBroker(config)
         self.heartbeat_monitor = HeartbeatMonitor(max_latency_ms=10)
 
+        # Insider Signal Engine (trade-based only, provisional weights)
+        self.insider_engine = InsiderSignalEngine()
+
         # TopologicalEngine — feeds FLV with real TPE signals per order-book tick
         self.tpe_engine = TopologicalEngine(symbol=symbol)
 
@@ -335,6 +345,7 @@ class MasterOrchestrator:
         self._position_lock = threading.Lock()
 
         logger.info(f"MasterOrchestrator initialized for {symbol}")
+        logger.info("  InsiderSignalEngine: trade-based only, provisional weights")
 
     def start(self) -> None:
         """Start orchestrator."""
@@ -539,14 +550,16 @@ class MasterOrchestrator:
 
     def _process_trade_packet(self, packet: EventPacket) -> None:
         """
-        Process trade packet.
+        Process trade packet. Primary path for InsiderSignalEngine.
 
         Args:
             packet: Event packet
         """
         trade = packet.data
+        exchange_ts_ns = packet.exchange_ts_ns
 
-        # Update entropy decoder
+        # Update entropy decoder (existing call, preserves wall-clock dependency)
+        # Note: entropy decoder expects datetime; fixing requires separate pass
         entropy = self.signal_fusion.update_entropy(
             self.symbol,
             trade["side"],
@@ -559,11 +572,51 @@ class MasterOrchestrator:
             size=trade["size"],
             price=trade["price"],
             side=trade["side"],
-            timestamp_ns=packet.exchange_ts_ns
+            timestamp_ns=exchange_ts_ns
         )
 
+        # --- Insider Signal Engine Integration (Trade-Based Only) ---
+        # Provisional: entity ID placeholder, fixed weights, no real catalyst detection
+        side_val = trade.get("side", 0)
+        direction = ObservationDirection.BUY if side_val > 0 else (ObservationDirection.SELL if side_val < 0 else ObservationDirection.UNKNOWN)
+
+        size = trade.get("size", 0.0)
+        price = trade.get("price", 0.0)
+        intensity = min(1.0, size / 100000.0)                     # provisional normalization
+        notional_weight = min(1.0, (size * price) / 1_000_000.0)  # provisional normalization
+
+        observation = InsiderObservation(
+            observation_id=f"trade_{exchange_ts_ns}_{self.symbol}",
+            timestamp_ns=exchange_ts_ns,
+            symbol=self.symbol,
+            entity_id=f"exchange_{self.symbol}",  # provisional
+            direction=direction,
+            intensity=Decimal(str(intensity)),
+            notional_weight=Decimal(str(notional_weight)),
+            source_reliability=Decimal('0.7'),     # provisional
+            event_proximity_weight=Decimal('0.5'), # provisional
+            novelty_weight=Decimal('0.5'),         # provisional
+            corroboration_weight=Decimal('0.5'),   # provisional
+            invalidation_weight=Decimal('0.0'),
+            source_type=ObservationSourceType.FLOW,
+            tags=("trade",),
+        )
+
+        snapshot = self.insider_engine.ingest_observation(observation)
+
+        # Send urgency if active and minimally confident (provisional threshold)
+        if snapshot and snapshot.active and snapshot.confidence > Decimal('0.3'):
+            # PROVISIONAL: confidence * (1 + cluster_strength), clamped to 2.0
+            urgency = float(snapshot.confidence) * (1.0 + float(snapshot.cluster_strength))
+            urgency = min(2.0, max(0.0, urgency))
+            self.signal_fusion.update_insider(urgency, exchange_ts_ns)
+            logger.debug(
+                "Insider urgency updated: %s urgency=%.3f",
+                self.symbol, urgency
+            )
+
         # Update heartbeat
-        self.heartbeat_monitor.heartbeat(packet.exchange_ts_ns)
+        self.heartbeat_monitor.heartbeat(exchange_ts_ns)
 
     def _generate_order(self, fusion: Any, price: float, timestamp_ns: int) -> None:
         """
@@ -699,5 +752,6 @@ class MasterOrchestrator:
 
         self.flv_strategy.reset()
         self.tpe_engine.reset()
+        self.insider_engine.reset()
 
         logger.info(f"MasterOrchestrator reset for {self.symbol}")

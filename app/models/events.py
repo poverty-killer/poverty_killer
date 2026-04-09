@@ -23,7 +23,7 @@ from decimal import Decimal
 from typing import Optional, Dict, List, Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import (
     EventType, OrderSide, AlertSeverity, ReplayMode, SourceType
@@ -44,7 +44,9 @@ class BaseEvent(BaseModel):
     Base class for all events.
     Provides common fields and validation.
     """
-    
+
+    model_config = ConfigDict(use_enum_values=True)
+
     event_id: str = Field(default_factory=lambda: str(uuid4()))
     event_type: EventType
     source_module: str
@@ -52,26 +54,27 @@ class BaseEvent(BaseModel):
     receive_ts_ns: int = Field(default_factory=now_ns)
     schema_version: int = Field(default=1)
 
-    @validator('exchange_ts_ns', 'receive_ts_ns')
+    @field_validator('exchange_ts_ns', 'receive_ts_ns', mode='before')
+    @classmethod
     def validate_timestamp_non_negative(cls, v):
         if v < 0:
             raise ValueError(f"Timestamp cannot be negative: {v}")
         return v
 
-    @validator('receive_ts_ns')
-    def validate_receive_after_exchange(cls, v, values):
-        if 'exchange_ts_ns' in values and v < values['exchange_ts_ns']:
-            raise ValueError(f"receive_ts_ns ({v}) < exchange_ts_ns ({values['exchange_ts_ns']})")
-        return v
-
-    @validator('schema_version')
+    @field_validator('schema_version', mode='before')
+    @classmethod
     def validate_version(cls, v):
         if v <= 0:
             raise ValueError(f"schema_version must be positive: {v}")
         return v
 
-    class Config:
-        use_enum_values = True
+    @model_validator(mode='after')
+    def validate_receive_after_exchange(self):
+        if self.receive_ts_ns < self.exchange_ts_ns:
+            raise ValueError(
+                f"receive_ts_ns ({self.receive_ts_ns}) < exchange_ts_ns ({self.exchange_ts_ns})"
+            )
+        return self
 
 
 # ============================================
@@ -80,7 +83,9 @@ class BaseEvent(BaseModel):
 
 class TradeEvent(BaseEvent):
     """Individual trade execution event."""
-    
+
+    model_config = ConfigDict(use_enum_values=True)
+
     event_type: EventType = EventType.TRADE
     symbol: str
     price: Decimal
@@ -89,21 +94,20 @@ class TradeEvent(BaseEvent):
     trade_id: str
     aggressor: Optional[bool] = None  # True = buy side initiated
 
-    @validator('price')
+    @field_validator('price', mode='before')
+    @classmethod
     def validate_price(cls, v):
         return price(v)
 
-    @validator('quantity')
+    @field_validator('quantity', mode='before')
+    @classmethod
     def validate_quantity(cls, v):
         return crypto(v)
-
-    class Config:
-        use_enum_values = True
 
 
 class QuoteEvent(BaseEvent):
     """Best bid/ask quote event."""
-    
+
     event_type: EventType = EventType.QUOTE
     symbol: str
     bid_price: Decimal
@@ -111,11 +115,13 @@ class QuoteEvent(BaseEvent):
     ask_price: Decimal
     ask_size: Decimal
 
-    @validator('bid_price', 'ask_price')
+    @field_validator('bid_price', 'ask_price', mode='before')
+    @classmethod
     def validate_price(cls, v):
         return price(v)
 
-    @validator('bid_size', 'ask_size')
+    @field_validator('bid_size', 'ask_size', mode='before')
+    @classmethod
     def validate_size(cls, v):
         return crypto(v)
 
@@ -125,25 +131,28 @@ class OrderBookLevel(BaseModel):
     price: Decimal
     size: Decimal
 
-    @validator('price')
+    @field_validator('price', mode='before')
+    @classmethod
     def validate_price(cls, v):
         return price(v)
 
-    @validator('size')
+    @field_validator('size', mode='before')
+    @classmethod
     def validate_size(cls, v):
         return crypto(v)
 
 
 class OrderBookSnapshotEvent(BaseEvent):
     """Full order book snapshot."""
-    
+
     event_type: EventType = EventType.ORDER_BOOK_SNAPSHOT
     symbol: str
     bids: List[OrderBookLevel] = Field(default_factory=list)
     asks: List[OrderBookLevel] = Field(default_factory=list)
     sequence: int = Field(default=0, description="Exchange sequence number")
 
-    @validator('sequence')
+    @field_validator('sequence', mode='before')
+    @classmethod
     def validate_sequence(cls, v):
         if v < 0:
             raise ValueError(f"sequence cannot be negative: {v}")
@@ -152,7 +161,7 @@ class OrderBookSnapshotEvent(BaseEvent):
 
 class OrderBookDeltaEvent(BaseEvent):
     """Order book delta (update)."""
-    
+
     event_type: EventType = EventType.ORDER_BOOK_DELTA
     symbol: str
     bids: List[OrderBookLevel] = Field(default_factory=list)  # New/updated levels
@@ -161,31 +170,37 @@ class OrderBookDeltaEvent(BaseEvent):
     ask_removals: List[Decimal] = Field(default_factory=list)  # Prices to remove
     sequence: int = Field(default=0, description="Exchange sequence number")
 
-    @validator('sequence')
+    @field_validator('sequence', mode='before')
+    @classmethod
     def validate_sequence(cls, v):
         if v < 0:
             raise ValueError(f"sequence cannot be negative: {v}")
         return v
 
-    @validator('bid_removals', 'ask_removals', each_item=True)
-    def validate_removal_price(cls, v):
-        return price(v)
+    @field_validator('bid_removals', 'ask_removals', mode='before')
+    @classmethod
+    def validate_removal_prices(cls, v):
+        if v is None:
+            return v
+        return [price(item) for item in v]
 
 
 class ClockTickEvent(BaseEvent):
     """Synthetic clock tick for deterministic replay."""
-    
+
     event_type: EventType = EventType.CLOCK_TICK
     tick_number: int = Field(default=0, description="Tick counter since start")
     elapsed_ns: int = Field(default=0, description="Elapsed nanoseconds from start")
 
-    @validator('tick_number')
+    @field_validator('tick_number', mode='before')
+    @classmethod
     def validate_tick(cls, v):
         if v < 0:
             raise ValueError(f"tick_number cannot be negative: {v}")
         return v
 
-    @validator('elapsed_ns')
+    @field_validator('elapsed_ns', mode='before')
+    @classmethod
     def validate_elapsed(cls, v):
         if v < 0:
             raise ValueError(f"elapsed_ns cannot be negative: {v}")
@@ -206,20 +221,20 @@ class AuditEvent(BaseEvent):
     - Security events
     - Compliance records
     """
-    
+
+    model_config = ConfigDict(use_enum_values=True)
+
     event_type: EventType = EventType.AUDIT_EVENT
     severity: AlertSeverity
     message: str
     decision_uuid: Optional[str] = Field(None, description="Linked decision UUID if applicable")
     data: Dict[str, Any] = Field(default_factory=dict)
 
-    @validator('decision_uuid')
+    @field_validator('decision_uuid', mode='before')
+    @classmethod
     def validate_decision_uuid(cls, v):
         # Audit events may have decision_uuid = None for system logs
         return v
-
-    class Config:
-        use_enum_values = True
 
 
 # ============================================
@@ -234,13 +249,14 @@ class HeartbeatEvent(BaseEvent):
     Core accounting and replay paths use integer nanoseconds exclusively.
     This float field is explicitly isolated and cannot contaminate monetary truth.
     """
-    
+
     event_type: EventType = EventType.HEARTBEAT
     components_healthy: Dict[str, bool] = Field(default_factory=dict)
     latency_ms: float = Field(default=0.0, description="Monitoring telemetry only - CONSTITUTIONAL EXCEPTION")
     queue_sizes: Dict[str, int] = Field(default_factory=dict)
 
-    @validator('latency_ms')
+    @field_validator('latency_ms', mode='before')
+    @classmethod
     def validate_latency(cls, v):
         if v < 0:
             raise ValueError(f"latency_ms cannot be negative: {v}")
@@ -248,12 +264,16 @@ class HeartbeatEvent(BaseEvent):
             raise ValueError(f"latency_ms unreasonably high: {v} ms")
         return v
 
-    @validator('queue_sizes', each_item=True)
-    def validate_queue_size(cls, v):
-        if v < 0:
-            raise ValueError(f"queue size cannot be negative: {v}")
-        if v > 1000000:  # 1M items maximum per queue
-            raise ValueError(f"queue size unreasonably large: {v}")
+    @field_validator('queue_sizes', mode='before')
+    @classmethod
+    def validate_queue_sizes(cls, v):
+        if v is None:
+            return v
+        for key, size in v.items():
+            if size < 0:
+                raise ValueError(f"queue size cannot be negative: {size}")
+            if size > 1000000:  # 1M items maximum per queue
+                raise ValueError(f"queue size unreasonably large: {size}")
         return v
 
 
@@ -263,7 +283,9 @@ class HeartbeatEvent(BaseEvent):
 
 class ReplayStartEvent(BaseEvent):
     """Marks the beginning of a replay session."""
-    
+
+    model_config = ConfigDict(use_enum_values=True)
+
     event_type: EventType = EventType.REPLAY_START
     replay_mode: ReplayMode
     source_path: str
@@ -272,32 +294,36 @@ class ReplayStartEvent(BaseEvent):
     end_timestamp_ns: Optional[int] = None
     replay_seed: int = Field(default=0, description="Random seed for deterministic replay")
 
-    @validator('start_timestamp_ns', 'end_timestamp_ns')
+    @field_validator('start_timestamp_ns', 'end_timestamp_ns', mode='before')
+    @classmethod
     def validate_timestamp(cls, v):
         if v is not None and v <= 0:
             raise ValueError(f"Timestamp must be positive: {v}")
         return v
 
-    @validator('replay_seed')
+    @field_validator('replay_seed', mode='before')
+    @classmethod
     def validate_seed(cls, v):
         if v < 0:
             raise ValueError(f"replay_seed cannot be negative: {v}")
         return v
 
-    @root_validator
-    def validate_timestamp_ordering(cls, values):
-        start = values.get('start_timestamp_ns')
-        end = values.get('end_timestamp_ns')
-        
+    @model_validator(mode='after')
+    def validate_timestamp_ordering(self):
+        start = self.start_timestamp_ns
+        end = self.end_timestamp_ns
         if end is not None and end <= start:
-            raise ValueError(f"end_timestamp_ns ({end}) must be greater than start_timestamp_ns ({start})")
-        
-        return values
+            raise ValueError(
+                f"end_timestamp_ns ({end}) must be greater than start_timestamp_ns ({start})"
+            )
+        return self
 
 
 class ReplayEndEvent(BaseEvent):
     """Marks the end of a replay session."""
-    
+
+    model_config = ConfigDict(use_enum_values=True)
+
     event_type: EventType = EventType.REPLAY_END
     replay_mode: ReplayMode
     events_processed: int
@@ -305,7 +331,8 @@ class ReplayEndEvent(BaseEvent):
     checksum: str
     verification_passed: bool
 
-    @validator('events_processed', 'duration_ns')
+    @field_validator('events_processed', 'duration_ns', mode='before')
+    @classmethod
     def validate_positive(cls, v):
         if v < 0:
             raise ValueError(f"Value cannot be negative: {v}")
