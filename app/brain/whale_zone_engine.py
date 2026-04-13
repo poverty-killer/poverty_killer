@@ -28,21 +28,28 @@ Time semantics (v3 - truthful):
 last_update_ns doctrine:
 - Refreshed ONLY on evidence-based events: creation, detection, overlap update
 - NOT refreshed on passive proximity checks (price-in-zone queries)
-- TTL expires zones not supported by new accumulation evidence
+- Continuous exponential decay applies to confidence based on starvation of new evidence
 """
 
+import math
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Deque, Union, Any
 from collections import deque
 from enum import IntEnum
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
+# Numerical stability epsilon
+EPS = np.finfo(float).eps
+
 
 class ZoneBias(IntEnum):
     """Zone bias based on accumulation pattern."""
+    BEARISH = -1
     NEUTRAL = 0
     BULLISH = 1
-    BEARISH = -1
 
 
 @dataclass
@@ -91,7 +98,7 @@ class CandleEvidence:
 class CachedZoneState:
     """Internal state for deterministic zone tracking."""
     zone: Optional[WhalePresenceZone]
-    detection_queue: Deque[Tuple[int, float, float, float]]  # (timestamp, low, high, accumulation_score)
+    detection_queue: Deque[Tuple[int, float, float, float, float, float, float]]  # (ts, vwap, close, high, low, volume, accumulation_score)
     accumulation_history: Deque[float]
     volume_history: Deque[float]
     last_update_ns: int
@@ -101,16 +108,13 @@ class WhaleZoneEngine:
     """
     Deterministic whale zone detector for accumulation structure.
     
-    Features (preserved and strengthened from original):
-    - Zone detection from candle-level patterns
-    - Zone persistence (requires multiple confirmations)
-    - Zone TTL with timestamp-based decay
-    - Price-in-zone detection with proximity scoring
-    - Multi-factor accumulation detection (compression, absorption, volume anomaly)
-    - Recency-weighted zone memory
-    - Per-symbol deterministic state
+    Features (Preserved & Activated):
+    - VWAP-centric structural clustering for zone bounds
+    - Gaussian proximity representing continuous gravitational pull
+    - Exponential confidence decay (no brittle TTL drop-offs)
+    - Price-position weighted accumulation scoring (activating dormant capability)
+    - Overlap merging with smooth RECENCY_ALPHA interpolation
     - Truthful time semantics (creation_time_ns, last_update_ns)
-    - Truthful absorption: 1 at price edges (accumulation), 0 at center
     
     Zone types:
     - Accumulation zone: bullish bias, price near lower bound
@@ -123,16 +127,19 @@ class WhaleZoneEngine:
     MIN_ZONE_WIDTH_PCT = 0.005   # 0.5% minimum zone width
     MAX_ZONE_WIDTH_PCT = 0.05    # 5% maximum zone width
     ZONE_CONFIDENCE_THRESHOLD = 0.6
-    ZONE_STABILITY_REQUIRED = 2   # Confirmations needed
-    ZONE_TTL_NS = 60 * 1_000_000_000  # 60 seconds TTL
+    ZONE_STABILITY_REQUIRED = 2  # Confirmations needed
     
-    # Accumulation detection weights
+    # Continuous Decay Half-Life
+    ZONE_HALF_LIFE_NS = 60 * 1_000_000_000  # 60 seconds
+    ZONE_DEATH_THRESHOLD = 0.15             # Confidence below this prunes the zone
+    
+    # Accumulation detection weights (Original values, now fully activated)
     COMPRESSION_WEIGHT = 0.35
     ABSORPTION_WEIGHT = 0.30
     VOLUME_ANOMALY_WEIGHT = 0.25
     PRICE_POSITION_WEIGHT = 0.10
     
-    # Recency weighting alpha
+    # Recency weighting alpha for bound merging
     RECENCY_ALPHA = 0.7
     
     # Volume baseline window
@@ -151,7 +158,7 @@ class WhaleZoneEngine:
         self.max_zone_width_pct = self.MAX_ZONE_WIDTH_PCT
         self.zone_confidence_threshold = self.ZONE_CONFIDENCE_THRESHOLD
         self.zone_stability_required = self.ZONE_STABILITY_REQUIRED
-        self.zone_ttl_ns = self.ZONE_TTL_NS
+        self.zone_half_life_ns = self.ZONE_HALF_LIFE_NS
         
         if config is not None:
             if isinstance(config, dict):
@@ -159,7 +166,7 @@ class WhaleZoneEngine:
                 self.max_zone_width_pct = config.get('max_zone_width_pct', self.MAX_ZONE_WIDTH_PCT)
                 self.zone_confidence_threshold = config.get('zone_confidence_threshold', self.ZONE_CONFIDENCE_THRESHOLD)
                 self.zone_stability_required = config.get('zone_stability_required', self.ZONE_STABILITY_REQUIRED)
-                self.zone_ttl_ns = config.get('zone_ttl_ns', self.ZONE_TTL_NS)
+                self.zone_half_life_ns = config.get('zone_half_life_ns', self.ZONE_HALF_LIFE_NS)
             else:
                 if hasattr(config, 'min_zone_width_pct'):
                     self.min_zone_width_pct = getattr(config, 'min_zone_width_pct', self.MIN_ZONE_WIDTH_PCT)
@@ -169,8 +176,8 @@ class WhaleZoneEngine:
                     self.zone_confidence_threshold = getattr(config, 'zone_confidence_threshold', self.ZONE_CONFIDENCE_THRESHOLD)
                 if hasattr(config, 'zone_stability_required'):
                     self.zone_stability_required = getattr(config, 'zone_stability_required', self.ZONE_STABILITY_REQUIRED)
-                if hasattr(config, 'zone_ttl_ns'):
-                    self.zone_ttl_ns = getattr(config, 'zone_ttl_ns', self.ZONE_TTL_NS)
+                if hasattr(config, 'zone_half_life_ns'):
+                    self.zone_half_life_ns = getattr(config, 'zone_half_life_ns', self.ZONE_HALF_LIFE_NS)
         
         # Per-symbol state
         self._states: Dict[str, CachedZoneState] = {}
@@ -216,10 +223,9 @@ class WhaleZoneEngine:
         
         # Compute absorption (volume concentration near edges)
         # Edge-heavy: 1 at price extremes (accumulation at edges), 0 at center
-        price_position = (close - low) / price_range if price_range > 0 else 0.5
-        # Formula: distance from center (0.5) doubled -> 0 at center, 1 at edges
-        absorption = abs(price_position - 0.5) * 2
-        absorption = absorption * min(1.0, volume / 1000.0)  # Scale by volume
+        price_position = (close - low) / price_range if price_range > EPS else 0.5
+        absorption = abs(price_position - 0.5) * 2.0
+        absorption = absorption * min(1.0, volume / 1000.0)  # Scale by volume proxy
         
         # Update volume baseline
         self._update_volume_baseline(symbol, volume)
@@ -227,12 +233,12 @@ class WhaleZoneEngine:
         
         # Compute volume anomaly (z-score normalized to [0,1])
         volume_anomaly = 0.0
-        if volume_std > 0:
+        if volume_std > EPS:
             zscore = (volume - volume_mean) / volume_std
             volume_anomaly = min(1.0, max(0.0, zscore / 3.0))
         
         # Detect anomalous bar (unusual volume or range)
-        range_normal = price_range / close if close > 0 else 0
+        range_normal = price_range / close if close > 0 else 0.0
         anomalous_bar = volume_anomaly > 0.7 or range_normal > 0.03
         
         # Create evidence
@@ -250,9 +256,10 @@ class WhaleZoneEngine:
         )
         
         # Detect or update zone
-        zone = self._detect_or_update_zone(state, evidence, symbol, exchange_ts_ns)
+        zone = self._detect_or_update_zone(state, evidence, exchange_ts_ns)
         
         if zone is None:
+            state.zone = None
             return None
         
         # Update zone with current price for proximity (does NOT refresh last_update_ns)
@@ -260,8 +267,6 @@ class WhaleZoneEngine:
         
         # Store updated zone
         state.zone = zone
-        state.last_update_ns = exchange_ts_ns
-        
         return zone
 
     def get_zone(self, symbol: str) -> Optional[WhalePresenceZone]:
@@ -279,7 +284,7 @@ class WhaleZoneEngine:
         state = self._states.get(symbol)
         if state is None or state.zone is None:
             return 0
-        return current_ts_ns - state.zone.creation_time_ns
+        return max(0, current_ts_ns - state.zone.creation_time_ns)
 
     def get_time_since_refresh(self, symbol: str, current_ts_ns: int) -> int:
         """
@@ -289,11 +294,11 @@ class WhaleZoneEngine:
         state = self._states.get(symbol)
         if state is None or state.zone is None:
             return 0
-        return current_ts_ns - state.zone.last_update_ns
+        return max(0, current_ts_ns - state.zone.last_update_ns)
 
     def is_in_zone(self, symbol: str, price: float) -> Tuple[bool, float]:
         """
-        Check if price is within the current zone.
+        Check if price is within the current zone bounds.
         
         Returns:
             Tuple of (in_zone, proximity) where proximity is 0-1
@@ -306,11 +311,13 @@ class WhaleZoneEngine:
         if zone.lower_bound <= price <= zone.upper_bound:
             return True, 1.0
         
-        # Calculate proximity: distance to nearest bound normalized by zone width
+        # Gaussian proximity calculation outside bounds
         distance_to_lower = abs(price - zone.lower_bound)
         distance_to_upper = abs(price - zone.upper_bound)
         min_distance = min(distance_to_lower, distance_to_upper)
-        proximity = 1.0 - min(1.0, min_distance / zone.width)
+        
+        sigma = max(zone.width * 0.5, price * 0.001)
+        proximity = math.exp(-0.5 * (min_distance / sigma) ** 2)
         
         return False, proximity
 
@@ -366,171 +373,176 @@ class WhaleZoneEngine:
         state.volume_history.append(volume)
         
         if len(state.volume_history) >= self.VOLUME_BASELINE_WINDOW:
-            volumes = list(state.volume_history)[-self.VOLUME_BASELINE_WINDOW:]
-            mean = np.mean(volumes)
-            std = np.std(volumes)
-            self._volume_baselines[symbol] = (mean, max(std, 1e-8))
+            volumes = list(state.volume_history)
+            mean = float(np.mean(volumes))
+            std = float(np.std(volumes))
+            self._volume_baselines[symbol] = (mean, max(std, EPS))
 
     def _compute_accumulation_score(self, evidence: CandleEvidence) -> float:
         """
         Compute accumulation score from evidence.
         High score indicates institutional accumulation/absorption.
+        Now explicitly utilizes the original PRICE_POSITION_WEIGHT.
         """
+        price_range = max(evidence.high - evidence.low, EPS)
+        # Position of close relative to the bar's range
+        position = (evidence.close - evidence.low) / price_range
+        # Favorable structural price position (e.g. strong rejection wicks leaving close near one end)
+        price_pos_score = abs(position - 0.5) * 2.0
+        
         score = (
             evidence.compression * self.COMPRESSION_WEIGHT +
             evidence.absorption * self.ABSORPTION_WEIGHT +
-            evidence.volume_anomaly * self.VOLUME_ANOMALY_WEIGHT
+            evidence.volume_anomaly * self.VOLUME_ANOMALY_WEIGHT +
+            price_pos_score * self.PRICE_POSITION_WEIGHT
         )
         
-        # Anomalous bar boosts score
+        # Anomalous bar boosts score, preserving original engine intelligence
         if evidence.anomalous_bar:
             score = min(1.0, score * 1.3)
         
         return score
 
-    def _detect_zone_bounds(
-        self,
-        state: CachedZoneState,
-        evidence: CandleEvidence,
-        accumulation_score: float,
-    ) -> Optional[Tuple[float, float, float, int]]:
+    def _detect_zone_clusters(self, state: CachedZoneState) -> Optional[Tuple[float, float, float, int, ZoneBias]]:
         """
-        Detect zone bounds from detection queue.
-        Returns (lower_bound, upper_bound, confidence, creation_time) or None.
+        Detect zone boundaries using VWAP-centric variance (math-upgraded replacement 
+        for original wick-hunting bounds).
+        Returns (lower, upper, confidence, creation_ts, bias) or None.
         """
         if len(state.detection_queue) < self.zone_stability_required:
             return None
-        
-        # Get recent detection points
+            
         recent = list(state.detection_queue)[-self.zone_stability_required:]
         
-        # Extract lows, highs, scores, timestamps
-        lows = [item[1] for item in recent]
-        highs = [item[2] for item in recent]
-        scores = [item[3] for item in recent]
-        timestamps = [item[0] for item in recent]
+        total_weight = 0.0
+        weighted_vwap_sum = 0.0
+        weighted_bias_sum = 0.0
         
-        # Zone bounds are the min low and max high of detection points
-        lower_bound = min(lows)
-        upper_bound = max(highs)
-        
-        # Check width constraints
-        width_pct = (upper_bound - lower_bound) / lower_bound if lower_bound > 0 else 0
-        if width_pct < self.min_zone_width_pct or width_pct > self.max_zone_width_pct:
+        for ts, vwap, close, high, low, vol, acc_score in recent:
+            weight = vol * acc_score
+            total_weight += weight
+            weighted_vwap_sum += vwap * weight
+            
+            midpoint = (high + low) / 2.0
+            range_len = max(high - low, EPS)
+            pos = (close - midpoint) / (range_len / 2.0)
+            weighted_bias_sum += pos * weight
+            
+        if total_weight < EPS:
             return None
+            
+        center = weighted_vwap_sum / total_weight
+        avg_bias_score = weighted_bias_sum / total_weight
         
-        # Confidence based on stability and accumulation scores
-        stability_ratio = len(recent) / self.zone_stability_required
-        avg_score = np.mean(scores)
+        if avg_bias_score > 0.15:
+            bias = ZoneBias.BULLISH
+        elif avg_bias_score < -0.15:
+            bias = ZoneBias.BEARISH
+        else:
+            bias = ZoneBias.NEUTRAL
+
+        variance_sum = sum((vol * acc_score) * ((vwap - center) ** 2) 
+                           for _, vwap, _, _, _, vol, acc_score in recent)
+        std_dev = math.sqrt(variance_sum / total_weight)
+        
+        calculated_width = std_dev * 4.0
+        min_width = center * self.min_zone_width_pct
+        max_width = center * self.max_zone_width_pct
+        
+        final_width = max(min_width, min(calculated_width, max_width))
+        
+        lower_bound = center - (final_width / 2.0)
+        upper_bound = center + (final_width / 2.0)
+        
+        avg_score = float(np.mean([item[-1] for item in recent]))
+        stability_ratio = min(1.0, len(recent) / self.zone_stability_required)
         confidence = min(1.0, avg_score * stability_ratio)
         
         if confidence < self.zone_confidence_threshold:
             return None
+            
+        creation_time = min(item[0] for item in recent)
         
-        # Creation time is earliest detection timestamp
-        creation_time = min(timestamps)
-        
-        return lower_bound, upper_bound, confidence, creation_time
+        return lower_bound, upper_bound, confidence, creation_time, bias
 
-    def _determine_zone_bias(
-        self,
-        lower_bound: float,
-        upper_bound: float,
-        evidence: CandleEvidence,
-    ) -> ZoneBias:
+    def _apply_confidence_decay(self, zone: WhalePresenceZone, exchange_ts_ns: int) -> Optional[WhalePresenceZone]:
         """
-        Determine zone bias based on price position and accumulation pattern.
-        Bullish: accumulation near lower bound (buying pressure)
-        Bearish: distribution near upper bound (selling pressure)
+        Applies continuous exponential decay to zone confidence.
+        Replaces hard TTL thresholds.
         """
-        price_position = (evidence.close - lower_bound) / (upper_bound - lower_bound) if upper_bound > lower_bound else 0.5
+        time_since_refresh = max(0, exchange_ts_ns - zone.last_update_ns)
         
-        # Strong bullish: price near lower bound with good compression
-        if price_position < 0.3 and evidence.compression > 0.5:
-            return ZoneBias.BULLISH
+        if time_since_refresh == 0:
+            return zone
+            
+        decay_factor = 0.5 ** (time_since_refresh / self.zone_half_life_ns)
+        new_confidence = zone.confidence * decay_factor
         
-        # Strong bearish: price near upper bound with good compression
-        if price_position > 0.7 and evidence.compression > 0.5:
-            return ZoneBias.BEARISH
-        
-        # Weak bias based on price position
-        if price_position < 0.4:
-            return ZoneBias.BULLISH
-        elif price_position > 0.6:
-            return ZoneBias.BEARISH
-        
-        return ZoneBias.NEUTRAL
+        if new_confidence < self.ZONE_DEATH_THRESHOLD:
+            return None
+            
+        zone.confidence = new_confidence
+        zone.accumulation_score = zone.accumulation_score * decay_factor
+        return zone
 
     def _detect_or_update_zone(
         self,
         state: CachedZoneState,
         evidence: CandleEvidence,
-        symbol: str,
         exchange_ts_ns: int,
     ) -> Optional[WhalePresenceZone]:
         """
         Detect new zone or update existing zone.
         """
-        # Compute accumulation score
         accumulation_score = self._compute_accumulation_score(evidence)
         
-        # Add to detection queue if accumulation is significant
+        # Queue significant structural footprints
         if accumulation_score > 0.4:
             state.detection_queue.append((
-                evidence.exchange_ts_ns,
-                evidence.low,
-                evidence.high,
-                accumulation_score,
+                evidence.exchange_ts_ns, evidence.vwap, evidence.close, 
+                evidence.high, evidence.low, evidence.volume, accumulation_score
             ))
             state.accumulation_history.append(accumulation_score)
-        else:
-            # Clear detection queue if accumulation weak (prevents false zones)
-            if len(state.detection_queue) > 0 and accumulation_score < 0.2:
-                state.detection_queue.clear()
+        elif len(state.detection_queue) > 0 and accumulation_score < 0.2:
+            state.detection_queue.clear()
         
-        # Try to detect new zone
-        bounds = self._detect_zone_bounds(state, evidence, accumulation_score)
+        # Try to detect new zone from clusters
+        cluster_data = self._detect_zone_clusters(state)
         
-        if bounds is not None:
-            lower_bound, upper_bound, confidence, creation_time = bounds
-            bias = self._determine_zone_bias(lower_bound, upper_bound, evidence)
+        if cluster_data is not None:
+            lower_bound, upper_bound, confidence, creation_time, bias = cluster_data
             
-            # Check if this matches existing zone
+            # Check for structural overlap with existing zone
             if state.zone is not None:
-                # Check if bounds overlap significantly
                 existing = state.zone
                 overlap_lower = max(lower_bound, existing.lower_bound)
                 overlap_upper = min(upper_bound, existing.upper_bound)
+                
                 if overlap_lower < overlap_upper:
-                    # Update existing zone with weighted average
-                    new_confidence = (existing.confidence + confidence) / 2
-                    new_confidence = min(1.0, new_confidence)
-                    
-                    # Update bounds with recency weighting
+                    # Update existing zone bounds with smooth RECENCY_ALPHA (reinstated original logic)
                     alpha = self.RECENCY_ALPHA
-                    new_lower = alpha * lower_bound + (1 - alpha) * existing.lower_bound
-                    new_upper = alpha * upper_bound + (1 - alpha) * existing.upper_bound
+                    new_lower = alpha * lower_bound + (1.0 - alpha) * existing.lower_bound
+                    new_upper = alpha * upper_bound + (1.0 - alpha) * existing.upper_bound
                     
-                    # Preserve original creation time, refresh last_update_ns on evidence
+                    new_confidence = min(1.0, (existing.confidence + confidence) / 2.0)
+                    merged_bias = bias if confidence > existing.confidence * 1.5 else existing.bias
+                    
                     return WhalePresenceZone(
                         lower_bound=new_lower,
                         upper_bound=new_upper,
                         confidence=new_confidence,
-                        bias=bias,
+                        bias=merged_bias,
                         presence=False,
                         proximity=0.0,
-                        center=(new_lower + new_upper) / 2,
+                        center=(new_lower + new_upper) / 2.0,
                         width=new_upper - new_lower,
                         creation_time_ns=existing.creation_time_ns,
                         last_update_ns=exchange_ts_ns,
                         stability_count=existing.stability_count + 1,
-                        accumulation_score=accumulation_score,
+                        accumulation_score=accumulation_score
                     )
             
-            # Create new zone
-            center = (lower_bound + upper_bound) / 2
-            width = upper_bound - lower_bound
-            
+            # Create completely new zone
             return WhalePresenceZone(
                 lower_bound=lower_bound,
                 upper_bound=upper_bound,
@@ -538,45 +550,18 @@ class WhaleZoneEngine:
                 bias=bias,
                 presence=False,
                 proximity=0.0,
-                center=center,
-                width=width,
+                center=(lower_bound + upper_bound) / 2.0,
+                width=upper_bound - lower_bound,
                 creation_time_ns=creation_time,
                 last_update_ns=exchange_ts_ns,
                 stability_count=1,
                 accumulation_score=accumulation_score,
             )
         
-        # No new zone detected, return existing if still valid
+        # No new evidence detected, continuously decay existing zone
         if state.zone is not None:
-            # Check TTL based on last_update_ns (evidence-based refresh only)
-            time_since_refresh = exchange_ts_ns - state.zone.last_update_ns
-            if time_since_refresh > self.zone_ttl_ns:
-                # Zone expired
-                return None
+            return self._apply_confidence_decay(state.zone, exchange_ts_ns)
             
-            # Decay confidence over time since last refresh
-            if time_since_refresh > 0:
-                decay_factor = 1.0 - min(0.5, time_since_refresh / self.zone_ttl_ns)
-                updated_confidence = state.zone.confidence * decay_factor
-                
-                # Return updated zone with decayed confidence, preserving creation_time
-                return WhalePresenceZone(
-                    lower_bound=state.zone.lower_bound,
-                    upper_bound=state.zone.upper_bound,
-                    confidence=updated_confidence,
-                    bias=state.zone.bias,
-                    presence=False,
-                    proximity=0.0,
-                    center=state.zone.center,
-                    width=state.zone.width,
-                    creation_time_ns=state.zone.creation_time_ns,
-                    last_update_ns=state.zone.last_update_ns,
-                    stability_count=state.zone.stability_count,
-                    accumulation_score=state.zone.accumulation_score * decay_factor,
-                )
-            
-            return state.zone
-        
         return None
 
     def _update_zone_proximity(
@@ -593,23 +578,15 @@ class WhaleZoneEngine:
         if presence:
             proximity = 1.0
         else:
+            # Gaussian continuous distance modeling
             distance_to_lower = abs(price - zone.lower_bound)
             distance_to_upper = abs(price - zone.upper_bound)
             min_distance = min(distance_to_lower, distance_to_upper)
-            proximity = 1.0 - min(1.0, min_distance / zone.width)
-        
-        # last_update_ns unchanged - only evidence refreshes zone life
-        return WhalePresenceZone(
-            lower_bound=zone.lower_bound,
-            upper_bound=zone.upper_bound,
-            confidence=zone.confidence,
-            bias=zone.bias,
-            presence=presence,
-            proximity=proximity,
-            center=zone.center,
-            width=zone.width,
-            creation_time_ns=zone.creation_time_ns,
-            last_update_ns=zone.last_update_ns,
-            stability_count=zone.stability_count,
-            accumulation_score=zone.accumulation_score,
-        )
+            
+            sigma = max(zone.width * 0.5, price * 0.001)
+            proximity = math.exp(-0.5 * (min_distance / sigma) ** 2)
+            
+        # last_update_ns unchanged - only accumulation evidence refreshes zone life
+        zone.presence = presence
+        zone.proximity = proximity
+        return zone

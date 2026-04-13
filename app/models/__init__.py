@@ -9,6 +9,7 @@ Usage:
         EventEnvelope, TruthFrame, OrderIntent, FillEvent,
         EventType, OrderSide, RegimeType, NormalInvariant,
         FusionDecision, DarkPoolPrint, OptionsFlow, StrategySignal,
+        OrderRequest, OrderFill, CollapseQuality, SleeveType,
     )
 """
 
@@ -40,6 +41,10 @@ from app.models.enums import (
     SignalType,
     CheckpointType,
     ResolutionType,
+    # Entropy decoder enums
+    CollapseQuality,
+    # Strategy sleeve enums
+    SleeveType,
 )
 
 
@@ -97,6 +102,13 @@ from app.models.fusion import FusionDecision
 # ============================================
 
 from app.models.signals import DarkPoolPrint, OptionsFlow, StrategySignal
+
+
+# ============================================
+# Orders (Canonical Order Models)
+# ============================================
+
+from app.models.orders import OrderRequest, OrderFill
 
 
 # ============================================
@@ -178,6 +190,8 @@ __all__ = [
     'SignalType',
     'CheckpointType',
     'ResolutionType',
+    'CollapseQuality',
+    'SleeveType',
     # Contract submodels
     'ExchangePosition',
     'ExchangeOpenOrder',
@@ -218,6 +232,9 @@ __all__ = [
     'DarkPoolPrint',
     'OptionsFlow',
     'StrategySignal',
+    # Orders
+    'OrderRequest',
+    'OrderFill',
     # Market Data
     'Candle',
     'OrderBookSnapshot',

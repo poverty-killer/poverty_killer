@@ -1,514 +1,517 @@
 ﻿"""
 app/brain/signal_fusion.py
 
-Deterministic, replay-safe fusion engine for Poverty Killer (reboot architecture).
-Consumes directional, confidence, and veto signals from:
-- EntropyDecoder (structural confidence / collapse)
-- RegimeDetector (regime classification)
-- ShansCurve (doctrinal fields: bias, confidence, superfluid)
-- ToxicityEngine (hostility suppression)
-- WhaleFlowEngine (directional edge)
-- InsiderSignalEngine (urgency/escalation)
+POVERTY_KILLER Supreme Board Implementation
+Role: Central Doctrine-Preserving Quantitative Fusion Engine
 
-Output: FusionDecision with attack_mode, confidence, sleeve eligibility.
+This module executes deterministic, replay-safe, non-linear signal fusion across 
+mixed-latency differentiators. It relies on strict contract adherence, continuous 
+temporal discounting, kinematic hazard tracking, and dynamic topological routing hints.
+
+Core Doctrinal Boundaries:
+- Whale Flow: Directional Alpha Vector (Momentum & Continuous Temporal Decay)
+- Shan's Curve: Exhaustion Asymptote (Superfluid), Orderbook Bias, Liquidity Density
+- Entropy: Threshold Temperature, Structural Disorder, Velocity, and Acceleration
+- Regime: Baseline Sleeve Authorization (Boolean flags) & Tie-breaker hints
+- Toxicity: Exponential Suppression, Hazard Velocity, and Hard Veto (is_toxic)
+- Insider: Urgency / Attack Escalation Catalyst (Gated by active/invalidated state)
+- Physical Validator: Base Reality Impact Bounds
 """
 
-from typing import Dict, Optional, Any, Union
+import math
+import logging
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
-from decimal import Decimal
 
-import numpy as np
-
-from app.models.enums import CollapseQuality, RegimeType
+# Lawful contracts imported strictly from provided repo truth
 from app.models.fusion import FusionDecision
-from app.models.entropy_score import EntropyScore
-from app.brain.entropy_decoder import EntropyDecoder
-from app.brain.shans_curve import ShansCurveSignal
+from app.models.enums import RegimeType
+from app.constants import SleeveType
 
+logger = logging.getLogger(__name__)
+
+
+# =========================================================================
+# MATHEMATICAL & QUANTITATIVE SUBSYSTEMS
+# =========================================================================
+
+class QuantMath:
+    """
+    Continuous mathematical functions for shaping raw signals into actionable 
+    probability spaces. Prevents linear scaling errors at boundary conditions.
+    """
+    @staticmethod
+    def exponential_decay(value: float, steepness: float = 3.0) -> float:
+        clamped = max(0.0, min(1.0, value))
+        return math.exp(-steepness * clamped)
+
+    @staticmethod
+    def temperature_threshold(base_threshold: float, entropy: float, max_penalty: float = 0.3) -> float:
+        clamped_entropy = max(0.0, min(1.0, entropy))
+        return min(0.95, base_threshold + (clamped_entropy * max_penalty))
+
+    @staticmethod
+    def temporal_discount(age_ns: int, half_life_ns: int) -> float:
+        if age_ns <= 0:
+            return 1.0
+        return math.pow(0.5, age_ns / half_life_ns)
+
+    @staticmethod
+    def vector_resonance(direction_a: int, confidence_a: float, bias_b: float) -> float:
+        clamped_conf = max(0.0, min(1.0, confidence_a))
+        clamped_bias = max(-1.0, min(1.0, bias_b))
+        return float(direction_a) * clamped_conf * clamped_bias
+
+    @staticmethod
+    def kelly_calibration_curve(raw_confidence: float) -> float:
+        clamped = max(0.0, min(1.0, raw_confidence))
+        return math.pow(clamped, 3)
+
+
+# =========================================================================
+# STATE, KINEMATICS & TELEMETRY
+# =========================================================================
 
 @dataclass
-class CachedRegimeState:
-    """Cached regime state with timestamp for staleness detection."""
-    regime: RegimeType
-    exchange_ts_ns: int
-    instrument_id: str
-    liquidity_usd: float
+class HysteresisState:
+    """
+    Tracks temporal derivatives (velocity and acceleration) and state persistence.
+    Essential for front-running market collapses before absolute thresholds are breached.
+    """
+    was_attack_mode: bool = False
+    consecutive_attack_ticks: int = 0
+    
+    # Entropy Kinematics
+    last_entropy: float = 0.0
+    entropy_velocity: float = 0.0      # ds/dt
+    entropy_acceleration: float = 0.0  # d2s/dt2
+    
+    # Toxicity Kinematics
+    last_toxicity: float = 0.0
+    toxicity_velocity: float = 0.0     # ds/dt
+    toxicity_acceleration: float = 0.0 # d2s/dt2
+    
+    last_eval_ns: int = 0
+
+    def update_kinematics(self, current_entropy: float, current_toxicity: float, current_ts_ns: int) -> None:
+        """Calculates 1st (Velocity) and 2nd (Acceleration) derivatives of hazard signals."""
+        if self.last_eval_ns > 0 and current_ts_ns > self.last_eval_ns:
+            dt_sec = (current_ts_ns - self.last_eval_ns) / 1e9
+            
+            # Velocity
+            new_ent_vel = (current_entropy - self.last_entropy) / dt_sec
+            new_tox_vel = (current_toxicity - self.last_toxicity) / dt_sec
+            
+            # Acceleration
+            self.entropy_acceleration = (new_ent_vel - self.entropy_velocity) / dt_sec
+            self.toxicity_acceleration = (new_tox_vel - self.toxicity_velocity) / dt_sec
+            
+            self.entropy_velocity = new_ent_vel
+            self.toxicity_velocity = new_tox_vel
+        else:
+            self.entropy_velocity = 0.0
+            self.toxicity_velocity = 0.0
+            self.entropy_acceleration = 0.0
+            self.toxicity_acceleration = 0.0
+
+        self.last_entropy = current_entropy
+        self.last_toxicity = current_toxicity
+        self.last_eval_ns = current_ts_ns
+
+    def register_decision(self, is_attack_mode: bool) -> None:
+        """Updates persistence counters to dampen micro-oscillations."""
+        if is_attack_mode:
+            self.consecutive_attack_ticks += 1
+        else:
+            self.consecutive_attack_ticks = 0
+        self.was_attack_mode = is_attack_mode
 
 
-@dataclass
-class CachedShansState:
-    """Cached Shan's Curve state."""
-    superfluid_score: float
-    bias: int
-    confidence: float
-    exchange_ts_ns: int
-
-
-@dataclass
-class CachedWhaleState:
-    """Cached Whale directional state."""
-    direction: int
-    score: float
-    exchange_ts_ns: int
-
-
-@dataclass
-class CachedEntropyState:
-    """Cached Entropy state per symbol/side."""
-    entropy_score: EntropyScore
-    collapse_quality: CollapseQuality
-    exchange_ts_ns: int
-
-
-@dataclass
-class CachedInsiderState:
-    """Cached Insider urgency state."""
-    urgency: float
-    exchange_ts_ns: int
-
+# =========================================================================
+# THE FUSION ENGINE
+# =========================================================================
 
 class SignalFusion:
     """
-    Role-pure fusion engine for reboot architecture.
-    Directional inputs → directional output.
-    Confidence/veto inputs → confidence/suppression.
-    No conflation.
+    Apex quantitative decision nexus for POVERTY_KILLER.
+    Maintains mixed-latency temporal caches, applies non-linear discounts,
+    manages state hysteresis, and provides tie-breaker routing hints.
     """
 
-    STALENESS_THRESHOLD_NS = 5 * 1_000_000_000
-
-    def __init__(self, config: Optional[Union[Dict[str, Any], Any]] = None, _legacy_compat: bool = False):
-        """
-        Initialize fusion engine with optional configuration.
-        
-        Args:
-            config: Either a dict with configuration keys or an object with
-                    attribute-style configuration. Supports both calling patterns
-                    for caller family compatibility.
-            _legacy_compat: Legacy compatibility parameter for caller family.
-        """
+    def __init__(self, config: Any, commander: Any = None):
         self.config = config
-        self.staleness_threshold_ns = self.STALENESS_THRESHOLD_NS
-        self.shans_weight = 0.7
-        self.attack_mode_persistence_required = 2
+        self.commander = commander
         
-        if config is not None:
-            if isinstance(config, dict):
-                self.staleness_threshold_ns = config.get('staleness_threshold_ns', self.STALENESS_THRESHOLD_NS)
-                self.shans_weight = float(config.get('shans_weight', 0.7))
-                self.attack_mode_persistence_required = int(config.get('attack_mode_persistence_required', 2))
-            else:
-                if hasattr(config, 'staleness_threshold_ns'):
-                    self.staleness_threshold_ns = getattr(config, 'staleness_threshold_ns', self.STALENESS_THRESHOLD_NS)
-                if hasattr(config, 'shans_weight'):
-                    self.shans_weight = float(getattr(config, 'shans_weight', 0.7))
-                if hasattr(config, 'attack_mode_persistence_required'):
-                    self.attack_mode_persistence_required = int(getattr(config, 'attack_mode_persistence_required', 2))
+        # Temporal Cache: key -> (payload_object, timestamp_nanoseconds)
+        self._cache: Dict[str, Tuple[Any, int]] = {}
         
-        self._cached_regime: Optional[CachedRegimeState] = None
-        self._cached_shans: Optional[CachedShansState] = None
-        self._cached_whale: Optional[CachedWhaleState] = None
-        self._cached_entropy: Dict[str, CachedEntropyState] = {}
-        self._cached_insider: Optional[CachedInsiderState] = None
+        # Core State Tracking
+        self._state = HysteresisState()
+        self._last_fusion: Optional[FusionDecision] = None
+        self._telemetry: Dict[str, Any] = {}
         
-        self._last_decision: Optional[FusionDecision] = None
-        self._attack_mode_consecutive: int = 0
+        # Strict Mixed-Latency TTL Doctrine (Nanoseconds)
+        self._ttl_ns = {
+            "whale_flow": 15_000_000_000,
+            "shans_curve": 15_000_000_000,
+            "physical": 30_000_000_000,
+            "toxicity": 30_000_000_000,
+            "entropy": 60_000_000_000,
+            "insider": 120_000_000_000,
+            "regime": 300_000_000_000
+        }
 
-    def _is_stale(self, timestamp_ns: int, current_ts_ns: int) -> bool:
-        return (current_ts_ns - timestamp_ns) > self.staleness_threshold_ns
+        # Half-lives for Continuous Temporal Discounting (Nanoseconds)
+        self._half_life_ns = {
+            "whale_flow": 5_000_000_000,
+            "shans_curve": 7_000_000_000,
+            "insider": 60_000_000_000
+        }
+        
+        logger.info("SignalFusion initialized. Replay-safety enforced. Router logic strictly delegated.")
 
-    def _get_current_timestamp_from_cache(self) -> int:
-        """Derive the maximum lawful cached timestamp for freshness checks."""
-        max_ts = 0
-        if self._cached_regime is not None:
-            max_ts = max(max_ts, self._cached_regime.exchange_ts_ns)
-        if self._cached_shans is not None:
-            max_ts = max(max_ts, self._cached_shans.exchange_ts_ns)
-        if self._cached_whale is not None:
-            max_ts = max(max_ts, self._cached_whale.exchange_ts_ns)
-        if self._cached_insider is not None:
-            max_ts = max(max_ts, self._cached_insider.exchange_ts_ns)
-        for cached in self._cached_entropy.values():
-            max_ts = max(max_ts, cached.exchange_ts_ns)
-        return max_ts
+    # =========================================================================
+    # STRICT INGESTION (REPLAY-SAFE)
+    # =========================================================================
 
-    def _bridge_shans_bias(self, bias_int: int) -> str:
-        if bias_int == 1:
+    def _ingest(self, key: str, payload: Any, timestamp_ns: int) -> None:
+        """Secure ingestion portal enforcing explicit timestamp tracking."""
+        if payload is not None:
+            self._cache[key] = (payload, timestamp_ns)
+
+    def update_whale(self, payload: Any, timestamp_ns: int) -> None:
+        self._ingest("whale_flow", payload, timestamp_ns)
+
+    def update_shans(self, payload: Any, timestamp_ns: int) -> None:
+        self._ingest("shans_curve", payload, timestamp_ns)
+
+    def update_regime(self, payload: Any, timestamp_ns: int) -> None:
+        self._ingest("regime", payload, timestamp_ns)
+
+    def update_entropy(self, payload: Any, timestamp_ns: int) -> None:
+        self._ingest("entropy", payload, timestamp_ns)
+
+    def update_insider(self, payload: Any, timestamp_ns: int) -> None:
+        self._ingest("insider", payload, timestamp_ns)
+
+    def update_toxicity(self, payload: Any, timestamp_ns: int) -> None:
+        self._ingest("toxicity", payload, timestamp_ns)
+
+    def update_physical(self, payload: Any, timestamp_ns: int) -> None:
+        self._ingest("physical", payload, timestamp_ns)
+
+    # =========================================================================
+    # STATE EXPORT & OBSERVABILITY
+    # =========================================================================
+
+    def get_last_fusion(self) -> Optional[FusionDecision]:
+        """Provides the last computed deterministic state to the Orchestrator/Router."""
+        return self._last_fusion
+
+    def get_fusion_telemetry(self) -> Dict[str, Any]:
+        """Exposes internal mathematical weights and kinematic states."""
+        return self._telemetry
+
+    def _bridge_shans_bias(self, raw_bias: float) -> str:
+        """
+        Contract Bridge: Transforms the continuous numerical bias from shans_curve.py 
+        into the explicit string literal required by FusionDecision.shans_bias.
+        """
+        if raw_bias > 0.15:
             return "bullish"
-        elif bias_int == -1:
+        elif raw_bias < -0.15:
             return "bearish"
         return "neutral"
 
-    def _bridge_regime(self, regime: RegimeType) -> str:
-        return regime.value if hasattr(regime, 'value') else str(regime)
+    # =========================================================================
+    # THE APEX ALGORITHM: CORE FUSION DOCTRINE
+    # =========================================================================
 
-    def get_current_regime(self) -> RegimeType:
-        """Returns cached regime without freshness guarantee. Caller must check staleness."""
-        if self._cached_regime is None:
-            return RegimeType.UNKNOWN
-        return self._cached_regime.regime
-
-    def update_shans(self, order_book: Any, regime: RegimeType, physical_verification: Optional[Any] = None) -> None:
-        superfluid_score = getattr(order_book, 'shans_superfluid_score', 0.0)
-        bias = getattr(order_book, 'shans_bias', 0)
-        confidence = getattr(order_book, 'shans_confidence', 0.0)
-        exchange_ts_ns = getattr(order_book, 'exchange_ts_ns', 0)
-        
-        verification_score = 1.0
-        if physical_verification is not None:
-            verification_score = getattr(physical_verification, 'score', 1.0)
-            if hasattr(physical_verification, 'is_severe_failure'):
-                if physical_verification.is_severe_failure():
-                    verification_score = 0.0
-        
-        final_confidence = float(np.clip(confidence * verification_score, 0.0, 1.0))
-        
-        self._cached_shans = CachedShansState(
-            superfluid_score=float(np.clip(superfluid_score, 0.0, 1.0)),
-            bias=int(np.clip(bias, -1, 1)),
-            confidence=final_confidence,
-            exchange_ts_ns=exchange_ts_ns,
-        )
-
-    def update_whale(self, candle: Any) -> None:
-        direction = getattr(candle, 'whale_direction', 0)
-        score = getattr(candle, 'whale_confidence', 0.0)
-        exchange_ts_ns = getattr(candle, 'exchange_ts_ns', 0)
-        
-        self._cached_whale = CachedWhaleState(
-            direction=int(np.clip(direction, -1, 1)),
-            score=float(np.clip(score, 0.0, 1.0)),
-            exchange_ts_ns=exchange_ts_ns,
-        )
-
-    def update_regime(self, candles: Any, instrument_id: str, liquidity_usd: float, exchange_ts_ns: int) -> None:
-        if hasattr(candles, 'regime') and candles.regime is not None:
-            regime = candles.regime
-        elif hasattr(candles, 'get_regime'):
-            regime = candles.get_regime()
-        else:
-            regime = RegimeType.UNKNOWN
-        
-        self._cached_regime = CachedRegimeState(
-            regime=regime,
-            exchange_ts_ns=exchange_ts_ns,
-            instrument_id=instrument_id,
-            liquidity_usd=liquidity_usd,
-        )
-
-    def get_macro_signal(self, exchange_ts_ns: int, whale_score: float) -> float:
-        effective_whale_score = whale_score
-        
-        if self._cached_whale is not None:
-            if not self._is_stale(self._cached_whale.exchange_ts_ns, exchange_ts_ns):
-                effective_whale_score = max(effective_whale_score, self._cached_whale.score)
-        
-        base_suppression = 1.0
-        
-        if self._cached_regime is not None:
-            if self._is_stale(self._cached_regime.exchange_ts_ns, exchange_ts_ns):
-                base_suppression = 0.5
-            elif self._cached_regime.regime == RegimeType.CRISIS:
-                base_suppression = 0.3
-            elif self._cached_regime.regime == RegimeType.RANGING:
-                base_suppression = 0.7
-        else:
-            base_suppression = 0.5
-        
-        suppression = base_suppression * (0.5 + 0.5 * effective_whale_score)
-        return float(np.clip(suppression, 0.0, 1.0))
-
-    def get_insider_signal(self) -> float:
-        """Returns cached insider urgency only if fresh, otherwise 0.0."""
-        if self._cached_insider is None:
-            return 0.0
-        
-        current_ts = self._get_current_timestamp_from_cache()
-        if current_ts == 0:
-            return 0.0
-        
-        if self._is_stale(self._cached_insider.exchange_ts_ns, current_ts):
-            return 0.0
-        
-        return self._cached_insider.urgency
-
-    def update_insider(self, urgency: float, exchange_ts_ns: int) -> None:
-        self._cached_insider = CachedInsiderState(
-            urgency=float(np.clip(urgency, 0.0, 2.0)),
-            exchange_ts_ns=exchange_ts_ns,
-        )
-
-    def update_entropy(self, symbol: str, side: str, exchange_ts_ns: int, regime: RegimeType, entropy_decoder: Optional[EntropyDecoder] = None) -> None:
-        key = f"{symbol}_{side}"
-        
-        entropy_score = None
-        collapse_quality = CollapseQuality.NONE
-        
-        if entropy_decoder is not None:
-            entropy_score = entropy_decoder.get_current(symbol)
-            if entropy_score is not None and hasattr(entropy_score, 'collapse_quality'):
-                collapse_quality = entropy_score.collapse_quality
-        
-        if entropy_score is None:
-            from app.models.entropy_score import EntropyScore
-            entropy_score = EntropyScore(
-                symbol=symbol,
-                timestamp=exchange_ts_ns,
-                entropy=Decimal('0.5'),
-                is_collapsed=False,
-                predicted_magnitude=Decimal('1.0'),
-                confidence=Decimal('0.5'),
-                samples_used=0,
-            )
-        
-        self._cached_entropy[key] = CachedEntropyState(
-            entropy_score=entropy_score,
-            collapse_quality=collapse_quality,
-            exchange_ts_ns=exchange_ts_ns,
-        )
-
-    def fuse(
-        self,
-        regime: Optional[RegimeType] = None,
-        whale_score: Optional[float] = None,
-        macro_signal: Optional[float] = None,
-        insider_signal: Optional[float] = None,
-        order_book: Optional[Any] = None
-    ) -> FusionDecision:
+    def fuse(self, current_ts_ns: int) -> FusionDecision:
         """
-        Fuse all signals into a lawful FusionDecision.
-        
-        Supports two calling patterns:
-        1. Explicit arguments (legacy direct call)
-        2. Cached state (orchestrator reboot path)
-        
-        When arguments are None, values are taken from cached state.
+        The mathematical heart of the system.
+        Executes staleness vetting, precise property extraction, temporal discounting,
+        kinematic derivative tracking, vector resonance, hysteresis modulation, 
+        and strict boundary alignment for the Strategy Router.
+
+        Args:
+            current_ts_ns: The authoritative orchestration tick timestamp.
+                           NO WALL-CLOCK FALLBACKS ARE PERMITTED.
         """
-        exchange_ts_ns = 0
-        if order_book is not None:
-            exchange_ts_ns = getattr(order_book, 'exchange_ts_ns', 0)
+        self._telemetry.clear()
+        self._telemetry["execution_ts"] = current_ts_ns
+
+        # ---------------------------------------------------------
+        # PHASE 1: TEMPORAL VETO (Staleness Enforcement)
+        # ---------------------------------------------------------
+        for sig, ttl in self._ttl_ns.items():
+            if sig not in self._cache:
+                return self._issue_hard_veto(current_ts_ns, f"Missing requisite signal [{sig}]")
+            
+            _, ts = self._cache[sig]
+            age_ns = current_ts_ns - ts
+            if age_ns > ttl:
+                return self._issue_hard_veto(current_ts_ns, f"Stale signal [{sig}] (Age: {age_ns / 1e9:.2f}s)")
+
+        # ---------------------------------------------------------
+        # PHASE 2: STRICT CONTRACT EXTRACTION
+        # ---------------------------------------------------------
+        
+        # ToxicityAlert
+        tox_payload, _ = self._cache["toxicity"]
+        tox_score = float(tox_payload.toxicity_score)
+        tox_is_toxic = bool(tox_payload.is_toxic)
+        
+        # EntropyScore
+        ent_payload, _ = self._cache["entropy"]
+        ent_score = float(ent_payload.entropy)
+        
+        # Kinematic Tracking
+        self._state.update_kinematics(ent_score, tox_score, current_ts_ns)
+        self._telemetry["entropy_velocity"] = self._state.entropy_velocity
+        self._telemetry["toxicity_velocity"] = self._state.toxicity_velocity
+        
+        # Physical Validator (Dict contract proven)
+        phys_dict, _ = self._cache["physical"]
+        phys_score = float(phys_dict.get("health_score", 0.0))
+        
+        # WhaleFlowAlert (direction is WhaleDirection Enum)
+        whale_payload, whale_ts = self._cache["whale_flow"]
+        whale_dir = int(whale_payload.direction.value)
+        whale_conf_raw = float(whale_payload.confidence)
+        
+        whale_age = current_ts_ns - whale_ts
+        whale_discount = QuantMath.temporal_discount(whale_age, self._half_life_ns["whale_flow"])
+        whale_conf_decayed = whale_conf_raw * whale_discount
+        
+        # ShansCurveSignal
+        shans_payload, shans_ts = self._cache["shans_curve"]
+        shans_superfluid = float(shans_payload.shans_superfluid_score)
+        shans_bias_raw = float(shans_payload.shans_bias)
+        shans_conf_raw = float(shans_payload.shans_confidence)
+        
+        shans_age = current_ts_ns - shans_ts
+        shans_discount = QuantMath.temporal_discount(shans_age, self._half_life_ns["shans_curve"])
+        shans_conf_decayed = shans_conf_raw * shans_discount
+        shans_bias_str = self._bridge_shans_bias(shans_bias_raw)
+        
+        # InsiderSignalSnapshot (Gated extraction)
+        insider_payload, insider_ts = self._cache["insider"]
+        if bool(insider_payload.active) and not bool(insider_payload.invalidated):
+            insider_urgency_raw = float(insider_payload.urgency) 
         else:
-            exchange_ts_ns = self._get_current_timestamp_from_cache()
+            insider_urgency_raw = 0.0
+            
+        insider_age = current_ts_ns - insider_ts
+        insider_urgency = insider_urgency_raw * QuantMath.temporal_discount(insider_age, self._half_life_ns["insider"])
         
-        effective_regime = regime
-        if effective_regime is None and self._cached_regime is not None:
-            if exchange_ts_ns > 0 and not self._is_stale(self._cached_regime.exchange_ts_ns, exchange_ts_ns):
-                effective_regime = self._cached_regime.regime
-        if effective_regime is None:
-            effective_regime = RegimeType.UNKNOWN
+        # RegimeDetector (Returns exactly Tuple[RegimeType, float])
+        regime_payload, _ = self._cache["regime"]
+        regime_type = regime_payload[0]
+
+        # ---------------------------------------------------------
+        # PHASE 3: CRITICAL HAZARD GATING (Absolute Boundaries)
+        # ---------------------------------------------------------
+        if whale_dir == 0:
+            return self._issue_hard_veto(current_ts_ns, "Whale Vector Neutral")
+            
+        if tox_is_toxic or tox_score >= 0.88:
+            return self._issue_hard_veto(current_ts_ns, f"Toxicity Critical (Score:{tox_score:.2f})")
+            
+        # Kinematic Veto: Toxicity rocketing upward
+        if tox_score > 0.60 and self._state.toxicity_velocity > 0.15:
+             return self._issue_hard_veto(current_ts_ns, f"Toxicity Spike (+{self._state.toxicity_velocity:.2f}/s)")
+             
+        if ent_score >= 0.95:
+            return self._issue_hard_veto(current_ts_ns, f"Entropy Disintegration ({ent_score:.2f})")
+            
+        if phys_score <= 0.15:
+            return self._issue_hard_veto(current_ts_ns, f"Physical Validator Collapse ({phys_score:.2f})")
+
+        # ---------------------------------------------------------
+        # PHASE 4: VECTOR RESONANCE & NON-LINEAR MODULATION
+        # ---------------------------------------------------------
+        resonance = QuantMath.vector_resonance(whale_dir, whale_conf_decayed, shans_bias_raw)
+        self._telemetry["vector_resonance"] = resonance
         
-        shans_superfluid = 0.0
-        shans_bias_int = 0
-        shans_confidence = 0.0
+        is_resonant = resonance > 0.10
+        is_dissonant = resonance < -0.20
+
+        if is_dissonant:
+            return self._issue_hard_veto(current_ts_ns, f"Vector Dissonance (Resonance: {resonance:.2f})")
+
+        # Base Alpha Synthesis
+        base_conviction = (whale_conf_decayed * 0.40) + (shans_conf_decayed * 0.35) + (phys_score * 0.25)
+
+        # Exponential hazard suppression
+        tox_multiplier = QuantMath.exponential_decay(tox_score, steepness=3.5)
         
-        if order_book is not None:
-            shans_superfluid = getattr(order_book, 'shans_superfluid_score', 0.0)
-            shans_bias_int = getattr(order_book, 'shans_bias', 0)
-            shans_confidence = getattr(order_book, 'shans_confidence', 0.0)
+        # Entropy suppresses confidence, but rising entropy (velocity) suppresses it harder
+        dynamic_entropy = min(1.0, ent_score + max(0.0, self._state.entropy_velocity * 2.0))
+        ent_multiplier = max(0.1, 1.0 - (dynamic_entropy * 0.65))
         
-        if self._cached_shans is not None:
-            if exchange_ts_ns > 0 and not self._is_stale(self._cached_shans.exchange_ts_ns, exchange_ts_ns):
-                shans_superfluid = max(shans_superfluid, self._cached_shans.superfluid_score)
-                if shans_bias_int == 0:
-                    shans_bias_int = self._cached_shans.bias
-                shans_confidence = max(shans_confidence, self._cached_shans.confidence)
+        resonance_bonus = 1.15 if is_resonant else 0.85
+
+        final_confidence = base_conviction * tox_multiplier * ent_multiplier * resonance_bonus
+        final_confidence = QuantMath.kelly_calibration_curve(final_confidence)
+        final_confidence = max(0.0, min(1.0, final_confidence))
         
-        shans_bias_str = self._bridge_shans_bias(shans_bias_int)
-        
-        entropy_score = None
-        entropy_conf = 0.5
-        entropy_collapsed = False
-        entropy_collapse_quality = CollapseQuality.NONE
-        
-        if order_book is not None:
-            entropy_score = getattr(order_book, 'entropy_score', None)
-        
-        if entropy_score is not None:
-            entropy_conf = float(entropy_score.confidence) if entropy_score.confidence else 0.5
-            entropy_collapsed = entropy_score.is_collapsed
-            if hasattr(entropy_score, 'collapse_quality'):
-                entropy_collapse_quality = entropy_score.collapse_quality
-        else:
-            for cached in self._cached_entropy.values():
-                if exchange_ts_ns > 0 and not self._is_stale(cached.exchange_ts_ns, exchange_ts_ns):
-                    entropy_score = cached.entropy_score
-                    entropy_conf = float(entropy_score.confidence) if entropy_score.confidence else 0.5
-                    entropy_collapsed = entropy_score.is_collapsed
-                    entropy_collapse_quality = cached.collapse_quality
-                    break
-        
-        toxicity_score = getattr(order_book, 'toxicity_score', 0.0) if order_book is not None else 0.0
-        
-        whale_direction = 0
-        whale_conf = whale_score if whale_score is not None else 0.0
-        
-        if self._cached_whale is not None:
-            if exchange_ts_ns > 0 and not self._is_stale(self._cached_whale.exchange_ts_ns, exchange_ts_ns):
-                whale_direction = self._cached_whale.direction
-                whale_conf = max(whale_conf, self._cached_whale.score)
-        
-        effective_insider = insider_signal if insider_signal is not None else 0.0
-        if self._cached_insider is not None:
-            if exchange_ts_ns > 0 and not self._is_stale(self._cached_insider.exchange_ts_ns, exchange_ts_ns):
-                effective_insider = max(effective_insider, self._cached_insider.urgency)
-        
-        effective_macro = macro_signal if macro_signal is not None else 1.0
-        if effective_macro is None:
-            effective_macro = 1.0
-        
-        directions = []
-        weights = []
-        
-        if whale_direction != 0:
-            directions.append(whale_direction)
-            weights.append(whale_conf)
-        
-        if shans_bias_int != 0:
-            directions.append(shans_bias_int)
-            weights.append(self.shans_weight)
-        
-        insider_mult = 1.0 + min(1.0, effective_insider)
-        
-        if not directions:
-            consensus_direction = 0
-        else:
-            weighted_sum = sum(d * w * (insider_mult if i == 0 else 1.0) for i, (d, w) in enumerate(zip(directions, weights)))
-            total_weight = sum(w * (insider_mult if i == 0 else 1.0) for i, w in enumerate(weights))
-            raw_consensus = weighted_sum / (total_weight + 1e-8)
-            consensus_direction = int(np.sign(raw_consensus)) if abs(raw_consensus) > 0.2 else 0
-        
-        base_confidence = 0.5
-        entropy_factor = 0.4 + 0.6 * entropy_conf
-        shans_factor = 0.4 + 0.6 * shans_confidence
-        whale_factor = 0.7 + 0.3 * whale_conf
-        macro_factor = effective_macro
-        insider_factor = 1.0 + min(0.5, effective_insider * 0.25)
-        toxicity_penalty = 1.0 - min(1.0, toxicity_score / 100.0)
-        
-        confidence = base_confidence * entropy_factor * shans_factor * whale_factor * macro_factor * insider_factor * toxicity_penalty
-        confidence = float(np.clip(confidence, 0.0, 1.0))
-        
+        self._telemetry["final_confidence"] = final_confidence
+
+        # ---------------------------------------------------------
+        # PHASE 5: HYSTERESIS-DRIVEN ATTACK MODE
+        # ---------------------------------------------------------
         attack_mode = False
-        if shans_superfluid > 0.8 and effective_insider > 0.5:
-            self._attack_mode_consecutive += 1
-            if self._attack_mode_consecutive >= self.attack_mode_persistence_required:
-                attack_mode = True
+        reason_flags = []
+
+        is_exhausted = shans_superfluid >= 0.80
+
+        if is_exhausted:
+            final_confidence *= 0.35
+            reason_flags.append(f"EXHAUSTION({shans_superfluid:.2f})")
+            self._state.register_decision(False)
         else:
-            self._attack_mode_consecutive = 0
-        
-        veto_active = False
-        veto_reason = None
-        
-        if entropy_collapsed and entropy_collapse_quality == CollapseQuality.EXTREME:
-            veto_active = True
-            veto_reason = "entropy_extreme_collapse"
-        
-        if not veto_active and toxicity_score >= 80.0:
-            veto_active = True
-            veto_reason = f"toxicity_{toxicity_score:.0f}"
-        
-        shadow_front_eligible = False
-        liquidity_void_eligible = False
+            base_attack_thresh = 0.72
+            sustain_attack_thresh = 0.55
+            
+            dynamic_thresh = QuantMath.temperature_threshold(
+                base_threshold=base_attack_thresh if not self._state.was_attack_mode else sustain_attack_thresh,
+                entropy=ent_score,
+                max_penalty=0.25
+            )
+
+            is_urgent = insider_urgency >= 0.60
+            if final_confidence >= dynamic_thresh and is_urgent:
+                attack_mode = True
+                reason_flags.append(f"ATTACK_ENGAGED(Urgency:{insider_urgency:.2f})")
+                
+            self._state.register_decision(attack_mode)
+
+        # ---------------------------------------------------------
+        # PHASE 6: REGIME AUTHORIZATION (Strict Boolean Mapping)
+        # ---------------------------------------------------------
         gamma_front_eligible = False
         sector_rotation_eligible = False
-        entropy_decoder_eligible = False
-        
-        if entropy_conf > 0.6 and shans_confidence > 0.4:
-            shadow_front_eligible = True
-            entropy_decoder_eligible = True
-        
-        if entropy_collapsed and entropy_collapse_quality in (CollapseQuality.EXTREME, CollapseQuality.WEAK):
-            shadow_front_eligible = False
-        
-        if entropy_conf > 0.5 and effective_regime in (RegimeType.RANGING, RegimeType.CRISIS):
-            liquidity_void_eligible = True
-        
-        if toxicity_score > 60.0:
-            liquidity_void_eligible = False
-        
-        if entropy_conf > 0.7 and shans_confidence > 0.5:
-            gamma_front_eligible = True
-        
-        if effective_regime in (RegimeType.TRENDING_BULL, RegimeType.TRENDING_BEAR):
-            sector_rotation_eligible = True
-        
-        physical_verification_score = 0.5
-        if entropy_score is not None and hasattr(entropy_score, 'physical_verification_score'):
-            physical_verification_score = float(entropy_score.physical_verification_score)
-        
-        if veto_active:
-            shadow_front_eligible = False
-            liquidity_void_eligible = False
-            gamma_front_eligible = False
-            sector_rotation_eligible = False
-            entropy_decoder_eligible = False
-            confidence = 0.0
-            attack_mode = False
+        shadow_front_eligible = False
+        flv_eligible = True             # Universal baseline scavenger
+        liquidity_void_eligible = False # Default restrictive state
         
         preferred_sleeve = None
-        if not veto_active:
-            if shadow_front_eligible and shans_confidence > 0.7:
-                preferred_sleeve = "shadow_front"
-            elif gamma_front_eligible and entropy_conf > 0.7:
-                preferred_sleeve = "gamma_front"
-            elif liquidity_void_eligible:
-                preferred_sleeve = "liquidity_void"
-            elif sector_rotation_eligible:
-                preferred_sleeve = "sector_rotation"
-        
         deprioritized_sleeves = []
-        if liquidity_void_eligible and not veto_active:
-            deprioritized_sleeves.append("liquidity_void")
-        if sector_rotation_eligible and not veto_active:
-            deprioritized_sleeves.append("sector_rotation")
-        
+        regime_str = regime_type.value
+
+        if regime_type in (RegimeType.TRENDING_BULL, RegimeType.TRENDING_BEAR):
+            sector_rotation_eligible = True
+            preferred_sleeve = SleeveType.SECTOR_ROTATION.value
+            deprioritized_sleeves = [SleeveType.SHADOW_FRONT.value, SleeveType.GAMMA_FRONT.value]
+            
+        elif regime_type == RegimeType.RANGING:
+            shadow_front_eligible = True
+            preferred_sleeve = SleeveType.SHADOW_FRONT.value
+            deprioritized_sleeves = [SleeveType.GAMMA_FRONT.value, SleeveType.SECTOR_ROTATION.value]
+            
+        elif regime_type == RegimeType.CRISIS:
+            gamma_front_eligible = True
+            preferred_sleeve = SleeveType.GAMMA_FRONT.value
+            deprioritized_sleeves = [SleeveType.SECTOR_ROTATION.value, SleeveType.SHADOW_FRONT.value]
+            
+        elif regime_type == RegimeType.UNKNOWN:
+            preferred_sleeve = SleeveType.FLV.value
+
+        # ---------------------------------------------------------
+        # PHASE 7: DETERMINISTIC ASSEMBLY
+        # ---------------------------------------------------------
+        base_reason = f"DIR:{whale_dir} | CONF:{final_confidence:.2f} | REG:{regime_str} | TOX:{tox_score:.2f}"
+        if reason_flags:
+            base_reason += f" | [{' | '.join(reason_flags)}]"
+
         decision = FusionDecision(
-            exchange_ts_ns=exchange_ts_ns,
+            exchange_ts_ns=current_ts_ns,
             attack_mode=attack_mode,
-            confidence=confidence,
-            shadow_front_eligible=shadow_front_eligible,
-            liquidity_void_eligible=liquidity_void_eligible,
-            entropy_decoder_eligible=entropy_decoder_eligible,
+            confidence=final_confidence,
+            
+            # Strict Boolean Eligibility Flags
             gamma_front_eligible=gamma_front_eligible,
+            shadow_front_eligible=shadow_front_eligible,
             sector_rotation_eligible=sector_rotation_eligible,
+            flv_eligible=flv_eligible,
+            liquidity_void_eligible=liquidity_void_eligible,
+            
+            # Router Hints
             preferred_sleeve=preferred_sleeve,
             deprioritized_sleeves=deprioritized_sleeves,
-            reason=self._build_reason(consensus_direction, veto_active, veto_reason, attack_mode),
-            regime=self._bridge_regime(effective_regime),
-            physical_verification_score=physical_verification_score,
+            
+            # Context
+            regime=regime_str,
+            reason=base_reason,
+            
+            # Analytical Scores
             shans_superfluid_score=shans_superfluid,
             shans_bias=shans_bias_str,
-            shans_confidence=shans_confidence,
+            shans_confidence=shans_conf_decayed,
+            physical_verification_score=phys_score
         )
-        
-        self._last_decision = decision
+
+        self._last_fusion = decision
         return decision
 
-    def _build_reason(self, direction: int, veto_active: bool, veto_reason: Optional[str], attack_mode: bool) -> str:
-        parts = []
-        if direction == 1:
-            parts.append("bullish")
-        elif direction == -1:
-            parts.append("bearish")
-        else:
-            parts.append("neutral")
-        
-        if veto_active and veto_reason:
-            parts.append(f"veto({veto_reason})")
-        
-        if attack_mode:
-            parts.append("attack_mode")
-        
-        return ";".join(parts) if parts else "neutral"
+    # =========================================================================
+    # VETO ARCHITECTURE
+    # =========================================================================
 
-    def get_last_decision(self) -> Optional[FusionDecision]:
-        return self._last_decision
+    def _issue_hard_veto(self, current_ts_ns: int, reason: str) -> FusionDecision:
+        """
+        Constructs a deterministic dead-state decision.
+        Preserves observable metrics for dashboard analytics while completely 
+        severing operational execution downstream.
+        """
+        self._telemetry["vetoed"] = True
+        self._telemetry["veto_reason"] = reason
 
-    def reset(self) -> None:
-        self._cached_regime = None
-        self._cached_shans = None
-        self._cached_whale = None
-        self._cached_entropy.clear()
-        self._cached_insider = None
-        self._last_decision = None
-        self._attack_mode_consecutive = 0
+        shans_superfluid = 0.0
+        shans_bias_str = "neutral"
+        shans_conf = 0.0
+        phys_score = 0.0
+        regime_str = RegimeType.UNKNOWN.value
+
+        if "shans_curve" in self._cache:
+            p, _ = self._cache["shans_curve"]
+            shans_superfluid = max(0.0, min(1.0, float(p.shans_superfluid_score)))
+            shans_bias_str = self._bridge_shans_bias(float(p.shans_bias))
+            shans_conf = max(0.0, min(1.0, float(p.shans_confidence)))
+            
+        if "physical" in self._cache:
+            p, _ = self._cache["physical"]
+            phys_score = max(0.0, min(1.0, float(p.get("health_score", 0.0))))
+            
+        if "regime" in self._cache:
+            r_tuple, _ = self._cache["regime"]
+            regime_str = r_tuple[0].value
+
+        self._state.register_decision(False)
+
+        decision = FusionDecision(
+            exchange_ts_ns=current_ts_ns,
+            attack_mode=False,
+            confidence=0.0,
+            
+            gamma_front_eligible=False,
+            shadow_front_eligible=False,
+            sector_rotation_eligible=False,
+            flv_eligible=False,
+            liquidity_void_eligible=False,
+            
+            preferred_sleeve=None,
+            deprioritized_sleeves=[],
+            
+            regime=regime_str,
+            reason=f"VETO: {reason}",
+            
+            shans_superfluid_score=shans_superfluid,
+            shans_bias=shans_bias_str,
+            shans_confidence=shans_conf,
+            physical_verification_score=phys_score
+        )
+        
+        self._last_fusion = decision
+        return decision

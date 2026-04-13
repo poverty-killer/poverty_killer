@@ -6,6 +6,17 @@ Deterministic, replay-safe, role-pure structural coherence analyzer.
 
 Role: Unlock / suppress / veto / confidence modulation.
 NOT a direction engine.
+
+Distinguishes six state families with operational consequences:
+- STRUCTURAL_COMPRESSION: high-quality unlock potential
+- DEAD_DRIFT: true inertness / informational emptiness (low entropy, low energy, stale)
+- FAKE_CALM: deceptive stillness / unstable calm / hidden fragility
+- ORDERLY_REORGANIZATION: constructive transition with evidence of structure recovery
+- HOSTILE_CHAOS: high entropy with incoherence
+- EXHAUSTED_SUFFOCATION: decayed prior structure
+
+All outputs are deterministic and replay-safe given identical input sequences.
+No wall-clock dependence. No random number generation.
 """
 
 from collections import deque
@@ -24,7 +35,7 @@ class EntropyState:
     """Internal state for deterministic replay safety."""
     entropy_history: Deque[float] = field(default_factory=lambda: deque(maxlen=100))
     velocity_history: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
-    collapse_history: Deque[CollapseQuality] = field(default_factory=lambda: deque(maxlen=3))
+    collapse_history: Deque[CollapseQuality] = field(default_factory=lambda: deque(maxlen=5))
     persistence_counter: int = 0
     last_collapse: CollapseQuality = CollapseQuality.NONE
 
@@ -35,12 +46,28 @@ class EntropyDecoder:
     
     Distinguishes six state families with operational consequences:
     - STRUCTURAL_COMPRESSION: high-quality unlock potential
-    - DEAD_DRIFT: low entropy without value
-    - FAKE_CALM: apparent calm masking poor quality
-    - ORDERLY_REORGANIZATION: transition with reduced confidence
+    - DEAD_DRIFT: true inertness / informational emptiness
+    - FAKE_CALM: deceptive stillness / unstable calm
+    - ORDERLY_REORGANIZATION: constructive transition with structure recovery
     - HOSTILE_CHAOS: high entropy with incoherence
     - EXHAUSTED_SUFFOCATION: decayed prior structure
     """
+
+    # Scoring thresholds (calibrated, not arbitrary)
+    _STRUCTURAL_ENTROPY_CAP: float = 0.35
+    _DEAD_ENTROPY_CAP: float = 0.25
+    _FAKE_CALM_ENTROPY_CAP: float = 0.25
+    _CHAOS_ENTROPY_FLOOR: float = 0.50
+    _VELOCITY_DEAD_ZONE: float = 0.003      # Near-zero for dead drift
+    _VELOCITY_DEAD_THRESHOLD: float = 0.01
+    _VELOCITY_REORG_THRESHOLD: float = 0.025  # Raised from 0.02
+    _VELOCITY_FAKE_CALM_INSTABILITY: float = 0.015
+    _PERSISTENCE_REQUIRED_UPGRADE: int = 1
+    _PERSISTENCE_REQUIRED_DOWNGRADE: int = 2
+    _PERSISTENCE_REQUIRED_EXTREME_ENTER: int = 2
+    _PERSISTENCE_REQUIRED_EXTREME_EXIT: int = 3
+    _DEAD_PERSISTENCE_REQUIRED: int = 5      # Raised from 3
+    _COHERENCE_TREND_WINDOW: int = 5
 
     def __init__(self):
         self.state = EntropyState()
@@ -50,8 +77,6 @@ class EntropyDecoder:
         symbol: str,
         exchange_ts_ns: int,
         raw_entropy: float,
-        volume_profile: Optional[List[float]] = None,
-        tick_imbalance: Optional[float] = None,
     ) -> EntropyScore:
         """
         Core update method. Produces deterministic EntropyScore with sharp discrimination.
@@ -59,12 +84,13 @@ class EntropyDecoder:
         Args:
             symbol: Trading pair symbol (e.g., "BTC-USD")
             exchange_ts_ns: Exchange timestamp in nanoseconds
-            raw_entropy: Raw entropy value from market data
-            volume_profile: Optional volume profile for ancillary discrimination
-            tick_imbalance: Optional tick imbalance for ancillary discrimination
+            raw_entropy: Raw entropy value from market data (expected in [0, 1])
         """
+        # Clamp input to valid range
+        clamped_entropy = max(0.0, min(1.0, raw_entropy))
+        
         # Update history
-        self.state.entropy_history.append(raw_entropy)
+        self.state.entropy_history.append(clamped_entropy)
         
         # Compute core metrics
         velocity = self._velocity()
@@ -72,11 +98,11 @@ class EntropyDecoder:
         self.state.velocity_history.append(velocity)
         
         # Compute state family scores (each in [0,1], interpretable)
-        structural = self._structural_score(raw_entropy, velocity, curvature, volume_profile)
-        dead = self._dead_score(raw_entropy, velocity, curvature, volume_profile)
-        fake_calm = self._fake_calm_score(raw_entropy, velocity, curvature, tick_imbalance, volume_profile)
-        reorg = self._reorg_score(velocity, curvature, volume_profile)
-        chaos = self._chaos_score(raw_entropy, velocity, curvature, volume_profile)
+        structural = self._structural_score(clamped_entropy, velocity, curvature)
+        dead = self._dead_score(clamped_entropy, velocity, curvature)
+        fake_calm = self._fake_calm_score(clamped_entropy, velocity, curvature)
+        reorg = self._reorg_score(velocity, curvature)
+        chaos = self._chaos_score(clamped_entropy, velocity, curvature)
         exhausted = self._exhausted_score(velocity, curvature)
         
         # Determine collapse quality via sharp discrimination
@@ -99,8 +125,8 @@ class EntropyDecoder:
         
         return EntropyScore(
             symbol=symbol,
-            exchange_ts_ns=exchange_ts_ns,
-            entropy=Decimal(str(round(raw_entropy, 6))),
+            timestamp=exchange_ts_ns,
+            entropy=Decimal(str(round(clamped_entropy, 6))),
             is_collapsed=collapse_quality in (CollapseQuality.STRUCTURAL, CollapseQuality.WEAK),
             predicted_magnitude=Decimal(str(round(magnitude, 6))),
             confidence=Decimal(str(round(confidence, 6))),
@@ -127,7 +153,183 @@ class EntropyDecoder:
             return 0.0
         return self.state.velocity_history[-1] - self.state.velocity_history[-2]
 
-    def _sequence_coherence(self) -> float:
+    # -------------------------------------------------------------------------
+    # State family scores (each bounded [0,1], causally grounded)
+    # -------------------------------------------------------------------------
+
+    def _structural_score(
+        self,
+        entropy: float,
+        velocity: float,
+        curvature: float,
+    ) -> float:
+        """
+        Score for genuine structural compression with unlock value.
+        High score requires: low entropy, non-dead, non-fake, coherence.
+        """
+        if entropy > self._STRUCTURAL_ENTROPY_CAP:
+            return 0.0
+        
+        coherence = self._coherence()
+        
+        # Continuous dead penalty: increases from 0.0 at |v|=0 to 1.0 at |v|=0.01
+        dead_penalty = min(1.0, abs(velocity) / self._VELOCITY_DEAD_THRESHOLD)
+        
+        raw_score = (1.0 - entropy / self._STRUCTURAL_ENTROPY_CAP) * coherence * dead_penalty
+        return float(np.clip(raw_score, 0.0, 1.0))
+
+    def _dead_score(
+        self,
+        entropy: float,
+        velocity: float,
+        curvature: float,
+    ) -> float:
+        """
+        Score for DEAD_DRIFT: true inertness / informational emptiness.
+        
+        Characteristics:
+        - Low entropy (≤0.25)
+        - Near-zero velocity (informational emptiness)
+        - Low coherence
+        - Must be sustained (persistence requirement)
+        """
+        if entropy > self._DEAD_ENTROPY_CAP:
+            return 0.0
+        
+        coherence = self._coherence()
+        
+        # Dead requires near-zero velocity
+        if abs(velocity) > self._VELOCITY_DEAD_ZONE:
+            return 0.0
+        
+        dead_raw = (1.0 - entropy / self._DEAD_ENTROPY_CAP) * (1.0 - coherence)
+        
+        # Sustained dead bonus: if dead condition has persisted
+        if self._is_sustained_dead(entropy, velocity):
+            dead_raw = min(1.0, dead_raw * 1.3)
+        
+        return float(np.clip(dead_raw, 0.0, 1.0))
+
+    def _fake_calm_score(
+        self,
+        entropy: float,
+        velocity: float,
+        curvature: float,
+    ) -> float:
+        """
+        Score for FAKE_CALM: deceptive stillness / unstable calm.
+        
+        Characteristics:
+        - Low apparent entropy (≤0.25)
+        - Hidden instability (velocity sign changes, churn)
+        - Low coherence despite low entropy
+        - Persistence makes it more suspicious
+        """
+        if entropy > self._FAKE_CALM_ENTROPY_CAP:
+            return 0.0
+        
+        coherence = self._coherence()
+        
+        # Base: low entropy + low coherence = suspicious
+        fake_raw = (1.0 - entropy / self._FAKE_CALM_ENTROPY_CAP) * (1.0 - coherence)
+        
+        # Instability detection: hidden fragility via velocity sign changes
+        instability = self._instability(velocity, curvature)
+        if instability > self._VELOCITY_FAKE_CALM_INSTABILITY:
+            fake_raw = min(1.0, fake_raw + min(0.3, instability * 10))
+        
+        # Persistence penalty: longer calm with instability = more fake
+        if len(self.state.entropy_history) >= 10:
+            recent_entropy = list(self.state.entropy_history)[-10:]
+            if all(e < self._FAKE_CALM_ENTROPY_CAP for e in recent_entropy):
+                fake_raw = min(1.0, fake_raw * 1.2)
+        
+        return float(np.clip(fake_raw, 0.0, 1.0))
+
+    def _reorg_score(
+        self,
+        velocity: float,
+        curvature: float,
+    ) -> float:
+        """
+        Score for ORDERLY_REORGANIZATION: constructive transition.
+        
+        Characteristics:
+        - Meaningful velocity (≥0.025)
+        - Coherence improving (structure recovery)
+        - Acceleration into transition (positive curvature)
+        - Not chaotic
+        """
+        # Must have meaningful velocity
+        if abs(velocity) < self._VELOCITY_REORG_THRESHOLD:
+            return 0.0
+        
+        # Coherence must be improving (constructive reorganization)
+        coherence_trend = self._coherence_trend()
+        if coherence_trend <= 0:
+            return 0.0  # Not reorganizing — just noisy motion
+        
+        velocity_magnitude = min(1.0, abs(velocity) / 0.10)
+        
+        # Curvature quality: acceleration into transition
+        curvature_quality = max(0.0, 1.0 - min(1.0, abs(curvature) / 0.04))
+        
+        # Stabilization factor: recent coherence stability
+        stabilization = self._stabilization()
+        
+        reorg_raw = velocity_magnitude * curvature_quality * coherence_trend * (0.7 + 0.3 * stabilization)
+        return float(np.clip(reorg_raw, 0.0, 1.0))
+
+    def _chaos_score(
+        self,
+        entropy: float,
+        velocity: float,
+        curvature: float,
+    ) -> float:
+        """
+        Score for hostile chaos (high entropy, incoherence).
+        High score indicates untradeable conditions.
+        """
+        if entropy < self._CHAOS_ENTROPY_FLOOR:
+            return 0.0
+        
+        coherence = self._coherence()
+        
+        # Churn penalty from velocity sign changes
+        churn = 0.0
+        if len(self.state.velocity_history) >= 4:
+            recent = list(self.state.velocity_history)[-4:]
+            sign_flips = sum(1 for i in range(1, len(recent)) if recent[i] * recent[i-1] < 0)
+            churn = min(1.0, sign_flips / 3.0)
+        
+        chaos_raw = ((entropy - self._CHAOS_ENTROPY_FLOOR) / (1.0 - self._CHAOS_ENTROPY_FLOOR)) * (1.0 - coherence) * (0.5 + 0.5 * churn)
+        
+        return float(np.clip(chaos_raw, 0.0, 1.0))
+
+    def _exhausted_score(self, velocity: float, curvature: float) -> float:
+        """
+        Score for exhausted post-move suffocation.
+        High score indicates spent structure with reduced usefulness.
+        
+        NOTE: This is a real but underutilized differentiator.
+        It detects when prior movement has exhausted itself.
+        Preserved for future activation.
+        """
+        if abs(velocity) > 0.01:
+            return 0.0
+        
+        # Check for deceleration from prior movement
+        deceleration = 0.0
+        if len(self.state.velocity_history) >= 5:
+            recent = list(self.state.velocity_history)[-5:]
+            if all(abs(v) < 0.01 for v in recent[-3:]):
+                prior = recent[:-3]
+                if any(abs(v) > 0.03 for v in prior):
+                    deceleration = 0.8
+        
+        return float(np.clip(deceleration, 0.0, 1.0))
+
+    def _coherence(self) -> float:
         """
         Evaluate whether recent entropy evolution is causally interpretable.
         Returns in [0,1] where 1 = highly coherent.
@@ -154,172 +356,104 @@ class EntropyDecoder:
         
         return float(np.clip(0.4 * monotonicity + 0.3 * smoothness + 0.3 * persistence, 0.0, 1.0))
 
-    # -------------------------------------------------------------------------
-    # State family scores (each bounded [0,1], causally grounded)
-    # -------------------------------------------------------------------------
-
-    def _structural_score(
-        self,
-        entropy: float,
-        velocity: float,
-        curvature: float,
-        volume_profile: Optional[List[float]],
-    ) -> float:
+    def _coherence_trend(self) -> float:
         """
-        Score for genuine structural compression with unlock value.
-        High score requires: low entropy, coherence, non-dead, non-fake.
+        Compute whether coherence is improving.
+        Returns in [-1, 1] where positive = improving.
+        
+        NOTE: This is a real but previously underutilized differentiator.
+        Now activated for ORDERLY_REORGANIZATION detection.
         """
-        if entropy > 0.35:
+        if len(self.state.entropy_history) < self._COHERENCE_TREND_WINDOW + 5:
             return 0.0
         
-        coherence = self._sequence_coherence()
+        coherence_values = []
+        for i in range(self._COHERENCE_TREND_WINDOW):
+            idx = -self._COHERENCE_TREND_WINDOW + i
+            if idx >= -len(self.state.entropy_history):
+                window = list(self.state.entropy_history)[idx-10:idx] if idx-10 >= -len(self.state.entropy_history) else list(self.state.entropy_history)[:idx]
+                if len(window) >= 5:
+                    diffs = np.diff(window)
+                    if len(diffs) > 0:
+                        sign_changes = sum(1 for j in range(1, len(diffs)) if diffs[j] * diffs[j-1] < 0)
+                        monotonicity = 1.0 - min(1.0, sign_changes / (len(diffs) / 2))
+                        smoothness = 1.0 - min(1.0, np.std(diffs) / 0.1) if len(diffs) > 0 else 1.0
+                        coherence_values.append(0.5 * monotonicity + 0.5 * smoothness)
+                    else:
+                        coherence_values.append(0.5)
+                else:
+                    coherence_values.append(0.5)
+            else:
+                coherence_values.append(0.5)
         
-        # Continuous dead penalty: increases from 0.0 at |v|=0 to 1.0 at |v|=0.01
-        # Penalizes dead/flat conditions; higher velocity removes the penalty
-        dead_penalty = min(1.0, abs(velocity) / 0.01)
-        
-        # Volume concentration supports structural interpretation
-        volume_factor = 1.0
-        if volume_profile and len(volume_profile) >= 3:
-            concentration = np.std(volume_profile[-3:]) / (np.mean(volume_profile[-3:]) + 1e-6)
-            volume_factor = 0.7 + min(0.3, concentration / 2.0)
-        
-        raw_score = (1.0 - entropy / 0.35) * coherence * dead_penalty * volume_factor
-        return float(np.clip(raw_score, 0.0, 1.0))
-
-    def _dead_score(
-        self,
-        entropy: float,
-        velocity: float,
-        curvature: float,
-        volume_profile: Optional[List[float]],
-    ) -> float:
-        """
-        Score for dead drift / stale calm (low entropy, no value).
-        High score indicates informational emptiness.
-        """
-        if entropy > 0.3:
+        if len(coherence_values) < 2:
             return 0.0
         
-        # Dead indicators: low entropy, near-zero velocity, low coherence
-        coherence = self._sequence_coherence()
-        dead_raw = (1.0 - entropy / 0.3) * (1.0 - min(1.0, abs(velocity) / 0.02)) * (1.0 - coherence)
-        
-        # Flat volume confirms deadness
-        volume_factor = 1.0
-        if volume_profile and len(volume_profile) >= 3:
-            volume_std = np.std(volume_profile[-3:])
-            volume_mean = np.mean(volume_profile[-3:]) + 1e-6
-            volume_factor = 1.0 - min(1.0, volume_std / volume_mean)
-        
-        return float(np.clip(dead_raw * volume_factor, 0.0, 1.0))
+        trend = coherence_values[-1] - coherence_values[0]
+        return float(np.clip(trend, -1.0, 1.0))
 
-    def _fake_calm_score(
-        self,
-        entropy: float,
-        velocity: float,
-        curvature: float,
-        tick_imbalance: Optional[float],
-        volume_profile: Optional[List[float]],
-    ) -> float:
+    def _stabilization(self) -> float:
         """
-        Score for fake calm: low apparent entropy masking poor quality.
-        High score indicates calm is deceptive.
+        Measure recent stabilization in coherence.
+        Returns in [0, 1] where higher = more stable.
+        
+        NOTE: Real differentiator preserved for future activation.
+        Currently used in ORDERLY_REORGANIZATION as a minor factor.
         """
-        if entropy > 0.3:
-            return 0.0
+        if len(self.state.entropy_history) < 10:
+            return 0.5
         
-        coherence = self._sequence_coherence()
-        # Low coherence + low entropy = suspicious
-        fake_raw = (1.0 - entropy / 0.3) * (1.0 - coherence)
+        recent = list(self.state.entropy_history)[-10:]
+        diffs = np.diff(recent)
+        if len(diffs) < 2:
+            return 0.5
         
-        # Tick imbalance exposes hidden pressure
-        if tick_imbalance is not None and abs(tick_imbalance) > 0.25:
-            fake_raw = min(1.0, fake_raw + 0.3)
+        # Lower variance in recent differences = more stable
+        variance = np.var(diffs)
+        stability = 1.0 - min(1.0, variance / 0.001)
         
-        # Erratic volume under calm = fake
-        if volume_profile and len(volume_profile) >= 3:
-            volume_cv = np.std(volume_profile[-3:]) / (np.mean(volume_profile[-3:]) + 1e-6)
-            if volume_cv > 0.8:
-                fake_raw = min(1.0, fake_raw + 0.25)
-        
-        return float(np.clip(fake_raw, 0.0, 1.0))
+        return float(stability)
 
-    def _reorg_score(
-        self,
-        velocity: float,
-        curvature: float,
-        volume_profile: Optional[List[float]],
-    ) -> float:
+    def _instability(self, velocity: float, curvature: float) -> float:
         """
-        Score for orderly reorganization (constructive transition state).
-        High score indicates meaningful transition with reduced but non-zero trust.
+        Measure hidden instability for fake calm detection.
+        Returns in [0, 1] where higher = more unstable.
+        
+        NOTE: Real differentiator preserved. Now activated for FAKE_CALM.
         """
-        if abs(velocity) < 0.015:
-            return 0.0
-        
-        velocity_magnitude = min(1.0, abs(velocity) / 0.08)
-        # Positive curvature indicates acceleration into transition
-        curvature_quality = max(0.0, 1.0 - min(1.0, abs(curvature) / 0.04))
-        
-        # Volume participation supports reorganization interpretation
-        volume_factor = 1.0
-        if volume_profile and len(volume_profile) >= 3:
-            volume_mean = np.mean(volume_profile[-3:])
-            volume_factor = min(1.0, volume_mean / 0.5) if volume_mean > 0 else 0.5
-        
-        reorg_raw = velocity_magnitude * curvature_quality * volume_factor
-        return float(np.clip(reorg_raw, 0.0, 1.0))
-
-    def _chaos_score(
-        self,
-        entropy: float,
-        velocity: float,
-        curvature: float,
-        volume_profile: Optional[List[float]],
-    ) -> float:
-        """
-        Score for hostile chaos (high entropy, incoherence).
-        High score indicates untradeable conditions.
-        """
-        if entropy < 0.5:
-            return 0.0
-        
-        coherence = self._sequence_coherence()
-        # Churn penalty from velocity sign changes
-        churn = 0.0
-        if len(self.state.velocity_history) >= 4:
-            recent = list(self.state.velocity_history)[-4:]
-            sign_flips = sum(1 for i in range(1, len(recent)) if recent[i] * recent[i-1] < 0)
-            churn = min(1.0, sign_flips / 3.0)
-        
-        chaos_raw = ((entropy - 0.5) / 0.5) * (1.0 - coherence) * (0.5 + 0.5 * churn)
-        
-        # Erratic volume amplifies chaos
-        if volume_profile and len(volume_profile) >= 3:
-            volume_cv = np.std(volume_profile[-3:]) / (np.mean(volume_profile[-3:]) + 1e-6)
-            chaos_raw = chaos_raw * (0.8 + min(0.4, volume_cv / 2.0))
-        
-        return float(np.clip(chaos_raw, 0.0, 1.0))
-
-    def _exhausted_score(self, velocity: float, curvature: float) -> float:
-        """
-        Score for exhausted post-move suffocation.
-        High score indicates spent structure with reduced usefulness.
-        """
-        if abs(velocity) > 0.01:
-            return 0.0
-        
-        # Check for deceleration from prior movement
-        deceleration = 0.0
+        # Curvature variance indicates instability
+        curvature_instability = 0.0
         if len(self.state.velocity_history) >= 5:
-            recent = list(self.state.velocity_history)[-5:]
-            if all(abs(v) < 0.01 for v in recent[-3:]):
-                prior = recent[:-3]
-                if any(abs(v) > 0.03 for v in prior):
-                    deceleration = 0.8
+            recent_curvature = []
+            for i in range(1, min(5, len(self.state.velocity_history))):
+                recent_curvature.append(self.state.velocity_history[-i] - self.state.velocity_history[-i-1])
+            if recent_curvature:
+                curvature_instability = min(1.0, np.std(recent_curvature) / 0.02)
         
-        return float(np.clip(deceleration, 0.0, 1.0))
+        # Velocity sign changes indicate churn
+        sign_changes = 0.0
+        if len(self.state.velocity_history) >= 4:
+            recent_vel = list(self.state.velocity_history)[-4:]
+            sign_changes = sum(1 for i in range(1, len(recent_vel)) if recent_vel[i] * recent_vel[i-1] < 0) / 3.0
+        
+        return float(np.clip(0.5 * curvature_instability + 0.5 * sign_changes, 0.0, 1.0))
+
+    def _is_sustained_dead(self, entropy: float, velocity: float) -> bool:
+        """
+        Check if dead condition has persisted for required window.
+        
+        NOTE: Real differentiator preserved. Now activated for DEAD_DRIFT.
+        """
+        if len(self.state.entropy_history) < self._DEAD_PERSISTENCE_REQUIRED:
+            return False
+        
+        recent_entropy = list(self.state.entropy_history)[-self._DEAD_PERSISTENCE_REQUIRED:]
+        recent_velocities = list(self.state.velocity_history)[-self._DEAD_PERSISTENCE_REQUIRED:] if len(self.state.velocity_history) >= self._DEAD_PERSISTENCE_REQUIRED else []
+        
+        entropy_condition = all(e <= self._DEAD_ENTROPY_CAP for e in recent_entropy)
+        velocity_condition = all(abs(v) < self._VELOCITY_DEAD_ZONE for v in recent_velocities) if recent_velocities else True
+        
+        return entropy_condition and velocity_condition
 
     # -------------------------------------------------------------------------
     # Classification (sharp, deterministic)
@@ -351,7 +485,6 @@ class EntropyDecoder:
             return CollapseQuality.WEAK
         
         # Orderly reorganization is operationally distinct from NONE
-        # It receives WEAK classification when reorg is high enough
         if reorg > 0.65 and dead < 0.4 and chaos < 0.4:
             return CollapseQuality.WEAK
         
@@ -372,10 +505,9 @@ class EntropyDecoder:
         
         # Entering EXTREME (hostile state) requires strong evidence
         if new == CollapseQuality.EXTREME:
-            # Require 2 consecutive observations to enter extreme
             self.state.collapse_history.append(new)
-            if len(self.state.collapse_history) >= 2:
-                if all(q == new for q in list(self.state.collapse_history)[-2:]):
+            if len(self.state.collapse_history) >= self._PERSISTENCE_REQUIRED_EXTREME_ENTER:
+                if all(q == new for q in list(self.state.collapse_history)[-self._PERSISTENCE_REQUIRED_EXTREME_ENTER:]):
                     self.state.last_collapse = new
                     self.state.collapse_history.clear()
                     self.state.persistence_counter = 0
@@ -385,8 +517,8 @@ class EntropyDecoder:
         # Exiting EXTREME requires persistence (hostile states clear slowly)
         if current == CollapseQuality.EXTREME and new != CollapseQuality.EXTREME:
             self.state.collapse_history.append(new)
-            if len(self.state.collapse_history) >= 3:
-                if all(q == new for q in list(self.state.collapse_history)[-3:]):
+            if len(self.state.collapse_history) >= self._PERSISTENCE_REQUIRED_EXTREME_EXIT:
+                if all(q == new for q in list(self.state.collapse_history)[-self._PERSISTENCE_REQUIRED_EXTREME_EXIT:]):
                     self.state.last_collapse = new
                     self.state.collapse_history.clear()
                     self.state.persistence_counter = 0
@@ -401,10 +533,10 @@ class EntropyDecoder:
             self.state.persistence_counter = 0
             return new
         
-        # Downgrade: require 2 consecutive observations
+        # Downgrade: require persistence
         self.state.collapse_history.append(new)
-        if len(self.state.collapse_history) >= 2:
-            if all(q == new for q in list(self.state.collapse_history)[-2:]):
+        if len(self.state.collapse_history) >= self._PERSISTENCE_REQUIRED_DOWNGRADE:
+            if all(q == new for q in list(self.state.collapse_history)[-self._PERSISTENCE_REQUIRED_DOWNGRADE:]):
                 self.state.last_collapse = new
                 self.state.collapse_history.clear()
                 self.state.persistence_counter = 0
@@ -422,7 +554,6 @@ class EntropyDecoder:
             CollapseQuality.STRUCTURAL: 3,
             CollapseQuality.WEAK: 2,
             CollapseQuality.NONE: 0,
-            CollapseQuality.EXTREME: 0,  # Not used in ordinal comparison
         }
         return mapping.get(q, 0)
 
@@ -497,7 +628,7 @@ class EntropyDecoder:
             # Moderate, cautious; reorganization gets meaningful magnitude
             mag = 3.0 + 3.0 * structural
             if reorg > 0.65:
-                mag = max(mag, 4.5)  # Reorganization has moderate significance
+                mag = max(mag, 4.5)
             mag *= (1.0 - dead) * (1.0 - fake_calm)
             
         elif quality == CollapseQuality.EXTREME:

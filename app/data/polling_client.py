@@ -2,6 +2,11 @@
 Polling Client - REST API Fallback for Market Data
 Provides REST API polling for symbols without WebSocket support.
 Acts as fallback when WebSocket connection fails.
+
+TIMESTAMP TRUTH:
+- exchange_ts_ns extracted from exchange response where available
+- Fallback to now_ns() is permitted for REST polling (non-authoritative fallback)
+- receive_ts_ns captured at response receipt for monitoring
 """
 
 import asyncio
@@ -13,6 +18,7 @@ from datetime import datetime, timedelta
 import aiohttp
 
 from app.models import Candle, OrderBookSnapshot
+from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +58,7 @@ class PollingClient:
         self._session: Optional[aiohttp.ClientSession] = None
 
         # Track last candle timestamps to avoid duplicates
-        self._last_candle_timestamps: Dict[str, datetime] = {}
+        self._last_candle_timestamps_ns: Dict[str, int] = {}
 
         # API endpoints (example for Kraken)
         self._endpoints = {
@@ -100,15 +106,16 @@ class PollingClient:
         """Main polling loop."""
         while self._running:
             try:
-                start_time = time.time()
+                start_time_ns = now_ns()
 
                 # Poll all symbols
                 await self._poll_all_symbols()
 
                 # Calculate sleep time to maintain interval
-                elapsed = time.time() - start_time
-                sleep_time = max(0, self.interval - elapsed)
-                await asyncio.sleep(sleep_time)
+                elapsed_ns = now_ns() - start_time_ns
+                elapsed_sec = elapsed_ns / 1_000_000_000.0
+                sleep_sec = max(0, self.interval - elapsed_sec)
+                await asyncio.sleep(sleep_sec)
 
             except asyncio.CancelledError:
                 break
@@ -155,11 +162,11 @@ class PollingClient:
 
                     for candle in candles:
                         # Check for duplicate
-                        last_ts = self._last_candle_timestamps.get(symbol)
-                        if last_ts and candle.timestamp <= last_ts:
+                        last_ts_ns = self._last_candle_timestamps_ns.get(symbol)
+                        if last_ts_ns and candle.exchange_ts_ns <= last_ts_ns:
                             continue
 
-                        self._last_candle_timestamps[symbol] = candle.timestamp
+                        self._last_candle_timestamps_ns[symbol] = candle.exchange_ts_ns
 
                         if self.on_candle:
                             await self._safe_callback(self.on_candle, candle)
@@ -234,9 +241,12 @@ class PollingClient:
                 if isinstance(ohlc_data, list):
                     for item in ohlc_data:
                         if len(item) >= 7:
+                            timestamp_ms = item[0]
+                            exchange_ts_ns = int(timestamp_ms * 1_000_000)
+                            
                             candle = Candle(
                                 symbol=symbol,
-                                timestamp=datetime.fromtimestamp(item[0]),
+                                exchange_ts_ns=exchange_ts_ns,
                                 open=float(item[1]),
                                 high=float(item[2]),
                                 low=float(item[3]),
@@ -269,10 +279,14 @@ class PollingClient:
                 if isinstance(book_data, dict):
                     bids = [(float(price), float(size)) for price, size in book_data.get("bids", [])]
                     asks = [(float(price), float(size)) for price, size in book_data.get("asks", [])]
+                    
+                    # REST responses often lack timestamp; use receipt time as fallback
+                    # This is a REST polling fallback, not authoritative WebSocket path
+                    exchange_ts_ns = now_ns()
 
                     return OrderBookSnapshot(
                         symbol=symbol,
-                        timestamp=datetime.utcnow(),
+                        exchange_ts_ns=exchange_ts_ns,
                         bids=bids[:50],
                         asks=asks[:50]
                     )
@@ -309,10 +323,7 @@ class PollingClient:
             "running": self._running,
             "interval": self.interval,
             "symbols": len(self.symbols),
-            "last_candle_timestamps": {
-                sym: ts.isoformat() if ts else None
-                for sym, ts in self._last_candle_timestamps.items()
-            }
+            "last_candle_timestamps_ns": self._last_candle_timestamps_ns.copy()
         }
 
     async def force_poll(self, symbol: Optional[str] = None) -> None:

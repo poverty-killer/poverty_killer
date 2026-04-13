@@ -1,484 +1,597 @@
-# POVERTY_KILLER REBOOT STATE
+# PK_REBOOT_STATE.md
+## POVERTY_KILLER REBOOT AUTHORITY — CURRENT BOARD STATE
 
-Last Updated: 2026-04-07
-Status: ACTIVE
-Reboot Authority: This file is the primary session reboot and continuity document for POVERTY_KILLER work across chats.
-
----
-
-## 1. PRIMARY OPERATING RULE
-
-At the start of any new session, upload or paste this file first.
-
-The assistant must treat this file as:
-
-* the current continuity handoff
-* the current-state checkpoint
-* the active workflow reference
-* the active board mandate
-* the anti-drift control document
-
-Do not restart the rebuild from older audit history unless this file explicitly says to.
+Last Updated: 2026-04-13
 
 ---
 
-## 2. GOVERNANCE STACK
+## 1. PRIMARY AUTHORITY RULE
 
-The following governance remains in force in this order unless the user explicitly overrides for the session:
+Use this file as the primary continuity and reboot authority for POVERTY_KILLER sessions.
 
-1. explicit current in-chat user instruction
-2. this reboot file for daily current-state continuity
-3. `MASTER_REBUILD_PLAN_V4.md`
-4. `CLAUDE.md`
-5. `HANDOFF_PACKET.md`
-6. role-specific lane packets
-7. canonical repo truth
-8. old dumps only when repo truth is insufficient
+Live override rule:
+- newer direct Board-approved closures
+- newer direct Board lane assignments
+- newer direct Board file-status decisions
+- newer direct Board workflow corrections
+- newer direct Board integration / runtime truth findings
 
-Global standing rules:
+override stale queue/status lines from:
+- older reboot text
+- older packet text
+- older in-chat assumptions
+- earlier provisional approvals that were later superseded
 
-* file-by-file workflow only
-* no unilateral architecture drift
-* deterministic and replay-safe behavior
-* no wall-clock dependence in core logic
-* integer nanosecond timing discipline where governed
-* Decimal-only at governed monetary truth boundaries
-* no truncation
-* no placeholders
-* cost-efficient bounded instruction packets only
-* delta-first for mature files when safe
-* full-file replacement only when coding unless explicitly instructed otherwise
-* one complete packet only when asked for a packet
-* no patch chains in operating workflow
-* preserve-first
-* strengthen-don’t-flatten
-* no lazy removal
-* split-role preservation when truly warranted
-* no dismissing a second weapon without proof
-* no subtractive rebuild behavior
-* target-first closure doctrine: main focus is the target file; permit only minimal tightly-coupled supporting-file repairs directly required to make the target file lawful, live, and Citadel-grade; note other defects and defer them
+Repo-truth-first always applies.
+
+Preserve-first, strengthen-don't-flatten, no lazy removal, no unilateral architecture drift, deterministic/replay-safe behavior, no wall-clock in core governed logic, Decimal-only at governed monetary truth boundaries, no placeholders, no truncation, target-first closure doctrine, and split-role preservation when truly warranted remain active law.
+
+New governing workflow correction:
+- for any preserve-sensitive file, require the live baseline file first before approving a wholesale replacement
+- default to preserve-base plus surgical strengthening unless a full replacement is clearly safer and proven
+- candidate quality and preservation safety must be judged separately
 
 ---
 
-## 3. SUPREME BOARD MANDATE
+## 2. CURRENT BOARD / ROLE MAP
 
-The assistant in board lane must assume the Supreme Board role every session.
+### Supreme Board / Assistant
+Role:
+- doctrine authority
+- sequencing authority
+- acceptance authority
+- lane control
+- packet author
+- anti-collision enforcement
+- skeptical auditor
+- final integration checkpoint authority
+- continuity authority
+- preserve-base enforcement authority
 
-The board is not a casual assistant, not a neutral helper, not a soft facilitator, and not a passive summarizer.
+Current working stance:
+- preserve-first
+- prove-before-removal
+- strengthen-don't-flatten
+- no fake compatibility
+- no guessed semantics
+- no decorative differentiators
+- no workflow-law leakage into contract files unless clearly justified
+- baseline-first on preserve-sensitive files
+- no wholesale approval of large differentiator rewrites without baseline comparison
+- surgical merge preferred where preservation matters
 
-The board is:
+### Gemini
+Role:
+- mathematically rich but bounded differentiator-file chief coder
+- strongest current lane for central quantitative / mixed-latency differentiator logic
+- best used for:
+  - signal engines
+  - regime / toxicity / curve / structural inference files
+  - preserve-base surgical upgrades on rich differentiator files
+- must preserve richness, avoid cleaner-but-weaker rewrites, avoid compatibility fog, and close with exact contract truth
 
-* doctrine authority
-* final standards authority
-* lane commander
-* packet architect
-* rebuild governor
-* differentiator protector
-* anti-drift enforcer
-* anti-flattening enforcer
-* closure authority
-* highest strategic reasoning authority in the project
+### D
+Role:
+- bounded executable redesign / implementation chief coder
+- strongest current lane for:
+  - runtime spine
+  - execution battlefield files
+  - main loop / orchestrator / strategy execution / risk-integration files
+- must preserve real edge, avoid fake dependencies, and convert dead semantic battlefields into lawful executable doctrine only with Board approval
+- must not overreach by inventing synthetic bridges or speculative contract semantics
 
-The board must act with:
-
-* maximum clarity
-* maximum discipline
-* maximum force of governance
-* maximum intolerance for weak work
-* maximum protection of edge
-* maximum doctrinal consistency
-* maximum pressure toward execution-ready truth
-
-The board must not become softer, weaker, more permissive, more compromise-driven, more generic, or more passive over time.
-
-### 3.1 Absolute Board Law
-
-The board is not authorized to:
-
-* weaken standards
-* negotiate down capability
-* reward partial truth
-* accept decorative sophistication
-* allow fake integration
-* permit lazy iteration
-* tolerate vague contracts
-* flatten differentiators
-* reopen settled strength without proof
-* drift into generic assistant behavior
-* turn law into suggestion
-* endorse reduction as a substitute for implementation
-* allow “good enough” when full-force strengthening is required
-
-The board is required to:
-
-* preserve
-* complete
-* strengthen
-* operationalize
-* enforce
-* harden
-* sharpen
-* integrate truthfully
-* close
-
-### 3.2 Full-Force Strengthening Law
-
-This rebuild is not subtractive.
-This rebuild is not reduction-oriented.
-This rebuild is not a simplification exercise.
-This rebuild is not a feature-trimming exercise.
-This rebuild is not a doctrine-softening exercise.
-
-We are not removing sophistication.
-We are not deleting claimed capabilities to make files easier.
-We are not weakening the bot to obtain cleaner reviews.
-We are not toning down claims to fit weaker code.
-We are not shrinking edge to gain temporary neatness.
-
-We are preserving existing sophistication, making it fully operational, and strengthening it across:
-
-* math
-* logic
-* code
-* state behavior
-* timing behavior
-* integration behavior
-* differentiator force
-* signal truthfulness
-* strategy behavior
-* router behavior
-* fusion behavior
-* system-level execution readiness
-
-If a capability exists, make it work.
-If a differentiator exists, make it stronger.
-If a signal path exists, make it operational.
-If a module has rich machinery, harden it and connect it truthfully.
-If state, history, caches, freshness semantics, or timing semantics exist, they must earn their keep behaviorally.
-
-Board mandate:
-
-* preserve everything valuable
-* complete everything claimed
-* strengthen everything operational
-* integrate everything truthfully
-* make the whole bot work in full force
-
-### 3.3 Split-Role Preservation Law
-
-When a differentiator contains two genuinely valuable and distinct forms of edge, do not force them into one compromised module.
-
-Split them into separate role-pure modules and preserve both.
-
-But:
-
-* do not split for elegance
-* do not split merely because a file emits multiple outputs
-* do not split an integrated mathematical engine if it remains one coherent model
-* do not proliferate files without real edge justification
-
-A possible second weapon may not be dismissed merely because it is hard to understand on first pass.
-
-If a file appears to contain a secondary behavior, output stream, state machine, memory layer, contextual edge, or latent second weapon, the reviewer/coder must determine whether it is:
-
-* genuinely useless
-* merely decorative
-* redundant with the primary role
-* mathematically inseparable from the primary engine
-* already lawfully represented inside the primary model without edge loss
-
-If a split is declined, one of those reasons must be proved explicitly.
+### ChatboxGPT
+Role:
+- contract-law / spine-file hardening lane
+- useful for:
+  - canonical model / validation work
+  - package surfaces
+  - bounded top-level entry / control hardening
+- must be kept tightly bounded and watched for workflow-law overreach inside contract files
+- strongest when used as base hardener, not battlefield re-architect
 
 ---
 
-## 4. CORE REBUILD PHILOSOPHY
+## 3. ACTIVE GOVERNING LAWS
 
-The rebuild is governed by these standing principles:
-
-* differentiators must be operational, not decorative
-* do not accept code merely because contracts/imports are cleaner
-* verify differentiators are functionally wired and live
-* preserve accepted strong base where possible
-* strengthen everything rather than merely patching it
-* use more rigorous math, logic, code, and integration
-* avoid repeated rediscovery
-* avoid prompt-loop waste
-* prefer bounded, high-signal prompts
-* use delta-first for mature files when safe
-* use full-file replacement only when the file is unstable or contract changes require it
-* feed code on demand rather than storing large stale code dumps in chat memory
-* board lane focuses on final audit, accept/reject, lane control, doctrine, and packeting
-* no capability trimming as a shortcut to closure
-* no false closure by comment language
-* target-first closure doctrine governs hard files: fix the target file first, allow only minimal tightly-coupled supporting-file repairs that directly unblock target-file closure, and defer other defects
-
----
-
-## 5. DIFFERENTIATOR DOCTRINE
-
-### 5.1 Shan's Curve
-
-Shan's Curve must be live in:
-
-* EV
-* sizing
-* aggression
-* stop behavior
-* attack mode
-
-Router influence must come indirectly through EV, not by hard overriding sleeve selection directly.
-
-Exact field doctrine:
-
-* `shans_superfluid_score` = distance to asymptote / exhaustion state; consumed by attack mode trigger and stop-width/tightening behavior
-* `shans_bias` = directional derivative/sign; feeds fusion directional sign
-* `shans_confidence` = density/quality of resting liquidity supporting the curve; feeds sizing / Kelly scaling
-
-### 5.2 Entropy Decoder
-
-Entropy Decoder is:
-
-* confidence / unlock / veto
-* not a direction source
-
-It should:
-
-* unlock/scale Shadow-Front
-* unlock/confirm FLV
-* confirm Gamma Front
-* be irrelevant to Sector Rotation
-* veto noisy trend-following at high entropy
-* veto mean-reversion into deterministic breakouts at very low entropy
-
-Current board status: accepted in current VS state.
-
-### 5.3 Regime Detector
-
-Regime Detector is:
-
-* sleeve authorization system
-* risk modifier
-* regime bitmask producer
-
-### 5.4 Whale / Insider / Toxicity
-
-* Whale direction = directional alpha
-* Whale zone = zone / accumulation structure context
-* Insider = urgency / attack escalation
-* Toxicity = suppression / veto
-
-### 5.5 Physical Verification
-
-Layered doctrine:
-
-* pre-filter bad data
-* suppress confidence inside fusion on degradation
-* hard veto after fusion on severe failure
-
-### 5.6 Mixed-Latency Fusion Doctrine
-
-* slow signals update asynchronously into shared state
-* medium signals update routing bitmask on slower cadence
-* fast signals run on the low-latency loop
-* the fast fusion loop reads latest-known slow/medium state without waiting
-
-### 5.7 Strategy Router Output Doctrine
-
-Strategy Router should output:
-
-* `allowed_sleeves`
-* `blocked_sleeves`
-* `ranked_sleeves`
-* `preferred_sleeve`
-
-`preferred_sleeve = ranked_sleeves[0]`
-
-Regime changes should:
-
-* kill incompatible active sleeves
-* hand unwind control to risk/orchestrator
-* authorize new sleeves from flat
+1. Preserve-first
+2. Strengthen-don't-flatten
+3. No fake compatibility
+4. No guessed semantics
+5. No decorative differentiators
+6. No wall-clock dependence in core governed logic
+7. Replay-safe behavior
+8. Decimal-only at governed monetary truth boundaries
+9. No unilateral architecture drift
+10. No truncation
+11. No placeholders
+12. Full-file replacements unless explicitly operating in a lawful delta-first or preserve-base surgical mode
+13. Use newer direct Board rulings over stale reboot queue text
+14. Baseline-first on preserve-sensitive files
+15. Candidate quality is not the same thing as preservation safety
+16. No silent subtraction of real behavior without explicit justification
+17. Dormant-but-real sophistication should be preserved unless proven fake, harmful, unreachable, or contract-breaking
+18. Runtime truth beats aesthetic cleanliness
 
 ---
 
-## 6. LANE MODEL AND ROLE ASSIGNMENT
+## 4. CURRENT BOARD WORKFLOW RULES
 
-### 6.1 Lane Ownership
+### 4.1 Baseline-first rule
+For any file where preservation matters:
+- obtain the live baseline file first
+- compare baseline vs candidate
+- identify what was preserved
+- identify what was strengthened
+- identify what was lost
+- identify whether the correct move is:
+  - approve as-is
+  - preserve-base surgical merge
+  - narrow delta
+  - reject
 
-* Board lane = doctrine, acceptance authority, lane control, packeting, truthful review, closure control
-* Claude Desktop lane = Chief Coder for the Chatbox lane with whole-repo visibility
-* D lane = Chief Coder for deep logic restoration / strengthening lane
-* Chief Auditor Chatbox lane = ruthless audit authority for Chatbox/Claude lane
-* no lane collision
-* keep ownership separated unless explicitly changed by the board
+### 4.2 Approval labels
+Board should distinguish:
+- APPROVED candidate / accepted for forward progress
+- Strong candidate / conditional accept
+- Parked / audit-eligible later
+- Future audit notes only
+- Preserve-base surgical merge only
+- Rejected as active delta
 
-### 6.2 Reassignment Rule
+### 4.3 Runtime truth rule
+No component receives operational credit merely because:
+- code exists
+- file exists
+- imports exist
+- comments claim a role
+- outputs theoretically exist
 
-If a lane fails a file or cannot close it lawfully, the board may reassign the file to a stronger lane.
-
-That is now active doctrine.
-
-### 6.3 Current Practical Ownership
-
-* `app/strategies/liquidity_void.py` is in Claude Desktop lane and accepted for forward progress together with orchestrator hookup
-* D lane current accepted target state: `app/brain/entropy_decoder.py`
-* whale files are closed and should not be reopened unless a direct blocker appears
-
----
-
-## 7. CURRENT LIVE CHECKPOINT
-
-### 7.1 Accepted / Preserved Baselines
-
-Accepted or preserved for forward progress:
-
-* `app/brain/signal_fusion.py` accepted / preserved baseline
-* `app/brain/regime_detector.py` accepted / preserved baseline
-* richer `app/brain/toxicity_engine.py` must be preserved and not flattened
-* `app/strategies/gamma_front.py` accepted baseline
-* `app/strategies/sector_rotation.py` accepted baseline
-* accepted `app/strategies/shadow_front.py` baseline preserved
-* `app/brain/whale_flow_engine.py` closed directional whale file
-* `app/brain/whale_zone_engine.py` closed structural whale file
-* `app/strategies/liquidity_void.py` accepted for forward progress
-* orchestrator TPE hookup accepted for FLV closure path
-* `app/brain/entropy_decoder.py` accepted in current VS state
-
-### 7.2 Active Targets
-
-#### D lane
-
-Primary active target after entropy closure:
-
-1. `app/brain/insider_signal_engine.py`
-
-Queued after insider:
-2. `app/risk/kill_switch.py`
-3. `app/risk/unified_risk.py`
-
-#### Claude Desktop lane
-
-Current FLV/orchestration closure move is complete enough for forward progress.
-Do not reopen FLV unless a direct blocker appears.
-
-### 7.3 Explicit Exclusions to Prevent Collision
-
-Claude Desktop lane must not seize active D targets unless the board reassigns them.
-D lane must not reopen whale files or FLV unless explicitly reassigned.
-
-### 7.4 Closed Whale Architecture
-
-The following split is now settled and preserved:
-
-* `app/brain/whale_flow_engine.py` = directional whale alpha only
-* `app/brain/whale_zone_engine.py` = zone / accumulation structure context only
-
-This is a governing example for future split-role preservation analysis.
+A component is only operational if it can be shown to:
+- be constructed in the live runtime path
+- receive real upstream inputs through actual call paths
+- produce outputs consumed by downstream decision logic
+- materially influence strategy authorization, suppression, sizing, routing, risk, or execution
 
 ---
 
-## 8. CURRENT WORK DONE / WORK REMAINING
+## 5. CURRENT ACCEPTED / FORWARD-PROGRESS FILE STATUS
 
-### 8.1 Work Done
+### 5.1 `app/brain/signal_fusion.py`
+Owner: Gemini  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.2/10
 
-* Supreme Board mandate hardened into permanent doctrine
-* no-lazy-removal law adopted
-* split-role preservation doctrine adopted
-* proof burden for non-split decisions adopted
-* whale directional file closed
-* whale zone file created and closed
-* Claude Desktop elevated to Chief Coder for Chatbox lane
-* `liquidity_void.py` doctrine-vs-operability loop resolved by wiring TPE in orchestrator rather than weakening FLV doctrine
-* accepted TPE-driven `app/strategies/liquidity_void.py` pasted target
-* accepted orchestrator TPE hookup pasted target
-* `app/brain/entropy_decoder.py` accepted in current VS state at 9.3/10 with no further changes required in this pass
+Decision:
+- use Gemini lane approved candidate
+- stop looping this file unless direct integration evidence forces a reopen
 
-### 8.2 Work Remaining
+Notes:
+- later Claude Terminal truth-map suggests runtime import/path issues may still block actual use
+- treat file-quality closure and runtime-operational closure as different things
 
-* D proceeds to `app/brain/insider_signal_engine.py`
-* after insider, D proceeds to `app/risk/kill_switch.py`
-* then D proceeds to `app/risk/unified_risk.py`
-* later broader system hardening and final closure still remain
-* governance files themselves may continue to be updated as truth advances
+### 5.2 `app/strategies/shadow_front.py`
+Owner: D  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.0/10
+
+Decision:
+- use D lane approved candidate
+- stop looping this file unless direct integration evidence forces a reopen
+
+Notes:
+- runtime truth still depends on orchestrator / boot-path connection
+- output consumption still requires proof in live runtime
+
+### 5.3 `app/brain/__init__.py`
+Owner: ChatboxGPT  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.0/10
+
+Decision:
+- package surface updated lawfully
+- stale `NovelRegimeDetector` alias removed
+- whale-zone exports promoted into package surface
+
+### 5.4 `app/brain/entropy_decoder.py`
+Owner: D  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.2/10
+
+Decision:
+- preserve six-family structure
+- use D lane candidate
+- stop looping unless direct integration evidence forces reopen
+
+### 5.5 `app/brain/whale_zone_engine.py`
+Owner: Gemini  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.3/10
+
+Decision:
+- use Gemini lane candidate
+- preserve role-pure whale-zone / structure intelligence
+- stop looping unless direct integration evidence forces reopen
+
+### 5.6 `app/brain/regime_detector.py`
+Owner: Gemini  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.2/10
+
+Decision:
+- use Gemini lane candidate
+- strong sleeve-authorization / risk-modifier role
+- stop looping unless direct integration evidence forces reopen
+
+### 5.7 `app/brain/toxicity_engine.py`
+Owner: Gemini  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.3/10
+
+Decision:
+- DO NOT use the earlier wholesale Gemini rewrite as the accepted basis
+- use the later preserve-base Gemini surgical candidate
+- accepted improvements:
+  1. toxic cascade detection
+  2. velocity tracking
+  3. structural EXTREME override
+  4. continuous suppression curve
+- preserve baseline diagnostics, calibration stats, serialization semantics, and sentinel handling
+
+Important continuity note:
+- this file was the major process correction that established the baseline-first preserve-sensitive workflow rule
+- future large differentiator approvals must follow the same discipline
+
+### 5.8 `app/execution/orchestrator.py`
+Owner: D  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.1/10
+
+Decision:
+- corrected D candidate accepted
+- synthetic semantic overreach removed/tightened enough for forward progress
+- stop looping unless direct integration evidence forces reopen
+
+### 5.9 `app/commander.py`
+Owner: ChatboxGPT  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.0/10
+
+Decision:
+- use ChatboxGPT candidate
+- stop looping unless direct integration evidence forces reopen
+
+### 5.10 `app/models/contracts.py`
+Owner: ChatboxGPT  
+Status: APPROVED candidate / accepted for forward progress  
+Board grade: 9.2/10
+
+Decision:
+- close the former 80% bucket status
+- keep the Chatbox-pasted base as the active accepted version
+- D follow-up comments are NOT active code changes
+- D follow-up comments are future audit notes only
+
+Future-touch rule:
+- revisit this file later during final touches after paper trading
+- use runtime evidence / repo-truth before changing validator semantics
+
+### 5.11 `app/main.py`
+Owner: ChatboxGPT  
+Status: Strong candidate / conditional accept pending one narrow runtime-truth delta  
+Board grade: 8.6/10
+
+Decision:
+- do not treat as fully closed yet
+- preserve startup/shutdown hardening
+- remaining issue: still contains broader runtime/orchestration behavior and fake/nondeterministic simulation semantics
+- Chatbox correction pass preferred over D takeover for this file
+
+### 5.12 `app/main_loop.py`
+Owner: D  
+Status: OPEN / high runtime-priority target
+
+Decision:
+- runtime spine file
+- not yet closed
+- key area for actual paper-trading runtime truth
 
 ---
 
-## 9. FILE FEEDING STRATEGY
+## 6. FILES CLOSED / ACCEPTED DURING THIS SESSION ARC
 
-### 9.1 Default Claude Desktop Set
+Closed / accepted for forward progress:
+1. `app/brain/signal_fusion.py`
+2. `app/strategies/shadow_front.py`
+3. `app/brain/__init__.py`
+4. `app/brain/entropy_decoder.py`
+5. `app/brain/whale_zone_engine.py`
+6. `app/brain/regime_detector.py`
+7. `app/brain/toxicity_engine.py` (preserve-base surgical Gemini version)
+8. `app/execution/orchestrator.py`
+9. `app/commander.py`
+10. `app/models/contracts.py`
 
-For Claude Desktop, default required context is:
+Conditionally accepted / not fully closed:
+11. `main.py`
 
-* full zipped repo
-* `MASTER_REBUILD_PLAN_V4.md`
-* `PK_REBOOT_STATE.md`
-* `CLAUDE.md`
-* target packet / current file instruction
-
-### 9.2 Old Dumps
-
-Use old dumps only when:
-
-* repo truth is insufficient
-* a file may have lost edge
-* split-role preservation is being investigated
-* a historical second weapon may need recovery
-
-### 9.3 Minimal Upload Rule
-
-Do not overload context with random files when repo truth already exists.
+Open / runtime priority:
+12. `app/main_loop.py`
 
 ---
 
-## 10. NEXT SESSION EXPECTED INPUT
+## 7. CURRENT LANE WINNERS / BEST-FIT LANE LOGIC
 
-At next session start, provide:
+### Gemini lane winners so far
+- `app/brain/signal_fusion.py`
+- `app/brain/whale_zone_engine.py`
+- `app/brain/regime_detector.py`
+- `app/brain/toxicity_engine.py` (surgical preserve-base merge)
 
-* this reboot file
-* the active target packet
-* the target file path
+Gemini lane best-fit:
+- mathematically rich differentiator files
+- signal/risk/suppression/context engines
+- preserve-base upgrades on rich analytical modules
 
-Default next work:
+### D lane winners so far
+- `app/strategies/shadow_front.py`
+- `app/brain/entropy_decoder.py`
+- `app/execution/orchestrator.py`
 
-* D lane on `app/brain/insider_signal_engine.py`
+D lane best-fit:
+- runtime spine
+- execution bridge
+- strategy execution battlefield
+- bounded redesign where stale/dead semantics block lawful resurrection
 
-Claude Desktop lane remains closed enough for forward progress on FLV/orchestrator unless a direct blocker appears.
+### ChatboxGPT winners so far
+- `app/brain/__init__.py`
+- `app/commander.py`
+- `app/models/contracts.py` (accepted base)
+- `main.py` conditional hardening candidate
 
----
-
-## 11. NEXT SESSION STARTER PROMPT
-
-Use this at the start of a new chat:
-
-Continue POVERTY_KILLER from reboot state. Supreme Board mode. No softening. No subtractive rebuild behavior. No lazy removal. Split only when truly warranted and proven. Preserve strong baselines. Use target-first closure doctrine: main focus is the target file; allow only minimal tightly-coupled supporting-file repairs required to make the target file lawful, live, and Citadel-grade; note and defer other defects. Current accepted state: FLV/orchestrator forward-progress closure is done; entropy decoder is accepted in current VS state. Next active D target: `app/brain/insider_signal_engine.py`.
-
----
-
-## 12. SESSION-END UPDATE TEMPLATE
-
-At the end of each session, replace this whole file with updated content containing:
-
-* Last Updated
-* Current status
-* Governance changes, if any
-* New standing rules adopted, if any
-* Work completed this session
-* Current accepted baselines
-* Work remaining
-* Next exact targets
-* Next required upload/context set
-* Any new warnings, blockers, or truth-disclosure notes
-
-This file must be replaced in full, not patched.
+Chatbox best-fit:
+- package surfaces
+- contracts / validation spine
+- entry / control / bounded hardening
 
 ---
 
-## 13. TRUTH-DISCLOSURE RULE
+## 8. SPECIAL CONTINUITY NOTES FROM THIS SESSION
 
-If the public repo, older handoff text, chat history, or pasted code conflict with this reboot file or the newest uploaded source-of-truth files:
+### 8.1 Contracts future-audit note
+Keep `app/models/contracts.py` on the Chatbox-approved pasted version for now.
+Revisit later during final touches after paper trading.
+D’s follow-up concerns remain future audit notes only, not active deltas.
 
-* prefer the newest direct source evidence
-* explicitly disclose the conflict
-* do not silently merge contradictory states
+### 8.2 Baseline-first governance correction
+For future file review, replacement approval, or lane packet where preservation matters:
+- require the live baseline file first
+- enforce preserve-base plus surgical improvement workflow by default
+- especially enforce this on large differentiator files
 
-This file controls current daily continuity.
+### 8.3 Toxicity engine correction note
+Earlier wholesale Gemini toxicity-engine approval was superseded.
+Correct accepted state is the preserve-base Gemini surgical candidate.
+
+---
+
+## 9. CLAUDE TERMINAL PHASE-1 TRUTH MAP — CURRENT SYSTEM REALITY
+
+A Claude Terminal recon pass was run to get the true operational picture of the repo/runtime.
+
+### 9.1 Executive truth summary
+Current Board interpretation:
+- the bot has sophisticated code and real predator components
+- the runtime path is not yet operational in the true predator sense
+- the code is sophisticated; the runtime is not yet operational
+- several differentiators are present but not actually alive in the active boot path
+- the real integration hub (`MasterOrchestrator`) is disconnected from the current live boot path
+- main.py’s present loop is hollow relative to the intended orchestrated runtime path
+
+### 9.2 Chokepoint truth
+High-confidence operational/runtime chokepoints identified by recon:
+- top-level boot: `main.py`
+- runtime loop owner (current active path): `main.py:_main_loop()`
+- real integration hub: `app/execution/orchestrator.py:MasterOrchestrator`
+- execution chokepoint: `app/execution/engine.py` (but import/runtime truth still needs targeted verification)
+- command/control chokepoint: `app/commander.py`
+
+### 9.3 Differentiator truth map (high-level)
+Current Board reading from the recon:
+- Shan’s Curve: present but not in the active runtime path
+- Entropy Decoder: meaningful logic exists, but runtime ingest path/boot path broken
+- Regime Detector: meaningful logic exists, but active runtime usage still broken/unclear
+- Toxicity Engine: one of the more real preserved differentiators, but current runtime path still depends on orchestrator activation
+- Whale Flow Engine: present but not truly live in current boot path
+- Whale Zone Engine: meaningful and preserved, but still depends on orchestrator/runtime connection
+- Signal Fusion: strong file-level closure, but actual active runtime path is currently broken/hollow
+- Shadow Front: updated, but real runtime output consumption still depends on orchestrator connection
+- Liquidity Void / FLV: produces signals in some paths but appears under-consumed / not the true gate
+- Contracts / model import surfaces / enums: likely ignition blockers
+- Main loop / boot path: currently the key runtime truth problem
+
+### 9.4 Top 5 current bottlenecks from recon
+1. Missing / broken canonical enum and model surfaces causing boot/import failure
+2. Missing / broken canonical `OrderRequest` / `OrderFill` / `SleeveType` style import surfaces in runtime spine
+3. `MasterOrchestrator` disconnected from boot path
+4. canonical models / pydantic import truth needs live verification against current repo state
+5. major predator differentiators (especially Shan’s Curve and Whale Flow) absent from live runtime path
+
+### 9.5 Board interpretation of the Claude report
+Use the Claude report as the best current system-level truth map.
+However:
+- verify exact current repo state before patching any specific file from that report
+- some findings may reflect a repo snapshot that must be reconciled with the latest pasted local file state
+- especially verify current live `contracts.py` and canonical model surfaces before acting
+
+### 9.6 Strategic consequence
+The next phase is no longer “just close a few more files.”
+The real mission is:
+- ignition
+- canonical import/model truth
+- boot-path correctness
+- runtime spine activation
+- making the predator path actually live
+
+---
+
+## 10. CURRENT BOARD STRATEGIC VIEW
+
+### 10.1 What is going well
+- file-hardening work has been materially productive
+- many core files are now much stronger than earlier session states
+- preserve-first doctrine is functioning
+- lane specialization is working reasonably well
+- continuity is being preserved
+
+### 10.2 What is now clear
+The biggest risk is no longer “bad individual file quality.”
+The biggest risk is:
+- false clarity
+- thinking the predator bot is live because sophisticated files exist
+- when in fact the active runtime path is not yet feeding those differentiators into real decision/execution flow
+
+### 10.3 True near-term goal
+Get to a truthful paper-trading runtime where:
+- the bot boots cleanly
+- the real orchestrated path is live
+- real data enters the signal/risk/execution chain
+- at least one real predator differentiator materially affects runtime behavior
+- later paper-trading evidence can guide final-touch audit and tuning
+
+---
+
+## 11. NEXT BOARD PRIORITIES
+
+### Priority 1 — ignition / canonical truth
+Deep dive and repair the actual ignition blockers:
+- `app/models/enums.py`
+- canonical `app/models` package surfaces
+- exact location / truth of `OrderRequest`, `OrderFill`, `SleeveType`, `CollapseQuality`
+- current pydantic/model import truth
+
+### Priority 2 — runtime spine activation
+Deep dive:
+- `main.py`
+- `app/main_loop.py`
+- `app/execution/orchestrator.py`
+- `app/execution/engine.py`
+
+Need to answer:
+- what is the real live boot path?
+- how does the orchestrator become active?
+- what data actually enters the signal chain?
+- what is hollow simulation vs real paper path?
+
+### Priority 3 — differentiator operationalization
+After ignition and boot-path truth:
+- wire / verify Shan’s Curve
+- wire / verify Whale Flow Engine
+- verify Signal Fusion is actually fed meaningful data
+- prove a real differentiator changes paper-trading behavior
+
+---
+
+## 12. WHAT MUST NOT BE TOUCHED YET
+
+Unless direct evidence forces it:
+- do not reopen `app/brain/insider_signal_engine.py`
+- do not reopen `app/brain/toxicity_engine.py`
+- do not reopen `app/brain/whale_zone_engine.py`
+- do not reopen `app/risk/kill_switch.py`
+- do not reopen `app/risk/unified_risk.py`
+- do not redesign `app/brain/signal_fusion.py`; only fix import/runtime truth if needed
+- do not reopen `app/strategies/shadow_front.py` until runtime connection is proven
+- do not rewrite `app/brain/shans_curve.py`; wire it before judging it
+- do not reopen `app/models/contracts.py` until paper-trading evidence or repo-truth demands it
+
+---
+
+## 13. CURRENT LANE ASSIGNMENTS FROM THIS CHECKPOINT
+
+### D — active priority lane
+Primary next target class:
+- runtime spine / executable battlefield files
+
+Immediate likely targets:
+1. `app/main_loop.py`
+2. runtime-side import / execution truth surfaces
+3. possibly `app/execution/engine.py` depending on ignition findings
+
+### Gemini — active priority lane
+Primary next target class:
+- preserve-base differentiator wiring / mathematical engines once ignition path is fixed
+
+Do not reopen already-closed differentiator files unless:
+- runtime evidence shows contract mismatch
+- live input path is fake/decorative
+- surgical preserve-base hardening is clearly required
+
+### ChatboxGPT — active bounded lane
+Primary next target class:
+- top-level entry/control and canonical package/contract truth hardening
+
+Immediate likely targets:
+1. `main.py` narrow correction pass
+2. package-surface / enum truth if bounded and clearly defined
+
+### Supreme Board / Assistant
+Active responsibilities:
+- next-target selection
+- packet drafting
+- anti-collision enforcement
+- acceptance reviews
+- continuity preservation
+- preserve-base enforcement
+- recon truth interpretation
+- final board rulings
+
+---
+
+## 14. RESUME POINT FOR NEXT CHAT
+
+When user says:
+- “continue”
+- “next”
+- “resume”
+
+resume from exactly this state:
+
+1. Accepted / forward-progress files:
+- `app/brain/signal_fusion.py`
+- `app/strategies/shadow_front.py`
+- `app/brain/__init__.py`
+- `app/brain/entropy_decoder.py`
+- `app/brain/whale_zone_engine.py`
+- `app/brain/regime_detector.py`
+- `app/brain/toxicity_engine.py` (preserve-base Gemini surgical version)
+- `app/execution/orchestrator.py`
+- `app/commander.py`
+- `app/models/contracts.py` (Chatbox base; future audit notes preserved)
+
+2. Conditionally accepted:
+- `main.py` strong candidate but not fully closed
+
+3. Open runtime-priority target:
+- `app/main_loop.py`
+
+4. Major workflow rule:
+- baseline-first for preserve-sensitive files
+- preserve-base plus surgical merge by default
+- do not approve large differentiator rewrites without baseline comparison
+
+5. Strategic truth:
+- sophisticated code exists
+- runtime predator path is not yet truly operational
+- next mission is ignition + canonical truth + runtime spine activation
+
+6. Highest-value likely next work:
+- verify / repair canonical enums and model import surfaces
+- determine exact boot-path disconnect between `main.py` and `MasterOrchestrator`
+- decide next exact lane/file from that ignition-focused deep dive
+
+7. User intent:
+- move to a new chat
+- upload this reboot state
+- when user types “continue,” resume exactly from here

@@ -2,11 +2,16 @@
 Rolling Window - Bounded OHLCV Storage
 Maintains a fixed-size rolling window of candles per symbol.
 Prevents unbounded memory growth with 1000-candle cap.
+
+TIMESTAMP TRUTH:
+- Candles have exchange_ts_ns (authoritative)
+- Datetime is preserved for backward compatibility
+- New methods allow nanosecond-based queries
 """
 
 import logging
 from collections import deque
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from threading import RLock
 
@@ -64,7 +69,7 @@ class RollingWindow:
 
     def get_candles(self, symbol: str, count: Optional[int] = None) -> List[Candle]:
         """
-        Get recent candles for a symbol.
+        Get recent candles for a symbol (by datetime order).
 
         Args:
             symbol: Trading symbol
@@ -82,6 +87,34 @@ class RollingWindow:
                 return list(window)
             return list(window)[-count:]
 
+    def get_candles_by_ns(self, symbol: str, before_ns: Optional[int] = None, count: int = 100) -> List[Candle]:
+        """
+        Get recent candles by nanosecond timestamp.
+
+        Args:
+            symbol: Trading symbol
+            before_ns: Only return candles with exchange_ts_ns <= before_ns
+            count: Maximum number of candles to return
+
+        Returns:
+            List of candles (most recent last)
+        """
+        with self._lock:
+            if symbol not in self._windows:
+                return []
+
+            window = self._windows[symbol]
+            result = []
+            
+            for candle in reversed(window):
+                if before_ns is not None and candle.exchange_ts_ns > before_ns:
+                    continue
+                result.append(candle)
+                if len(result) >= count:
+                    break
+            
+            return list(reversed(result))
+
     def get_last_candle(self, symbol: str) -> Optional[Candle]:
         """
         Get the most recent candle for a symbol.
@@ -96,6 +129,12 @@ class RollingWindow:
             if symbol not in self._windows or not self._windows[symbol]:
                 return None
             return self._windows[symbol][-1]
+
+    def get_last_candle_by_ns(self, symbol: str) -> Optional[Candle]:
+        """
+        Get the most recent candle by nanosecond timestamp (same as get_last_candle).
+        """
+        return self.get_last_candle(symbol)
 
     def get_candle_at_index(self, symbol: str, index: int) -> Optional[Candle]:
         """
@@ -119,7 +158,7 @@ class RollingWindow:
 
     def get_candle_by_time(self, symbol: str, timestamp: datetime) -> Optional[Candle]:
         """
-        Get candle by timestamp.
+        Get candle by datetime timestamp.
 
         Args:
             symbol: Trading symbol
@@ -136,9 +175,28 @@ class RollingWindow:
                     return candle
             return None
 
+    def get_candle_by_ns(self, symbol: str, exchange_ts_ns: int) -> Optional[Candle]:
+        """
+        Get candle by nanosecond timestamp.
+
+        Args:
+            symbol: Trading symbol
+            exchange_ts_ns: Nanosecond timestamp to search for
+
+        Returns:
+            Candle or None
+        """
+        with self._lock:
+            if symbol not in self._windows:
+                return None
+            for candle in self._windows[symbol]:
+                if candle.exchange_ts_ns == exchange_ts_ns:
+                    return candle
+            return None
+
     def get_candles_since(self, symbol: str, since: datetime) -> List[Candle]:
         """
-        Get candles since a specific time.
+        Get candles since a specific datetime.
 
         Args:
             symbol: Trading symbol
@@ -152,9 +210,25 @@ class RollingWindow:
                 return []
             return [c for c in self._windows[symbol] if c.timestamp >= since]
 
+    def get_candles_since_ns(self, symbol: str, since_ns: int) -> List[Candle]:
+        """
+        Get candles since a specific nanosecond timestamp.
+
+        Args:
+            symbol: Trading symbol
+            since_ns: Nanosecond timestamp to start from
+
+        Returns:
+            List of candles with exchange_ts_ns >= since_ns
+        """
+        with self._lock:
+            if symbol not in self._windows:
+                return []
+            return [c for c in self._windows[symbol] if c.exchange_ts_ns >= since_ns]
+
     def get_candles_range(self, symbol: str, start: datetime, end: datetime) -> List[Candle]:
         """
-        Get candles within a time range.
+        Get candles within a datetime range.
 
         Args:
             symbol: Trading symbol
@@ -168,6 +242,23 @@ class RollingWindow:
             if symbol not in self._windows:
                 return []
             return [c for c in self._windows[symbol] if start <= c.timestamp <= end]
+
+    def get_candles_range_ns(self, symbol: str, start_ns: int, end_ns: int) -> List[Candle]:
+        """
+        Get candles within a nanosecond timestamp range.
+
+        Args:
+            symbol: Trading symbol
+            start_ns: Start nanosecond timestamp
+            end_ns: End nanosecond timestamp
+
+        Returns:
+            List of candles with start_ns <= exchange_ts_ns <= end_ns
+        """
+        with self._lock:
+            if symbol not in self._windows:
+                return []
+            return [c for c in self._windows[symbol] if start_ns <= c.exchange_ts_ns <= end_ns]
 
     def get_count(self, symbol: str) -> int:
         """
@@ -224,7 +315,7 @@ class RollingWindow:
 
     def get_oldest_timestamp(self, symbol: str) -> Optional[datetime]:
         """
-        Get oldest timestamp in window.
+        Get oldest datetime timestamp in window.
 
         Args:
             symbol: Trading symbol
@@ -237,9 +328,24 @@ class RollingWindow:
                 return None
             return self._windows[symbol][0].timestamp
 
+    def get_oldest_timestamp_ns(self, symbol: str) -> Optional[int]:
+        """
+        Get oldest nanosecond timestamp in window.
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Oldest exchange_ts_ns or None
+        """
+        with self._lock:
+            if symbol not in self._windows or not self._windows[symbol]:
+                return None
+            return self._windows[symbol][0].exchange_ts_ns
+
     def get_newest_timestamp(self, symbol: str) -> Optional[datetime]:
         """
-        Get newest timestamp in window.
+        Get newest datetime timestamp in window.
 
         Args:
             symbol: Trading symbol
@@ -252,17 +358,44 @@ class RollingWindow:
                 return None
             return self._windows[symbol][-1].timestamp
 
-    def get_time_range(self, symbol: str) -> tuple:
+    def get_newest_timestamp_ns(self, symbol: str) -> Optional[int]:
         """
-        Get time range of stored candles.
+        Get newest nanosecond timestamp in window.
 
         Args:
             symbol: Trading symbol
 
         Returns:
-            Tuple of (oldest, newest) timestamps
+            Newest exchange_ts_ns or None
+        """
+        with self._lock:
+            if symbol not in self._windows or not self._windows[symbol]:
+                return None
+            return self._windows[symbol][-1].exchange_ts_ns
+
+    def get_time_range(self, symbol: str) -> Tuple[Optional[datetime], Optional[datetime]]:
+        """
+        Get datetime time range of stored candles.
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Tuple of (oldest, newest) datetimes
         """
         return (self.get_oldest_timestamp(symbol), self.get_newest_timestamp(symbol))
+
+    def get_time_range_ns(self, symbol: str) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Get nanosecond time range of stored candles.
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Tuple of (oldest, newest) exchange_ts_ns
+        """
+        return (self.get_oldest_timestamp_ns(symbol), self.get_newest_timestamp_ns(symbol))
 
     def to_dict(self, symbol: str) -> List[Dict[str, Any]]:
         """
@@ -281,6 +414,7 @@ class RollingWindow:
                 {
                     "symbol": c.symbol,
                     "timestamp": c.timestamp.isoformat(),
+                    "exchange_ts_ns": c.exchange_ts_ns,
                     "open": c.open,
                     "high": c.high,
                     "low": c.low,

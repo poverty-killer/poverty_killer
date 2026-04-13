@@ -2,15 +2,21 @@
 Validators - Data Integrity and Stale Data Checks
 Validates incoming market data for integrity, ordering, and staleness.
 Prevents trading on corrupted or stale data.
+
+TIMESTAMP TRUTH:
+- Authoritative staleness checks use exchange_ts_ns (nanoseconds)
+- Wall-clock (datetime.utcnow) used ONLY for telemetry/logging
+- All external callers provide current_time_ns for authoritative checks
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Optional, Tuple, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.models import Candle, OrderBookSnapshot
 from app.constants import STALE_DATA_THRESHOLD_SECONDS
+from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +26,18 @@ class ValidationResult:
     """Result of data validation."""
     is_valid: bool
     error: Optional[str] = None
-    warnings: List[str] = None
-
-    def __post_init__(self):
-        if self.warnings is None:
-            self.warnings = []
+    warnings: List[str] = field(default_factory=list)
 
 
 class DataValidator:
     """
     Validates incoming market data for integrity and staleness.
     Checks: stale bars, ordering, duplicates, malformed values, impossible OHLCV.
+    
+    TIMESTAMP AUTHORITY:
+    - For authoritative staleness checks, callers must provide current_time_ns
+    - Wall-clock fallback (datetime.utcnow) used ONLY when caller omits timestamp
+    - This is a constitutional exception for backward compatibility
     """
 
     def __init__(self, stale_threshold_seconds: int = STALE_DATA_THRESHOLD_SECONDS):
@@ -41,15 +48,25 @@ class DataValidator:
             stale_threshold_seconds: Seconds before data is considered stale
         """
         self.stale_threshold_seconds = stale_threshold_seconds
-        self._last_timestamps: Dict[str, datetime] = {}
+        self._last_timestamps_ns: Dict[str, int] = {}
 
-    def validate_candle(self, candle: Candle, current_time: Optional[datetime] = None) -> ValidationResult:
+    def _is_stale_ns(self, timestamp_ns: int, current_time_ns: int) -> bool:
+        """Check if a nanosecond timestamp is stale."""
+        age_ns = current_time_ns - timestamp_ns
+        age_sec = age_ns / 1_000_000_000.0
+        return age_sec > self.stale_threshold_seconds
+
+    def validate_candle(
+        self,
+        candle: Candle,
+        current_time_ns: Optional[int] = None
+    ) -> ValidationResult:
         """
         Validate a single candle.
 
         Args:
             candle: Candle to validate
-            current_time: Current time for staleness check
+            current_time_ns: Current time in nanoseconds (authoritative)
 
         Returns:
             ValidationResult with status and errors/warnings
@@ -77,27 +94,33 @@ class DataValidator:
         if candle.low > candle.open and candle.low > candle.close:
             warnings.append(f"Low ({candle.low}) above both open and close")
 
-        # 3. Check for stale data
-        if current_time is None:
+        # 3. Check for stale data (authoritative path)
+        if current_time_ns is not None:
+            if self._is_stale_ns(candle.exchange_ts_ns, current_time_ns):
+                age_sec = (current_time_ns - candle.exchange_ts_ns) / 1_000_000_000.0
+                errors.append(f"Stale candle: {age_sec:.1f}s old (threshold {self.stale_threshold_seconds}s)")
+        else:
+            # Telemetry fallback — wall-clock permitted
             current_time = datetime.utcnow()
-        candle_age = (current_time - candle.timestamp).total_seconds()
-        if candle_age > self.stale_threshold_seconds:
-            errors.append(f"Stale candle: {candle_age:.1f}s old (threshold {self.stale_threshold_seconds}s)")
+            candle_age = (current_time - candle.timestamp).total_seconds()
+            if candle_age > self.stale_threshold_seconds:
+                warnings.append(f"Candle age (telemetry): {candle_age:.1f}s old")
 
         # 4. Check ordering against previous candle
-        last_timestamp = self._last_timestamps.get(candle.symbol)
-        if last_timestamp:
-            if candle.timestamp <= last_timestamp:
-                errors.append(f"Out of order: {candle.timestamp} <= last {last_timestamp}")
-            time_diff = (candle.timestamp - last_timestamp).total_seconds()
-            if time_diff < 0:
-                errors.append(f"Negative time diff: {time_diff}s")
-            if time_diff > 300:  # 5 minute gap
-                warnings.append(f"Large time gap: {time_diff:.1f}s")
+        last_timestamp_ns = self._last_timestamps_ns.get(candle.symbol)
+        if last_timestamp_ns is not None:
+            if candle.exchange_ts_ns <= last_timestamp_ns:
+                errors.append(f"Out of order: {candle.exchange_ts_ns} <= last {last_timestamp_ns}")
+            time_diff_ns = candle.exchange_ts_ns - last_timestamp_ns
+            time_diff_sec = time_diff_ns / 1_000_000_000.0
+            if time_diff_sec < 0:
+                errors.append(f"Negative time diff: {time_diff_sec}s")
+            if time_diff_sec > 300:  # 5 minute gap
+                warnings.append(f"Large time gap: {time_diff_sec:.1f}s")
 
         # Update last timestamp if valid enough
         if not errors:
-            self._last_timestamps[candle.symbol] = candle.timestamp
+            self._last_timestamps_ns[candle.symbol] = candle.exchange_ts_ns
 
         return ValidationResult(
             is_valid=len(errors) == 0,
@@ -105,13 +128,17 @@ class DataValidator:
             warnings=warnings
         )
 
-    def validate_candles(self, candles: List[Candle], current_time: Optional[datetime] = None) -> ValidationResult:
+    def validate_candles(
+        self,
+        candles: List[Candle],
+        current_time_ns: Optional[int] = None
+    ) -> ValidationResult:
         """
         Validate a list of candles.
 
         Args:
             candles: List of candles to validate
-            current_time: Current time for staleness check
+            current_time_ns: Current time in nanoseconds (authoritative)
 
         Returns:
             ValidationResult with aggregated status
@@ -120,7 +147,7 @@ class DataValidator:
         all_warnings = []
 
         for i, candle in enumerate(candles):
-            result = self.validate_candle(candle, current_time)
+            result = self.validate_candle(candle, current_time_ns)
             if not result.is_valid:
                 all_errors.append(f"Candle {i}: {result.error}")
             all_warnings.extend(result.warnings)
@@ -131,13 +158,17 @@ class DataValidator:
             warnings=all_warnings
         )
 
-    def validate_order_book(self, order_book: OrderBookSnapshot, current_time: Optional[datetime] = None) -> ValidationResult:
+    def validate_order_book(
+        self,
+        order_book: OrderBookSnapshot,
+        current_time_ns: Optional[int] = None
+    ) -> ValidationResult:
         """
         Validate an order book snapshot.
 
         Args:
             order_book: Order book to validate
-            current_time: Current time for staleness check
+            current_time_ns: Current time in nanoseconds (authoritative)
 
         Returns:
             ValidationResult with status and errors/warnings
@@ -145,12 +176,17 @@ class DataValidator:
         errors = []
         warnings = []
 
-        # 1. Check for stale data
-        if current_time is None:
+        # 1. Check for stale data (authoritative path)
+        if current_time_ns is not None:
+            if self._is_stale_ns(order_book.exchange_ts_ns, current_time_ns):
+                age_sec = (current_time_ns - order_book.exchange_ts_ns) / 1_000_000_000.0
+                errors.append(f"Stale order book: {age_sec:.1f}s old")
+        else:
+            # Telemetry fallback — wall-clock permitted
             current_time = datetime.utcnow()
-        book_age = (current_time - order_book.timestamp).total_seconds()
-        if book_age > self.stale_threshold_seconds:
-            errors.append(f"Stale order book: {book_age:.1f}s old")
+            book_age = (current_time - order_book.timestamp).total_seconds()
+            if book_age > self.stale_threshold_seconds:
+                warnings.append(f"Order book age (telemetry): {book_age:.1f}s old")
 
         # 2. Check bids are sorted descending
         if order_book.bids:
@@ -189,55 +225,48 @@ class DataValidator:
 
     def is_stale(self, timestamp: datetime, current_time: Optional[datetime] = None) -> bool:
         """
-        Check if a timestamp is stale.
-
-        Args:
-            timestamp: Timestamp to check
-            current_time: Current time
-
-        Returns:
-            True if stale
+        Check if a timestamp is stale (telemetry only).
+        
+        WARNING: This method uses wall-clock datetime. Use only for monitoring.
+        For authoritative staleness checks, use exchange_ts_ns with current_time_ns.
         """
         if current_time is None:
             current_time = datetime.utcnow()
         age = (current_time - timestamp).total_seconds()
         return age > self.stale_threshold_seconds
 
-    def get_stale_status(self, symbol: str, current_time: Optional[datetime] = None) -> Tuple[bool, float]:
+    def get_stale_status(self, symbol: str, current_time_ns: Optional[int] = None) -> Tuple[bool, float]:
         """
         Get stale status for a symbol.
 
         Args:
             symbol: Trading symbol
-            current_time: Current time
+            current_time_ns: Current time in nanoseconds (authoritative)
 
         Returns:
             Tuple of (is_stale, age_seconds)
         """
-        if current_time is None:
-            current_time = datetime.utcnow()
-
-        last_ts = self._last_timestamps.get(symbol)
-        if last_ts is None:
+        last_ts_ns = self._last_timestamps_ns.get(symbol)
+        if last_ts_ns is None:
             return True, float('inf')
 
-        age = (current_time - last_ts).total_seconds()
-        return age > self.stale_threshold_seconds, age
+        if current_time_ns is not None:
+            age_ns = current_time_ns - last_ts_ns
+            age_sec = age_ns / 1_000_000_000.0
+            return age_sec > self.stale_threshold_seconds, age_sec
+
+        # Telemetry fallback
+        return True, float('inf')
 
     def reset_symbol(self, symbol: str) -> None:
-        """
-        Reset tracking for a symbol.
-
-        Args:
-            symbol: Trading symbol
-        """
-        if symbol in self._last_timestamps:
-            del self._last_timestamps[symbol]
+        """Reset tracking for a symbol."""
+        if symbol in self._last_timestamps_ns:
+            del self._last_timestamps_ns[symbol]
             logger.debug(f"Reset validator for {symbol}")
 
     def reset_all(self) -> None:
         """Reset all tracking."""
-        self._last_timestamps.clear()
+        self._last_timestamps_ns.clear()
         logger.info("Reset all validators")
 
     def validate_price(self, price: float, symbol: str) -> ValidationResult:
