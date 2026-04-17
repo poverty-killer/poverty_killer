@@ -24,8 +24,8 @@ from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
-# Symbol validation: alphanumeric, hyphen, period, underscore (typical exchange symbols)
-_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9\-\._]+$")
+# Symbol validation: alphanumeric, hyphen, period, underscore, slash (Kraken v2 canonical: BTC/USD)
+_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9\-\._/]+$")
 
 
 def _datetime_to_ns(dt: datetime) -> int:

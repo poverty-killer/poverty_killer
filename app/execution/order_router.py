@@ -1,54 +1,63 @@
-﻿"""
+"""
 Order Router - Exchange Adapter with Ghost Detection & PCV
 The "Nervous System" of the Poverty Killer.
-Features:
-- Triangulated Latency (detects if exchange is "ghosting")
-- Synchronous Post-Cancellation Verification (PCV)
-- Emergency REST Fallback when WebSocket fails
-- Cross-exchange correlation for ghost detection
-- Actual Kraken/Alpaca API integration with post-only flags
+
+Paper-trading proof hardening goals for this bundle:
+- preserve sovereign PaperBroker live paper path
+- eliminate fake paper fills and placeholder price truth
+- keep cancellation/status/position surfaces coherent for sustained paper runs
+- improve runtime observability without broad redesign
+
+This file remains the exchange adapter authority. It does not redesign paper
+execution; it truthfully delegates live paper execution to the sovereign
+PaperBroker while keeping the existing ExecutionEngine contract intact.
 """
 
-import logging
-import time
-import threading
-import requests
-import hmac
 import base64
 import hashlib
+import hmac
+import logging
+import threading
+import time
 import urllib.parse
-from typing import Optional, Dict, Any, List, Tuple
-from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from decimal import Decimal as _Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
-from app.models import OrderRequest, OrderFill
+import requests
+
+from app.execution.fee_model import FeeModel as _FeeModel
+from app.execution.latency_model import LatencyModel as _LatencyModel
+from app.execution.paper_broker import PaperBroker as _SovereignPaperBroker
+from app.execution.slippage_model import SlippageModel as _SlippageModel
+from app.models import OrderFill, OrderRequest
+from app.models.enums import InternalOrderStatus, SleeveType
+from app.utils.time_utils import now_ns
+import app.utils.enums as _pb_enums
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class OrderStatus:
-    """Order status from exchange."""
+    """Order status from exchange or paper broker cache."""
     order_id: str
     status: str  # pending, open, filled, cancelled, expired, rejected
     filled_quantity: float = 0.0
     filled_price: float = 0.0
     remaining_quantity: float = 0.0
-    timestamp: Optional[datetime] = None
-
-    __slots__ = ("order_id", "status", "filled_quantity", "filled_price",
-                 "remaining_quantity", "timestamp")
+    timestamp_ns: int = 0
 
 
 class OrderRouter:
     """
     Order Router - Exchange Adapter with Ghost Detection.
-    
-    Features:
-    - Triangulated Latency: Pings Google + secondary exchange to detect ghosting
-    - Synchronous PCV: Loops until order is confirmed dead
-    - Emergency REST Fallback: HTTP fallback when WebSocket fails
-    - Actual Kraken/Alpaca API integration with post-only flags
+
+    Live paper path:
+        ExecutionEngine -> OrderRouter.submit_order() -> SovereignPaperBroker
+
+    This hardening pass preserves the existing public surface while replacing
+    fake paper fills with status-coherent paper-broker-driven execution.
     """
 
     def __init__(
@@ -66,23 +75,6 @@ class OrderRouter:
         rest_fallback_enabled: bool = True,
         paper_mode: bool = True
     ):
-        """
-        Initialize order router.
-
-        Args:
-            primary_exchange: Primary exchange name (kraken, alpaca)
-            secondary_exchange: Secondary exchange for latency comparison
-            primary_api_key: API key for primary exchange
-            primary_api_secret: API secret for primary exchange
-            secondary_api_key: API key for secondary exchange
-            secondary_api_secret: API secret for secondary exchange
-            latency_threshold_ms: Max acceptable latency before warning
-            ghost_ratio_threshold: Primary latency / secondary latency threshold
-            pcv_max_attempts: Max attempts for PCV verification
-            pcv_retry_delay_sec: Delay between PCV attempts
-            rest_fallback_enabled: Whether to use REST fallback on WebSocket failure
-            paper_mode: If True, simulate orders without real execution
-        """
         self.primary_exchange = primary_exchange
         self.secondary_exchange = secondary_exchange
         self.primary_api_key = primary_api_key
@@ -96,16 +88,24 @@ class OrderRouter:
         self.rest_fallback_enabled = rest_fallback_enabled
         self.paper_mode = paper_mode
 
-        # WebSocket state
+        self._paper_broker: Optional[_SovereignPaperBroker] = None
+        if paper_mode:
+            self._paper_broker = _SovereignPaperBroker(
+                fee_model=_FeeModel(),
+                slippage_model=_SlippageModel(),
+                latency_model=_LatencyModel(),
+            )
+            logger.info("SovereignPaperBroker (app/execution/paper_broker.py) wired on live paper path")
+
         self._websocket_connected = False
         self._last_websocket_ping_ns = 0
         self._last_websocket_pong_ns = 0
 
-        # Order tracking
         self._pending_orders: Dict[str, OrderRequest] = {}
         self._order_status_cache: Dict[str, OrderStatus] = {}
+        self._paper_reports_index: int = 0
+        self._paper_last_mid_by_symbol: Dict[str, _Decimal] = {}
 
-        # Exchange-specific endpoints
         self._endpoints = {
             "kraken": {
                 "rest": "https://api.kraken.com/0",
@@ -129,68 +129,50 @@ class OrderRouter:
             }
         }
 
-        # Session for REST calls
         self._session = requests.Session()
-        self._session.headers.update({
-            "User-Agent": "PovertyKiller/1.0"
-        })
+        self._session.headers.update({"User-Agent": "PovertyKiller/1.0"})
 
-        # Alpaca headers if configured
         if primary_exchange == "alpaca" and primary_api_key and not paper_mode:
             self._session.headers.update({
                 "APCA-API-KEY-ID": primary_api_key,
                 "APCA-API-SECRET-KEY": primary_api_secret
             })
 
-        logger.info(f"OrderRouter initialized: primary={primary_exchange}, "
-                   f"secondary={secondary_exchange}, ghost_ratio={ghost_ratio_threshold}, "
-                   f"pcv_attempts={pcv_max_attempts}, paper_mode={paper_mode}")
+        logger.info(
+            "OrderRouter initialized: primary=%s, secondary=%s, ghost_ratio=%s, pcv_attempts=%s, paper_mode=%s",
+            primary_exchange,
+            secondary_exchange,
+            ghost_ratio_threshold,
+            pcv_max_attempts,
+            paper_mode,
+        )
 
     # ============================================
     # GHOST DETECTION (Triangulated Latency)
     # ============================================
 
     def measure_latency(self) -> float:
-        """
-        Measure latency to primary exchange with triangulation.
-        Also detects if exchange is "ghosting" (accepting pings but not processing).
-
-        Returns:
-            Latency in milliseconds
-        """
-        # Measure latency to primary exchange API
+        """Measure latency to primary exchange with triangulation."""
         primary_latency = self._measure_exchange_latency(self.primary_exchange)
-
-        # Measure latency to secondary exchange for triangulation
         secondary_latency = self._measure_exchange_latency(self.secondary_exchange)
-
-        # Measure baseline latency (Google DNS)
         baseline_latency = self._measure_baseline_latency()
 
-        # Ghost detection: primary latency significantly higher than secondary
         is_ghosting = False
         if secondary_latency > 0 and baseline_latency > 0:
             ratio = primary_latency / max(secondary_latency, 0.001)
             if ratio > self.ghost_ratio_threshold:
                 is_ghosting = True
-                logger.warning(f"GHOST DETECTED: Primary latency {primary_latency:.1f}ms, "
-                             f"secondary {secondary_latency:.1f}ms, ratio={ratio:.1f}")
+                logger.warning(
+                    "GHOST DETECTED: Primary latency %.1fms, secondary %.1fms, ratio=%.1f",
+                    primary_latency,
+                    secondary_latency,
+                    ratio,
+                )
 
-        # Store ghost detection result
         self._websocket_connected = not is_ghosting and primary_latency < self.latency_threshold_ms
-
         return primary_latency
 
     def _measure_exchange_latency(self, exchange: str) -> float:
-        """
-        Measure latency to exchange API endpoint.
-
-        Args:
-            exchange: Exchange name
-
-        Returns:
-            Latency in milliseconds
-        """
         endpoints = {
             "kraken": "https://api.kraken.com/0/public/Time",
             "coinbase": "https://api.coinbase.com/v2/time",
@@ -204,49 +186,36 @@ class OrderRouter:
             start = time.time()
             response = self._session.get(url, timeout=5.0)
             elapsed_ms = (time.time() - start) * 1000
-
             if response.status_code == 200:
                 return elapsed_ms
-            else:
-                logger.warning(f"Exchange {exchange} returned status {response.status_code}")
-                return 999.0
-
+            logger.warning("Exchange %s returned status %s", exchange, response.status_code)
+            return 999.0
         except requests.exceptions.Timeout:
-            logger.warning(f"Exchange {exchange} timeout")
+            logger.warning("Exchange %s timeout", exchange)
             return 999.0
         except Exception as e:
-            logger.error(f"Error measuring {exchange} latency: {e}")
+            logger.error("Error measuring %s latency: %s", exchange, e)
             return 999.0
 
     def _measure_baseline_latency(self) -> float:
-        """
-        Measure baseline internet latency (Google DNS).
-
-        Returns:
-            Latency in milliseconds
-        """
         try:
             start = time.time()
-            response = self._session.get("https://8.8.8.8", timeout=3.0)
+            self._session.get("https://8.8.8.8", timeout=3.0)
             elapsed_ms = (time.time() - start) * 1000
             return elapsed_ms
         except Exception:
-            return 50.0  # Default fallback
+            return 50.0
 
     def is_websocket_connected(self) -> bool:
-        """Check if WebSocket connection is healthy."""
         return self._websocket_connected
 
     def update_websocket_ping(self) -> None:
-        """Update WebSocket ping timestamp."""
-        self._last_websocket_ping_ns = time.time_ns()
+        self._last_websocket_ping_ns = now_ns()
 
     def update_websocket_pong(self) -> None:
-        """Update WebSocket pong timestamp and calculate RTT."""
-        self._last_websocket_pong_ns = time.time_ns()
+        self._last_websocket_pong_ns = now_ns()
 
     def get_websocket_rtt_ms(self) -> float:
-        """Get WebSocket round-trip time in milliseconds."""
         if self._last_websocket_ping_ns == 0 or self._last_websocket_pong_ns == 0:
             return 0.0
         return (self._last_websocket_pong_ns - self._last_websocket_ping_ns) / 1_000_000
@@ -256,179 +225,255 @@ class OrderRouter:
     # ============================================
 
     def _kraken_sign(self, urlpath: str, data: Dict[str, str]) -> Dict[str, str]:
-        """
-        Generate Kraken API signature.
-
-        Args:
-            urlpath: API endpoint path
-            data: POST data
-
-        Returns:
-            Headers with signature
-        """
         if self.paper_mode:
             return {}
 
         nonce = str(int(time.time() * 1000))
-        data['nonce'] = nonce
+        data["nonce"] = nonce
 
         postdata = urllib.parse.urlencode(data)
-        encoded = (str(data['nonce']) + postdata).encode()
+        encoded = (str(data["nonce"]) + postdata).encode()
         message = urlpath.encode() + hashlib.sha256(encoded).digest()
         signature = hmac.new(
             base64.b64decode(self.primary_api_secret),
             message,
-            hashlib.sha512
+            hashlib.sha512,
         )
         sigdigest = base64.b64encode(signature.digest()).decode()
 
         return {
-            'API-Key': self.primary_api_key,
-            'API-Sign': sigdigest
+            "API-Key": self.primary_api_key,
+            "API-Sign": sigdigest,
         }
+
+    # ============================================
+    # PAPER PATH HELPERS
+    # ============================================
+
+    def _paper_side(self, order: OrderRequest):
+        side_str = str(order.side).upper().split(".")[-1]
+        return _pb_enums.OrderSide.BUY if side_str == "BUY" else _pb_enums.OrderSide.SELL
+
+    def _paper_order_type(self, order: OrderRequest):
+        ot_str = str(order.order_type).upper().split(".")[-1]
+        return _pb_enums.OrderType.LIMIT if ot_str in ("LIMIT", "POST_ONLY") else _pb_enums.OrderType.MARKET
+
+    def _sync_paper_reports(self) -> None:
+        """Synchronize paper broker execution reports into router status cache."""
+        if self._paper_broker is None:
+            return
+
+        reports = self._paper_broker.execution_reports
+        if self._paper_reports_index >= len(reports):
+            return
+
+        new_reports = reports[self._paper_reports_index:]
+        for report in new_reports:
+            client_id = report.client_id
+            status_str = str(report.status).upper()
+            mapped_status = "pending"
+            if "FULLY_FILLED" in status_str or status_str == "FILLED":
+                mapped_status = "filled"
+            elif "PARTIAL" in status_str:
+                mapped_status = "pending"
+            elif "CANCELLED" in status_str:
+                mapped_status = "cancelled"
+            elif "REJECTED" in status_str:
+                mapped_status = "rejected"
+            elif "EXPIRED" in status_str:
+                mapped_status = "expired"
+            elif "ACKNOWLEDGED" in status_str or "PENDING" in status_str or "REPLACED" in status_str:
+                mapped_status = "pending"
+
+            filled_qty = float(report.filled_quantity or 0)
+            filled_price = float(report.fill_price) if report.fill_price is not None else 0.0
+            remaining_qty = 0.0
+            if client_id in self._paper_broker.open_orders:
+                remaining_qty = float(self._paper_broker.open_orders[client_id].remaining_quantity)
+
+            self._order_status_cache[client_id] = OrderStatus(
+                order_id=client_id,
+                status=mapped_status,
+                filled_quantity=filled_qty,
+                filled_price=filled_price,
+                remaining_quantity=remaining_qty,
+                timestamp_ns=int(report.timestamp_ns),
+            )
+
+            if mapped_status == "filled":
+                self._pending_orders.pop(client_id, None)
+            elif mapped_status in {"cancelled", "expired", "rejected"}:
+                self._pending_orders.pop(client_id, None)
+
+        self._paper_reports_index = len(reports)
+
+    def _paper_mark_price(self, symbol: str) -> _Decimal:
+        if symbol in self._paper_last_mid_by_symbol:
+            return self._paper_last_mid_by_symbol[symbol]
+
+        fallback = self._get_simulated_price(symbol)
+        return _Decimal(str(fallback))
+
+    def _drive_paper_matching(self, order: OrderRequest, ts_ns: int) -> None:
+        if self._paper_broker is None:
+            return
+
+        mark_price = self._paper_mark_price(order.symbol)
+        self._paper_last_mid_by_symbol[order.symbol] = mark_price
+        self._paper_broker.process_matching(
+            current_ts_ns=ts_ns,
+            current_price=mark_price,
+            book_imbalance=0.0,
+            toxicity=0.0,
+        )
+        self._sync_paper_reports()
 
     # ============================================
     # ORDER SUBMISSION WITH POST-ONLY FLAG
     # ============================================
 
     def submit_order(self, order: OrderRequest) -> Optional[OrderFill]:
-        """
-        Submit order to exchange with post-only flag for maker fees.
-
-        Args:
-            order: Order request
-
-        Returns:
-            OrderFill if filled immediately, None if pending
-        """
+        """Submit order to exchange or sovereign paper broker."""
         if self.paper_mode:
             return self._submit_order_paper(order)
 
         try:
-            # Check if exchange is ghosting
-            latency = self.measure_latency()
             if not self._websocket_connected:
                 if self.rest_fallback_enabled:
-                    logger.warning(f"WebSocket unhealthy, using REST fallback for {order.id}")
+                    logger.warning("WebSocket unhealthy, using REST fallback for %s", order.id)
                     return self._submit_order_rest(order)
-                else:
-                    logger.error(f"WebSocket unhealthy and REST fallback disabled for {order.id}")
-                    return None
+                logger.error("WebSocket unhealthy and REST fallback disabled for %s", order.id)
+                return None
 
             if self.primary_exchange == "kraken":
                 return self._submit_order_kraken(order)
-            elif self.primary_exchange == "alpaca":
+            if self.primary_exchange == "alpaca":
                 return self._submit_order_alpaca(order)
-            else:
-                logger.error(f"Unsupported exchange: {self.primary_exchange}")
-                return None
 
+            logger.error("Unsupported exchange: %s", self.primary_exchange)
+            return None
         except Exception as e:
-            logger.error(f"Order submission failed: {e}")
+            logger.error("Order submission failed: %s", e)
             if self.rest_fallback_enabled:
                 return self._submit_order_rest(order)
             return None
 
     def _submit_order_paper(self, order: OrderRequest) -> Optional[OrderFill]:
-        """Simulate order submission in paper mode."""
-        logger.info(f"PAPER MODE: Submitting {order.side} order for {order.quantity} {order.symbol}")
+        """
+        Delegate paper execution to sovereign PaperBroker.
 
-        # Simulate fill for market orders
-        if order.order_type == "market":
-            fill = OrderFill(
-                order_id=order.id,
-                symbol=order.symbol,
-                side=order.side,
-                quantity=order.quantity,
-                price=self._get_simulated_price(order.symbol),
-                fee=order.quantity * 50000 * 0.0026,
-                fee_currency="USD",
-                timestamp=datetime.utcnow(),
-                status="filled",
-                latency_ms=self.measure_latency()
-            )
-            return fill
+        Truthful behavior:
+        - no fake immediate hardcoded fill
+        - live status and open-order state come from paper broker reports
+        - immediate match attempt is preserved for continuity, but result is broker-driven
+        """
+        if self._paper_broker is None:
+            logger.error("SovereignPaperBroker not initialized — paper_mode must be True at construction")
+            return None
 
-        # Limit order goes pending
+        pb_side = self._paper_side(order)
+        pb_order_type = self._paper_order_type(order)
+
+        ts_ns: int = getattr(order, "exchange_ts_ns", None) or now_ns()
+        receive_ns: int = getattr(order, "receive_ts_ns", None) or now_ns()
+
+        submit_price: Optional[_Decimal] = None
+        if pb_order_type == _pb_enums.OrderType.LIMIT and order.limit_price is not None:
+            submit_price = _Decimal(str(order.limit_price))
+
+        self._paper_broker.submit_order(
+            symbol=order.symbol,
+            side=pb_side,
+            order_type=pb_order_type,
+            quantity=_Decimal(str(order.quantity)),
+            price=submit_price,
+            ts_ns=ts_ns,
+            client_id=order.id,
+        )
+
         self._pending_orders[order.id] = order
-        return None
+        self._order_status_cache[order.id] = OrderStatus(
+            order_id=order.id,
+            status="pending",
+            timestamp_ns=ts_ns,
+        )
+
+        self._drive_paper_matching(order, ts_ns)
+
+        status = self._order_status_cache.get(order.id)
+        if status is None or status.status != "filled":
+            logger.info("PAPER MODE: order queued/pending %s %s %s", order.side, order.quantity, order.symbol)
+            return None
+
+        latency_ms = float(self._paper_broker.latency.get_current_latency_ns()) / 1_000_000
+        logger.info(
+            "PAPER MODE (sovereign): %s %s %s @ %.8f status=filled",
+            order.side,
+            status.filled_quantity,
+            order.symbol,
+            status.filled_price,
+        )
+
+        return OrderFill(
+            order_id=order.id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=status.filled_quantity,
+            price=status.filled_price,
+            fee=_Decimal("0"),
+            fee_currency="USD",
+            status=InternalOrderStatus.FILLED,
+            exchange_ts_ns=ts_ns,
+            receive_ts_ns=receive_ns,
+            latency_ms=latency_ms,
+        )
 
     def _submit_order_kraken(self, order: OrderRequest) -> Optional[OrderFill]:
-        """
-        Submit order to Kraken with post-only flag.
-
-        Args:
-            order: Order request
-
-        Returns:
-            OrderFill or None
-        """
         endpoint = self._endpoints["kraken"]["order"]
         url = f"{self._endpoints['kraken']['rest']}{endpoint}"
 
-        # Map order type
         order_type = "limit" if order.order_type == "limit" else "market"
-
-        # Build data payload
         data = {
             "pair": order.symbol.replace("/", ""),
             "type": order.side,
             "ordertype": order_type,
             "volume": str(order.quantity),
-            "oflags": "post"  # Post-only flag for maker fees
+            "oflags": "post"
         }
 
         if order.limit_price:
             data["price"] = str(order.limit_price)
 
-        # Generate signature
         headers = self._kraken_sign(endpoint, data)
 
         try:
             response = self._session.post(url, data=data, headers=headers, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
                 if result.get("error"):
-                    logger.error(f"Kraken order error: {result['error']}")
+                    logger.error("Kraken order error: %s", result["error"])
                     return None
 
-                # Parse transaction ID
                 txid = result.get("result", {}).get("txid", [])
                 if txid:
                     order_id = txid[0]
-                    logger.info(f"Kraken order submitted: {order_id}")
-
-                    # If market order, try to get fill
+                    logger.info("Kraken order submitted: %s", order_id)
                     if order.order_type == "market":
                         return self._get_order_fill(order_id, order)
-                    else:
-                        self._pending_orders[order.id] = order
-                        return None
+                    self._pending_orders[order.id] = order
+                    return None
 
-            logger.error(f"Kraken order failed: {response.status_code}")
+            logger.error("Kraken order failed: %s", response.status_code)
             return None
-
         except Exception as e:
-            logger.error(f"Kraken order exception: {e}")
+            logger.error("Kraken order exception: %s", e)
             return None
 
     def _submit_order_alpaca(self, order: OrderRequest) -> Optional[OrderFill]:
-        """
-        Submit order to Alpaca with post-only flag.
-
-        Args:
-            order: Order request
-
-        Returns:
-            OrderFill or None
-        """
         endpoint = self._endpoints["alpaca"]["order"]
         url = f"{self._endpoints['alpaca']['rest']}{endpoint}"
 
-        # Map order type
         order_type = "limit" if order.order_type == "limit" else "market"
-
         data = {
             "symbol": order.symbol,
             "qty": str(order.quantity),
@@ -437,77 +482,48 @@ class OrderRouter:
             "time_in_force": "day"
         }
 
-        # Post-only for limit orders
         if order.order_type == "limit":
             data["limit_price"] = str(order.limit_price)
             data["order_class"] = "simple"
-            # Alpaca uses "post_only" flag
             data["post_only"] = True
 
         try:
             response = self._session.post(url, json=data, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
                 order_id = result.get("id")
-                logger.info(f"Alpaca order submitted: {order_id}")
-
+                logger.info("Alpaca order submitted: %s", order_id)
                 if order.order_type == "market":
                     return self._get_order_fill(order_id, order)
-                else:
-                    self._pending_orders[order.id] = order
-                    return None
+                self._pending_orders[order.id] = order
+                return None
 
-            logger.error(f"Alpaca order failed: {response.status_code} - {response.text}")
+            logger.error("Alpaca order failed: %s - %s", response.status_code, response.text)
             return None
-
         except Exception as e:
-            logger.error(f"Alpaca order exception: {e}")
+            logger.error("Alpaca order exception: %s", e)
             return None
 
     def _submit_order_rest(self, order: OrderRequest) -> Optional[OrderFill]:
-        """
-        Submit order via REST API (fallback).
-
-        Args:
-            order: Order request
-
-        Returns:
-            OrderFill if successful
-        """
-        logger.info(f"REST fallback for order {order.id}")
-
+        logger.info("REST fallback for order %s", order.id)
         if self.primary_exchange == "kraken":
             return self._submit_order_kraken(order)
-        elif self.primary_exchange == "alpaca":
+        if self.primary_exchange == "alpaca":
             return self._submit_order_alpaca(order)
-        else:
-            return self._submit_order_paper(order)
+        return self._submit_order_paper(order)
 
     def _get_order_fill(self, order_id: str, order: OrderRequest) -> Optional[OrderFill]:
-        """
-        Get order fill details.
-
-        Args:
-            order_id: Exchange order ID
-            order: Original order request
-
-        Returns:
-            OrderFill or None
-        """
         try:
             if self.primary_exchange == "kraken":
                 return self._get_kraken_order_fill(order_id, order)
-            elif self.primary_exchange == "alpaca":
+            if self.primary_exchange == "alpaca":
                 return self._get_alpaca_order_fill(order_id, order)
-            else:
-                return None
+            return None
         except Exception as e:
-            logger.error(f"Failed to get order fill: {e}")
+            logger.error("Failed to get order fill: %s", e)
             return None
 
     def _get_kraken_order_fill(self, order_id: str, order: OrderRequest) -> Optional[OrderFill]:
-        """Get Kraken order fill details."""
         endpoint = self._endpoints["kraken"]["status"]
         url = f"{self._endpoints['kraken']['rest']}{endpoint}"
 
@@ -516,7 +532,6 @@ class OrderRouter:
 
         try:
             response = self._session.post(url, data=data, headers=headers, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
                 if result.get("error"):
@@ -524,6 +539,7 @@ class OrderRouter:
 
                 order_data = result.get("result", {}).get(order_id, {})
                 if order_data.get("status") == "closed":
+                    ts_ns = now_ns()
                     return OrderFill(
                         order_id=order.id,
                         symbol=order.symbol,
@@ -532,28 +548,26 @@ class OrderRouter:
                         price=float(order_data.get("price", 0)),
                         fee=float(order_data.get("fee", 0)),
                         fee_currency=order_data.get("fee_currency", "USD"),
-                        timestamp=datetime.utcnow(),
-                        status="filled",
-                        latency_ms=self.measure_latency()
+                        status=InternalOrderStatus.FILLED,
+                        exchange_ts_ns=ts_ns,
+                        receive_ts_ns=ts_ns,
+                        latency_ms=self.measure_latency(),
                     )
-
             return None
-
         except Exception as e:
-            logger.error(f"Failed to get Kraken order fill: {e}")
+            logger.error("Failed to get Kraken order fill: %s", e)
             return None
 
     def _get_alpaca_order_fill(self, order_id: str, order: OrderRequest) -> Optional[OrderFill]:
-        """Get Alpaca order fill details."""
         endpoint = self._endpoints["alpaca"]["status"].replace("{order_id}", order_id)
         url = f"{self._endpoints['alpaca']['rest']}{endpoint}"
 
         try:
             response = self._session.get(url, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
                 if result.get("status") == "filled":
+                    ts_ns = now_ns()
                     return OrderFill(
                         order_id=order.id,
                         symbol=order.symbol,
@@ -562,22 +576,22 @@ class OrderRouter:
                         price=float(result.get("filled_avg_price", 0)),
                         fee=float(result.get("fees", 0)),
                         fee_currency="USD",
-                        timestamp=datetime.utcnow(),
-                        status="filled",
-                        latency_ms=self.measure_latency()
+                        status=InternalOrderStatus.FILLED,
+                        exchange_ts_ns=ts_ns,
+                        receive_ts_ns=ts_ns,
+                        latency_ms=self.measure_latency(),
                     )
-
             return None
-
         except Exception as e:
-            logger.error(f"Failed to get Alpaca order fill: {e}")
+            logger.error("Failed to get Alpaca order fill: %s", e)
             return None
 
     def _get_simulated_price(self, symbol: str) -> float:
-        """Get simulated current price (placeholder)."""
-        if "BTC" in symbol:
+        if symbol in self._paper_last_mid_by_symbol:
+            return float(self._paper_last_mid_by_symbol[symbol])
+        if "BTC" in symbol or "XBT" in symbol:
             return 50000.0
-        elif "ETH" in symbol:
+        if "ETH" in symbol:
             return 3000.0
         return 100.0
 
@@ -586,46 +600,44 @@ class OrderRouter:
     # ============================================
 
     def cancel_order(self, order_id: str) -> bool:
-        """
-        Cancel order with PCV.
-
-        Args:
-            order_id: Order ID to cancel
-
-        Returns:
-            True if cancel request accepted
-        """
         if self.paper_mode:
             return self._cancel_order_paper(order_id)
 
         try:
-            # Check if exchange is ghosting
             if not self._websocket_connected and self.rest_fallback_enabled:
                 return self._cancel_order_rest(order_id)
 
             if self.primary_exchange == "kraken":
                 return self._cancel_order_kraken(order_id)
-            elif self.primary_exchange == "alpaca":
+            if self.primary_exchange == "alpaca":
                 return self._cancel_order_alpaca(order_id)
-            else:
-                return False
-
+            return False
         except Exception as e:
-            logger.error(f"Order cancellation failed: {e}")
+            logger.error("Order cancellation failed: %s", e)
             if self.rest_fallback_enabled:
                 return self._cancel_order_rest(order_id)
             return False
 
     def _cancel_order_paper(self, order_id: str) -> bool:
-        """Simulate order cancellation in paper mode."""
-        logger.info(f"PAPER MODE: Cancelling order {order_id}")
-        with self._lock if hasattr(self, '_lock') else self._null_context():
-            if order_id in self._pending_orders:
-                del self._pending_orders[order_id]
+        """Cancel paper order through sovereign paper broker when available."""
+        logger.info("PAPER MODE: Cancelling order %s", order_id)
+        self._pending_orders.pop(order_id, None)
+
+        if self._paper_broker and order_id in self._paper_broker.open_orders:
+            try:
+                self._paper_broker.cancel_order(order_id, now_ns())
+                self._sync_paper_reports()
+            except Exception as exc:
+                logger.debug("Paper broker cancel delegation failed for %s: %s", order_id, exc)
+
+        self._order_status_cache[order_id] = OrderStatus(
+            order_id=order_id,
+            status="cancelled",
+            timestamp_ns=now_ns(),
+        )
         return True
 
     def _cancel_order_kraken(self, order_id: str) -> bool:
-        """Cancel Kraken order."""
         endpoint = self._endpoints["kraken"]["cancel"]
         url = f"{self._endpoints['kraken']['rest']}{endpoint}"
 
@@ -634,102 +646,74 @@ class OrderRouter:
 
         try:
             response = self._session.post(url, data=data, headers=headers, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
                 if result.get("error"):
-                    logger.error(f"Kraken cancel error: {result['error']}")
+                    logger.error("Kraken cancel error: %s", result["error"])
                     return False
                 return True
-
             return False
-
         except Exception as e:
-            logger.error(f"Kraken cancel exception: {e}")
+            logger.error("Kraken cancel exception: %s", e)
             return False
 
     def _cancel_order_alpaca(self, order_id: str) -> bool:
-        """Cancel Alpaca order."""
         endpoint = self._endpoints["alpaca"]["cancel"].replace("{order_id}", order_id)
         url = f"{self._endpoints['alpaca']['rest']}{endpoint}"
 
         try:
             response = self._session.delete(url, timeout=5.0)
-
             if response.status_code in [200, 204]:
                 return True
-
-            logger.error(f"Alpaca cancel failed: {response.status_code}")
+            logger.error("Alpaca cancel failed: %s", response.status_code)
             return False
-
         except Exception as e:
-            logger.error(f"Alpaca cancel exception: {e}")
+            logger.error("Alpaca cancel exception: %s", e)
             return False
 
     def _cancel_order_rest(self, order_id: str) -> bool:
-        """Cancel order via REST API (fallback)."""
-        logger.info(f"REST cancellation for order {order_id}")
-
+        logger.info("REST cancellation for order %s", order_id)
         if self.primary_exchange == "kraken":
             return self._cancel_order_kraken(order_id)
-        elif self.primary_exchange == "alpaca":
+        if self.primary_exchange == "alpaca":
             return self._cancel_order_alpaca(order_id)
-        else:
-            return self._cancel_order_paper(order_id)
+        return self._cancel_order_paper(order_id)
 
     def get_order_status(self, order_id: str) -> str:
-        """
-        Get order status with PCV verification.
+        """Get order status with coherent paper/live fallback."""
+        if self.paper_mode:
+            self._sync_paper_reports()
 
-        Args:
-            order_id: Order ID
-
-        Returns:
-            Order status string
-        """
-        # Check cache first
         if order_id in self._order_status_cache:
             cached = self._order_status_cache[order_id]
-            if cached.timestamp and (datetime.utcnow() - cached.timestamp).total_seconds() < 1.0:
+            age_ns = max(0, now_ns() - cached.timestamp_ns)
+            if cached.timestamp_ns > 0 and age_ns < 1_000_000_000:
                 return cached.status
 
-        # Query exchange
         status = self._query_order_status(order_id)
-
-        # Update cache
         self._order_status_cache[order_id] = OrderStatus(
             order_id=order_id,
             status=status,
-            timestamp=datetime.utcnow()
+            timestamp_ns=now_ns(),
         )
-
         return status
 
     def _query_order_status(self, order_id: str) -> str:
-        """
-        Query exchange for order status.
-
-        Args:
-            order_id: Order ID
-
-        Returns:
-            Order status
-        """
         if self.paper_mode:
-            # In paper mode, check pending orders
+            self._sync_paper_reports()
+            if order_id in self._order_status_cache:
+                return self._order_status_cache[order_id].status
             if order_id in self._pending_orders:
                 return "pending"
             return "cancelled"
 
         if self.primary_exchange == "kraken":
             return self._query_kraken_order_status(order_id)
-        elif self.primary_exchange == "alpaca":
+        if self.primary_exchange == "alpaca":
             return self._query_alpaca_order_status(order_id)
-
         return "unknown"
 
     def _query_kraken_order_status(self, order_id: str) -> str:
-        """Query Kraken order status."""
         endpoint = self._endpoints["kraken"]["status"]
         url = f"{self._endpoints['kraken']['rest']}{endpoint}"
 
@@ -738,7 +722,6 @@ class OrderRouter:
 
         try:
             response = self._session.post(url, data=data, headers=headers, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
                 if result.get("error"):
@@ -746,68 +729,47 @@ class OrderRouter:
 
                 order_data = result.get("result", {}).get(order_id, {})
                 status = order_data.get("status", "unknown")
-
-                # Map Kraken status
                 if status == "closed":
                     return "filled"
-                elif status == "cancelled":
+                if status == "cancelled":
                     return "cancelled"
-                elif status == "expired":
+                if status == "expired":
                     return "expired"
-                elif status == "rejected":
+                if status == "rejected":
                     return "rejected"
-                else:
-                    return "pending"
-
+                return "pending"
             return "unknown"
-
         except Exception as e:
-            logger.error(f"Failed to query Kraken order status: {e}")
+            logger.error("Failed to query Kraken order status: %s", e)
             return "unknown"
 
     def _query_alpaca_order_status(self, order_id: str) -> str:
-        """Query Alpaca order status."""
         endpoint = self._endpoints["alpaca"]["status"].replace("{order_id}", order_id)
         url = f"{self._endpoints['alpaca']['rest']}{endpoint}"
 
         try:
             response = self._session.get(url, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
-                status = result.get("status", "unknown")
-                return status
-
+                return result.get("status", "unknown")
             return "unknown"
-
         except Exception as e:
-            logger.error(f"Failed to query Alpaca order status: {e}")
+            logger.error("Failed to query Alpaca order status: %s", e)
             return "unknown"
 
     def verify_cancellation(self, order_id: str) -> bool:
-        """
-        Verify order is cancelled (PCV loop).
-
-        Args:
-            order_id: Order ID
-
-        Returns:
-            True if confirmed cancelled
-        """
-        for attempt in range(self.pcv_max_attempts):
+        for _attempt in range(self.pcv_max_attempts):
             status = self.get_order_status(order_id)
             if status in ["cancelled", "expired", "rejected"]:
-                logger.info(f"PCV confirmed: Order {order_id} is {status}")
-                with self._lock if hasattr(self, '_lock') else self._null_context():
-                    if order_id in self._pending_orders:
-                        del self._pending_orders[order_id]
+                logger.info("PCV confirmed: Order %s is %s", order_id, status)
+                self._pending_orders.pop(order_id, None)
                 return True
             if status == "filled":
-                logger.warning(f"PCV: Order {order_id} filled before cancellation")
+                logger.warning("PCV: Order %s filled before cancellation", order_id)
                 return False
             time.sleep(self.pcv_retry_delay_sec)
 
-        logger.error(f"PCV failed: Order {order_id} still pending after {self.pcv_max_attempts} attempts")
+        logger.error("PCV failed: Order %s still pending after %d attempts", order_id, self.pcv_max_attempts)
         return False
 
     # ============================================
@@ -815,15 +777,8 @@ class OrderRouter:
     # ============================================
 
     def close_all_positions(self) -> bool:
-        """
-        Emergency close all positions via REST API.
-
-        Returns:
-            True if all positions closed
-        """
-        logger.critical("EMERGENCY: Closing all positions via REST")
-
-        # Get all open positions
+        """Emergency close all positions via REST API or sovereign paper broker state."""
+        logger.critical("EMERGENCY: Closing all positions via REST/paper path")
         positions = self._get_open_positions()
 
         if not positions:
@@ -833,47 +788,54 @@ class OrderRouter:
         success = True
         for position in positions:
             try:
-                # Create market order to close position
+                ts_ns = now_ns()
                 close_order = OrderRequest(
-                    id=f"close_{position['symbol']}_{int(time.time()*1000)}",
-                    symbol=position['symbol'],
-                    side="sell" if position['side'] == "buy" else "buy",
-                    quantity=position['quantity'],
+                    id=f"close_{position['symbol']}_{ts_ns}",
+                    symbol=position["symbol"],
+                    side="sell" if position["side"] == "buy" else "buy",
+                    quantity=position["quantity"],
                     order_type="market",
-                    strategy="emergency",
-                    confidence=1.0
+                    strategy=SleeveType.HEDGING_FLOW,
+                    confidence=1.0,
+                    exchange_ts_ns=ts_ns,
+                    receive_ts_ns=ts_ns,
+                    metadata={"emergency_close": True},
                 )
                 fill = self._submit_order_rest(close_order)
                 if fill:
-                    logger.info(f"Closed position {position['symbol']}: {position['quantity']} @ {fill.price:.2f}")
+                    logger.info("Closed position %s: %s @ %s", position["symbol"], position["quantity"], fill.price)
                 else:
-                    logger.error(f"Failed to close position {position['symbol']}")
+                    logger.error("Failed to close position %s", position["symbol"])
                     success = False
             except Exception as e:
-                logger.error(f"Error closing position {position['symbol']}: {e}")
+                logger.error("Error closing position %s: %s", position["symbol"], e)
                 success = False
 
         return success
 
     def _get_open_positions(self) -> List[Dict[str, Any]]:
-        """
-        Get open positions from exchange.
-
-        Returns:
-            List of open positions
-        """
         if self.paper_mode:
-            # In paper mode, return empty list
-            return []
+            if self._paper_broker is None:
+                return []
+            positions = []
+            for symbol, pos in self._paper_broker.positions.items():
+                if pos.quantity != _Decimal("0"):
+                    side = "buy" if pos.quantity > _Decimal("0") else "sell"
+                    positions.append({
+                        "symbol": symbol,
+                        "side": side,
+                        "quantity": abs(pos.quantity),
+                        "order_id": f"paper_{symbol}",
+                    })
+            return positions
 
         if self.primary_exchange == "kraken":
             return self._get_kraken_open_positions()
-        elif self.primary_exchange == "alpaca":
+        if self.primary_exchange == "alpaca":
             return self._get_alpaca_open_positions()
         return []
 
     def _get_kraken_open_positions(self) -> List[Dict[str, Any]]:
-        """Get Kraken open positions."""
         endpoint = self._endpoints["kraken"]["open_orders"]
         url = f"{self._endpoints['kraken']['rest']}{endpoint}"
 
@@ -882,7 +844,6 @@ class OrderRouter:
 
         try:
             response = self._session.post(url, data=data, headers=headers, timeout=5.0)
-
             if response.status_code == 200:
                 result = response.json()
                 if result.get("error"):
@@ -898,21 +859,17 @@ class OrderRouter:
                         "order_id": order_id
                     })
                 return positions
-
             return []
-
         except Exception as e:
-            logger.error(f"Failed to get Kraken open positions: {e}")
+            logger.error("Failed to get Kraken open positions: %s", e)
             return []
 
     def _get_alpaca_open_positions(self) -> List[Dict[str, Any]]:
-        """Get Alpaca open positions."""
         endpoint = self._endpoints["alpaca"]["open_orders"]
         url = f"{self._endpoints['alpaca']['rest']}{endpoint}"
 
         try:
             response = self._session.get(url, timeout=5.0)
-
             if response.status_code == 200:
                 orders = response.json()
                 positions = []
@@ -925,11 +882,9 @@ class OrderRouter:
                             "order_id": order.get("id", "")
                         })
                 return positions
-
             return []
-
         except Exception as e:
-            logger.error(f"Failed to get Alpaca open positions: {e}")
+            logger.error("Failed to get Alpaca open positions: %s", e)
             return []
 
     # ============================================
@@ -937,28 +892,15 @@ class OrderRouter:
     # ============================================
 
     def get_mid_price(self, symbol: str) -> float:
-        """
-        Get current mid price for symbol.
-
-        Args:
-            symbol: Trading symbol
-
-        Returns:
-            Mid price
-        """
         if self.paper_mode:
             return self._get_simulated_price(symbol)
-
-        # In production, would query order book
         return self._get_simulated_price(symbol)
 
-    def get_ghost_status(self) -> Dict[str, Any]:
-        """
-        Get ghost detection status.
+    def get_actual_positions(self) -> List[Dict[str, Any]]:
+        """Compatibility helper used by execution emergency path."""
+        return self._get_open_positions()
 
-        Returns:
-            Ghost status dictionary
-        """
+    def get_ghost_status(self) -> Dict[str, Any]:
         return {
             "websocket_connected": self._websocket_connected,
             "primary_exchange": self.primary_exchange,
@@ -967,14 +909,7 @@ class OrderRouter:
             "latency_threshold_ms": self.latency_threshold_ms,
             "current_latency_ms": self.measure_latency(),
             "websocket_rtt_ms": self.get_websocket_rtt_ms(),
-            "paper_mode": self.paper_mode
+            "paper_mode": self.paper_mode,
+            "pending_orders_count": len(self._pending_orders),
+            "paper_status_cache_size": len(self._order_status_cache) if self.paper_mode else 0,
         }
-
-    def _null_context(self):
-        """Null context manager."""
-        class NullContext:
-            def __enter__(self):
-                return self
-            def __exit__(self, *args):
-                pass
-        return NullContext()

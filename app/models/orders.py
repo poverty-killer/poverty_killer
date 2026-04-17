@@ -13,7 +13,7 @@ will be updated in Bundle 3 to import from this module instead of the tombstone.
 """
 
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator

@@ -1,83 +1,86 @@
-﻿"""
+"""
 Execution Engine - The "Body" of the Poverty Killer
-SOVEREIGN GRADE - Final Version
-HARDENED with:
-- FIRE-AND-FORGET Emergency Liquidation using NON-BLOCKING ThreadPoolExecutor
-- Signal TTL (500ms) - rejects signals older than 500ms
-- Price Sanity Check - rejects if price moved >2% while in queue
-- Regime Re-validation - checks if regime changed during queue
-- Full risk guard integration
-- Maker fee priority in Attack Mode
+SOVEREIGN GRADE - Execution-layer bounded hardening pass
+
+This module is the active execution body on the live spine:
+    main.py:SovereignHeartbeat -> MainLoop -> ExecutionEngine -> OrderRouter
+
+This hardening pass preserves the existing execution architecture while removing
+execution-side dishonesty from the active path:
+- process_events() is now a truthful compatibility surface, not fake work
+- wall-clock datetimes are removed from active execution decisions
+- queue TTL / recalibration timing now uses canonical now_ns()
+- pending-order age checks now use authoritative order timestamps when available
+- remaining wall-clock behavior is limited to sleep-based thread pacing only
+
+Preserved live responsibilities:
+- Signal queueing and validation
+- Queue TTL rejection
+- Price sanity rejection
+- Regime drift rejection
+- Data-health gating
+- Fire-and-forget emergency liquidation
+- Normal-mode PCV cancellation
+- Zombie sweep / monitor / executor background loops
 """
 
-import logging
-import time
-import threading
-import queue
-import signal
-import sys
-from typing import Optional, Dict, Any, List, Tuple
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
 import concurrent.futures
+import logging
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
-from app.models import OrderRequest, OrderFill, StrategySignal
-from app.risk.guard import HybridRiskGuard
+from app.brain.data_validator import DataContinuityValidator
+from app.commander import Commander
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
-from app.commander import Commander
-from app.brain.data_validator import DataContinuityValidator
+from app.models import OrderFill, OrderRequest, StrategySignal
+from app.risk.guard import HybridRiskGuard
+from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
+NS_PER_SECOND = 1_000_000_000
+NS_PER_MS = 1_000_000
 
-@dataclass
+
+@dataclass(slots=True)
 class ExecutionState:
     """Current execution state."""
     is_running: bool = False
     is_in_safe_mode: bool = False
     is_in_recalibration: bool = False
-    recalibration_until: Optional[datetime] = None
+    recalibration_until_ns: int = 0
     last_latency_ms: float = 0.0
     pending_orders: Dict[str, OrderRequest] = field(default_factory=dict)
     filled_orders: List[OrderFill] = field(default_factory=list)
-    last_health_check: Optional[datetime] = None
+    last_health_check_ns: int = 0
     last_equity: float = 0.0
     last_regime: str = "unknown"
     is_emergency_liquidation_in_progress: bool = False
 
-    __slots__ = ("is_running", "is_in_safe_mode", "is_in_recalibration",
-                 "recalibration_until", "last_latency_ms", "pending_orders",
-                 "filled_orders", "last_health_check", "last_equity", "last_regime",
-                 "is_emergency_liquidation_in_progress")
 
-
-@dataclass
+@dataclass(slots=True)
 class QueuedSignal:
-    """Signal stored in execution queue with metadata."""
+    """Signal stored in execution queue with deterministic metadata."""
     signal: StrategySignal
     is_attack: bool
-    enqueue_time: datetime
+    enqueue_time_ns: int
     enqueue_price: float
     enqueue_regime: str
-
-    __slots__ = ("signal", "is_attack", "enqueue_time", "enqueue_price", "enqueue_regime")
 
 
 class ExecutionEngine:
     """
     Tactical Execution Engine - Sovereign Grade.
-    
-    Features:
-    - Signal TTL (500ms) - rejects stale signals
-    - Price Sanity Check - rejects if price moved >2% while in queue
-    - Regime Re-validation - checks if regime changed during queue
-    - FIRE-AND-FORGET Emergency Liquidation - NON-BLOCKING ThreadPoolExecutor
-    - Velocity-of-Loss Fuse (4% in 60 seconds = emergency shutdown)
-    - Post-Cancellation Verification (PCV) - normal mode only
-    - Zombie Order Sweeper (auto-cancel stuck orders)
-    - Lag Monitoring (auto-safe mode on high latency)
-    - Maker fee priority in Attack Mode
+
+    Hardening status for this bundle:
+    - process_events(): truthful compatibility surface
+    - active-path timing: canonical now_ns()
+    - queue TTL / recalibration timing: replay-safe relative to canonical time source
+    - sleep() remains only as non-authoritative thread pacing
     """
 
     def __init__(
@@ -96,24 +99,6 @@ class ExecutionEngine:
         maker_offset_pct: float = 0.001,
         emergency_cancel_workers: int = 10
     ):
-        """
-        Initialize execution engine.
-
-        Args:
-            commander: Global commander for attack mode
-            risk_guard: Hybrid risk guard for safety checks
-            order_router: Order router for exchange communication
-            masking_layer: Stochastic masking for execution camouflage
-            data_validator: Data continuity validator for market health
-            signal_ttl_ms: Max time signal can stay in queue (milliseconds)
-            price_sanity_threshold_pct: Max price movement before rejecting signal
-            zombie_sweep_interval_sec: How often to check for zombie orders
-            max_pending_age_sec: Max age for pending orders before cancellation
-            lag_threshold_ms: Latency threshold before auto-safe mode
-            recalibration_pause_sec: How long to pause after floor breach
-            maker_offset_pct: Offset from mid price for maker orders (0.1%)
-            emergency_cancel_workers: Max threads for emergency cancel pool
-        """
         self.commander = commander
         self.risk_guard = risk_guard
         self.order_router = order_router
@@ -129,6 +114,10 @@ class ExecutionEngine:
         self.maker_offset_pct = maker_offset_pct
         self.emergency_cancel_workers = emergency_cancel_workers
 
+        self._signal_ttl_ns = int(max(0.0, signal_ttl_ms) * NS_PER_MS)
+        self._recalibration_pause_ns = int(max(0.0, recalibration_pause_sec) * NS_PER_SECOND)
+        self._max_pending_age_ns = int(max(0.0, max_pending_age_sec) * NS_PER_SECOND)
+
         self._state = ExecutionState()
         self._execution_queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
@@ -137,29 +126,31 @@ class ExecutionEngine:
         self._executor_thread: Optional[threading.Thread] = None
         self._emergency_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
-        # Register callbacks with risk guard
         self.risk_guard.register_recalibrate_callback(self._on_recalibration)
         self.risk_guard.register_emergency_callback(self._on_emergency)
         self.risk_guard.register_zombie_callback(self._on_zombie_detected)
         self.risk_guard.register_lag_callback(self._on_lag_detected)
         self.risk_guard.register_vol_fuse_callback(self._on_vol_fuse)
 
-        logger.info(f"ExecutionEngine initialized: signal_ttl={signal_ttl_ms}ms, "
-                   f"price_sanity={price_sanity_threshold_pct:.1%}, "
-                   f"emergency_workers={emergency_cancel_workers}, "
-                   f"maker_offset={maker_offset_pct:.2%}")
+        logger.info(
+            "ExecutionEngine initialized: signal_ttl=%sms, price_sanity=%.1f%%, emergency_workers=%d, maker_offset=%.2f%%",
+            signal_ttl_ms,
+            price_sanity_threshold_pct * 100.0,
+            emergency_cancel_workers,
+            maker_offset_pct * 100.0,
+        )
 
     # ============================================
     # PUBLIC METHODS
     # ============================================
 
     def start(self) -> None:
-        """Start execution engine threads."""
+        """Start execution engine background threads."""
         if self._state.is_running:
             return
 
         self._state.is_running = True
-        self._state.last_health_check = datetime.utcnow()
+        self._state.last_health_check_ns = now_ns()
 
         self._sweeper_thread = threading.Thread(target=self._zombie_sweeper_loop, daemon=True)
         self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
@@ -178,8 +169,20 @@ class ExecutionEngine:
             self._emergency_executor.shutdown(wait=False)
         logger.info("ExecutionEngine stopped")
 
+    def process_events(self) -> None:
+        """
+        Truthful compatibility surface.
+
+        The live engine processes queued execution asynchronously in
+        _executor_loop() after start(). There is no separate synchronous event
+        pump to run here. This method intentionally performs no execution work
+        and exists only so higher-level heartbeat/support code can call it
+        without introducing a second execution authority.
+        """
+        return
+
     def update_equity(self, current_equity: float) -> None:
-        """Update current equity for VoL tracking."""
+        """Update current equity for risk tracking."""
         with self._lock:
             self._state.last_equity = current_equity
         self.risk_guard.update_equity_history(current_equity)
@@ -191,25 +194,20 @@ class ExecutionEngine:
 
     def submit_signal(self, signal: StrategySignal, current_price: float, is_attack: bool) -> bool:
         """
-        Submit a trading signal for execution with TTL and sanity checks.
+        Submit a trading signal for execution.
 
-        Args:
-            signal: Strategy signal to execute
-            current_price: Current market price at submission time
-            is_attack: Whether in attack mode
-
-        Returns:
-            True if accepted, False if rejected
+        Queue admission uses canonical now_ns() and explicit state gating.
         """
         if not self._state.is_running:
             return False
 
+        current_ns = now_ns()
+
         if self._state.is_in_recalibration:
-            if self._state.recalibration_until and datetime.utcnow() < self._state.recalibration_until:
+            if self._state.recalibration_until_ns > 0 and current_ns < self._state.recalibration_until_ns:
                 return False
-            else:
-                self._state.is_in_recalibration = False
-                self._state.recalibration_until = None
+            self._state.is_in_recalibration = False
+            self._state.recalibration_until_ns = 0
 
         if self._state.is_in_safe_mode:
             return False
@@ -230,9 +228,9 @@ class ExecutionEngine:
         queued_signal = QueuedSignal(
             signal=signal,
             is_attack=is_attack,
-            enqueue_time=datetime.utcnow(),
+            enqueue_time_ns=current_ns,
             enqueue_price=current_price,
-            enqueue_regime=self._state.last_regime
+            enqueue_regime=self._state.last_regime,
         )
 
         self._execution_queue.put(queued_signal)
@@ -245,14 +243,15 @@ class ExecutionEngine:
                 "is_running": self._state.is_running,
                 "is_in_safe_mode": self._state.is_in_safe_mode,
                 "is_in_recalibration": self._state.is_in_recalibration,
-                "recalibration_until": self._state.recalibration_until.isoformat() if self._state.recalibration_until else None,
+                "recalibration_until_ns": self._state.recalibration_until_ns,
                 "last_latency_ms": self._state.last_latency_ms,
                 "pending_orders_count": len(self._state.pending_orders),
-                "pending_orders_value": sum(o.quantity * (o.limit_price or 0) for o in self._state.pending_orders.values()),
+                "pending_orders_value": sum(float(o.quantity) * float(o.limit_price or 0) for o in self._state.pending_orders.values()),
                 "filled_orders_count": len(self._state.filled_orders),
                 "execution_queue_size": self._execution_queue.qsize(),
                 "last_equity": self._state.last_equity,
-                "last_regime": self._state.last_regime
+                "last_regime": self._state.last_regime,
+                "last_health_check_ns": self._state.last_health_check_ns,
             }
 
     # ============================================
@@ -268,14 +267,19 @@ class ExecutionEngine:
         return gross_ev - total_costs
 
     def _validate_signal_before_execution(self, queued: QueuedSignal, current_price: float) -> Tuple[bool, str]:
-        """Validate signal before execution with TTL, price sanity, and regime checks."""
-        age_ms = (datetime.utcnow() - queued.enqueue_time).total_seconds() * 1000
-        if age_ms > self.signal_ttl_ms:
-            return False, f"stale: {age_ms:.1f}ms"
+        """Validate queued signal with TTL, price sanity, and regime checks."""
+        current_ns = now_ns()
+        age_ns = max(0, current_ns - queued.enqueue_time_ns)
+        age_ms = age_ns / NS_PER_MS
+        if age_ns > self._signal_ttl_ns:
+            return False, f"stale:{age_ms:.1f}ms"
+
+        if queued.enqueue_price <= 0.0:
+            return False, "invalid_enqueue_price"
 
         price_change_pct = abs(current_price - queued.enqueue_price) / queued.enqueue_price
         if price_change_pct > self.price_sanity_threshold_pct:
-            return False, f"price_moved: {price_change_pct:.2%}"
+            return False, f"price_moved:{price_change_pct:.2%}"
 
         if self._state.last_regime and queued.enqueue_regime:
             if self._state.last_regime != queued.enqueue_regime:
@@ -284,7 +288,7 @@ class ExecutionEngine:
                     (queued.enqueue_regime == "crisis" and self._state.last_regime == "trending")
                 )
                 if severe:
-                    return False, f"regime_changed: {queued.enqueue_regime} -> {self._state.last_regime}"
+                    return False, f"regime_changed:{queued.enqueue_regime}->{self._state.last_regime}"
 
         if self.data_validator and not self.data_validator.is_data_healthy(queued.signal.symbol):
             return False, "data_unhealthy"
@@ -292,20 +296,21 @@ class ExecutionEngine:
         return True, "ok"
 
     def _execute_signal(self, queued: QueuedSignal) -> None:
-        """Execute a trading signal after validation."""
+        """Execute a trading signal after sovereign validation."""
         signal = queued.signal
         is_attack = queued.is_attack
         current_price = self.order_router.get_mid_price(signal.symbol)
 
         is_valid, reason = self._validate_signal_before_execution(queued, current_price)
         if not is_valid:
-            logger.warning(f"Signal rejected: {signal.id} - {reason}")
+            logger.warning("Signal rejected: %s/%s - %s", signal.strategy, signal.symbol, reason)
             return
 
         masked = self.masking_layer.mask_order(signal.quantity)
 
+        current_ns = now_ns()
         order = OrderRequest(
-            id=f"{signal.strategy}_{signal.symbol}_{int(time.time() * 1000)}",
+            id=f"{signal.strategy}_{signal.symbol}_{signal.exchange_ts_ns}",
             symbol=signal.symbol,
             side=signal.side,
             quantity=masked.masked_size,
@@ -313,7 +318,14 @@ class ExecutionEngine:
             limit_price=signal.price,
             strategy=signal.strategy,
             confidence=signal.confidence,
-            metadata={"original_size": signal.quantity, "masked_size": masked.masked_size, "is_attack": is_attack}
+            exchange_ts_ns=signal.exchange_ts_ns,
+            receive_ts_ns=current_ns,
+            metadata={
+                "original_size": signal.quantity,
+                "masked_size": masked.masked_size,
+                "is_attack": is_attack,
+                "execution_enqueue_time_ns": queued.enqueue_time_ns,
+            },
         )
 
         if order.order_type == "limit" and current_price > 0:
@@ -332,20 +344,20 @@ class ExecutionEngine:
                 with self._lock:
                     self._state.pending_orders[order.id] = order
         except Exception as e:
-            logger.error(f"Order submission failed: {e}")
+            logger.error("Order submission failed: %s", e)
 
     # ============================================
     # PCV FOR NORMAL OPERATIONS
     # ============================================
 
     def _cancel_pending_order_with_pcv(self, order_id: str) -> bool:
-        """Cancel a pending order with PCV. ONLY for normal operations."""
+        """Cancel a pending order with PCV. Normal operations only."""
         try:
             cancel_success = self.order_router.cancel_order(order_id)
             if not cancel_success:
                 return False
 
-            for attempt in range(5):
+            for _attempt in range(5):
                 status = self.order_router.get_order_status(order_id)
                 if status in ["cancelled", "expired", "rejected"]:
                     with self._lock:
@@ -357,7 +369,7 @@ class ExecutionEngine:
                 time.sleep(0.5)
             return False
         except Exception as e:
-            logger.error(f"PCV cancellation failed: {e}")
+            logger.error("PCV cancellation failed: %s", e)
             return False
 
     # ============================================
@@ -366,9 +378,7 @@ class ExecutionEngine:
 
     def _emergency_liquidate_all(self) -> None:
         """
-        EMERGENCY LIQUIDATION - FIRE-AND-FORGET SEQUENCE.
-        NON-BLOCKING ThreadPoolExecutor with shutdown(wait=False).
-        No sequential sleep. No PCV. Instantly flatten the portfolio.
+        Emergency liquidation - fire-and-forget sequence.
         """
         if self._state.is_emergency_liquidation_in_progress:
             logger.warning("Emergency liquidation already in progress")
@@ -379,32 +389,26 @@ class ExecutionEngine:
             order_ids = list(self._state.pending_orders.keys())
             self._state.pending_orders.clear()
 
-        logger.critical(f"EMERGENCY LIQUIDATION: FIRE-AND-FORGET for {len(order_ids)} orders")
+        logger.critical("EMERGENCY LIQUIDATION: FIRE-AND-FORGET for %d orders", len(order_ids))
 
-        # Step 1: Fire-and-Forget cancellations using NON-BLOCKING ThreadPoolExecutor
         if order_ids:
             max_workers = min(self.emergency_cancel_workers, len(order_ids))
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-            
             for order_id in order_ids:
                 executor.submit(self._emergency_cancel_order, order_id)
-            
-            # CRITICAL: wait=False ensures the main thread does NOT block
             executor.shutdown(wait=False)
             self._emergency_executor = executor
 
-        # Step 2: Instantly flatten positions (no waiting for cancel threads)
         try:
             self.order_router.close_all_positions()
             logger.critical("EMERGENCY LIQUIDATION: MARKET SELL COMMANDS ISSUED")
         except Exception as e:
-            logger.error(f"Emergency liquidation execution failed: {e}")
+            logger.error("Emergency liquidation execution failed: %s", e)
 
-        # Step 3: Quick non-blocking check
         try:
             remaining = self.order_router.get_actual_positions()
             if remaining:
-                logger.critical(f"WARNING: {len(remaining)} positions remain after liquidation")
+                logger.critical("WARNING: %d positions remain after liquidation", len(remaining))
         except Exception:
             pass
 
@@ -419,10 +423,10 @@ class ExecutionEngine:
         try:
             self.order_router.cancel_order(order_id)
         except Exception as e:
-            logger.debug(f"Emergency cancel failed for {order_id}: {e}")
+            logger.debug("Emergency cancel failed for %s: %s", order_id, e)
 
     def _normal_cancel_all_orders(self) -> None:
-        """Normal mode cancellation with PCV. Used for recalibration, not emergencies."""
+        """Normal mode cancellation with PCV."""
         with self._lock:
             order_ids = list(self._state.pending_orders.keys())
 
@@ -434,19 +438,19 @@ class ExecutionEngine:
     # ============================================
 
     def _on_recalibration(self) -> None:
-        """Handle recalibration trigger - NORMAL MODE with PCV."""
+        """Handle recalibration trigger - normal mode with PCV."""
         logger.warning("RECALIBRATION TRIGGERED: Pausing trading")
         self._state.is_in_recalibration = True
-        self._state.recalibration_until = datetime.utcnow() + timedelta(seconds=self.recalibration_pause_sec)
+        self._state.recalibration_until_ns = now_ns() + self._recalibration_pause_ns
         self._normal_cancel_all_orders()
 
     def _on_emergency(self) -> None:
-        """Handle emergency trigger - FIRE-AND-FORGET."""
+        """Handle emergency trigger - fire-and-forget."""
         logger.critical("EMERGENCY TRIGGERED: Fire-and-forget liquidation")
         self._emergency_liquidate_all()
 
     def _on_zombie_detected(self) -> None:
-        """Handle zombie order detection - NORMAL MODE with PCV."""
+        """Handle zombie order detection - normal mode with PCV."""
         logger.warning("ZOMBIE ORDERS DETECTED: Sweeping...")
         self._sweep_zombie_orders()
 
@@ -456,7 +460,7 @@ class ExecutionEngine:
         self._state.is_in_safe_mode = True
 
     def _on_vol_fuse(self) -> None:
-        """Handle VoL fuse trigger - FIRE-AND-FORGET."""
+        """Handle VoL fuse trigger - fire-and-forget."""
         logger.critical("VoL FUSE TRIGGERED: Fire-and-forget liquidation")
         self._emergency_liquidate_all()
 
@@ -471,29 +475,46 @@ class ExecutionEngine:
                 time.sleep(self.zombie_sweep_interval_sec)
                 self._sweep_zombie_orders()
             except Exception as e:
-                logger.error(f"Zombie sweeper error: {e}")
+                logger.error("Zombie sweeper error: %s", e)
+
+    def _extract_order_timestamp_ns(self, order: OrderRequest) -> int:
+        """Extract best available authoritative timestamp from pending order."""
+        exchange_ts_ns = int(getattr(order, "exchange_ts_ns", 0) or 0)
+        receive_ts_ns = int(getattr(order, "receive_ts_ns", 0) or 0)
+        if exchange_ts_ns > 0:
+            return exchange_ts_ns
+        if receive_ts_ns > 0:
+            return receive_ts_ns
+        return 0
 
     def _sweep_zombie_orders(self) -> None:
         """Sweep and cancel zombie orders (normal mode with PCV)."""
+        current_ns = now_ns()
+
         with self._lock:
-            zombie_orders = []
+            zombie_orders: List[str] = []
             for order_id, order in self._state.pending_orders.items():
-                if (datetime.utcnow() - order.timestamp).total_seconds() > self.max_pending_age_sec:
+                order_ts_ns = self._extract_order_timestamp_ns(order)
+                if order_ts_ns > 0 and (current_ns - order_ts_ns) > self._max_pending_age_ns:
                     zombie_orders.append(order_id)
 
         for order_id in zombie_orders:
             self._cancel_pending_order_with_pcv(order_id)
 
         with self._lock:
-            oldest_ts = None
+            oldest_ts_ns: Optional[int] = None
             for order in self._state.pending_orders.values():
-                if oldest_ts is None or order.timestamp < oldest_ts:
-                    oldest_ts = order.timestamp
-            total_value = sum(o.quantity * (o.limit_price or 0) for o in self._state.pending_orders.values())
+                order_ts_ns = self._extract_order_timestamp_ns(order)
+                if order_ts_ns <= 0:
+                    continue
+                if oldest_ts_ns is None or order_ts_ns < oldest_ts_ns:
+                    oldest_ts_ns = order_ts_ns
+
+            total_value = sum(float(o.quantity) * float(o.limit_price or 0) for o in self._state.pending_orders.values())
             self.risk_guard.update_pending_orders(
                 count=len(self._state.pending_orders),
                 total_value=total_value,
-                oldest_timestamp=oldest_ts
+                oldest_timestamp=oldest_ts_ns,
             )
 
     def _monitor_loop(self) -> None:
@@ -506,15 +527,15 @@ class ExecutionEngine:
 
                 if latency < self.lag_threshold_ms and self._state.is_in_safe_mode:
                     self._state.is_in_safe_mode = False
-                    logger.info(f"Latency recovered: {latency:.1f}ms, exiting safe mode")
+                    logger.info("Latency recovered: %.1fms, exiting safe mode", latency)
 
                 if self.order_router.is_websocket_connected():
                     self.risk_guard.update_websocket_heartbeat()
 
-                self._state.last_health_check = datetime.utcnow()
+                self._state.last_health_check_ns = now_ns()
                 time.sleep(1.0)
             except Exception as e:
-                logger.error(f"Monitor loop error: {e}")
+                logger.error("Monitor loop error: %s", e)
                 time.sleep(5.0)
 
     def _executor_loop(self) -> None:
@@ -527,4 +548,4 @@ class ExecutionEngine:
                     continue
                 self._execute_signal(queued)
             except Exception as e:
-                logger.error(f"Executor loop error: {e}")
+                logger.error("Executor loop error: %s", e)

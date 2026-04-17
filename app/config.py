@@ -282,6 +282,37 @@ class Config(BaseSettings):
     # ============================================
     broker_mode: Literal["paper", "live"] = Field(default="paper", description="paper = simulation, live = real trading")
 
+    # Primary market data venue.
+    # Literal enforces only currently-supported venues.
+    # To add a second venue: extend Literal, add entry to _VENUE_SYMBOL_FILTER in main.py,
+    # and add a client branch in SovereignHeartbeat._start_whale_websocket().
+    primary_feed_venue: Literal["kraken"] = Field(
+        default="kraken",
+        description="Primary market data feed venue. Currently: kraken only."
+    )
+
+    # Active market classes — user-controlled declaration of which markets are live.
+    # Symbols in symbol_universe whose asset class is NOT in this list are explicitly
+    # inactive and will not be fed or traded.
+    # Default: ["crypto"] — matches current Kraken-only bring-up.
+    # To activate equities: add "equity" here and wire an Alpaca feed.
+    # Valid values: crypto, equity, etf, future
+    active_markets: List[str] = Field(
+        default=["crypto"],
+        description="Active market asset classes. Valid: crypto, equity, etf, future."
+    )
+
+    @field_validator("active_markets", mode="before")
+    @classmethod
+    def validate_active_markets(cls, v):
+        valid = {"crypto", "equity", "etf", "future"}
+        if isinstance(v, str):
+            v = json.loads(v) if v.startswith("[") else [v]
+        unknown = set(str(m).lower() for m in v) - valid
+        if unknown:
+            raise ValueError(f"Unknown market class(es): {unknown}. Valid: {valid}")
+        return [str(m).lower() for m in v]
+
     # Kraken (Crypto)
     kraken_api_key: Optional[str] = Field(default=None, description="Kraken API key")
     kraken_api_secret: Optional[str] = Field(default=None, description="Kraken API secret")

@@ -25,8 +25,8 @@ from dataclasses import dataclass
 
 # Lawful contracts imported strictly from provided repo truth
 from app.models.fusion import FusionDecision
-from app.models.enums import RegimeType
-from app.constants import SleeveType
+from app.models.enums import RegimeType, SleeveType
+from app.brain.toxicity_engine import ToxicityRegime
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,7 @@ class SignalFusion:
         # ToxicityAlert
         tox_payload, _ = self._cache["toxicity"]
         tox_score = float(tox_payload.toxicity_score)
-        tox_is_toxic = bool(tox_payload.is_toxic)
+        tox_is_toxic = bool(tox_payload.regime.value >= ToxicityRegime.TOXIC.value)
         
         # EntropyScore
         ent_payload, _ = self._cache["entropy"]
@@ -393,8 +393,8 @@ class SignalFusion:
         gamma_front_eligible = False
         sector_rotation_eligible = False
         shadow_front_eligible = False
-        flv_eligible = True             # Universal baseline scavenger
-        liquidity_void_eligible = False # Default restrictive state
+        entropy_decoder_eligible = False  # Regime-gated; not universally on
+        liquidity_void_eligible = False   # Default restrictive state
         
         preferred_sleeve = None
         deprioritized_sleeves = []
@@ -434,7 +434,7 @@ class SignalFusion:
             gamma_front_eligible=gamma_front_eligible,
             shadow_front_eligible=shadow_front_eligible,
             sector_rotation_eligible=sector_rotation_eligible,
-            flv_eligible=flv_eligible,
+            entropy_decoder_eligible=entropy_decoder_eligible,
             liquidity_void_eligible=liquidity_void_eligible,
             
             # Router Hints
@@ -498,7 +498,7 @@ class SignalFusion:
             gamma_front_eligible=False,
             shadow_front_eligible=False,
             sector_rotation_eligible=False,
-            flv_eligible=False,
+            entropy_decoder_eligible=False,
             liquidity_void_eligible=False,
             
             preferred_sleeve=None,

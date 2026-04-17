@@ -1126,6 +1126,38 @@ class InsiderSignalEngine:
             supporting_observation_count=state.supporting_observation_count,
         )
     
+    def get_or_default_snapshot(self, symbol: str, timestamp_ns: int) -> "InsiderSignalSnapshot":
+        """
+        Get current snapshot for symbol, or zero-state default if symbol not tracked.
+
+        Returns InsiderSignalSnapshot with active=False when no observations exist.
+        This is the correct "no-signal" state — not a fake payload.
+        Fusion will produce insider_urgency_raw=0.0 for active=False snapshots.
+        """
+        snapshot = self.snapshot_for_symbol(symbol)
+        if snapshot is not None:
+            return snapshot
+        return InsiderSignalSnapshot(
+            symbol=symbol,
+            timestamp_ns=timestamp_ns,
+            last_observation_ns=0,
+            last_directional_observation_ns=0,
+            last_state_transition_ns=0,
+            bullish_score=DECIMAL_ZERO,
+            bearish_score=DECIMAL_ZERO,
+            net_pressure=DECIMAL_ZERO,
+            confidence=DECIMAL_ZERO,
+            freshness=DECIMAL_ZERO,
+            cluster_strength=DECIMAL_ZERO,
+            contradiction_pressure=DECIMAL_ZERO,
+            invalidation_pressure=DECIMAL_ZERO,
+            directional_bias=DirectionalBias.NEUTRAL,
+            active=False,
+            degraded=False,
+            invalidated=False,
+            supporting_observation_count=0,
+        )
+
     def reset_symbol(self, symbol: str) -> None:
         """Reset state for a specific symbol."""
         if symbol in self._symbols:

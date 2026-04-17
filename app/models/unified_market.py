@@ -6,6 +6,39 @@ Unified Market Models - Predator Grade
 - Fixed-size NumPy array (lock-free read pattern)
 - Shared-memory ready for multiprocessing
 - No threading.Lock() in hot path
+
+AUTHORITY BOUNDARY — READ BEFORE WIRING
+========================================
+This file defines its OWN AssetClass, Exchange, InstrumentSpec, MacroRegime,
+and TradingStatus. These are NOT the canonical types. They are NOT imported
+from app.models.enums and are NOT type-compatible with the live spine.
+
+Canonical authorities:
+  - AssetClass     → app.models.enums.AssetClass  (re-exported via app.constants)
+  - ExchangeType   → app.models.enums.ExchangeType (re-exported via app.constants)
+  - InstrumentSpec → app.instrument_registry.InstrumentSpec (connected to live spine)
+  - now_ns()       → app.utils.time_utils.now_ns()
+
+This file's AssetClass and app.models.enums.AssetClass share string values
+(e.g. "crypto") but are different Python classes. isinstance() checks and
+direct enum comparisons will silently fail across the boundary.
+
+CURRENT STATUS: DISCONNECTED from live spine.
+  - Consumers (aggregator.py, ghost_tick_detector.py, hydration_manager.py)
+    are not imported by main.py or main_loop.py.
+  - Runtime behavior is unaffected while disconnected.
+
+BEFORE CONNECTING any consumer to the live spine:
+  1. Replace AssetClass here with re-export of app.models.enums.AssetClass.
+     Add INDEX/FOREX to canonical enum ONLY if those markets are being activated.
+  2. Replace Exchange here with re-export of app.models.enums.ExchangeType.
+     Update get_precision_metadata() — Exchange.COINBASE ref will break.
+  3. Replace InstrumentSpec here with or alias to app.instrument_registry.InstrumentSpec.
+  4. Replace now_ns() with import from app.utils.time_utils.
+
+The CrossAssetCorrelationMatrix is the one piece with genuine future value
+(numpy-backed, lock-free, ID-indexed). It is safe to preserve and activate
+independently once the enum and InstrumentSpec conflicts are resolved.
 """
 
 import numpy as np

@@ -22,6 +22,9 @@ from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
+# Kraken REST uses XBT for Bitcoin, not BTC
+_KRAKEN_BASE_MAP = {"BTC": "XBT"}
+
 
 class PollingClient:
     """
@@ -210,16 +213,19 @@ class PollingClient:
 
     def _format_symbol(self, symbol: str) -> str:
         """
-        Format symbol for exchange API.
+        Format symbol for Kraken REST API.
 
         Args:
-            symbol: Trading symbol (e.g., "BTC/USD")
+            symbol: Trading symbol in canonical slash-form (e.g., "BTC/USD")
 
         Returns:
-            Formatted symbol for exchange
+            Kraken REST pair identifier (e.g., "XBTUSD")
         """
-        # Remove slash for Kraken
-        return symbol.replace("/", "")
+        if "/" in symbol:
+            base, quote = symbol.split("/", 1)
+            base = _KRAKEN_BASE_MAP.get(base, base)
+            return f"{base}{quote}"
+        return symbol
 
     def _parse_candles(self, data: Dict, symbol: str) -> List[Candle]:
         """
@@ -241,8 +247,9 @@ class PollingClient:
                 if isinstance(ohlc_data, list):
                     for item in ohlc_data:
                         if len(item) >= 7:
-                            timestamp_ms = item[0]
-                            exchange_ts_ns = int(timestamp_ms * 1_000_000)
+                            # Kraken REST OHLC returns time as Unix seconds (not ms)
+                            timestamp_sec = item[0]
+                            exchange_ts_ns = int(timestamp_sec) * 1_000_000_000
                             
                             candle = Candle(
                                 symbol=symbol,

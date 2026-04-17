@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(sed -n '31,70p' /c/Users/shahn/OneDrive/Desktop/poverty_killer/app/constants.py)",
+      "Bash(sed -n '535,580p' /c/Users/shahn/OneDrive/Desktop/poverty_killer/app/utils/enums.py)",
+      "Bash(grep:*)",
+      "Bash(timeout 25 python main.py)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(awk '{print $1, $2}')"
+    ]
+  }
+}

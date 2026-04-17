@@ -131,7 +131,7 @@ class HybridRiskGuard:
         # Load or initialize state
         self._state = self._load_state(initial_equity)
         
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # Reentrant: assess_state() nests sub-methods that also lock
         self._recalibrate_callbacks: List[Callable] = []
         self._emergency_callbacks: List[Callable] = []
         self._zombie_callbacks: List[Callable] = []

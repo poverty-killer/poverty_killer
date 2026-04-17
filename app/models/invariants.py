@@ -182,7 +182,7 @@ class KillSwitchInvariant(BaseModel):
             raise ValueError(f"schema_version must be positive: {v}")
         return v
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def validate_auto_recover_consistency(cls, values):
         """Ensure auto_recover_after_ns and requires_manual_reset are mutually exclusive."""
         auto_recover = values.get('auto_recover_after_ns')
@@ -443,7 +443,7 @@ class InvariantViolationEvent(BaseModel):
             raise ValueError(f"duration_ns cannot be negative: {v}")
         return v
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def validate_resolved_after_timestamp(cls, values):
         """Ensure resolved_at_ns is after timestamp_ns when both are present."""
         timestamp_ns = values.get('timestamp_ns')
@@ -479,7 +479,7 @@ class InvariantCheckResult(BaseModel):
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def validate_violation_consistency(cls, values):
         """Ensure violation presence matches passed flag."""
         passed = values.get('passed')
@@ -516,7 +516,7 @@ class InvariantBatchCheckResult(BaseModel):
             raise ValueError(f"timestamp_ns must be positive: {v}")
         return v
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def compute_from_results(cls, values):
         """Compute violations_count and mode triggers from results."""
         results = values.get('results', [])

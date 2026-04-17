@@ -1,17 +1,27 @@
 ﻿"""
 Physical Validator - Exchange Latency and Price Impact Verification
+RESTORED: Deterministic, replay-safe, with fusion compatibility bridge.
+
 Tracks exchange latency, network RTT, and price impact correlation.
 Identifies toxic flow where latency exceeds expected impact thresholds.
 Used to validate execution quality and detect market manipulation.
+
+PRESERVE-FIRST RESTORATION:
+- Baseline shape preserved with deterministic physical-data repair
+- Random simulation replaced with fixed deterministic exchange constants
+- Added to_fusion_dict() for signal_fusion.py compatibility
+- Original record_latency signature preserved (optional timestamp_ns)
 """
 
 import logging
-import numpy as np
-from typing import Optional, Dict, List, Tuple, Any
-from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Any
+from datetime import datetime
 from collections import deque
 
+import numpy as np
+
 from app.models import PhysicalVerification
+from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +60,7 @@ class PhysicalValidator:
         self._order_size_history: Dict[str, deque] = {}
         self._toxicity_history: Dict[str, deque] = {}
 
-        # Physical infrastructure data (simulated)
+        # Physical infrastructure data (deterministic exchange metadata placeholders)
         self._mining_hashrate: Dict[str, float] = {}
         self._datacenter_power: Dict[str, float] = {}
         self._cable_latency: Dict[str, float] = {}
@@ -58,7 +68,11 @@ class PhysicalValidator:
         # Last verification results
         self._last_verification: Dict[str, PhysicalVerification] = {}
 
-        logger.info(f"PhysicalValidator initialized: latency_threshold={latency_threshold_ms}ms")
+        logger.info(f"PhysicalValidator initialized: latency_threshold={latency_threshold_ms}ms (deterministic mode)")
+
+    # =========================================================================
+    # CORE RECORDING METHODS (Preserved baseline shape with deterministic repair)
+    # =========================================================================
 
     def record_latency(
         self,
@@ -66,7 +80,8 @@ class PhysicalValidator:
         exchange: str,
         latency_ms: float,
         order_size: float,
-        price_impact_bps: float
+        price_impact_bps: float,
+        timestamp_ns: Optional[int] = None,
     ) -> PhysicalVerification:
         """
         Record a latency measurement.
@@ -77,9 +92,35 @@ class PhysicalValidator:
             latency_ms: Order-to-fill latency in milliseconds
             order_size: Order size in USD
             price_impact_bps: Actual price impact in basis points
+            timestamp_ns: Optional authoritative timestamp for deterministic replay
 
         Returns:
-            PhysicalVerification object
+            PhysicalVerification object (primary return type)
+            
+        Note: Fusion consumers needing dict format should use to_fusion_dict(exchange)
+        """
+        # If timestamp_ns provided, use deterministic path
+        if timestamp_ns is not None:
+            return self._record_latency_deterministic(
+                symbol, exchange, latency_ms, order_size, price_impact_bps, timestamp_ns
+            )
+        
+        # Original path (preserved baseline shape)
+        return self._record_latency_original(
+            symbol, exchange, latency_ms, order_size, price_impact_bps
+        )
+    
+    def _record_latency_original(
+        self,
+        symbol: str,
+        exchange: str,
+        latency_ms: float,
+        order_size: float,
+        price_impact_bps: float,
+    ) -> PhysicalVerification:
+        """
+        Original record_latency implementation.
+        Baseline shape preserved. Physical-data behavior repaired to deterministic.
         """
         # Initialize history for this exchange
         self._init_exchange_history(exchange)
@@ -101,22 +142,77 @@ class PhysicalValidator:
         # Update toxicity history
         self._toxicity_history[exchange].append(1 if is_toxic else 0)
 
-        # Simulate physical infrastructure data (would come from APIs in production)
-        physical_data = self._simulate_physical_data(exchange)
+        # Get deterministic physical infrastructure data (fixed constants, no random)
+        physical_data = self._get_deterministic_physical_data(exchange)
 
         # Create verification record
         verification = PhysicalVerification(
             symbol=symbol,
-            timestamp=datetime.utcnow(),
+            exchange_ts_ns=now_ns(),
             exchange=exchange,
-            exchange_latency_ms=latency_ms,
-            network_rtt_ms=latency_ms * 0.6,  # Approximate RTT
-            order_size=order_size,
+            exchange_latency_ns=int(latency_ms * 1_000_000),
+            network_rtt_ns=int(latency_ms * 0.6 * 1_000_000),
+            order_size_usd=order_size,
             price_impact_bps=price_impact_bps,
             expected_impact_bps=expected_impact,
             latency_impact_ratio=latency_impact_ratio,
             is_toxic=is_toxic,
-            mining_hashrate=physical_data["mining_hashrate"],
+            mining_hashrate_th=physical_data["mining_hashrate"],
+            datacenter_power_mw=physical_data["datacenter_power_mw"],
+            undersea_cable_latency_ms=physical_data["cable_latency_ms"]
+        )
+
+        self._last_verification[exchange] = verification
+        return verification
+    
+    def _record_latency_deterministic(
+        self,
+        symbol: str,
+        exchange: str,
+        latency_ms: float,
+        order_size: float,
+        price_impact_bps: float,
+        timestamp_ns: int,
+    ) -> PhysicalVerification:
+        """
+        Deterministic record_latency path for replay safety.
+        Same as original but with integer-arithmetic timestamp conversion.
+        """
+        # Initialize history for this exchange
+        self._init_exchange_history(exchange)
+
+        # Add to history
+        self._latency_history[exchange].append(latency_ms)
+        self._impact_history[exchange].append(price_impact_bps)
+        self._order_size_history[exchange].append(order_size)
+
+        # Calculate expected impact based on order size and liquidity
+        expected_impact = self._calculate_expected_impact(exchange, order_size)
+
+        # Calculate latency-impact ratio
+        latency_impact_ratio = latency_ms / (abs(price_impact_bps) + 1.0)
+
+        # Determine toxicity
+        is_toxic = self._detect_toxicity(exchange, latency_ms, price_impact_bps)
+
+        # Update toxicity history
+        self._toxicity_history[exchange].append(1 if is_toxic else 0)
+
+        # Get deterministic physical infrastructure data (fixed constants, no random)
+        physical_data = self._get_deterministic_physical_data(exchange)
+
+        verification = PhysicalVerification(
+            symbol=symbol,
+            exchange_ts_ns=timestamp_ns,
+            exchange=exchange,
+            exchange_latency_ns=int(latency_ms * 1_000_000),
+            network_rtt_ns=int(latency_ms * 0.6 * 1_000_000),
+            order_size_usd=order_size,
+            price_impact_bps=price_impact_bps,
+            expected_impact_bps=expected_impact,
+            latency_impact_ratio=latency_impact_ratio,
+            is_toxic=is_toxic,
+            mining_hashrate_th=physical_data["mining_hashrate"],
             datacenter_power_mw=physical_data["datacenter_power_mw"],
             undersea_cable_latency_ms=physical_data["cable_latency_ms"]
         )
@@ -198,18 +294,20 @@ class PhysicalValidator:
 
         return latency_toxic and impact_toxic
 
-    def _simulate_physical_data(self, exchange: str) -> Dict[str, Any]:
+    def _get_deterministic_physical_data(self, exchange: str) -> Dict[str, Any]:
         """
-        Simulate physical infrastructure data.
-        In production, this would come from real APIs.
-
+        Get deterministic physical infrastructure data.
+        
+        Deterministic exchange metadata placeholders preserved for compatibility.
+        Fixed constants per exchange. No randomness. Replay-safe.
+        
         Args:
             exchange: Exchange name
-
+            
         Returns:
-            Physical data dictionary
+            Physical data dictionary with deterministic values
         """
-        # Exchange-specific baseline data
+        # Exchange-specific baseline data (fixed constants, no randomness)
         exchange_data = {
             "kraken": {"mining": 15.0, "power": 120.0, "cable": 85.0},
             "alpaca": {"mining": 0.0, "power": 50.0, "cable": 45.0},
@@ -217,13 +315,50 @@ class PhysicalValidator:
         }
 
         base = exchange_data.get(exchange.lower(), {"mining": 10.0, "power": 100.0, "cable": 70.0})
-
-        # Add small random variation
+        
         return {
-            "mining_hashrate": base["mining"] * (0.9 + np.random.random() * 0.2),
-            "datacenter_power_mw": base["power"] * (0.95 + np.random.random() * 0.1),
-            "cable_latency_ms": base["cable"] * (0.9 + np.random.random() * 0.2)
+            "mining_hashrate": base["mining"],
+            "datacenter_power_mw": base["power"],
+            "cable_latency_ms": base["cable"],
         }
+
+    # =========================================================================
+    # FUSION COMPATIBILITY BRIDGE (Preserve-first addition)
+    # =========================================================================
+    
+    def to_fusion_dict(self, exchange: str) -> Dict[str, float]:
+        """
+        Convert exchange health to FusionDecision-compatible dict.
+        
+        signal_fusion.py expects dict with "health_score" key.
+        This is a compatibility bridge for fusion consumers.
+        Primary return type remains PhysicalVerification via record_latency().
+        
+        Args:
+            exchange: Exchange name
+            
+        Returns:
+            Dict with "health_score" key (0-1 scale)
+        """
+        health = self.get_exchange_health(exchange)
+        return {"health_score": health.get("health_score", 0.5)}
+    
+    def get_fusion_health_score(self, exchange: str) -> float:
+        """
+        Get health score for fusion consumption.
+        
+        Args:
+            exchange: Exchange name
+            
+        Returns:
+            Float health score in [0, 1]
+        """
+        health = self.get_exchange_health(exchange)
+        return health.get("health_score", 0.5)
+
+    # =========================================================================
+    # PRESERVED ANALYTICS METHODS (Unchanged from baseline)
+    # =========================================================================
 
     def get_current(self, exchange: str) -> Optional[PhysicalVerification]:
         """

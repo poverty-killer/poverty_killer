@@ -1,180 +1,35 @@
-﻿"""
+"""
 System Constants
 All enum-like constants and static values for the Poverty Killer engine.
 This file defines the core vocabulary of the system.
 HARDENED: MAX_LEVERAGE=2.0, STALE_DATA=10s, Balanced CLASS_LIMITS
+
+ENUM AUTHORITY: All enum class definitions have been migrated to app.models.enums.
+This file re-exports them for backward compatibility.
+Non-enum content (numeric constants, SigmaRiskConfig, helper dicts) is authoritative here.
 """
 
-from enum import Enum
 from typing import Dict
 
+# ============================================================================
+# ALL ENUM RE-EXPORTS (authority: app.models.enums)
+# ============================================================================
 
-# ============================================
-# MARKET REGIME CLASSIFICATION
-# ============================================
-
-class RegimeType(str, Enum):
-    """
-    Market regime classification from GMM detector.
-    Determines which strategies are eligible and risk parameters.
-    """
-    TRENDING = "trending"
-    RANGING = "ranging"
-    CRISIS = "crisis"
-    UNKNOWN = "unknown"
-
-
-# ============================================
-# STRATEGY SLEEVES
-# ============================================
-
-class SleeveType(str, Enum):
-    """
-    All 9 strategy sleeves available in the system.
-    Each has its own risk profile, market conditions, and capital allocation.
-    """
-    SHADOW_FRONT = "shadow_front"
-    FLV = "flv"
-    ENTROPY_DECODER = "entropy_decoder"
-    PHYSICAL_ONCHAIN = "physical_onchain"
-    CONVEXITY_SWITCH = "convexity_switch"
-    HEDGING_FLOW = "hedging_flow"
-    ADAPTIVE_DC = "adaptive_dc"
-    GAMMA_FRONT = "gamma_front"
-    SECTOR_ROTATION = "sector_rotation"
-
-
-# ============================================
-# RISK PROFILES
-# ============================================
-
-class RiskProfile(str, Enum):
-    """
-    Risk profiles determine scaling factors within hard caps.
-    Higher risk = higher position sizing, but never exceeds hard caps.
-    """
-    SAFE = "safe"
-    NORMAL = "normal"
-    MODERATE = "moderate"
-    AGGRESSIVE = "aggressive"
-    CRISIS_OPPORTUNISTIC = "crisis_opportunistic"
-
-
-# ============================================
-# CONTROL MODES
-# ============================================
-
-class ControlMode(str, Enum):
-    """
-    Operator control modes. Can be changed remotely via control/mode.txt.
-    These never override hard caps or kill switch.
-    """
-    SAFE = "safe"
-    NORMAL = "normal"
-    MODERATE = "moderate"
-    AGGRESSIVE = "aggressive"
-    CRISIS_OPPORTUNISTIC = "crisis_opportunistic"
-    CAPITAL_SECURE = "capital_secure"
-    EMERGENCY_HALT = "emergency_halt"
-
-
-# ============================================
-# ORDER & POSITION STATUS
-# ============================================
-
-class OrderStatus(str, Enum):
-    """Order lifecycle status."""
-    PENDING = "pending"
-    SUBMITTED = "submitted"
-    PARTIAL = "partial"
-    FILLED = "filled"
-    CANCELLED = "cancelled"
-    REJECTED = "rejected"
-    EXPIRED = "expired"
-
-
-class PositionStatus(str, Enum):
-    """Position lifecycle status."""
-    OPEN = "open"
-    CLOSING = "closing"
-    CLOSED = "closed"
-    STUCK = "stuck"
-
-
-# ============================================
-# EVENT TYPES
-# ============================================
-
-class EventType(str, Enum):
-    """System event types for pub/sub communication."""
-    MARKET_DATA = "market_data"
-    SIGNAL = "signal"
-    ORDER = "order"
-    FILL = "fill"
-    RISK = "risk"
-    ERROR = "error"
-    STATE_CHANGE = "state_change"
-    CONTROL = "control"
-    HEALTH = "health"
-
-
-# ============================================
-# STRATEGY STATE MACHINES
-# ============================================
-
-class ShadowFrontState(str, Enum):
-    """
-    Shadow-Front strategy state machine.
-    Transitions are persisted to state store for crash recovery.
-    """
-    IDLE = "idle"
-    SILENT_ACCUMULATION = "silent_accumulation"
-    ARMED = "armed"
-    IGNITION = "ignition"
-    ACTIVE = "active"
-    COOLDOWN = "cooldown"
-
-
-class LiquidityVoidStatus(str, Enum):
-    """FLV strategy status for crisis trading."""
-    INACTIVE = "inactive"
-    SCANNING = "scanning"
-    DETECTED = "detected"
-    ENTERED = "entered"
-    EXITING = "exiting"
-    CLOSED = "closed"
-
-
-# ============================================
-# ASSET CLASSES
-# ============================================
-
-class AssetClass(str, Enum):
-    """
-    Asset classes for multi-market support.
-    Each has different risk multipliers, sessions, and fee structures.
-    """
-    CRYPTO = "crypto"
-    EQUITY = "equity"
-    ETF = "etf"
-    FUTURE = "future"
-
-
-class MarketSession(str, Enum):
-    """
-    Trading sessions by asset class.
-    Used to prevent trading when markets are closed.
-    """
-    CRYPTO_24_7 = "24_7"
-    EQUITY = "equity"
-    FUTURES = "futures"
-
-
-class ExchangeType(str, Enum):
-    """Supported exchanges by asset class."""
-    KRAKEN = "kraken"
-    ALPACA = "alpaca"
-    IBKR = "ibkr"
+from app.models.enums import (  # noqa: F401
+    RegimeType,
+    SleeveType,
+    RiskProfile,
+    ControlMode,
+    OrderStatus,
+    PositionStatus,
+    EventType,
+    ShadowFrontState,
+    LiquidityVoidState,
+    LiquidityVoidStatus,
+    AssetClass,
+    MarketSession,
+    ExchangeType,
+)
 
 
 # ============================================

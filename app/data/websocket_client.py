@@ -8,8 +8,8 @@ Async WebSocket client with Sovereign Grade features:
 - L2 order book and trade feed
 
 TIMESTAMP TRUTH (STRICT AUTHORITATIVE PATH):
-- exchange_ts_ns MUST come from exchange timestamp_ms
-- Messages WITHOUT timestamp_ms are REJECTED (dropped, logged)
+- exchange_ts_ns MUST come from exchange-provided nested Kraken v2 timestamps
+- Messages WITHOUT lawful exchange timestamp are REJECTED (dropped, logged)
 - No wall-clock substitution for authoritative timestamps
 - receive_ts_ns captured for telemetry only (not passed to canonical models)
 """
@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime
 from typing import Dict, List, Optional, Callable, Any, Tuple
 from collections import deque
 
@@ -35,8 +36,8 @@ class KrakenWebSocketClient:
     Sovereign WebSocket client for Kraken exchange.
     
     TIMESTAMP AUTHORITY:
-    - exchange_ts_ns extracted from Kraken message timestamp_ms
-    - Messages missing timestamp_ms are REJECTED (not fabricated)
+    - exchange_ts_ns extracted from nested Kraken v2 RFC3339 timestamps
+    - Messages missing lawful exchange timestamp are REJECTED (not fabricated)
     - receive_ts_ns captured for monitoring only
     """
     
@@ -109,7 +110,7 @@ class KrakenWebSocketClient:
         self._messages_processed = 0
         
         logger.info(f"KrakenWebSocketClient initialized: {len(symbols)} symbols")
-        logger.info("  TIMESTAMP TRUTH: Strict authoritative path — messages without exchange timestamp are REJECTED")
+        logger.info("  TIMESTAMP TRUTH: Strict authoritative path — messages without lawful nested exchange timestamp are REJECTED")
     
     # ============================================
     # CONNECTION MANAGEMENT
@@ -240,23 +241,23 @@ class KrakenWebSocketClient:
         await self._websocket.send(json.dumps(trade_msg))
         logger.info(f"Subscribed to trades for {len(self.symbols)} symbols")
         
-        # Subscribe to candle channel (1 minute)
+        # Subscribe to OHLC channel (1 minute) — Kraken v2 authority
         candle_msg = {
             "method": "subscribe",
             "params": {
-                "channel": "candle",
+                "channel": "ohlc",
                 "symbol": self.symbols,
                 "interval": 1
             }
         }
         await self._websocket.send(json.dumps(candle_msg))
-        logger.info(f"Subscribed to candles for {len(self.symbols)} symbols")
+        logger.info(f"Subscribed to ohlc for {len(self.symbols)} symbols")
         
         # Record subscriptions
         self._subscriptions = {
             "book": self.symbols.copy(),
             "trade": self.symbols.copy(),
-            "candle": self.symbols.copy()
+            "ohlc": self.symbols.copy()
         }
     
     async def _reconnect(self) -> None:
@@ -352,7 +353,7 @@ class KrakenWebSocketClient:
         """
         try:
             data = json.loads(raw_message)
-            
+
             # Check for heartbeat/pong response
             if data.get("method") == "pong":
                 logger.debug("Pong received")
@@ -377,7 +378,7 @@ class KrakenWebSocketClient:
                 await self._parse_order_book(data, receive_ts_ns)
             elif channel == "trade":
                 await self._parse_trade(data, receive_ts_ns)
-            elif channel == "candle":
+            elif channel in ("ohlc", "candle"):
                 await self._parse_candle(data, receive_ts_ns)
             else:
                 logger.debug(f"Unknown channel: {channel}")
@@ -390,165 +391,283 @@ class KrakenWebSocketClient:
     # ============================================
     # MESSAGE PARSING — STRICT AUTHORITATIVE PATH
     # ============================================
-    
-    def _extract_exchange_timestamp_ns(self, data: Dict, channel_type: str) -> Optional[int]:
+
+    def _parse_rfc3339_to_ns(self, timestamp_value: Any, channel_type: str) -> Optional[int]:
         """
-        Extract authoritative exchange timestamp from message.
-        
+        Parse Kraken v2 RFC3339 timestamp into canonical ns.
+
+        STRICT RULE:
+        - No wall-clock substitution
+        - Invalid or missing exchange timestamp -> reject
+        """
+        if timestamp_value is None:
+            logger.warning(f"Missing RFC3339 timestamp in {channel_type} message — rejecting")
+            self._messages_rejected_no_timestamp += 1
+            return None
+
+        if not isinstance(timestamp_value, str):
+            logger.warning(f"Non-string timestamp in {channel_type} message: {timestamp_value} — rejecting")
+            self._messages_rejected_no_timestamp += 1
+            return None
+
+        ts = timestamp_value.strip()
+        if not ts:
+            logger.warning(f"Empty timestamp string in {channel_type} message — rejecting")
+            self._messages_rejected_no_timestamp += 1
+            return None
+
+        try:
+            if ts.endswith("Z"):
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            else:
+                dt = datetime.fromisoformat(ts)
+
+            if dt.tzinfo is None:
+                logger.warning(f"Naive timestamp in {channel_type} message: {timestamp_value} — rejecting")
+                self._messages_rejected_no_timestamp += 1
+                return None
+
+            return int(dt.timestamp() * 1_000_000_000)
+        except Exception:
+            logger.warning(f"Invalid RFC3339 timestamp in {channel_type} message: {timestamp_value} — rejecting")
+            self._messages_rejected_no_timestamp += 1
+            return None
+
+    def _get_nested_payload_objects(self, data: Dict) -> List[Dict]:
+        """
+        Extract Kraken v2 nested payload objects from data[].
+
+        Returns:
+            List of nested dict payload entries
+        """
+        payload = data.get("data", [])
+        if not isinstance(payload, list):
+            return []
+        return [entry for entry in payload if isinstance(entry, dict)]
+
+    def _extract_nested_symbol(self, payload_obj: Dict) -> str:
+        """
+        Extract symbol from nested Kraken v2 payload object.
+        """
+        for key in ("symbol", "pair", "instrument_name"):
+            value = payload_obj.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
+    def _extract_nested_exchange_timestamp_ns(self, payload_obj: Dict, channel_type: str, candidate_keys: List[str]) -> Optional[int]:
+        """
+        Extract authoritative nested exchange timestamp from Kraken v2 payload object.
+
+        Args:
+            payload_obj: Nested payload dict
+            channel_type: Logical channel name for logging
+            candidate_keys: Ordered candidate timestamp keys
+
         Returns:
             exchange_ts_ns if valid, None otherwise
-        
-        STRICT RULE: If exchange does not provide timestamp_ms, return None.
-        NO FALLBACK to local time. Messages without timestamp are REJECTED.
         """
-        timestamp_ms = data.get("timestamp")
-        
-        if timestamp_ms is None:
-            logger.warning(f"Missing timestamp_ms in {channel_type} message — rejecting")
-            self._messages_rejected_no_timestamp += 1
-            return None
-        
-        if not isinstance(timestamp_ms, (int, float)) or timestamp_ms <= 0:
-            logger.warning(f"Invalid timestamp_ms in {channel_type} message: {timestamp_ms} — rejecting")
-            self._messages_rejected_no_timestamp += 1
-            return None
-        
-        return int(timestamp_ms * 1_000_000)
+        for key in candidate_keys:
+            if key in payload_obj:
+                exchange_ts_ns = self._parse_rfc3339_to_ns(payload_obj.get(key), channel_type)
+                if exchange_ts_ns is not None:
+                    return exchange_ts_ns
+
+        logger.warning(f"Missing nested exchange timestamp in {channel_type} payload — rejecting")
+        self._messages_rejected_no_timestamp += 1
+        return None
     
     async def _parse_order_book(self, data: Dict, receive_ts_ns: int) -> None:
         """
-        Parse order book message from Kraken.
-        
+        Parse order book message from Kraken v2.
+
         STRICT AUTHORITATIVE PATH:
-        - exchange_ts_ns MUST come from message timestamp_ms
-        - Missing or invalid timestamp → message REJECTED
+        - symbol MUST come from nested payload object(s) inside data[]
+        - exchange_ts_ns MUST come from nested Kraken v2 RFC3339 timestamp
+        - Missing or invalid nested fields -> message REJECTED
         """
         try:
-            symbol = data.get("symbol", "")
-            if not symbol:
-                logger.warning("Order book message missing symbol — rejecting")
+            payload_objects = self._get_nested_payload_objects(data)
+            if not payload_objects:
+                logger.warning("Order book message missing nested payload data[] — rejecting")
                 return
-            
-            # Extract authoritative timestamp — strict
-            exchange_ts_ns = self._extract_exchange_timestamp_ns(data, "order_book")
-            if exchange_ts_ns is None:
-                return  # Message rejected, already logged
-            
-            # Parse bids and asks
-            bids = []
-            asks = []
-            
-            book_data = data.get("data", {})
-            for bid in book_data.get("bids", []):
-                bids.append((float(bid.get("price", 0)), float(bid.get("qty", 0))))
-            for ask in book_data.get("asks", []):
-                asks.append((float(ask.get("price", 0)), float(ask.get("qty", 0))))
-            
-            if not bids and not asks:
-                logger.debug(f"Empty order book for {symbol} — skipping")
-                return
-            
-            # Create snapshot using canonical OrderBookSnapshot
-            snapshot = OrderBookSnapshot(
-                symbol=symbol,
-                exchange_ts_ns=exchange_ts_ns,
-                bids=bids[:50],
-                asks=asks[:50]
-            )
-            
-            self._messages_processed += 1
-            
-            # Call callback
-            if self.on_order_book:
-                if asyncio.iscoroutinefunction(self.on_order_book):
-                    await self.on_order_book(snapshot)
-                else:
-                    self.on_order_book(snapshot)
+
+            for book_data in payload_objects:
+                symbol = self._extract_nested_symbol(book_data)
+                if not symbol:
+                    logger.warning("Order book nested payload missing symbol — rejecting")
+                    continue
+
+                exchange_ts_ns = self._extract_nested_exchange_timestamp_ns(
+                    book_data,
+                    "order_book",
+                    ["timestamp", "time", "ts"]
+                )
+                if exchange_ts_ns is None:
+                    continue
+
+                bids = []
+                asks = []
+
+                for bid in book_data.get("bids", []):
+                    try:
+                        bids.append((float(bid.get("price", 0)), float(bid.get("qty", 0))))
+                    except Exception:
+                        continue
+
+                for ask in book_data.get("asks", []):
+                    try:
+                        asks.append((float(ask.get("price", 0)), float(ask.get("qty", 0))))
+                    except Exception:
+                        continue
+
+                if not bids and not asks:
+                    logger.debug(f"Empty order book for {symbol} — skipping")
+                    continue
+
+                snapshot = OrderBookSnapshot(
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    bids=bids[:50],
+                    asks=asks[:50]
+                )
+
+                self._messages_processed += 1
+
+                if self.on_order_book:
+                    if asyncio.iscoroutinefunction(self.on_order_book):
+                        await self.on_order_book(snapshot)
+                    else:
+                        self.on_order_book(snapshot)
                     
         except Exception as e:
             logger.error(f"Failed to parse order book: {e}")
     
     async def _parse_trade(self, data: Dict, receive_ts_ns: int) -> None:
         """
-        Parse trade message from Kraken.
-        
+        Parse trade message from Kraken v2.
+
         STRICT AUTHORITATIVE PATH:
-        - exchange_ts_ns MUST come from message timestamp_ms
-        - Missing or invalid timestamp → message REJECTED
+        - symbol MUST come from each nested trade object if present, otherwise
+          from enclosing nested payload object
+        - exchange_ts_ns MUST come from nested trade/object RFC3339 timestamp
+        - Missing or invalid nested fields -> trade REJECTED
         """
         try:
-            symbol = data.get("symbol", "")
-            if not symbol:
-                logger.warning("Trade message missing symbol — rejecting")
+            payload_objects = self._get_nested_payload_objects(data)
+            if not payload_objects:
+                logger.warning("Trade message missing nested payload data[] — rejecting")
                 return
-            
-            # Extract authoritative timestamp — strict
-            exchange_ts_ns = self._extract_exchange_timestamp_ns(data, "trade")
-            if exchange_ts_ns is None:
-                return  # Message rejected, already logged
-            
-            for trade_data in data.get("data", []):
-                price = float(trade_data.get("price", 0))
-                volume = float(trade_data.get("qty", 0))
-                side_str = trade_data.get("side", "buy")
-                side = 1 if side_str == "buy" else -1
-                
-                trade_info = {
-                    "symbol": symbol,
-                    "price": price,
-                    "volume": volume,
-                    "side": side,
-                    "exchange_ts_ns": exchange_ts_ns,
-                    "receive_ts_ns": receive_ts_ns,
-                    "trade_id": trade_data.get("trade_id", "")
-                }
-                
-                self._messages_processed += 1
-                
-                # Call callback
-                if self.on_trade:
-                    if asyncio.iscoroutinefunction(self.on_trade):
-                        await self.on_trade(trade_info)
-                    else:
-                        self.on_trade(trade_info)
+
+            for payload_obj in payload_objects:
+                payload_symbol = self._extract_nested_symbol(payload_obj)
+
+                # Some Kraken v2 payloads place actual trade records inside nested arrays/objects;
+                # preserve-first handling: if payload_obj itself looks like a trade, process it directly,
+                # otherwise process entries in payload_obj["trades"] if present.
+                trade_entries = []
+                if "price" in payload_obj and ("qty" in payload_obj or "quantity" in payload_obj):
+                    trade_entries = [payload_obj]
+                elif isinstance(payload_obj.get("trades"), list):
+                    trade_entries = [t for t in payload_obj.get("trades", []) if isinstance(t, dict)]
+                else:
+                    trade_entries = [payload_obj]
+
+                for trade_data in trade_entries:
+                    symbol = self._extract_nested_symbol(trade_data) or payload_symbol
+                    if not symbol:
+                        logger.warning("Trade payload missing symbol — rejecting")
+                        continue
+
+                    exchange_ts_ns = self._extract_nested_exchange_timestamp_ns(
+                        trade_data if any(k in trade_data for k in ("timestamp", "time", "trade_time")) else payload_obj,
+                        "trade",
+                        ["timestamp", "time", "trade_time"]
+                    )
+                    if exchange_ts_ns is None:
+                        continue
+
+                    try:
+                        price = float(trade_data.get("price", 0))
+                        volume = float(trade_data.get("qty", trade_data.get("quantity", 0)))
+                    except Exception:
+                        logger.warning("Trade payload has non-numeric price/qty — rejecting")
+                        continue
+
+                    side_str = trade_data.get("side", trade_data.get("taker_side", "buy"))
+                    side = 1 if side_str == "buy" else -1
+
+                    trade_info = {
+                        "symbol": symbol,
+                        "price": price,
+                        "volume": volume,
+                        "side": side,
+                        "exchange_ts_ns": exchange_ts_ns,
+                        "receive_ts_ns": receive_ts_ns,
+                        "trade_id": trade_data.get("trade_id", "")
+                    }
+
+                    self._messages_processed += 1
+
+                    if self.on_trade:
+                        if asyncio.iscoroutinefunction(self.on_trade):
+                            await self.on_trade(trade_info)
+                        else:
+                            self.on_trade(trade_info)
                         
         except Exception as e:
             logger.error(f"Failed to parse trade: {e}")
     
     async def _parse_candle(self, data: Dict, receive_ts_ns: int) -> None:
         """
-        Parse candle message from Kraken.
-        
+        Parse candle message from Kraken v2.
+
         STRICT AUTHORITATIVE PATH:
-        - exchange_ts_ns MUST come from message timestamp_ms
-        - Missing or invalid timestamp → message REJECTED
+        - symbol MUST come from nested payload object(s) inside data[]
+        - exchange_ts_ns MUST come from nested Kraken v2 RFC3339 timestamp
+        - Missing or invalid nested fields -> candle REJECTED
+
+        Assumption:
+        - active candle payload may provide authoritative timestamp under:
+          interval_begin, timestamp, or time
         """
         try:
-            symbol = data.get("symbol", "")
-            if not symbol:
-                logger.warning("Candle message missing symbol — rejecting")
+            payload_objects = self._get_nested_payload_objects(data)
+            if not payload_objects:
+                logger.warning("Candle message missing nested payload data[] — rejecting")
                 return
-            
-            # Extract authoritative timestamp — strict
-            exchange_ts_ns = self._extract_exchange_timestamp_ns(data, "candle")
-            if exchange_ts_ns is None:
-                return  # Message rejected, already logged
-            
-            for candle_data in data.get("data", []):
-                candle = Candle(
-                    symbol=symbol,
-                    exchange_ts_ns=exchange_ts_ns,
-                    open=float(candle_data.get("open", 0)),
-                    high=float(candle_data.get("high", 0)),
-                    low=float(candle_data.get("low", 0)),
-                    close=float(candle_data.get("close", 0)),
-                    volume=float(candle_data.get("volume", 0)),
-                    timeframe="1m"
+
+            for candle_data in payload_objects:
+                symbol = self._extract_nested_symbol(candle_data)
+                if not symbol:
+                    logger.warning("Candle nested payload missing symbol — rejecting")
+                    continue
+
+                exchange_ts_ns = self._extract_nested_exchange_timestamp_ns(
+                    candle_data,
+                    "candle",
+                    ["interval_begin", "timestamp", "time"]
                 )
+                if exchange_ts_ns is None:
+                    continue
+
+                try:
+                    candle = Candle(
+                        symbol=symbol,
+                        exchange_ts_ns=exchange_ts_ns,
+                        open=float(candle_data.get("open", 0)),
+                        high=float(candle_data.get("high", 0)),
+                        low=float(candle_data.get("low", 0)),
+                        close=float(candle_data.get("close", 0)),
+                        volume=float(candle_data.get("volume", 0)),
+                        timeframe="1m"
+                    )
+                except Exception:
+                    logger.warning("Candle payload has non-numeric OHLCV fields — rejecting")
+                    continue
                 
                 self._messages_processed += 1
                 
-                # Call callback
                 if self.on_candle:
                     if asyncio.iscoroutinefunction(self.on_candle):
                         await self.on_candle(candle)

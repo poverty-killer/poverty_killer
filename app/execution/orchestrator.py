@@ -1,27 +1,30 @@
 """
 Master Execution Orchestrator - The "Air Traffic Control" for Poverty Killer
-Atomic event pulse processing with serialized pipeline.
 
-This file is the REAL INTEGRATION CHOKE POINT for:
-- Event processing (order book, candles, trades)
-- Risk gating (unified_risk + kill_switch)
-- Position sizing (position_sizing engine)
-- Strategy routing (FLV, Shadow-Front via fusion)
-- Execution (paper broker with realistic simulation)
-- Intelligence integration (entropy, whale zone)
+REJECTED-DUAL-AUTHORITY — Board ruling 2026-04-15.
+This file is NOT a plausible co-equal future owner of the runtime spine.
+It MUST NOT be wired. It MUST NOT be repaired toward wiring.
 
-All authoritative decision paths use deterministic timestamps from events.
-Monitoring/wall-clock is isolated to non-authoritative status reporting only.
+REJECTION BASIS (irreconcilable with live spine):
+1. Instantiates own SignalFusion(config) at line 324 — creates a second independent
+   fusion brain alongside main.py:SovereignHeartbeat.signal_fusion. No reconciliation
+   path exists. Two caches, two FusionDecisions, one market feed = irresolvable split.
+2. Contains internal PaperBroker class (line 105) — duplicates app/execution/paper_broker.py
+   (SovereignPaperBroker). Internal broker has no order lifecycle, no fill engine,
+   no cancel path, no reconciliation. Not the same contract.
+3. Bypasses OrderRouter entirely — calls self.paper_broker.execute() directly.
+   The live spine is: ExecutionEngine → OrderRouter → SovereignPaperBroker.
+   MasterOrchestrator skips all three.
+4. Position tracking is an internal dict — not the live ExecutionEngine position state.
 
-PRESERVED INTELLIGENCE (all live, all operational):
-- SignalFusion: fusion decision aggregation
-- EntropyDecoder: structural coherence / collapse detection
-- WhaleZoneEngine: accumulation zone context
-- ToxicityEngine: market toxicity detection
-- TopologicalEngine: TPE for FLV
-- InsiderSignalEngine: urgency detection
-- LiquidityVoidStrategy: crisis sniper
-- ShadowFrontStrategy: flagship alpha
+LIVE SPINE (authoritative):
+    main.py:SovereignHeartbeat → ExecutionEngine → OrderRouter → SovereignPaperBroker
+
+RETAINED FOR: reference only. Do not maintain. Do not repair. Do not wire.
+Board may delete at any time.
+
+Signal_fusion call sites were repaired (Board-authorized pass) before this ruling.
+Those repairs are preserved in case any logic is extracted for reference purposes.
 """
 
 import logging
@@ -195,7 +198,7 @@ class PaperBroker:
 class HeartbeatMonitor:
     """
     Heartbeat monitor for main loop health.
-    
+
     IMPORTANT: This is MONITORING ONLY. Uses wall-clock for telemetry.
     Does NOT affect authoritative bot decisions.
     """
@@ -256,17 +259,17 @@ class HeartbeatMonitor:
 
 class CachedRiskState:
     """Cached risk state from the last authoritative evaluation."""
-    
+
     def __init__(self):
         self.last_result: Optional[UnifiedRiskResult] = None
         self.last_timestamp_ns: int = 0
         self.last_symbol: Optional[str] = None
-    
+
     def update(self, result: UnifiedRiskResult, timestamp_ns: int, symbol: str) -> None:
         self.last_result = result
         self.last_timestamp_ns = timestamp_ns
         self.last_symbol = symbol
-    
+
     def get_for_display(self, symbol: str) -> Optional[UnifiedRiskResult]:
         """Get cached result for display (monitoring only, not authoritative)."""
         if self.last_symbol == symbol and self.last_result:
@@ -276,23 +279,21 @@ class CachedRiskState:
 
 class MasterOrchestrator:
     """
-    Master Execution Orchestrator - Real bot integration choke point.
-    
-    This file is the SINGLE AUTHORITY for:
-    - Event processing (order book, candles, trades)
-    - Risk gating (unified_risk + kill_switch)
-    - Position sizing (position_sizing engine)
-    - Strategy routing (FLV, Shadow-Front via fusion)
-    - Execution (paper broker with realistic simulation)
-    - Intelligence integration (entropy, whale zone)
-    
-    All authoritative decisions use deterministic timestamps from events.
-    Monitoring/status uses cached state, not fresh recomputation.
-    
-    PRESERVED INTELLIGENCE INTEGRATION:
-    - EntropyDecoder: structural coherence / collapse detection
-    - WhaleZoneEngine: accumulation zone context
-    - ShadowFrontStrategy: flagship alpha (receives updates)
+    Master Execution Orchestrator - DORMANT candidate surface.
+
+    NOT the single authority. NOT wired. NOT in live path.
+    Live authority is main.py:SovereignHeartbeat.
+
+    SignalFusion — LIVE CONTRACT (repaired):
+        Live API: update_*(payload: Any, timestamp_ns: int),
+                  fuse(current_ts_ns: int),
+                  get_last_fusion() -> Optional[FusionDecision].
+        All 7 broken call sites repaired.
+        Regime detection not yet wired — (RegimeType.UNKNOWN, 0.0) placeholder.
+        Missing ingest paths (separate Board items): shans, physical, toxicity.
+
+    Authoritative decisions use deterministic timestamps from events (preserved).
+    Monitoring/status uses cached state, not fresh recomputation (preserved).
     """
 
     def __init__(self, config: Any, symbol: str, kill_switch: KillSwitch):
@@ -396,7 +397,7 @@ class MasterOrchestrator:
     ) -> None:
         """
         Update risk state from external risk truth.
-        
+
         Args:
             stale_data_blocks: Current stale data blocks
             divergence_blocks: Current divergence blocks
@@ -422,7 +423,7 @@ class MasterOrchestrator:
         # Update price history for volatility calculation
         self._price_history.append(candle.close)
         self._last_price = candle.close
-        
+
         packet = EventPacket(
             event_type="candle",
             data=candle,
@@ -508,17 +509,11 @@ class MasterOrchestrator:
         candle = packet.data
         exchange_ts_ns = packet.exchange_ts_ns
 
-        # Update whale flow
-        whale_score = self.signal_fusion.update_whale(candle)
+        # Update whale flow — update_whale(payload, timestamp_ns) mutates cache, returns None
+        self.signal_fusion.update_whale(candle, exchange_ts_ns)
 
-        # Calculate liquidity depth from order book if available
-        liquidity_usd = self._calculate_liquidity_usd()
-
-        # Update regime
-        regime = self.signal_fusion.update_regime(
-            [candle], 0, liquidity_usd, exchange_ts_ns
-        )
-        self._last_regime = regime
+        # Update regime — regime detection engine not wired; UNKNOWN keeps cache fresh (300s TTL)
+        self.signal_fusion.update_regime((RegimeType.UNKNOWN, 0.0), exchange_ts_ns)
 
         # NEW: Update whale zone engine with candle data
         self.whale_zone_engine.update(
@@ -533,7 +528,6 @@ class MasterOrchestrator:
         self._last_whale_zone = self.whale_zone_engine.get_zone(self.symbol)
 
         # NEW: Update entropy decoder (structural coherence intelligence)
-        # raw_entropy would come from market microstructure; default to neutral if not available
         raw_entropy = getattr(candle, 'entropy', DEFAULT_ENTROPY)
         entropy_score = self.entropy_decoder.update(
             symbol=self.symbol,
@@ -541,51 +535,22 @@ class MasterOrchestrator:
             raw_entropy=raw_entropy
         )
         self._last_entropy = entropy_score
-        self.signal_fusion.update_entropy(
-            symbol=self.symbol,
-            side="",  # Not side-specific in candle context
-            exchange_ts_ns=exchange_ts_ns,
-            regime=regime,
-            entropy_decoder=self.entropy_decoder
-        )
+        # update_entropy(payload, timestamp_ns) — live API
+        self.signal_fusion.update_entropy(entropy_score, exchange_ts_ns)
 
-        # Get macro and insider signals
-        macro = self.signal_fusion.get_macro_signal(exchange_ts_ns, 0.0)
-        insider = self.signal_fusion.get_insider_signal()
-
-        self._last_macro = macro
-
-        # NEW: Update ShadowFront strategy with current signals
-        if whale_score is not None:
-            self.shadow_front.update_whale(whale_score)
-        
+        # ShadowFront strategy updates
         # Sentiment velocity — would come from sentiment engine; default to 0 if not available
         sentiment_velocity = getattr(candle, 'sentiment_velocity', 0.0)
         self.shadow_front.update_sentiment(sentiment_velocity, exchange_ts_ns)
-        
-        # Insider urgency — pass raw float (orchestrator does not fabricate snapshots)
-        if insider is not None:
-            # ShadowFront.update_insider_state expects InsiderSignalSnapshot
-            # We pass None and let strategy handle absence, or create minimal snapshot
-            # For now, pass None — insider urgency will be handled by fusion layer
-            pass
-        
-        # Macro state — pass raw macro float
-        # ShadowFront.update_macro_state expects MacroSignal; pass None for now
-        # Macro suppression will come from fusion layer
-        
+
+        # Macro signal engine not wired — _last_macro stays None; flv uses it as-is
+
         # Toxicity state
         toxicity_alert = self.toxicity_engine.get_last_alert()
         self.shadow_front.update_toxicity_state(toxicity_alert)
 
-        # Fuse signals
-        fusion = self.signal_fusion.fuse(
-            regime=regime,
-            whale_score=None,
-            macro_signal=macro,
-            insider_signal=insider,
-            order_book=self._last_order_book
-        )
+        # Fuse signals — live API: fuse(current_ts_ns: int)
+        fusion = self.signal_fusion.fuse(exchange_ts_ns)
 
         # Generate order if attack mode AND unified risk allows
         if fusion.attack_mode and fusion.preferred_sleeve:
@@ -596,7 +561,7 @@ class MasterOrchestrator:
     def _process_trade_packet(self, packet: EventPacket) -> None:
         """
         Process trade packet with insider engine integration.
-        
+
         Insider urgency is consumed DIRECTLY from the repaired engine's
         authoritative urgency property. No local recomputation.
         """
@@ -661,7 +626,7 @@ class MasterOrchestrator:
     def _calculate_liquidity_usd(self) -> float:
         """
         Calculate liquidity depth from order book if available.
-        
+
         Fallback: DEFAULT_LIQUIDITY_USD ($100k) when no order book.
         This is a conservative estimate for initial conditions.
         """
@@ -674,32 +639,32 @@ class MasterOrchestrator:
     def _calculate_volatility(self) -> Decimal:
         """
         Calculate rolling volatility from price history.
-        
+
         Uses annualized volatility from daily returns.
         Falls back to DEFAULT_VOLATILITY (1%) with bounded range [0.5%, 5%].
         """
         if len(self._price_history) < MIN_PRICE_HISTORY:
             return DEFAULT_VOLATILITY
-        
+
         prices = list(self._price_history)[-VOLATILITY_WINDOW:]
         if len(prices) < 2:
             return DEFAULT_VOLATILITY
-        
+
         # Calculate returns
         returns = []
         for i in range(1, len(prices)):
             if prices[i-1] > 0:
                 ret = (prices[i] - prices[i-1]) / prices[i-1]
                 returns.append(ret)
-        
+
         if len(returns) < RETURNS_MIN_SAMPLES:
             return DEFAULT_VOLATILITY
-        
+
         # Standard deviation of returns
         mean_ret = sum(returns) / len(returns)
         variance = sum((r - mean_ret) ** 2 for r in returns) / len(returns)
         volatility = (variance ** 0.5) * (252 ** 0.5)  # Annualized
-        
+
         # Clamp to reasonable range
         vol = max(float(MIN_VOLATILITY), min(float(MAX_VOLATILITY), volatility))
         return Decimal(str(vol))
@@ -708,17 +673,17 @@ class MasterOrchestrator:
         """Calculate current exposure percentage from open positions."""
         if not self._open_positions:
             return Decimal('0')
-        
+
         total_exposure = Decimal('0')
         for pos in self._open_positions.values():
             quantity = Decimal(str(pos.get("quantity", 0)))
             price = Decimal(str(pos.get("entry_price", 0)))
             total_exposure += quantity * price
-        
+
         capital = Decimal(str(self._get_current_capital()))
         if capital <= 0:
             return Decimal('0')
-        
+
         return total_exposure / capital
 
     def _get_current_capital(self) -> float:
@@ -730,13 +695,13 @@ class MasterOrchestrator:
     def _get_kelly_multiplier(self) -> Decimal:
         """
         Get current Kelly multiplier.
-        
+
         Derivation: Based on attack mode from last fusion decision.
         Mapping is explicit and bounded:
         - Attack mode (confidence > threshold): 0.85 (aggressive)
         - Safe mode: 0.40 (conservative)
         """
-        last_fusion = self.signal_fusion.get_last_decision()
+        last_fusion = self.signal_fusion.get_last_fusion()
         is_attack = last_fusion.attack_mode if last_fusion else False
         return Decimal('0.85') if is_attack else Decimal('0.4')
 
@@ -750,14 +715,14 @@ class MasterOrchestrator:
     def _get_min_order_size(self, symbol: str) -> float:
         """
         Get minimum order size from instrument registry.
-        
+
         Fallback: instrument-specific heuristics when registry lookup fails.
         These heuristics are conservative estimates for major instruments.
         """
         spec = InstrumentRegistry.get_instrument(symbol)
         if spec:
             return spec.min_size
-        
+
         # Fallback heuristics (conservative estimates)
         if symbol in ("BTC/USD", "ETH/USD"):
             return 0.0001  # 0.0001 BTC/ETH minimum
@@ -769,10 +734,10 @@ class MasterOrchestrator:
     def _generate_order_with_risk_gating(self, fusion: Any, price: float, timestamp_ns: int) -> None:
         """
         Generate and execute order with full risk gating.
-        
+
         This is the SINGLE AUTHORITATIVE ORDER GENERATION PATH.
         All risk evaluation uses deterministic timestamps from events.
-        
+
         Integrates:
         1. Kill switch check (deterministic, uses timestamp_ns)
         2. Entropy gating (structural coherence check using real EntropyScore fields)
@@ -782,7 +747,7 @@ class MasterOrchestrator:
         6. Safety gate (final approval)
         7. Execution (paper broker)
         8. Cache result for monitoring
-        
+
         CRITICAL FIX: Order side is determined ONCE and propagated truthfully
         through safety gate, execution, and position storage.
         """
@@ -816,7 +781,7 @@ class MasterOrchestrator:
             order_side = "buy"  # Default, will be overridden by FLV signal if present
         else:
             order_side = "buy"  # Default for other strategies
-        
+
         # Override from FLV signal if available
         if fusion.preferred_sleeve == "liquidity_void" and hasattr(fusion, 'flv_side_override'):
             order_side = fusion.flv_side_override
@@ -837,7 +802,7 @@ class MasterOrchestrator:
         with self._lock:
             toxicity_score = self._get_toxicity_score()
             exposure_pct = self._calculate_exposure_pct()
-            
+
             risk_result = self.unified_risk.evaluate_for_symbol(
                 timestamp_ns=timestamp_ns,
                 kill_switch=self._kill_switch,
@@ -849,7 +814,7 @@ class MasterOrchestrator:
                 toxicity_score=toxicity_score,
                 current_exposure_pct=exposure_pct
             )
-            
+
             # Cache for monitoring
             self._cached_risk.update(risk_result, timestamp_ns, self.symbol)
 
@@ -1007,7 +972,7 @@ class MasterOrchestrator:
     def get_status(self) -> Dict[str, Any]:
         """
         Get orchestrator status for monitoring.
-        
+
         IMPORTANT: This reports CACHED authoritative state.
         It does NOT perform fresh risk evaluation.
         For authoritative decisions, use the order generation path.
@@ -1015,7 +980,7 @@ class MasterOrchestrator:
         with self._lock:
             # Use cached risk result, NOT fresh evaluation
             cached_risk = self._cached_risk.get_for_display(self.symbol)
-            
+
             return {
                 "symbol": self.symbol,
                 "event_queue_size": self._event_queue.qsize(),

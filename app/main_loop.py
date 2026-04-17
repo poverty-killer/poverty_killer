@@ -1,36 +1,33 @@
-﻿"""
+"""
 Main Loop - Sovereign Market-Data / Brain / State / Risk-Ingress Pipeline
 
-Role:
-    MainLoop is the authoritative upstream event-processing core.
-    It receives market data ticks and drives:
-        1. Data continuity validation
-        2. Signal brain updates (TPE, Shan's Curve, whale, regime, fusion state)
-        3. Risk state assessment (guard, VoL, recalibration)
-        4. Recalibration state machine advancement
-        5. Emergency liquidation gate (CRISIS_ABORT / EMERGENCY_HALT only)
-        6. Execution engine event drain (process_events only)
-        7. Health logging and diagnostics
+WIRED — integrated into main.py:SovereignHeartbeat as of Board bundle pass 2026-04-15.
+Receives events via callbacks from PollingClient (candles, order books) and
+KrakenWebSocketClient (candles, trades). Drives fusion, recalibration, and TPE
+with authoritative exchange timestamps.
 
-    Signal submission boundary:
-        MainLoop does NOT submit execution signals.
-        StrategySignal construction, StrategyVote aggregation,
-        DecisionCompiler, OrderIntent, and ExecutionEngine.submit_signal()
-        belong to a separate downstream layer not yet authorized.
-        This boundary is explicitly documented and enforced.
+Signal_fusion call sites: ALL REPAIRED.
+Shans payload: CLEARED — on_order_book processes through ShansCurve and passes
+    ShansCurveSignal to signal_fusion.
+Regime: WIRED — RegimeDetector.update() called from on_order_book() with real
+    bid/ask spread and depth. Volume from last candle (L1 proxy; honest degradation).
+Physical: WIRED — PhysicalValidator records real order book receive latency;
+    to_fusion_dict() feeds health_score to signal_fusion.
+Toxicity: WIRED — ToxicityEngine.update_candle() + update_toxicity() from on_candle().
+Entropy: WIRED — EntropyDecoder.update() with range-based proxy from candle OHLC.
+    Same instance shared with ShansCurve (ShansCurve reads entropy_history[-1]).
+Insider: PARTIALLY WIRED — InsiderSignalEngine.get_or_default_snapshot() feeds
+    active=False snapshot; urgency=0.0 until external observation feed added.
 
-Integration note:
-    MainLoop is a standalone class. Feed adapters (WebSocket clients,
-    REST pollers) must call on_order_book / on_candle / on_trade /
-    on_equity_update to drive the pipeline. Wiring from main.py is
-    a separate authorized pass.
+Signal submission boundary (preserved):
+    MainLoop does NOT submit execution signals.
+    StrategySignal, StrategyVote, DecisionCompiler, OrderIntent, ExecutionEngine.submit_signal()
+    belong to a separate downstream layer not yet authorized.
 
 Timing authority:
     - All exchange timestamps come from market data (authoritative int ns)
     - Wall-clock time.time_ns() used ONLY for receive-side latency tracking
-    - No random number generation
-    - DataContinuityValidator.record_data() requires datetime at its boundary;
-      conversion from ns is performed locally via datetime.utcfromtimestamp()
+    - DataContinuityValidator.record_data() requires datetime; conversion performed locally
 """
 
 import logging
@@ -46,33 +43,41 @@ from app.risk.guard import HybridRiskGuard
 from app.brain.signal_fusion import SignalFusion
 from app.brain.data_validator import DataContinuityValidator
 from app.brain.recalibrator import Recalibrator
+from app.brain.shans_curve import ShansCurve
 from app.brain.topological_engine import TopologicalEngine, TopologicalSignal
+from app.brain.regime_detector import RegimeDetector
+from app.brain.physical_validator import PhysicalValidator
+from app.brain.toxicity_engine import ToxicityEngine, ToxicityAlert
+from app.brain.entropy_decoder import EntropyDecoder
+from app.brain.insider_signal_engine import InsiderSignalEngine, InsiderSignalSnapshot
 from app.execution.engine import ExecutionEngine
 from app.models import (
     OrderBookSnapshot,
     Candle,
     FusionDecision,
 )
+from app.models.enums import RegimeType
 
 logger = logging.getLogger(__name__)
+
+# Book event throttle: process pipeline at most every 200ms of wall-clock time.
+# Prevents WS queue backlog when Kraken sends high-frequency (100+/sec) book updates.
+# Measured in receive_ns (wall clock) not exchange_ts to avoid cross-symbol timestamp drift.
+# At ~70ms pipeline time per event: 200ms interval → 5 runs/sec → 35% asyncio load.
+_MIN_BOOK_PROCESS_INTERVAL_NS: int = 200_000_000  # 200ms → max 5 book pipeline runs/sec
 
 
 def _ns_to_datetime(ns: int) -> datetime:
     """
     Convert nanosecond timestamp to UTC datetime.
-
     Used only at DataContinuityValidator boundary which requires datetime.
-    All internal state uses int nanoseconds.
     """
     return datetime.utcfromtimestamp(ns / 1_000_000_000.0)
 
 
 @dataclass
 class LoopMetrics:
-    """
-    Per-iteration metrics for the main loop.
-    All counters are monotonically increasing.
-    """
+    """Per-iteration metrics. All counters monotonically increasing."""
     iteration_count: int = 0
     last_candle_exchange_ts_ns: int = 0
     last_order_book_exchange_ts_ns: int = 0
@@ -93,59 +98,51 @@ class MainLoop:
 
     Proven collaborator contracts (all verified from live repo):
 
-    OrderBookSnapshot (app/models/market_data.py):
-        Fields: symbol, exchange_ts_ns, bids, asks, exchange_latency_ns
-        Properties: mid_price, best_bid, best_ask, spread, spread_bps,
-                    depth_at_levels(n), imbalance
-        NO total_bid_liquidity_usd — does not exist
+    OrderBookSnapshot: symbol, exchange_ts_ns, mid_price (@property),
+        depth_at_levels(n) -> Tuple[float, float], spread, spread_bps, imbalance
 
-    FusionDecision (app/models/fusion.py):
-        Fields: exchange_ts_ns, attack_mode, confidence,
-                shadow_front_eligible, liquidity_void_eligible,
-                entropy_decoder_eligible, gamma_front_eligible,
-                sector_rotation_eligible, preferred_sleeve, deprioritized_sleeves,
-                reason, regime, physical_verification_score,
-                shans_superfluid_score, shans_bias, shans_confidence
-        NO side, quantity, expected_net_profit_pct — do not exist
+    FusionDecision: exchange_ts_ns, attack_mode, confidence,
+        shadow_front_eligible, liquidity_void_eligible, entropy_decoder_eligible,
+        gamma_front_eligible, sector_rotation_eligible, preferred_sleeve,
+        deprioritized_sleeves, reason, regime, physical_verification_score,
+        shans_superfluid_score, shans_bias, shans_confidence
 
-    DataContinuityValidator (app/brain/data_validator.py):
-        Methods: record_data(symbol, timestamp: datetime),
-                 mark_good(symbol), is_data_healthy(symbol),
-                 record_websocket_heartbeat(symbol)
-        NO update_heartbeat — does not exist
+    DataContinuityValidator: record_data(symbol, timestamp: datetime),
+        mark_good(symbol), is_data_healthy(symbol)
 
-    SignalFusion.get_macro_signal(exchange_ts_ns: int, whale_score: float):
-        whale_score is a FLOOR value, not the sole input.
-        Implementation: effective = max(whale_score, cached_whale.score) when fresh.
-        Passing 0.0 is correct: update_whale() runs immediately before on the same
-        tick, so cached_whale is always fresh. max(0.0, cached_score) = cached_score.
-        Passing any positive value would artificially inflate above cache truth.
+    ShansCurve: update_order_book(symbol, mid_price, cum_bid_vol, cum_ask_vol,
+        depth_velocity, timestamp) -> Optional[ShansCurveSignal]
 
-    HybridRiskGuard (app/risk/guard.py):
-        assess_state(current_equity: float, tpe_coherence: float) -> Dict
-        update_equity_history(current_equity: float)
-        can_trade() -> bool
+    RegimeDetector: update(price, volume, bid_price, ask_price, bid_depth,
+        ask_depth, exchange_ts_ns) -> Tuple[RegimeType, float]
 
-    Recalibrator (app/brain/recalibrator.py):
-        evaluate_regime(price_drop_pct, tpe_signal, drop_duration_sec) -> str
-        start_recalibration(reason, duration_seconds)
-        end_recalibration()
-        should_recover() -> bool
-        is_in_recalibration() -> bool
-        get_recalibration_remaining() -> float
-        get_recovery_strategy() -> Dict
-        min_recalibration_seconds: float (attribute)
+    PhysicalValidator: record_latency(symbol, exchange, latency_ms, order_size,
+        price_impact_bps, timestamp_ns) -> PhysicalVerification;
+        to_fusion_dict(exchange) -> {"health_score": float}
 
-    ExecutionEngine (app/execution/engine.py):
-        process_events() — drain the execution queue, no signal submission
-        update_equity(current_equity: float)
-        _emergency_liquidate_all() — fire-and-forget, non-blocking
+    ToxicityEngine: update_candle(volume, high, low, close, timestamp_ns),
+        update_toxicity(current_ts_ns) -> ToxicityAlert
 
-    Commander (app/commander.py):
-        update_equity(current_equity: float, timestamp_ns: int)
-        is_attack_mode() -> bool
-        get_kelly_multiplier() -> float
-        get_status() -> Dict
+    EntropyDecoder: update(symbol, exchange_ts_ns, raw_entropy) -> EntropyScore
+
+    InsiderSignalEngine: get_or_default_snapshot(symbol, timestamp_ns)
+        -> InsiderSignalSnapshot (active=False if no observations)
+
+    SignalFusion — LIVE CONTRACT (all call sites repaired):
+        update_*(payload, timestamp_ns), fuse(current_ts_ns), get_last_fusion()
+
+    HybridRiskGuard: assess_state(equity, tpe_coherence) -> Dict,
+        update_equity_history(equity), can_trade() -> bool
+
+    Recalibrator: evaluate_regime(price_drop_pct, tpe_signal, drop_duration_sec) -> str,
+        start_recalibration(reason, duration_seconds), end_recalibration(),
+        should_recover() -> bool, min_recalibration_seconds: float
+
+    ExecutionEngine: process_events(), update_equity(equity),
+        _emergency_liquidate_all()
+
+    Commander: update_equity(equity, timestamp_ns), is_attack_mode(),
+        get_kelly_multiplier(), get_status()
     """
 
     def __init__(
@@ -156,38 +153,36 @@ class MainLoop:
         signal_fusion: SignalFusion,
         data_validator: DataContinuityValidator,
         recalibrator: Recalibrator,
+        shans_curve: ShansCurve,
         tpe_engine: TopologicalEngine,
+        regime_detector: RegimeDetector,
+        physical_validator: PhysicalValidator,
+        toxicity_engine: ToxicityEngine,
+        entropy_decoder: EntropyDecoder,
+        insider_engine: InsiderSignalEngine,
         execution_engine: ExecutionEngine,
         symbol: str,
+        exchange: str = "kraken",
         health_log_interval_iterations: int = 600,
     ):
-        """
-        Initialize the main loop.
-
-        Args:
-            config: Configuration object
-            commander: Global commander (attack mode, Kelly multiplier)
-            risk_guard: Hybrid risk guard (equity, VoL, fuses)
-            signal_fusion: Signal fusion brain
-            data_validator: Data continuity validator
-            recalibrator: Topological recalibration engine
-            tpe_engine: Topological persistence engine
-            execution_engine: Execution engine (event drain only)
-            symbol: Primary trading symbol
-            health_log_interval_iterations: Health log cadence in candle ticks
-        """
         self.config = config
         self.commander = commander
         self.risk_guard = risk_guard
         self.signal_fusion = signal_fusion
         self.data_validator = data_validator
         self.recalibrator = recalibrator
+        self.shans_curve = shans_curve
         self.tpe_engine = tpe_engine
+        self.regime_detector = regime_detector
+        self.physical_validator = physical_validator
+        self.toxicity_engine = toxicity_engine
+        self.entropy_decoder = entropy_decoder
+        self.insider_engine = insider_engine
         self.execution_engine = execution_engine
         self.symbol = symbol
+        self.exchange = exchange
         self.health_log_interval_iterations = health_log_interval_iterations
 
-        # Per-tick state — all guarded by _lock
         self._last_order_book: Optional[OrderBookSnapshot] = None
         self._last_candle: Optional[Candle] = None
         self._last_tpe_signal: Optional[TopologicalSignal] = None
@@ -196,121 +191,147 @@ class MainLoop:
         self._last_fusion: Optional[FusionDecision] = None
         self._last_risk_state: Optional[Dict[str, Any]] = None
 
-        # Recalibration state machine
         self._recalibration_active: bool = False
         self._recalibration_start_ns: int = 0
+        self._last_book_receive_ns: int = 0
 
         self._metrics = LoopMetrics()
         self._lock = threading.Lock()
         self._running = False
 
-        logger.info(
-            "MainLoop initialized: symbol=%s, health_log_interval=%d",
-            symbol, health_log_interval_iterations
-        )
+        logger.info("MainLoop initialized: symbol=%s", symbol)
 
     # =========================================================================
     # LIFECYCLE
     # =========================================================================
 
     def start(self) -> None:
-        """Mark loop as active. ExecutionEngine must be started separately."""
         self._running = True
         logger.info("MainLoop started: symbol=%s", self.symbol)
 
     def stop(self) -> None:
-        """Mark loop as inactive."""
         self._running = False
         logger.info(
-            "MainLoop stopped: symbol=%s, candle_iterations=%d, "
-            "emergency_liquidations=%d, recalibration_entries=%d",
-            self.symbol,
-            self._metrics.iteration_count,
-            self._metrics.emergency_liquidations,
-            self._metrics.recalibration_entries,
+            "MainLoop stopped: symbol=%s iterations=%d emergency_liquidations=%d",
+            self.symbol, self._metrics.iteration_count, self._metrics.emergency_liquidations,
         )
 
     # =========================================================================
-    # MARKET DATA INGRESS — called by feed adapters
+    # MARKET DATA INGRESS — called by SovereignHeartbeat feed callbacks
     # =========================================================================
 
     def on_order_book(self, order_book: OrderBookSnapshot) -> None:
         """
-        Ingest an authoritative order book snapshot.
+        Ingest authoritative order book snapshot.
 
         Drives:
-          - Data continuity record (record_data + mark_good)
-          - TPE analysis (real coherence score for risk guard)
-          - Signal fusion Shan's Curve update (cached state mutation)
-          - Last price update from mid_price (proven @property)
-
-        Proven fields used:
-          exchange_ts_ns, mid_price (@property), depth_at_levels() (method)
-
-        Args:
-            order_book: Authoritative L2 order book snapshot
+          - Data continuity (record_data + mark_good)
+          - TPE analysis (real coherence score)
+          - ShansCurve processing → signal_fusion shans slot (ShansCurveSignal payload)
+          - Regime detection → signal_fusion regime slot (real L2-derived signal)
+          - Physical latency → signal_fusion physical slot (health_score dict)
+          - Price update from mid_price
         """
         if not self._running:
             return
+        if order_book.symbol != self.symbol:
+            return  # Reject foreign-symbol books: MainLoop is single-symbol; all pipeline state is self.symbol
 
         receive_ns = time.time_ns()
         exchange_ts_ns = order_book.exchange_ts_ns
 
+        # Throttle: skip if pipeline ran within the last 200ms of wall-clock time.
+        # Drains the WS queue instantly for burst periods; prevents asyncio loop overload.
+        if receive_ns - self._last_book_receive_ns < _MIN_BOOK_PROCESS_INTERVAL_NS:
+            return
+        self._last_book_receive_ns = receive_ns
+
         with self._lock:
             self._last_order_book = order_book
-            mid = order_book.mid_price  # proven @property
+            mid = order_book.mid_price
             if mid > 0.0:
                 self._last_price = mid
+            last_candle_ref = self._last_candle  # snapshot for regime volume proxy
 
-        # Data continuity — record_data requires datetime boundary
-        self.data_validator.record_data(
-            self.symbol,
-            _ns_to_datetime(exchange_ts_ns)
-        )
+        self.data_validator.record_data(self.symbol, _ns_to_datetime(exchange_ts_ns))
         self.data_validator.mark_good(self.symbol)
 
-        # TPE analysis — produces TopologicalSignal.coherence_score
         tpe_signal = self.tpe_engine.analyze(order_book)
         with self._lock:
             self._last_tpe_signal = tpe_signal
 
-        # Shan's Curve — mutates signal_fusion cached state, return value unused
-        self.signal_fusion.update_shans(
-            order_book,
-            self.signal_fusion.get_current_regime(),
-            None
+        if mid > 0.0:
+            cum_bid_vol, cum_ask_vol = order_book.depth_at_levels(10)
+
+            # Shan's Curve — ShansCurveSignal → signal_fusion shans slot
+            shans_result = self.shans_curve.update_order_book(
+                symbol=self.symbol,
+                mid_price=mid,
+                cum_bid_vol=cum_bid_vol,
+                cum_ask_vol=cum_ask_vol,
+                depth_velocity=0.0,
+                timestamp=exchange_ts_ns,
+            )
+            if shans_result is not None:
+                self.signal_fusion.update_shans(shans_result, exchange_ts_ns)
+
+            # Regime — real L2-derived signal
+            # bid/ask from spread; depth from depth_at_levels; volume from last candle (L1 proxy)
+            spread = order_book.spread
+            bid_price = mid - spread / 2.0
+            ask_price = mid + spread / 2.0
+            last_volume = last_candle_ref.volume if last_candle_ref is not None else 0.0
+            regime_tuple = self.regime_detector.update(
+                price=mid,
+                volume=last_volume,
+                bid_price=bid_price,
+                ask_price=ask_price,
+                bid_depth=cum_bid_vol,
+                ask_depth=cum_ask_vol,
+                exchange_ts_ns=exchange_ts_ns,
+            )
+            self.signal_fusion.update_regime(regime_tuple, exchange_ts_ns)
+
+        # Physical — real network latency from order book receive-side measurement
+        latency_ms = (receive_ns - exchange_ts_ns) / 1_000_000
+        latency_ms_clamped = max(0.0, latency_ms)
+        self.physical_validator.record_latency(
+            symbol=self.symbol,
+            exchange=self.exchange,
+            latency_ms=latency_ms_clamped,
+            order_size=0.0,
+            price_impact_bps=0.0,
+            timestamp_ns=exchange_ts_ns,
         )
+        phys_dict = self.physical_validator.to_fusion_dict(self.exchange)
+        self.signal_fusion.update_physical(phys_dict, exchange_ts_ns)
 
         self._metrics.last_order_book_exchange_ts_ns = exchange_ts_ns
 
-        # Receive-side latency tracking (wall-clock vs exchange timestamp)
-        latency_ms = (receive_ns - exchange_ts_ns) / 1_000_000
         if latency_ms > 200.0:
             logger.warning(
-                "Order book receive latency spike: %.1fms symbol=%s ts_ns=%d",
-                latency_ms, self.symbol, exchange_ts_ns
+                "Order book receive latency spike: %.1fms symbol=%s",
+                latency_ms, self.symbol,
             )
 
     def on_candle(self, candle: Candle) -> None:
         """
-        Ingest an authoritative candle.
+        Ingest authoritative candle.
 
         Drives:
-          - Whale flow update (mutates signal_fusion._cached_whale)
-          - Regime update (mutates signal_fusion._cached_regime)
-          - Macro + insider signal retrieval (float scores for fusion only)
-          - Signal fusion (fuse() — for state tracking, not signal submission)
+          - Whale flow update (signal_fusion whale slot)
+          - Toxicity update (candle proxy mode → ToxicityAlert → signal_fusion toxicity slot)
+          - Entropy update (range-based proxy → EntropyScore → signal_fusion entropy slot)
+          - Insider update (real engine; active=False until observations added)
           - Commander equity sync
+          - fuse(exchange_ts_ns) — authoritative timestamp, not wall-clock
           - Risk state assessment with real TPE coherence
-          - Recalibration state machine advancement
-          - Execution engine event drain (process_events only)
+          - Recalibration state machine
+          - Execution engine event drain
           - Health logging
 
-        Signal submission is NOT performed here.
-        Fusion state is stored for downstream layer consumption via get_last_fusion().
-
-        Args:
-            candle: Authoritative OHLCV candle
+        Regime slot updated from on_order_book() — not here.
+        Signal submission NOT performed here.
         """
         if not self._running:
             return
@@ -322,91 +343,54 @@ class MainLoop:
             if candle.close > 0.0:
                 self._last_price = candle.close
 
-        # Whale flow — update_whale() mutates _cached_whale, returns None
-        self.signal_fusion.update_whale(candle)
+        self.signal_fusion.update_whale(candle, exchange_ts_ns)
 
-        # Regime — update_regime() mutates _cached_regime, returns None
-        # Liquidity: derived from proven depth_at_levels() on last order book
-        # bid_depth and ask_depth are in base units; multiply by price for USD proxy
-        with self._lock:
-            ob = self._last_order_book
-            last_price = self._last_price
-
-        liquidity_usd: float = 0.0
-        if ob is not None and last_price > 0.0:
-            bid_depth, ask_depth = ob.depth_at_levels(10)  # proven method
-            liquidity_usd = (bid_depth + ask_depth) * last_price
-
-        self.signal_fusion.update_regime(
-            [candle], 0, liquidity_usd, exchange_ts_ns
+        # Toxicity — candle proxy mode (real engine, honest degraded input)
+        self.toxicity_engine.update_candle(
+            volume=candle.volume,
+            high=candle.high,
+            low=candle.low,
+            close=candle.close,
+            timestamp_ns=exchange_ts_ns,
         )
+        tox_alert: ToxicityAlert = self.toxicity_engine.update_toxicity(exchange_ts_ns)
+        self.signal_fusion.update_toxicity(tox_alert, exchange_ts_ns)
 
-        # Commander equity sync
+        # Entropy — realized intrabar range proxy (candle high - low normalized by close)
+        # Scale of 20: maps typical crypto range/close (0.002–0.05) to [0.04–1.0]
+        raw_entropy = min(1.0, (candle.high - candle.low) / max(candle.close, 1e-9) * 20.0)
+        entropy_score = self.entropy_decoder.update(self.symbol, exchange_ts_ns, raw_entropy)
+        self.signal_fusion.update_entropy(entropy_score, exchange_ts_ns)
+
+        # Insider — real engine state; active=False until external observations added
+        insider_snapshot = self.insider_engine.get_or_default_snapshot(self.symbol, exchange_ts_ns)
+        self.signal_fusion.update_insider(insider_snapshot, exchange_ts_ns)
+
         self.commander.update_equity(self._last_equity, exchange_ts_ns)
 
-        # get_macro_signal(exchange_ts_ns: int, whale_score: float) -> float
-        #
-        # whale_score=0.0 is the provably correct floor value, not a fallback.
-        #
-        # Proof from signal_fusion.py get_macro_signal():
-        #   effective_whale_score = whale_score  # starts at 0.0
-        #   if self._cached_whale is not None and not stale:
-        #       effective_whale_score = max(effective_whale_score, self._cached_whale.score)
-        #
-        # update_whale(candle) was called immediately above on this same tick,
-        # so _cached_whale is always fresh (age = 0 << STALENESS_THRESHOLD_NS = 5s).
-        # Therefore: effective_whale_score = max(0.0, cached_whale.score) = cached_whale.score.
-        # Passing any positive value > 0 would inflate above cache truth.
-        # 0.0 is the exact correct floor for the cache-dominates semantics.
-        macro_score: float = self.signal_fusion.get_macro_signal(
-            exchange_ts_ns, 0.0
-        )
-
-        # get_insider_signal() -> float: returns cached urgency if fresh, else 0.0
-        insider_score: float = self.signal_fusion.get_insider_signal()
-
-        # fuse() — produces FusionDecision for state tracking and downstream consumption
-        # MainLoop does NOT use fusion output for signal submission
-        with self._lock:
-            ob_snapshot = self._last_order_book
-
-        fusion: FusionDecision = self.signal_fusion.fuse(
-            regime=None,           # reads from _cached_regime
-            whale_score=None,      # reads from _cached_whale
-            macro_signal=macro_score,
-            insider_signal=insider_score,
-            order_book=ob_snapshot
-        )
-
+        fusion: FusionDecision = self.signal_fusion.fuse(exchange_ts_ns)
         with self._lock:
             self._last_fusion = fusion
 
         self._metrics.iteration_count += 1
         self._metrics.last_candle_exchange_ts_ns = exchange_ts_ns
 
-        # TPE coherence for risk guard — from last TPE signal or honest midpoint
         with self._lock:
             tpe_signal = self._last_tpe_signal
 
         tpe_coherence: float = (
-            tpe_signal.coherence_score
-            if tpe_signal is not None
-            else 0.5  # no TPE data yet — honest midpoint, not a biased value
+            tpe_signal.coherence_score if tpe_signal is not None else 0.5
         )
 
-        # Risk state assessment with real TPE coherence
         risk_state = self.risk_guard.assess_state(self._last_equity, tpe_coherence)
         with self._lock:
             self._last_risk_state = risk_state
         self._metrics.last_risk_assessment_ns = exchange_ts_ns
 
-        # Recalibration state machine
         self._advance_recalibration(risk_state, tpe_signal, exchange_ts_ns)
 
-        # Execution engine event drain — process_events() only, no signal submission
         self.execution_engine.process_events()
 
-        # Health logging cadence
         if (self._metrics.iteration_count - self._metrics.last_health_log_iteration
                 >= self.health_log_interval_iterations):
             self._log_health()
@@ -416,29 +400,14 @@ class MainLoop:
 
     def on_trade(self, size: float, price: float, side: int, exchange_ts_ns: int) -> None:
         """
-        Ingest an authoritative trade tick.
-
-        Drives:
-          - Data continuity record (record_data + mark_good)
-          - Last price update
-
-        Trade-level toxicity engine update is handled by the orchestrator
-        (app/execution/orchestrator.py) which has direct ToxicityEngine access.
-        MainLoop does not duplicate that path.
-
-        Args:
-            size: Trade size in base units
-            price: Trade price in quote currency
-            side: +1 for buy, -1 for sell
-            exchange_ts_ns: Authoritative exchange nanosecond timestamp
+        Ingest authoritative trade tick.
+        Drives data continuity and price update only.
+        Toxicity engine update is handled by SovereignHeartbeat (direct ToxicityEngine access).
         """
         if not self._running:
             return
 
-        self.data_validator.record_data(
-            self.symbol,
-            _ns_to_datetime(exchange_ts_ns)
-        )
+        self.data_validator.record_data(self.symbol, _ns_to_datetime(exchange_ts_ns))
         self.data_validator.mark_good(self.symbol)
 
         if price > 0.0:
@@ -449,22 +418,13 @@ class MainLoop:
 
     def on_equity_update(self, current_equity: float, exchange_ts_ns: int) -> None:
         """
-        Receive authoritative portfolio equity from exchange reconciliation.
+        Receive authoritative portfolio equity.
 
         Drives:
-          - Internal equity state update
-          - HybridRiskGuard.update_equity_history() — VoL tracking
-          - ExecutionEngine.update_equity() — equity sync
-          - Commander.update_equity() — attack mode drawdown check
-
-        All three proven from live repo:
-          - HybridRiskGuard.update_equity_history(current_equity: float)
-          - ExecutionEngine.update_equity(current_equity: float)
-          - Commander.update_equity(current_equity: float, timestamp_ns: int)
-
-        Args:
-            current_equity: Total portfolio equity in USD
-            exchange_ts_ns: Authoritative exchange nanosecond timestamp
+          - Internal equity state
+          - HybridRiskGuard.update_equity_history()
+          - ExecutionEngine.update_equity()
+          - Commander.update_equity()
         """
         if not self._running:
             return
@@ -477,7 +437,8 @@ class MainLoop:
         self.commander.update_equity(current_equity, exchange_ts_ns)
 
         self._metrics.last_equity_update_ns = exchange_ts_ns
-        # =========================================================================
+
+    # =========================================================================
     # RECALIBRATION STATE MACHINE
     # =========================================================================
 
@@ -487,55 +448,20 @@ class MainLoop:
         tpe_signal: Optional[TopologicalSignal],
         exchange_ts_ns: int,
     ) -> None:
-        """
-        Advance the recalibration state machine on every candle tick.
-
-        State transitions (proven from Recalibrator live contract):
-            NORMAL → EMERGENCY_LIQUIDATION:
-                when risk_state["action"] == "EMERGENCY_HALT"
-                OR recalibrator returns "CRISIS_ABORT"
-            NORMAL → RECALIBRATING:
-                when risk_state["action"] == "RECALIBRATE"
-            RECALIBRATING → NORMAL:
-                when recalibrator.should_recover() == True
-                AND risk_state["action"] not in ("RECALIBRATE", "EMERGENCY_HALT")
-            RECALIBRATING (extended):
-                when should_recover() == True but conditions still unfavorable
-
-        Proven Recalibrator methods used:
-            evaluate_regime(price_drop_pct: float,
-                            tpe_signal: Optional[TopologicalSignal],
-                            drop_duration_sec: float) -> str
-            start_recalibration(reason: str, duration_seconds: float)
-            end_recalibration()
-            should_recover() -> bool
-            min_recalibration_seconds: float (attribute)
-
-        Proven ExecutionEngine method used:
-            _emergency_liquidate_all() — fire-and-forget, NON-BLOCKING ThreadPoolExecutor
-
-        Args:
-            risk_state: Output of risk_guard.assess_state()
-            tpe_signal: Last TopologicalSignal or None
-            exchange_ts_ns: Authoritative exchange nanosecond timestamp
-        """
         action: str = risk_state.get("action", "AGGRESSIVE")
         drawdown_from_peak: float = risk_state.get("drawdown_from_peak", 0.0)
 
-        # EMERGENCY_HALT — highest priority, bypasses recalibration
         if action == "EMERGENCY_HALT":
             if not self._recalibration_active:
                 logger.critical(
-                    "EMERGENCY_HALT from risk guard — initiating fire-and-forget "
-                    "liquidation: drawdown=%.2f%% reason=%s",
+                    "EMERGENCY_HALT: drawdown=%.2f%% reason=%s — fire-and-forget liquidation",
                     drawdown_from_peak * 100,
-                    risk_state.get("reason", "unknown")
+                    risk_state.get("reason", "unknown"),
                 )
                 self._metrics.emergency_liquidations += 1
                 self.execution_engine._emergency_liquidate_all()
             return
 
-        # Topological regime evaluation — real TPE geometry, not hardcoded
         drop_duration_sec: float = (
             (exchange_ts_ns - self._recalibration_start_ns) / 1_000_000_000.0
             if self._recalibration_active and self._recalibration_start_ns > 0
@@ -545,41 +471,33 @@ class MainLoop:
         regime_decision: str = self.recalibrator.evaluate_regime(
             price_drop_pct=drawdown_from_peak,
             tpe_signal=tpe_signal,
-            drop_duration_sec=drop_duration_sec
+            drop_duration_sec=drop_duration_sec,
         )
 
-        # CRISIS_ABORT from recalibrator → emergency liquidation
         if regime_decision == "CRISIS_ABORT" and not self._recalibration_active:
             logger.critical(
-                "CRISIS_ABORT from recalibrator — initiating fire-and-forget "
-                "liquidation: drawdown=%.2f%% betti_1=%d persistence=%.3f",
+                "CRISIS_ABORT from recalibrator: drawdown=%.2f%% betti_1=%d — liquidation",
                 drawdown_from_peak * 100,
                 tpe_signal.betti_1 if tpe_signal is not None else 0,
-                tpe_signal.persistence_score if tpe_signal is not None else 0.0
             )
             self._metrics.emergency_liquidations += 1
             self.execution_engine._emergency_liquidate_all()
             return
 
-        # Enter recalibration if risk guard demands it
         if action == "RECALIBRATE" and not self._recalibration_active:
             self._recalibration_active = True
             self._recalibration_start_ns = exchange_ts_ns
             self._metrics.recalibration_entries += 1
             self.recalibrator.start_recalibration(
                 reason=risk_state.get("reason", "risk_guard_floor_breach"),
-                duration_seconds=self.recalibrator.min_recalibration_seconds
+                duration_seconds=self.recalibrator.min_recalibration_seconds,
             )
             logger.warning(
-                "Recalibration STARTED: reason=%s drawdown=%.2f%% "
-                "betti_1=%d coherence=%.3f",
+                "Recalibration STARTED: reason=%s drawdown=%.2f%%",
                 risk_state.get("reason", "unknown"),
                 drawdown_from_peak * 100,
-                tpe_signal.betti_1 if tpe_signal is not None else 0,
-                tpe_signal.coherence_score if tpe_signal is not None else 0.0
             )
 
-        # Advance recalibration: check if ready to exit
         if self._recalibration_active:
             if self.recalibrator.should_recover():
                 if action not in ("RECALIBRATE", "EMERGENCY_HALT"):
@@ -587,23 +505,16 @@ class MainLoop:
                     self._recalibration_active = False
                     self._recalibration_start_ns = 0
                     self._metrics.recalibration_exits += 1
-                    logger.info(
-                        "Recalibration ENDED — resuming upstream pipeline: "
-                        "action=%s drawdown=%.2f%%",
-                        action, drawdown_from_peak * 100
-                    )
+                    logger.info("Recalibration ENDED: action=%s", action)
                 else:
-                    # Conditions still unfavorable — extend recalibration
                     logger.info(
-                        "Recalibration cooldown elapsed but conditions unfavorable "
-                        "(action=%s) — extending by %.0fs",
-                        action, self.recalibrator.min_recalibration_seconds
+                        "Recalibration cooldown elapsed but conditions unfavorable (action=%s) — extending",
+                        action,
                     )
                     self.recalibrator.start_recalibration(
                         reason="extended_" + risk_state.get("reason", "unfavorable"),
-                        duration_seconds=self.recalibrator.min_recalibration_seconds
+                        duration_seconds=self.recalibrator.min_recalibration_seconds,
                     )
-
             self._metrics.last_recalibration_check_ns = exchange_ts_ns
 
     # =========================================================================
@@ -611,92 +522,57 @@ class MainLoop:
     # =========================================================================
 
     def _log_health(self) -> None:
-        """
-        Log health summary at regular candle-tick intervals.
-
-        All status methods proven from live repo:
-          - HybridRiskGuard.get_status() -> Dict
-          - Recalibrator.get_status() -> Dict
-          - ExecutionEngine.get_status() -> Dict
-          - Commander.get_status() -> Dict
-          - Recalibrator.get_recovery_strategy() -> Dict
-          - Recalibrator.get_recalibration_remaining() -> float
-        """
         risk_status = self.risk_guard.get_status()
         recal_status = self.recalibrator.get_status()
         exec_status = self.execution_engine.get_status()
         commander_status = self.commander.get_status()
 
         logger.info(
-            "HEALTH | iter=%d | mode=%s | equity=%.2f | tradeable=%.2f | "
-            "drawdown=%.2f%% | can_trade=%s | recalibrating=%s | "
-            "pending_orders=%d | exec_queue=%d | "
+            "HEALTH | iter=%d | mode=%s | equity=%.2f | drawdown=%.2f%% | "
+            "can_trade=%s | recalibrating=%s | pending_orders=%d | "
             "emergency_liquidations=%d | recal_entries=%d",
             self._metrics.iteration_count,
             commander_status.get("mode", "UNKNOWN"),
             risk_status.get("current_equity", 0.0),
-            risk_status.get("tradeable_equity", 0.0),
             risk_status.get("drawdown_from_peak", 0.0) * 100,
             risk_status.get("can_trade", False),
             recal_status.get("is_in_recalibration", False),
             exec_status.get("pending_orders_count", 0),
-            exec_status.get("execution_queue_size", 0),
             self._metrics.emergency_liquidations,
             self._metrics.recalibration_entries,
         )
 
-        # Fusion state summary — monitoring only, not for signal generation
         with self._lock:
             fusion = self._last_fusion
         if fusion is not None:
             logger.debug(
-                "FUSION STATE | attack=%s | sleeve=%s | conf=%.3f | "
-                "shans_superfluid=%.3f | shans_bias=%s",
-                fusion.attack_mode,
-                fusion.preferred_sleeve,
-                fusion.confidence,
-                fusion.shans_superfluid_score,
-                fusion.shans_bias,
+                "FUSION | attack=%s | sleeve=%s | conf=%.3f | shans=%.3f | bias=%s",
+                fusion.attack_mode, fusion.preferred_sleeve, fusion.confidence,
+                fusion.shans_superfluid_score, fusion.shans_bias,
             )
 
-        # Physical fuse alert
         if risk_status.get("physical_fuse_triggered"):
             logger.critical("HEALTH ALERT: Physical fuse triggered!")
-
-        # VoL fuse alert
         if risk_status.get("vol_fuse_triggered"):
             logger.critical("HEALTH ALERT: VoL fuse triggered!")
-
-        # Exchange outage alert
         if risk_status.get("outage_detected"):
             logger.critical("HEALTH ALERT: Exchange outage detected!")
 
-        # Recalibration recovery strategy
         if recal_status.get("is_in_recalibration"):
             strategy = self.recalibrator.get_recovery_strategy()
             remaining = self.recalibrator.get_recalibration_remaining()
             logger.info(
-                "RECALIBRATION ACTIVE | remaining=%.0fs | attempt=%d | "
-                "betti_1=%d | persistence=%.3f | strategy=%s",
+                "RECALIBRATION ACTIVE | remaining=%.0fs | attempt=%d | strategy=%s",
                 remaining,
                 recal_status.get("recovery_attempts", 0),
-                recal_status.get("last_betti_1_count", 0),
-                recal_status.get("last_persistence_score", 0.0),
-                strategy.get("description", "unknown")
+                strategy.get("description", "unknown"),
             )
-            # =========================================================================
+
+    # =========================================================================
     # DIAGNOSTICS
     # =========================================================================
 
     def get_status(self) -> Dict[str, Any]:
-        """
-        Get current main loop status for monitoring and dashboard.
-
-        All fields sourced from proven internal state only.
-
-        Returns:
-            Status dictionary
-        """
         with self._lock:
             last_price = self._last_price
             last_equity = self._last_equity
@@ -717,80 +593,33 @@ class MainLoop:
             "last_candle_ts_ns": self._metrics.last_candle_exchange_ts_ns,
             "last_order_book_ts_ns": self._metrics.last_order_book_exchange_ts_ns,
             "last_trade_ts_ns": self._metrics.last_trade_exchange_ts_ns,
-            "last_equity_update_ns": self._metrics.last_equity_update_ns,
-            "tpe_coherence": (
-                tpe_signal.coherence_score if tpe_signal is not None else None
-            ),
-            "tpe_super_void": (
-                tpe_signal.super_void_detected if tpe_signal is not None else None
-            ),
-            "tpe_betti_1": (
-                tpe_signal.betti_1 if tpe_signal is not None else None
-            ),
-            "tpe_persistence": (
-                tpe_signal.persistence_score if tpe_signal is not None else None
-            ),
-            # Fusion state exposed for downstream signal submission layer
-            "fusion_attack_mode": (
-                fusion.attack_mode if fusion is not None else None
-            ),
-            "fusion_preferred_sleeve": (
-                fusion.preferred_sleeve if fusion is not None else None
-            ),
-            "fusion_confidence": (
-                fusion.confidence if fusion is not None else None
-            ),
-            "fusion_regime": (
-                fusion.regime if fusion is not None else None
-            ),
-            "fusion_shans_superfluid": (
-                fusion.shans_superfluid_score if fusion is not None else None
-            ),
-            "fusion_shans_bias": (
-                fusion.shans_bias if fusion is not None else None
-            ),
+            "tpe_coherence": tpe_signal.coherence_score if tpe_signal is not None else None,
+            "tpe_betti_1": tpe_signal.betti_1 if tpe_signal is not None else None,
+            "fusion_attack_mode": fusion.attack_mode if fusion is not None else None,
+            "fusion_preferred_sleeve": fusion.preferred_sleeve if fusion is not None else None,
+            "fusion_confidence": fusion.confidence if fusion is not None else None,
+            "fusion_regime": fusion.regime if fusion is not None else None,
             "emergency_liquidations": self._metrics.emergency_liquidations,
             "recalibration_entries": self._metrics.recalibration_entries,
             "recalibration_exits": self._metrics.recalibration_exits,
-            "consecutive_errors": self._metrics.consecutive_errors,
-            # Signal submission boundary: NOT performed by MainLoop
             "signal_submission": "downstream_layer_not_yet_authorized",
         }
 
     def get_last_fusion(self) -> Optional[FusionDecision]:
-        """
-        Return the last FusionDecision for downstream layer consumption.
-
-        The downstream signal submission layer (StrategyVote -> DecisionCompiler
-        -> OrderIntent -> ExecutionEngine) reads fusion state from here.
-        MainLoop does not act on fusion for signal submission purposes.
-
-        Returns:
-            Last FusionDecision or None if no candle tick received yet
-        """
         with self._lock:
             return self._last_fusion
 
     def get_last_tpe_signal(self) -> Optional[TopologicalSignal]:
-        """
-        Return the last TopologicalSignal for downstream layer consumption.
-
-        Returns:
-            Last TopologicalSignal or None if no order book tick received yet
-        """
         with self._lock:
             return self._last_tpe_signal
 
     def get_metrics(self) -> LoopMetrics:
-        """Return raw loop metrics (read-only reference)."""
         return self._metrics
 
     def is_recalibrating(self) -> bool:
-        """Return True if recalibration is currently active."""
         return self._recalibration_active
 
     def reset_metrics(self) -> None:
-        """Reset loop metrics. Use only after recalibration or for testing."""
         self._metrics = LoopMetrics()
         logger.info("MainLoop metrics reset for %s", self.symbol)
 
@@ -806,29 +635,17 @@ def create_main_loop(
     signal_fusion: SignalFusion,
     data_validator: DataContinuityValidator,
     recalibrator: Recalibrator,
+    shans_curve: ShansCurve,
     tpe_engine: TopologicalEngine,
+    regime_detector: RegimeDetector,
+    physical_validator: PhysicalValidator,
+    toxicity_engine: ToxicityEngine,
+    entropy_decoder: EntropyDecoder,
+    insider_engine: InsiderSignalEngine,
     execution_engine: ExecutionEngine,
     symbol: str,
+    exchange: str = "kraken",
 ) -> MainLoop:
-    """
-    Factory function for MainLoop construction.
-
-    All parameters match proven live constructors.
-
-    Args:
-        config: Configuration object (Config.from_env())
-        commander: Commander instance
-        risk_guard: HybridRiskGuard instance
-        signal_fusion: SignalFusion instance
-        data_validator: DataContinuityValidator instance
-        recalibrator: Recalibrator instance
-        tpe_engine: TopologicalEngine instance
-        execution_engine: ExecutionEngine instance
-        symbol: Primary trading symbol (e.g. "XBT/USD")
-
-    Returns:
-        Configured MainLoop instance (not yet started)
-    """
     return MainLoop(
         config=config,
         commander=commander,
@@ -836,7 +653,14 @@ def create_main_loop(
         signal_fusion=signal_fusion,
         data_validator=data_validator,
         recalibrator=recalibrator,
+        shans_curve=shans_curve,
         tpe_engine=tpe_engine,
+        regime_detector=regime_detector,
+        physical_validator=physical_validator,
+        toxicity_engine=toxicity_engine,
+        entropy_decoder=entropy_decoder,
+        insider_engine=insider_engine,
         execution_engine=execution_engine,
         symbol=symbol,
+        exchange=exchange,
     )
