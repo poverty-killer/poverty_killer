@@ -1,0 +1,16 @@
+{"ts": 1777915069, "event_tool": "<unknown>", "decision": "block", "detail": "HOOK_PARSE_FAILURE:event_not_dict", "override_flag": "", "packet": "", "reason_present": false}
+{"ts": 1777915069, "event_tool": "<unknown>", "decision": "block", "detail": "HOOK_PARSE_FAILURE:event_not_dict", "override_flag": "", "packet": "", "reason_present": false}
+{"ts": 1777915069, "event_tool": "Bash", "decision": "approve", "detail": "override_accepted", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915069, "event_tool": "Edit", "decision": "approve", "detail": "override_accepted", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915069, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:too_short_non_whitespace_5", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915069, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:starts_with_test", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915069, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:blank_or_whitespace_only", "override_flag": "true", "packet": "G0", "reason_present": false}
+{"ts": 1777915069, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:blank_or_whitespace_only", "override_flag": "true", "packet": "G0", "reason_present": false}
+{"ts": 1777915374, "event_tool": "<unknown>", "decision": "block", "detail": "HOOK_PARSE_FAILURE:event_not_dict", "override_flag": "", "packet": "", "reason_present": false}
+{"ts": 1777915374, "event_tool": "<unknown>", "decision": "block", "detail": "HOOK_PARSE_FAILURE:event_not_dict", "override_flag": "", "packet": "", "reason_present": false}
+{"ts": 1777915375, "event_tool": "Bash", "decision": "approve", "detail": "override_accepted", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915375, "event_tool": "Edit", "decision": "approve", "detail": "override_accepted", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915375, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:too_short_non_whitespace_5", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915375, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:starts_with_test", "override_flag": "true", "packet": "G0", "reason_present": true}
+{"ts": 1777915375, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:blank_or_whitespace_only", "override_flag": "true", "packet": "G0", "reason_present": false}
+{"ts": 1777915375, "event_tool": "Edit", "decision": "block", "detail": "override_rejected:blank_or_whitespace_only", "override_flag": "true", "packet": "G0", "reason_present": false}
