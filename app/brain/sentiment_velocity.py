@@ -26,6 +26,7 @@ This engine measures CHANGE in sentiment state over time:
 - Stability score - consistency of sentiment state
 """
 
+import threading
 import numpy as np
 import logging
 from typing import Dict, Optional, Tuple, Any
@@ -154,7 +155,8 @@ class SentimentVelocityEngine:
         self._last_vector: Optional[SentimentVector] = None
         self._last_macro_signal: Optional[MacroSignal] = None
         self._last_macro_kill_time_ns: Optional[int] = None
-        
+        self._lock = threading.Lock()
+
         logger.info(f"SentimentVelocityEngine initialized: velocity_window={velocity_window_ns//1_000_000_000}s, "
                    f"impulse_threshold={impulse_threshold}, divergence_threshold={divergence_threshold}")
         logger.info("  Timing authority: external nanosecond timestamps only")
@@ -180,49 +182,50 @@ class SentimentVelocityEngine:
             logger.warning(f"Invalid sentiment value: {value} — skipping update")
             return None
         
-        # Enforce timestamp monotonicity
-        if self._history:
-            last_ts = self._history[-1].timestamp_ns
-            if timestamp_ns <= last_ts:
-                logger.warning(f"Non-monotonic timestamp: {timestamp_ns} <= last {last_ts} — rejecting update")
+        with self._lock:
+            # Enforce timestamp monotonicity
+            if self._history:
+                last_ts = self._history[-1].timestamp_ns
+                if timestamp_ns <= last_ts:
+                    logger.warning(f"Non-monotonic timestamp: {timestamp_ns} <= last {last_ts} — rejecting update")
+                    return None
+
+            # Clamp value to reasonable range for analytical stability
+            clamped_value = max(-1.0, min(1.0, float(value)))
+
+            # Add to history
+            self._history.append(SentimentPoint(value=clamped_value, timestamp_ns=timestamp_ns))
+
+            # Need minimum history for calculations
+            if len(self._history) < self.min_history_points:
                 return None
-        
-        # Clamp value to reasonable range for analytical stability
-        clamped_value = max(-1.0, min(1.0, float(value)))
-        
-        # Add to history
-        self._history.append(SentimentPoint(value=clamped_value, timestamp_ns=timestamp_ns))
-        
-        # Need minimum history for calculations
-        if len(self._history) < self.min_history_points:
-            return None
-        
-        # Compute all analytical components
-        level = self._compute_current_level()
-        velocity = self._compute_velocity()
-        acceleration = self._compute_acceleration()
-        impulse = self._compute_impulse()
-        divergence = self._compute_divergence(level, velocity)
-        reversion_pressure = self._compute_reversion_pressure(level)
-        stability = self._compute_stability()
-        confidence = self._compute_confidence(timestamp_ns)
-        
-        vector = SentimentVector(
-            level=level,
-            velocity=velocity,
-            acceleration=acceleration,
-            impulse=impulse,
-            divergence=divergence,
-            reversion_pressure=reversion_pressure,
-            stability=stability,
-            confidence=confidence,
-            timestamp_ns=timestamp_ns
-        )
-        
-        # Store velocity for z-score calculation
-        self._velocity_history.append(velocity)
-        
-        self._last_vector = vector
+
+            # Compute all analytical components
+            level = self._compute_current_level()
+            velocity = self._compute_velocity()
+            acceleration = self._compute_acceleration()
+            impulse = self._compute_impulse()
+            divergence = self._compute_divergence(level, velocity)
+            reversion_pressure = self._compute_reversion_pressure(level)
+            stability = self._compute_stability()
+            confidence = self._compute_confidence(timestamp_ns)
+
+            vector = SentimentVector(
+                level=level,
+                velocity=velocity,
+                acceleration=acceleration,
+                impulse=impulse,
+                divergence=divergence,
+                reversion_pressure=reversion_pressure,
+                stability=stability,
+                confidence=confidence,
+                timestamp_ns=timestamp_ns
+            )
+
+            # Store velocity for z-score calculation
+            self._velocity_history.append(velocity)
+
+            self._last_vector = vector
         return vector
     
     def _compute_current_level(self) -> float:
@@ -637,9 +640,10 @@ class SentimentVelocityEngine:
     
     def reset(self) -> None:
         """Reset all internal state."""
-        self._history.clear()
-        self._velocity_history.clear()
-        self._last_vector = None
-        self._last_macro_signal = None
-        self._last_macro_kill_time_ns = None
+        with self._lock:
+            self._history.clear()
+            self._velocity_history.clear()
+            self._last_vector = None
+            self._last_macro_signal = None
+            self._last_macro_kill_time_ns = None
         logger.info("SentimentVelocityEngine reset")
