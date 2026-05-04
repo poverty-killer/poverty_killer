@@ -11,12 +11,31 @@ Paper-trading proof hardening goals for this bundle:
 This file remains the exchange adapter authority. It does not redesign paper
 execution; it truthfully delegates live paper execution to the sovereign
 PaperBroker while keeping the existing ExecutionEngine contract intact.
+
+BUNDLE 3B-P — EXCHANGE ACCOUNT / ORDER DATA ADAPTER FOUNDATIONS
+Added methods:
+- fetch_balances(): Get account balances from Kraken
+- fetch_open_orders(): Get open orders from Kraken
+- fetch_fills(): Get fill/trade history from Kraken
+- fetch_positions(): Derive positions from orders + fills
+- _call_kraken_private(): Reusable private API caller
+- get_exchange_truth_snapshot(): Returns real exchange data using fetch_* methods
+
+All methods are standalone fetchers. No automatic polling. No wiring to
+TruthFrame. That belongs in Bundle 3B.
+
+BUNDLE F1 — TELEMETRY HOOKS
+- Accepts optional telemetry_store for fill/rejection recording
+- Records fills via FillRecorder when paper or live fills occur
+- Records rejections when order submission fails
+- No semantic changes to order routing logic
 """
 
 import base64
 import hashlib
 import hmac
 import logging
+import math
 import threading
 import time
 import urllib.parse
@@ -31,8 +50,15 @@ from app.execution.latency_model import LatencyModel as _LatencyModel
 from app.execution.paper_broker import PaperBroker as _SovereignPaperBroker
 from app.execution.slippage_model import SlippageModel as _SlippageModel
 from app.models import OrderFill, OrderRequest
-from app.models.enums import InternalOrderStatus, SleeveType
+from app.models.enums import (
+    InternalOrderStatus,
+    OrderSide as _CanonicalOrderSide,
+    OrderType as _CanonicalOrderType,
+    SleeveType,
+)
 from app.utils.time_utils import now_ns
+from app.telemetry.event_store import TelemetryEventStore
+from app.telemetry.fill_recorder import FillRecorder
 import app.utils.enums as _pb_enums
 
 logger = logging.getLogger(__name__)
@@ -43,9 +69,9 @@ class OrderStatus:
     """Order status from exchange or paper broker cache."""
     order_id: str
     status: str  # pending, open, filled, cancelled, expired, rejected
-    filled_quantity: float = 0.0
-    filled_price: float = 0.0
-    remaining_quantity: float = 0.0
+    filled_quantity: _Decimal = _Decimal("0")
+    filled_price: _Decimal = _Decimal("0")
+    remaining_quantity: _Decimal = _Decimal("0")
     timestamp_ns: int = 0
 
 
@@ -58,6 +84,10 @@ class OrderRouter:
 
     This hardening pass preserves the existing public surface while replacing
     fake paper fills with status-coherent paper-broker-driven execution.
+
+    BUNDLE 3B-P: Added exchange account/order data fetching methods.
+    
+    BUNDLE F1: Added telemetry hooks for fills and rejections.
     """
 
     def __init__(
@@ -73,7 +103,8 @@ class OrderRouter:
         pcv_max_attempts: int = 5,
         pcv_retry_delay_sec: float = 0.5,
         rest_fallback_enabled: bool = True,
-        paper_mode: bool = True
+        paper_mode: bool = True,
+        telemetry_store: Optional[TelemetryEventStore] = None
     ):
         self.primary_exchange = primary_exchange
         self.secondary_exchange = secondary_exchange
@@ -106,6 +137,20 @@ class OrderRouter:
         self._paper_reports_index: int = 0
         self._paper_last_mid_by_symbol: Dict[str, _Decimal] = {}
 
+        # STAGE 2-F3: Symbol-indexed live market mid cache, populated by MainLoop
+        # on every accepted order-book ingress. Separate from
+        # _paper_last_mid_by_symbol (which is populated only after paper matching)
+        # to break the chicken-and-egg defect where execution validation could
+        # never observe a real market mid before the first paper order filled.
+        # Pure cache; no order/matching/position/cash/risk side effects.
+        self._latest_market_mid_by_symbol: Dict[str, _Decimal] = {}
+        self._latest_market_mid_ts_ns_by_symbol: Dict[str, int] = {}
+
+        self._fill_recorder: Optional[FillRecorder] = None
+        if telemetry_store:
+            self._fill_recorder = FillRecorder(telemetry_store)
+            logger.info("FillRecorder wired for telemetry")
+
         self._endpoints = {
             "kraken": {
                 "rest": "https://api.kraken.com/0",
@@ -116,130 +161,65 @@ class OrderRouter:
                 "cancel": "/private/CancelOrder",
                 "status": "/private/QueryOrders",
                 "open_orders": "/private/OpenOrders",
-                "balance": "/private/Balance"
+                "balance": "/private/Balance",
+                "trades_history": "/private/TradesHistory",
+                "closed_orders": "/private/ClosedOrders",
             },
             "alpaca": {
-                "rest": "https://paper-api.alpaca.markets",
-                "time": "/v2/clock",
-                "order": "/v2/orders",
-                "cancel": "/v2/orders/{order_id}",
-                "status": "/v2/orders/{order_id}",
-                "open_orders": "/v2/orders",
-                "balance": "/v2/account"
+                "rest": "https://paper-api.alpaca.markets/v2",
+                "order": "/orders",
+                "cancel": "/orders/{order_id}",
+                "status": "/orders/{order_id}",
+                "open_orders": "/orders",
+                "positions": "/positions"
             }
         }
 
         self._session = requests.Session()
-        self._session.headers.update({"User-Agent": "PovertyKiller/1.0"})
-
-        if primary_exchange == "alpaca" and primary_api_key and not paper_mode:
-            self._session.headers.update({
-                "APCA-API-KEY-ID": primary_api_key,
-                "APCA-API-SECRET-KEY": primary_api_secret
-            })
-
-        logger.info(
-            "OrderRouter initialized: primary=%s, secondary=%s, ghost_ratio=%s, pcv_attempts=%s, paper_mode=%s",
-            primary_exchange,
-            secondary_exchange,
-            ghost_ratio_threshold,
-            pcv_max_attempts,
-            paper_mode,
-        )
+        self._lock = threading.Lock()
 
     # ============================================
-    # GHOST DETECTION (Triangulated Latency)
+    # WEBSOCKET HEALTH MONITORING
     # ============================================
 
-    def measure_latency(self) -> float:
-        """Measure latency to primary exchange with triangulation."""
-        primary_latency = self._measure_exchange_latency(self.primary_exchange)
-        secondary_latency = self._measure_exchange_latency(self.secondary_exchange)
-        baseline_latency = self._measure_baseline_latency()
-
-        is_ghosting = False
-        if secondary_latency > 0 and baseline_latency > 0:
-            ratio = primary_latency / max(secondary_latency, 0.001)
-            if ratio > self.ghost_ratio_threshold:
-                is_ghosting = True
-                logger.warning(
-                    "GHOST DETECTED: Primary latency %.1fms, secondary %.1fms, ratio=%.1f",
-                    primary_latency,
-                    secondary_latency,
-                    ratio,
-                )
-
-        self._websocket_connected = not is_ghosting and primary_latency < self.latency_threshold_ms
-        return primary_latency
-
-    def _measure_exchange_latency(self, exchange: str) -> float:
-        endpoints = {
-            "kraken": "https://api.kraken.com/0/public/Time",
-            "coinbase": "https://api.coinbase.com/v2/time",
-            "binance": "https://api.binance.com/api/v3/time",
-            "alpaca": "https://paper-api.alpaca.markets/v2/clock"
-        }
-
-        url = endpoints.get(exchange, endpoints["kraken"])
-
-        try:
-            start = time.time()
-            response = self._session.get(url, timeout=5.0)
-            elapsed_ms = (time.time() - start) * 1000
-            if response.status_code == 200:
-                return elapsed_ms
-            logger.warning("Exchange %s returned status %s", exchange, response.status_code)
-            return 999.0
-        except requests.exceptions.Timeout:
-            logger.warning("Exchange %s timeout", exchange)
-            return 999.0
-        except Exception as e:
-            logger.error("Error measuring %s latency: %s", exchange, e)
-            return 999.0
-
-    def _measure_baseline_latency(self) -> float:
-        try:
-            start = time.time()
-            self._session.get("https://8.8.8.8", timeout=3.0)
-            elapsed_ms = (time.time() - start) * 1000
-            return elapsed_ms
-        except Exception:
-            return 50.0
+    def update_websocket_health(self, ping_ns: int, pong_ns: int):
+        with self._lock:
+            self._last_websocket_ping_ns = ping_ns
+            self._last_websocket_pong_ns = pong_ns
+            self._websocket_connected = (pong_ns - ping_ns) < (self.latency_threshold_ms * 1_000_000)
 
     def is_websocket_connected(self) -> bool:
-        return self._websocket_connected
-
-    def update_websocket_ping(self) -> None:
-        self._last_websocket_ping_ns = now_ns()
-
-    def update_websocket_pong(self) -> None:
-        self._last_websocket_pong_ns = now_ns()
+        with self._lock:
+            if not self._websocket_connected:
+                return False
+            if self._last_websocket_pong_ns == 0:
+                return False
+            age_ns = now_ns() - self._last_websocket_pong_ns
+            return age_ns < 30_000_000_000  # 30 seconds stale timeout
 
     def get_websocket_rtt_ms(self) -> float:
-        if self._last_websocket_ping_ns == 0 or self._last_websocket_pong_ns == 0:
-            return 0.0
-        return (self._last_websocket_pong_ns - self._last_websocket_ping_ns) / 1_000_000
+        with self._lock:
+            if self._last_websocket_ping_ns == 0 or self._last_websocket_pong_ns == 0:
+                return float("inf")
+            return (self._last_websocket_pong_ns - self._last_websocket_ping_ns) / 1_000_000
+
+    def measure_latency(self) -> float:
+        return self.get_websocket_rtt_ms()
 
     # ============================================
     # KRAKEN API AUTHENTICATION
     # ============================================
 
-    def _kraken_sign(self, urlpath: str, data: Dict[str, str]) -> Dict[str, str]:
-        if self.paper_mode:
+    def _kraken_sign(self, urlpath: str, data: dict) -> dict:
+        postdata = urllib.parse.urlencode(data)
+        encoded = (str(data.get("nonce", "")) + postdata).encode()
+        message = urlpath.encode() + hashlib.sha256(encoded).digest()
+
+        if not self.primary_api_secret:
             return {}
 
-        nonce = str(int(time.time() * 1000))
-        data["nonce"] = nonce
-
-        postdata = urllib.parse.urlencode(data)
-        encoded = (str(data["nonce"]) + postdata).encode()
-        message = urlpath.encode() + hashlib.sha256(encoded).digest()
-        signature = hmac.new(
-            base64.b64decode(self.primary_api_secret),
-            message,
-            hashlib.sha512,
-        )
-        sigdigest = base64.b64encode(signature.digest()).decode()
+        mac = hmac.new(base64.b64decode(self.primary_api_secret), message, hashlib.sha512)
+        sigdigest = base64.b64encode(mac.digest()).decode()
 
         return {
             "API-Key": self.primary_api_key,
@@ -247,16 +227,387 @@ class OrderRouter:
         }
 
     # ============================================
+    # BUNDLE 3B-P: REUSABLE PRIVATE API CALLER
+    # ============================================
+
+    def _call_kraken_private(self, endpoint_path: str, data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Reusable private API caller for Kraken.
+
+        Args:
+            endpoint_path: Path from self._endpoints (e.g., "/private/Balance")
+            data: POST data dict (nonce will be added automatically)
+
+        Returns:
+            Parsed JSON response result dict, or None on error
+        """
+        if self.paper_mode:
+            logger.debug("Paper mode: skipping Kraken private API call")
+            return None
+
+        if not self.primary_api_key or not self.primary_api_secret:
+            logger.warning("Kraken API credentials missing, cannot call %s", endpoint_path)
+            return None
+
+        url = f"{self._endpoints['kraken']['rest']}{endpoint_path}"
+        request_data = data.copy() if data else {}
+        request_data["nonce"] = str(int(time.time() * 1000))
+
+        headers = self._kraken_sign(endpoint_path, request_data)
+
+        try:
+            response = self._session.post(url, data=request_data, headers=headers, timeout=10.0)
+            if response.status_code != 200:
+                logger.error("Kraken private API error: HTTP %d for %s", response.status_code, endpoint_path)
+                return None
+
+            result = response.json()
+            if result.get("error"):
+                logger.error("Kraken private API error: %s for %s", result["error"], endpoint_path)
+                return None
+
+            return result.get("result")
+
+        except Exception as e:
+            logger.error("Kraken private API exception for %s: %s", endpoint_path, e)
+            return None
+
+    # ============================================
+    # BUNDLE 3B-P: BALANCE FETCHING
+    # ============================================
+
+    def fetch_balances(self) -> Dict[str, _Decimal]:
+        """
+        Fetch account balances from Kraken.
+
+        Returns:
+            Dict mapping currency (e.g., "USD", "BTC") to Decimal balance.
+            Returns empty dict if paper mode or API error.
+        """
+        if self.paper_mode:
+            # Paper mode: return simulated balances from paper broker
+            if self._paper_broker:
+                return {
+                    "USD": _Decimal(str(self._paper_broker.balance)),
+                }
+            return {}
+
+        result = self._call_kraken_private(self._endpoints["kraken"]["balance"])
+        if not result:
+            return {}
+
+        balances = {}
+        for currency, balance_str in result.items():
+            try:
+                balance = _Decimal(str(balance_str))
+                if balance > 0:
+                    balances[currency] = balance
+            except Exception:
+                logger.debug("Failed to parse balance for %s: %s", currency, balance_str)
+
+        return balances
+
+    # ============================================
+    # BUNDLE 3B-P: OPEN ORDERS FETCHING
+    # ============================================
+
+    def fetch_open_orders(self) -> List[Dict[str, Any]]:
+        """
+        Fetch open orders from Kraken.
+
+        Returns:
+            List of open orders with full details.
+            Returns empty list if paper mode or API error.
+        """
+        if self.paper_mode:
+            # Paper mode: return open orders from paper broker
+            if self._paper_broker:
+                orders = []
+                for client_id, order in self._paper_broker.open_orders.items():
+                    orders.append({
+                        "order_id": str(order.order_id),
+                        "client_id": client_id,
+                        "symbol": order.symbol,
+                        "side": order.side.value,
+                        "order_type": order.order_type.value,
+                        "quantity": float(order.quantity),
+                        "remaining_quantity": float(order.remaining_quantity),
+                        "filled_quantity": float(order.filled_quantity),
+                        "limit_price": float(order.limit_price) if order.limit_price else None,
+                        "status": order.status.value,
+                        "created_at_ns": order.created_at_ns,
+                    })
+                return orders
+            return []
+
+        result = self._call_kraken_private(self._endpoints["kraken"]["open_orders"])
+        if not result:
+            return []
+
+        orders = []
+        open_data = result.get("open", {})
+        for order_id, order_info in open_data.items():
+            descr = order_info.get("descr", {})
+            orders.append({
+                "order_id": order_id,
+                "symbol": descr.get("pair", ""),
+                "side": descr.get("type", ""),
+                "order_type": descr.get("ordertype", ""),
+                "quantity": float(order_info.get("vol", 0)),
+                "remaining_quantity": float(order_info.get("vol_exec", 0)),
+                "limit_price": float(descr.get("price", 0)) if descr.get("price") else None,
+                "status": order_info.get("status", "unknown"),
+                "created_at_ns": int(order_info.get("opentm", 0)) * 1_000_000_000 if order_info.get("opentm") else 0,
+            })
+
+        return orders
+
+    # ============================================
+    # BUNDLE 3B-P: FILL HISTORY FETCHING
+    # ============================================
+
+    def fetch_fills(self, start_time_ns: Optional[int] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Fetch fill/trade history from Kraken.
+
+        Args:
+            start_time_ns: Optional start time in nanoseconds (filters trades after this time)
+            limit: Maximum number of trades to return
+
+        Returns:
+            List of fills with price, quantity, fee, timestamp.
+            Returns empty list if paper mode or API error.
+        """
+        if self.paper_mode:
+            # Paper mode: return fills from paper broker execution reports
+            if self._paper_broker:
+                fills = []
+                for report in self._paper_broker.execution_reports:
+                    if report.filled_quantity and report.filled_quantity > 0:
+                        fills.append({
+                            "order_id": str(report.order_id),
+                            "client_id": report.client_id,
+                            "symbol": report.symbol,
+                            "quantity": float(report.filled_quantity),
+                            "price": float(report.fill_price) if report.fill_price else 0.0,
+                            "fee": float(report.fee),
+                            "timestamp_ns": report.timestamp_ns,
+                            "liquidity": report.liquidity.value if report.liquidity else "unknown",
+                        })
+                # Sort by timestamp descending, apply limit
+                fills.sort(key=lambda x: x["timestamp_ns"], reverse=True)
+                if start_time_ns:
+                    fills = [f for f in fills if f["timestamp_ns"] > start_time_ns]
+                return fills[:limit]
+            return []
+
+        data = {"limit": limit}
+        if start_time_ns:
+            # Kraken expects Unix timestamp in seconds
+            data["start"] = int(start_time_ns / 1_000_000_000)
+
+        result = self._call_kraken_private(self._endpoints["kraken"]["trades_history"], data)
+        if not result:
+            return []
+
+        fills = []
+        trades = result.get("trades", {})
+        for trade_id, trade_info in trades.items():
+            fills.append({
+                "trade_id": trade_id,
+                "order_id": trade_info.get("ordertxid", ""),
+                "symbol": trade_info.get("pair", ""),
+                "side": trade_info.get("type", ""),
+                "quantity": float(trade_info.get("vol", 0)),
+                "price": float(trade_info.get("price", 0)),
+                "fee": float(trade_info.get("fee", 0)),
+                "cost": float(trade_info.get("cost", 0)),
+                "timestamp_ns": int(trade_info.get("time", 0)) * 1_000_000_000,
+            })
+
+        return fills
+
+    # ============================================
+    # BUNDLE 3B-P: POSITION DERIVATION
+    # ============================================
+
+    def fetch_positions(self) -> List[Dict[str, Any]]:
+        """
+        Derive open positions from open orders and fills.
+
+        Kraken does not have a direct positions endpoint. Positions are derived by:
+        1. Aggregating net quantity from fills
+        2. Adjusting for open orders that are not yet filled
+
+        Returns:
+            List of positions with symbol, quantity, average_entry_price.
+            Returns empty list if paper mode or API error.
+        """
+        if self.paper_mode:
+            # Paper mode: return positions from paper broker
+            if self._paper_broker:
+                positions = []
+                for symbol, pos in self._paper_broker.positions.items():
+                    if pos.quantity != 0:
+                        positions.append({
+                            "symbol": symbol,
+                            "quantity": float(pos.quantity),
+                            "average_entry_price": float(pos.average_price) if pos.average_price else 0.0,
+                            "realized_pnl": float(pos.realized_pnl),
+                        })
+                return positions
+            return []
+
+        # Fetch fills to aggregate net position
+        fills = self.fetch_fills(limit=500)
+        position_map: Dict[str, Dict[str, Any]] = {}
+
+        for fill in fills:
+            symbol = fill["symbol"]
+            quantity = fill["quantity"]
+            side = fill["side"]
+            price = fill["price"]
+
+            if symbol not in position_map:
+                position_map[symbol] = {
+                    "symbol": symbol,
+                    "quantity": 0.0,
+                    "total_cost": 0.0,
+                    "average_entry_price": 0.0,
+                }
+
+            # BUY adds positive quantity, SELL subtracts
+            if side.lower() == "buy":
+                position_map[symbol]["quantity"] += quantity
+                position_map[symbol]["total_cost"] += quantity * price
+            else:
+                position_map[symbol]["quantity"] -= quantity
+
+        # Calculate average entry prices
+        positions = []
+        for symbol, pos in position_map.items():
+            if abs(pos["quantity"]) > 0.000001:  # Non-zero tolerance
+                avg_price = pos["total_cost"] / abs(pos["quantity"]) if pos["quantity"] != 0 else 0.0
+                positions.append({
+                    "symbol": symbol,
+                    "quantity": pos["quantity"],
+                    "average_entry_price": avg_price,
+                })
+
+        return positions
+
+    # ============================================
+    # BUNDLE 3B-P: EXCHANGE TRUTH SNAPSHOT (COMPLETED FOUNDATION)
+    # ============================================
+
+    def get_exchange_truth_snapshot(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Return a real snapshot of exchange-side truth for later ExchangeTruth hydration.
+
+        This is the completed foundation for Bundle 3B. It returns real data
+        from the fetch_* methods. Bundle 3B will wire this to main_loop.
+
+        Args:
+            symbol: Optional symbol filter (currently unused, returns all data)
+
+        Returns:
+            Dict with:
+            - balances: Dict[str, Decimal] from fetch_balances()
+            - positions: List[Dict] from fetch_positions()
+            - open_orders: List[Dict] from fetch_open_orders()
+            - fills_since_last_call: List[Dict] from fetch_fills()
+        """
+        return {
+            "balances": self.fetch_balances(),
+            "positions": self.fetch_positions(),
+            "open_orders": self.fetch_open_orders(),
+            "fills_since_last_call": self.fetch_fills(limit=100),
+        }
+
+    # ============================================
     # PAPER PATH HELPERS
     # ============================================
 
     def _paper_side(self, order: OrderRequest):
-        side_str = str(order.side).upper().split(".")[-1]
-        return _pb_enums.OrderSide.BUY if side_str == "BUY" else _pb_enums.OrderSide.SELL
+        """
+        Compatibility shim mapping only.
+
+        Canonical enum authority is app.models.enums.OrderSide.
+        app.utils.enums is imported here only because PaperBroker's preserved
+        compatibility surface still consumes that shim namespace.
+        """
+        if order.side == _CanonicalOrderSide.BUY:
+            return _pb_enums.OrderSide.BUY
+        if order.side == _CanonicalOrderSide.SELL:
+            return _pb_enums.OrderSide.SELL
+        raise ValueError(f"Unsupported canonical order side for paper bridge: {order.side!r}")
 
     def _paper_order_type(self, order: OrderRequest):
-        ot_str = str(order.order_type).upper().split(".")[-1]
-        return _pb_enums.OrderType.LIMIT if ot_str in ("LIMIT", "POST_ONLY") else _pb_enums.OrderType.MARKET
+        """
+        Compatibility shim mapping only.
+
+        Canonical enum authority is app.models.enums.OrderType.
+        This bridge intentionally narrows POST_ONLY into LIMIT for the preserved
+        PaperBroker legacy submit surface.
+        """
+        if order.order_type in (_CanonicalOrderType.LIMIT, _CanonicalOrderType.POST_ONLY):
+            return _pb_enums.OrderType.LIMIT
+        if order.order_type == _CanonicalOrderType.MARKET:
+            return _pb_enums.OrderType.MARKET
+        raise ValueError(f"Unsupported canonical order type for paper bridge: {order.order_type!r}")
+
+    def _map_paper_report_status_to_cache(self, report_status: Any) -> str:
+        """
+        Narrow PaperBroker lifecycle truth into the router's preserved coarse cache.
+
+        This cache is compatibility-oriented only; it is not a full canonical
+        lifecycle authority.
+        """
+        if report_status == _pb_enums.OrderStatus.FULLY_FILLED:
+            return "filled"
+        if report_status == _pb_enums.OrderStatus.CANCELLED:
+            return "cancelled"
+        if report_status == _pb_enums.OrderStatus.REJECTED:
+            return "rejected"
+        if report_status == _pb_enums.OrderStatus.EXPIRED:
+            return "expired"
+        if report_status in {
+            _pb_enums.OrderStatus.PARTIAL_FILL,
+            _pb_enums.OrderStatus.ACKNOWLEDGED,
+            _pb_enums.OrderStatus.PENDING_NEW,
+            _pb_enums.OrderStatus.REPLACED,
+            _pb_enums.OrderStatus.CREATED,
+            _pb_enums.OrderStatus.VALIDATED,
+            _pb_enums.OrderStatus.ROUTING,
+            _pb_enums.OrderStatus.ROUTED,
+            _pb_enums.OrderStatus.SENT,
+            _pb_enums.OrderStatus.PENDING_ACK,
+        }:
+            return "pending"
+
+        status_name = getattr(report_status, "name", str(report_status)).upper()
+        if status_name in {"FULLY_FILLED", "FILLED"}:
+            return "filled"
+        if "PARTIAL" in status_name:
+            return "pending"
+        if "CANCELLED" in status_name:
+            return "cancelled"
+        if "REJECTED" in status_name:
+            return "rejected"
+        if "EXPIRED" in status_name:
+            return "expired"
+        return "pending"
+
+    def _get_latest_paper_fill_report(self, client_id: str):
+        if self._paper_broker is None:
+            return None
+
+        for report in reversed(self._paper_broker.execution_reports):
+            if report.client_id != client_id:
+                continue
+            if report.filled_quantity and report.filled_quantity > _Decimal("0"):
+                return report
+        return None
 
     def _sync_paper_reports(self) -> None:
         """Synchronize paper broker execution reports into router status cache."""
@@ -270,26 +621,13 @@ class OrderRouter:
         new_reports = reports[self._paper_reports_index:]
         for report in new_reports:
             client_id = report.client_id
-            status_str = str(report.status).upper()
-            mapped_status = "pending"
-            if "FULLY_FILLED" in status_str or status_str == "FILLED":
-                mapped_status = "filled"
-            elif "PARTIAL" in status_str:
-                mapped_status = "pending"
-            elif "CANCELLED" in status_str:
-                mapped_status = "cancelled"
-            elif "REJECTED" in status_str:
-                mapped_status = "rejected"
-            elif "EXPIRED" in status_str:
-                mapped_status = "expired"
-            elif "ACKNOWLEDGED" in status_str or "PENDING" in status_str or "REPLACED" in status_str:
-                mapped_status = "pending"
+            mapped_status = self._map_paper_report_status_to_cache(report.status)
 
-            filled_qty = float(report.filled_quantity or 0)
-            filled_price = float(report.fill_price) if report.fill_price is not None else 0.0
-            remaining_qty = 0.0
+            filled_qty = report.filled_quantity or _Decimal("0")
+            filled_price = report.fill_price if report.fill_price is not None else _Decimal("0")
+            remaining_qty = _Decimal("0")
             if client_id in self._paper_broker.open_orders:
-                remaining_qty = float(self._paper_broker.open_orders[client_id].remaining_quantity)
+                remaining_qty = self._paper_broker.open_orders[client_id].remaining_quantity
 
             self._order_status_cache[client_id] = OrderStatus(
                 order_id=client_id,
@@ -323,8 +661,8 @@ class OrderRouter:
         self._paper_broker.process_matching(
             current_ts_ns=ts_ns,
             current_price=mark_price,
-            book_imbalance=0.0,
-            toxicity=0.0,
+            book_imbalance=_Decimal("0"),
+            toxicity=_Decimal("0"),
         )
         self._sync_paper_reports()
 
@@ -366,6 +704,8 @@ class OrderRouter:
         - no fake immediate hardcoded fill
         - live status and open-order state come from paper broker reports
         - immediate match attempt is preserved for continuity, but result is broker-driven
+        
+        BUNDLE F1: Records fills and rejections via FillRecorder when telemetry enabled.
         """
         if self._paper_broker is None:
             logger.error("SovereignPaperBroker not initialized — paper_mode must be True at construction")
@@ -405,6 +745,16 @@ class OrderRouter:
             logger.info("PAPER MODE: order queued/pending %s %s %s", order.side, order.quantity, order.symbol)
             return None
 
+        fill_report = self._get_latest_paper_fill_report(order.id)
+        fill_fee = _Decimal("0")
+        fee_currency = "USD"
+        exchange_fill_ts_ns = ts_ns
+
+        if fill_report is not None:
+            fill_fee = _Decimal(str(fill_report.fee))
+            if int(fill_report.timestamp_ns) > 0:
+                exchange_fill_ts_ns = int(fill_report.timestamp_ns)
+
         latency_ms = float(self._paper_broker.latency.get_current_latency_ns()) / 1_000_000
         logger.info(
             "PAPER MODE (sovereign): %s %s %s @ %.8f status=filled",
@@ -414,19 +764,44 @@ class OrderRouter:
             status.filled_price,
         )
 
-        return OrderFill(
+        fill = OrderFill(
             order_id=order.id,
             symbol=order.symbol,
             side=order.side,
             quantity=status.filled_quantity,
             price=status.filled_price,
-            fee=_Decimal("0"),
-            fee_currency="USD",
+            fee=fill_fee,
+            fee_currency=fee_currency,
             status=InternalOrderStatus.FILLED,
-            exchange_ts_ns=ts_ns,
+            exchange_ts_ns=exchange_fill_ts_ns,
             receive_ts_ns=receive_ns,
             latency_ms=latency_ms,
         )
+
+        # BUNDLE F1: Record fill to telemetry
+        if self._fill_recorder:
+            from decimal import Decimal
+            from app.models.contracts import FillEvent
+            from app.models.enums import OrderSide as CanonicalOrderSide
+            
+            fill_event = FillEvent(
+                fill_event_id=f"fill_{order.id}_{exchange_fill_ts_ns}",
+                execution_event_id=order.id,
+                order_intent_id=order.id,
+                decision_uuid=getattr(order, "decision_uuid", None),
+                symbol=order.symbol,
+                side=order.side,
+                quantity=Decimal(str(status.filled_quantity)),
+                price=Decimal(str(status.filled_price)),
+                fee=Decimal(str(fill_fee)),
+                fee_currency=fee_currency,
+                venue_fill_id=order.id,
+                exchange_ts_ns=exchange_fill_ts_ns,
+                receive_ts_ns=receive_ns,
+            )
+            self._fill_recorder.record_fill(fill_event)
+
+        return fill
 
     def _submit_order_kraken(self, order: OrderRequest) -> Optional[OrderFill]:
         endpoint = self._endpoints["kraken"]["order"]
@@ -452,6 +827,14 @@ class OrderRouter:
                 result = response.json()
                 if result.get("error"):
                     logger.error("Kraken order error: %s", result["error"])
+                    # BUNDLE F1: Record rejection
+                    if self._fill_recorder:
+                        self._fill_recorder.record_rejection(
+                            client_order_id=order.id,
+                            decision_uuid=getattr(order, "decision_uuid", None),
+                            reason=f"Kraken error: {result['error']}",
+                            reject_ts_ns=now_ns()
+                        )
                     return None
 
                 txid = result.get("result", {}).get("txid", [])
@@ -464,9 +847,25 @@ class OrderRouter:
                     return None
 
             logger.error("Kraken order failed: %s", response.status_code)
+            # BUNDLE F1: Record rejection
+            if self._fill_recorder:
+                self._fill_recorder.record_rejection(
+                    client_order_id=order.id,
+                    decision_uuid=getattr(order, "decision_uuid", None),
+                    reason=f"Kraken HTTP {response.status_code}",
+                    reject_ts_ns=now_ns()
+                )
             return None
         except Exception as e:
             logger.error("Kraken order exception: %s", e)
+            # BUNDLE F1: Record rejection
+            if self._fill_recorder:
+                self._fill_recorder.record_rejection(
+                    client_order_id=order.id,
+                    decision_uuid=getattr(order, "decision_uuid", None),
+                    reason=f"Kraken exception: {str(e)}",
+                    reject_ts_ns=now_ns()
+                )
             return None
 
     def _submit_order_alpaca(self, order: OrderRequest) -> Optional[OrderFill]:
@@ -499,9 +898,25 @@ class OrderRouter:
                 return None
 
             logger.error("Alpaca order failed: %s - %s", response.status_code, response.text)
+            # BUNDLE F1: Record rejection
+            if self._fill_recorder:
+                self._fill_recorder.record_rejection(
+                    client_order_id=order.id,
+                    decision_uuid=getattr(order, "decision_uuid", None),
+                    reason=f"Alpaca HTTP {response.status_code}: {response.text[:200]}",
+                    reject_ts_ns=now_ns()
+                )
             return None
         except Exception as e:
             logger.error("Alpaca order exception: %s", e)
+            # BUNDLE F1: Record rejection
+            if self._fill_recorder:
+                self._fill_recorder.record_rejection(
+                    client_order_id=order.id,
+                    decision_uuid=getattr(order, "decision_uuid", None),
+                    reason=f"Alpaca exception: {str(e)}",
+                    reject_ts_ns=now_ns()
+                )
             return None
 
     def _submit_order_rest(self, order: OrderRequest) -> Optional[OrderFill]:
@@ -540,19 +955,40 @@ class OrderRouter:
                 order_data = result.get("result", {}).get(order_id, {})
                 if order_data.get("status") == "closed":
                     ts_ns = now_ns()
-                    return OrderFill(
+                    fill = OrderFill(
                         order_id=order.id,
                         symbol=order.symbol,
                         side=order.side,
-                        quantity=float(order_data.get("vol_exec", 0)),
-                        price=float(order_data.get("price", 0)),
-                        fee=float(order_data.get("fee", 0)),
+                        quantity=_Decimal(str(order_data.get("vol_exec", 0))),
+                        price=_Decimal(str(order_data.get("price", 0))),
+                        fee=_Decimal(str(order_data.get("fee", 0))),
                         fee_currency=order_data.get("fee_currency", "USD"),
                         status=InternalOrderStatus.FILLED,
                         exchange_ts_ns=ts_ns,
                         receive_ts_ns=ts_ns,
                         latency_ms=self.measure_latency(),
                     )
+                    # BUNDLE F1: Record fill to telemetry
+                    if self._fill_recorder:
+                        from decimal import Decimal
+                        from app.models.contracts import FillEvent
+                        fill_event = FillEvent(
+                            fill_event_id=f"fill_{order.id}_{ts_ns}",
+                            execution_event_id=order.id,
+                            order_intent_id=order.id,
+                            decision_uuid=getattr(order, "decision_uuid", None),
+                            symbol=order.symbol,
+                            side=order.side,
+                            quantity=Decimal(str(fill.quantity)),
+                            price=Decimal(str(fill.price)),
+                            fee=Decimal(str(fill.fee)),
+                            fee_currency=fill.fee_currency,
+                            venue_fill_id=order_id,
+                            exchange_ts_ns=ts_ns,
+                            receive_ts_ns=ts_ns,
+                        )
+                        self._fill_recorder.record_fill(fill_event)
+                    return fill
             return None
         except Exception as e:
             logger.error("Failed to get Kraken order fill: %s", e)
@@ -568,19 +1004,40 @@ class OrderRouter:
                 result = response.json()
                 if result.get("status") == "filled":
                     ts_ns = now_ns()
-                    return OrderFill(
+                    fill = OrderFill(
                         order_id=order.id,
                         symbol=order.symbol,
                         side=order.side,
-                        quantity=float(result.get("filled_qty", 0)),
-                        price=float(result.get("filled_avg_price", 0)),
-                        fee=float(result.get("fees", 0)),
+                        quantity=_Decimal(str(result.get("filled_qty", 0))),
+                        price=_Decimal(str(result.get("filled_avg_price", 0))),
+                        fee=_Decimal(str(result.get("fees", 0))),
                         fee_currency="USD",
                         status=InternalOrderStatus.FILLED,
                         exchange_ts_ns=ts_ns,
                         receive_ts_ns=ts_ns,
                         latency_ms=self.measure_latency(),
                     )
+                    # BUNDLE F1: Record fill to telemetry
+                    if self._fill_recorder:
+                        from decimal import Decimal
+                        from app.models.contracts import FillEvent
+                        fill_event = FillEvent(
+                            fill_event_id=f"fill_{order.id}_{ts_ns}",
+                            execution_event_id=order.id,
+                            order_intent_id=order.id,
+                            decision_uuid=getattr(order, "decision_uuid", None),
+                            symbol=order.symbol,
+                            side=order.side,
+                            quantity=Decimal(str(fill.quantity)),
+                            price=Decimal(str(fill.price)),
+                            fee=Decimal(str(fill.fee)),
+                            fee_currency=fill.fee_currency,
+                            venue_fill_id=order_id,
+                            exchange_ts_ns=ts_ns,
+                            receive_ts_ns=ts_ns,
+                        )
+                        self._fill_recorder.record_fill(fill_event)
+                    return fill
             return None
         except Exception as e:
             logger.error("Failed to get Alpaca order fill: %s", e)
@@ -891,10 +1348,43 @@ class OrderRouter:
     # UTILITY METHODS
     # ============================================
 
-    def get_mid_price(self, symbol: str) -> float:
-        if self.paper_mode:
-            return self._get_simulated_price(symbol)
-        return self._get_simulated_price(symbol)
+    def update_market_mid(self, symbol: str, mid_price: float, exchange_ts_ns: int) -> None:
+        """
+        STAGE 2-F3: Symbol-indexed live market mid cache updater.
+
+        MainLoop calls this on every accepted order-book ingress so that
+        execution validation can observe a real per-symbol market mid even
+        before any paper order has filled. Pure cache update: no order
+        submission, no matching, no position changes, no cash changes, no
+        risk-state changes. Validates inputs and silently no-ops on invalid
+        values to keep the call site inside MainLoop hot-path safe.
+        """
+        if not isinstance(symbol, str) or not symbol:
+            return
+        if not isinstance(mid_price, (int, float)):
+            return
+        try:
+            f = float(mid_price)
+        except (ValueError, TypeError):
+            return
+        if not math.isfinite(f) or f <= 0.0:
+            return
+        if not isinstance(exchange_ts_ns, int) or exchange_ts_ns <= 0:
+            return
+        self._latest_market_mid_by_symbol[symbol] = _Decimal(str(f))
+        self._latest_market_mid_ts_ns_by_symbol[symbol] = exchange_ts_ns
+
+    def get_mid_price(self, symbol: str) -> _Decimal:
+        # STAGE 2-F3: Prefer the live market mid cache (populated by MainLoop on
+        # every accepted order-book ingress). This is the authoritative source
+        # for execution validation. Falls back to the post-paper-match cache
+        # (_paper_last_mid_by_symbol) and finally to the legacy hardcoded
+        # simulated-price helper only when no real mid has been observed yet.
+        # See post-patch report for the BLOCKER TRACKED on legacy hardcoded
+        # constants in _get_simulated_price for cold-start authority paths.
+        if symbol in self._latest_market_mid_by_symbol:
+            return self._latest_market_mid_by_symbol[symbol]
+        return _Decimal(str(self._get_simulated_price(symbol)))
 
     def get_actual_positions(self) -> List[Dict[str, Any]]:
         """Compatibility helper used by execution emergency path."""

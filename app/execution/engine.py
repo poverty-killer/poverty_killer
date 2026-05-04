@@ -22,6 +22,10 @@ Preserved live responsibilities:
 - Fire-and-forget emergency liquidation
 - Normal-mode PCV cancellation
 - Zombie sweep / monitor / executor background loops
+
+BUNDLE F1 Ã¢â‚¬â€ TELEMETRY INTEGRATION
+- Added telemetry_store parameter
+- Pass telemetry_store to OrderRouter
 """
 
 import concurrent.futures
@@ -30,6 +34,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.brain.data_validator import DataContinuityValidator
@@ -39,6 +44,7 @@ from app.execution.order_router import OrderRouter
 from app.models import OrderFill, OrderRequest, StrategySignal
 from app.risk.guard import HybridRiskGuard
 from app.utils.time_utils import now_ns
+from app.telemetry.event_store import TelemetryEventStore
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +74,7 @@ class QueuedSignal:
     signal: StrategySignal
     is_attack: bool
     enqueue_time_ns: int
-    enqueue_price: float
+    enqueue_price: Decimal
     enqueue_regime: str
 
 
@@ -81,6 +87,8 @@ class ExecutionEngine:
     - active-path timing: canonical now_ns()
     - queue TTL / recalibration timing: replay-safe relative to canonical time source
     - sleep() remains only as non-authoritative thread pacing
+    
+    BUNDLE F1: Added telemetry_store parameter for fill/rejection recording.
     """
 
     def __init__(
@@ -97,21 +105,23 @@ class ExecutionEngine:
         lag_threshold_ms: float = 200.0,
         recalibration_pause_sec: float = 14400.0,
         maker_offset_pct: float = 0.001,
-        emergency_cancel_workers: int = 10
+        emergency_cancel_workers: int = 10,
+        telemetry_store: Optional[TelemetryEventStore] = None
     ):
         self.commander = commander
         self.risk_guard = risk_guard
         self.order_router = order_router
         self.masking_layer = masking_layer
         self.data_validator = data_validator
+        self.telemetry_store = telemetry_store
 
         self.signal_ttl_ms = signal_ttl_ms
-        self.price_sanity_threshold_pct = price_sanity_threshold_pct
+        self.price_sanity_threshold_pct = Decimal(str(price_sanity_threshold_pct))
         self.zombie_sweep_interval_sec = zombie_sweep_interval_sec
         self.max_pending_age_sec = max_pending_age_sec
         self.lag_threshold_ms = lag_threshold_ms
         self.recalibration_pause_sec = recalibration_pause_sec
-        self.maker_offset_pct = maker_offset_pct
+        self.maker_offset_pct = Decimal(str(maker_offset_pct))
         self.emergency_cancel_workers = emergency_cancel_workers
 
         self._signal_ttl_ns = int(max(0.0, signal_ttl_ms) * NS_PER_MS)
@@ -192,7 +202,7 @@ class ExecutionEngine:
         with self._lock:
             self._state.last_regime = regime
 
-    def submit_signal(self, signal: StrategySignal, current_price: float, is_attack: bool) -> bool:
+    def submit_signal(self, signal: StrategySignal, current_price: Decimal, is_attack: bool) -> bool:
         """
         Submit a trading signal for execution.
 
@@ -222,7 +232,7 @@ class ExecutionEngine:
             return False
 
         expected_net_profit = self._calculate_signal_net_profit(signal)
-        if expected_net_profit < 0.005:
+        if expected_net_profit < Decimal("0.005"):
             return False
 
         queued_signal = QueuedSignal(
@@ -246,7 +256,7 @@ class ExecutionEngine:
                 "recalibration_until_ns": self._state.recalibration_until_ns,
                 "last_latency_ms": self._state.last_latency_ms,
                 "pending_orders_count": len(self._state.pending_orders),
-                "pending_orders_value": sum(float(o.quantity) * float(o.limit_price or 0) for o in self._state.pending_orders.values()),
+                "pending_orders_value": sum(o.quantity * (o.limit_price or Decimal("0")) for o in self._state.pending_orders.values()),
                 "filled_orders_count": len(self._state.filled_orders),
                 "execution_queue_size": self._execution_queue.qsize(),
                 "last_equity": self._state.last_equity,
@@ -258,15 +268,15 @@ class ExecutionEngine:
     # INTERNAL METHODS
     # ============================================
 
-    def _calculate_signal_net_profit(self, signal: StrategySignal) -> float:
-        expected_move = 0.02
+    def _calculate_signal_net_profit(self, signal: StrategySignal) -> Decimal:
+        expected_move = Decimal("0.02")
         if signal.metadata and "expected_move" in signal.metadata:
-            expected_move = signal.metadata["expected_move"]
-        gross_ev = expected_move * signal.confidence
-        total_costs = (0.26 + 0.10) / 100
+            expected_move = Decimal(str(signal.metadata["expected_move"]))
+        gross_ev = expected_move * Decimal(str(signal.confidence))
+        total_costs = Decimal("0.0036")
         return gross_ev - total_costs
 
-    def _validate_signal_before_execution(self, queued: QueuedSignal, current_price: float) -> Tuple[bool, str]:
+    def _validate_signal_before_execution(self, queued: QueuedSignal, current_price: Decimal) -> Tuple[bool, str]:
         """Validate queued signal with TTL, price sanity, and regime checks."""
         current_ns = now_ns()
         age_ns = max(0, current_ns - queued.enqueue_time_ns)
@@ -274,7 +284,7 @@ class ExecutionEngine:
         if age_ns > self._signal_ttl_ns:
             return False, f"stale:{age_ms:.1f}ms"
 
-        if queued.enqueue_price <= 0.0:
+        if queued.enqueue_price <= Decimal("0"):
             return False, "invalid_enqueue_price"
 
         price_change_pct = abs(current_price - queued.enqueue_price) / queued.enqueue_price
@@ -304,6 +314,12 @@ class ExecutionEngine:
         is_valid, reason = self._validate_signal_before_execution(queued, current_price)
         if not is_valid:
             logger.warning("Signal rejected: %s/%s - %s", signal.strategy, signal.symbol, reason)
+            logger.info(
+                "[EXEC_DIAG] SIGNAL_REJECTED: strategy=%s symbol=%s reason=%s",
+                signal.strategy,
+                signal.symbol,
+                reason,
+            )
             return
 
         masked = self.masking_layer.mask_order(signal.quantity)
@@ -328,14 +344,22 @@ class ExecutionEngine:
             },
         )
 
-        if order.order_type == "limit" and current_price > 0:
+        if order.order_type == "limit" and current_price > Decimal("0"):
             if order.side == "buy":
-                order.limit_price = current_price * (1 - self.maker_offset_pct)
+                order.limit_price = current_price * (Decimal("1") - self.maker_offset_pct)
             else:
-                order.limit_price = current_price * (1 + self.maker_offset_pct)
+                order.limit_price = current_price * (Decimal("1") + self.maker_offset_pct)
 
         try:
             fill = self.order_router.submit_order(order)
+            logger.info(
+                "[EXEC_DIAG] ORDER_SUBMIT_ATTEMPT: order_id=%s symbol=%s side=%s qty=%s fill=%s",
+                order.id,
+                order.symbol,
+                order.side,
+                order.quantity,
+                fill is not None,
+            )
             if fill:
                 with self._lock:
                     self._state.filled_orders.append(fill)
@@ -510,10 +534,10 @@ class ExecutionEngine:
                 if oldest_ts_ns is None or order_ts_ns < oldest_ts_ns:
                     oldest_ts_ns = order_ts_ns
 
-            total_value = sum(float(o.quantity) * float(o.limit_price or 0) for o in self._state.pending_orders.values())
+            total_value = sum(o.quantity * (o.limit_price or Decimal("0")) for o in self._state.pending_orders.values())
             self.risk_guard.update_pending_orders(
                 count=len(self._state.pending_orders),
-                total_value=total_value,
+                total_value=float(total_value),  # explicit float() at risk boundary — risk_guard is out of F4A scope
                 oldest_timestamp=oldest_ts_ns,
             )
 

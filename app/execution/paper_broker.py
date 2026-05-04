@@ -388,8 +388,8 @@ class PaperBroker:
         self,
         current_ts_ns: int,
         current_price: Decimal,
-        book_imbalance: float,
-        toxicity: float,
+        book_imbalance: Decimal,
+        toxicity: Decimal,
     ):
         """
         Legacy single-context compatibility path.
@@ -403,8 +403,8 @@ class PaperBroker:
             timestamp_ns=current_ts_ns,
             mid_price=_d(current_price, field_name="current_price"),
             spread_bps=Decimal("0"),
-            book_imbalance=Decimal(str(book_imbalance)),
-            toxicity_score=Decimal(str(toxicity)),
+            book_imbalance=book_imbalance,
+            toxicity_score=toxicity,
             regime=RegimeType.UNKNOWN,
             liquidity_regime=LiquidityRegime.UNKNOWN,
             toxicity_level=ToxicityLevel.UNKNOWN,
