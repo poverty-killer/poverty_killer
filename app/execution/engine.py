@@ -239,11 +239,18 @@ class ExecutionEngine:
             signal=signal,
             is_attack=is_attack,
             enqueue_time_ns=current_ns,
-            enqueue_price=current_price,
+            enqueue_price=current_price if isinstance(current_price, Decimal) else Decimal(str(current_price)),
             enqueue_regime=self._state.last_regime,
         )
 
         self._execution_queue.put(queued_signal)
+        logger.info(
+            "[EXEC_DIAG] SIGNAL_SUBMITTED: strategy=%s symbol=%s side=%s qty=%s",
+            signal.strategy,
+            signal.symbol,
+            signal.side,
+            signal.quantity,
+        )
         return True
 
     def get_status(self) -> Dict[str, Any]:
@@ -324,14 +331,32 @@ class ExecutionEngine:
 
         masked = self.masking_layer.mask_order(signal.quantity)
 
+        if is_attack:
+            if current_price > Decimal("0"):
+                if signal.side == "buy":
+                    limit_price_for_order = current_price * (Decimal("1") - self.maker_offset_pct)
+                else:
+                    limit_price_for_order = current_price * (Decimal("1") + self.maker_offset_pct)
+            elif signal.price is not None:
+                limit_price_for_order = Decimal(str(signal.price))
+            else:
+                logger.warning(
+                    "[EXEC_DIAG] SIGNAL_REJECTED: strategy=%s symbol=%s reason=limit_order_no_price",
+                    signal.strategy,
+                    signal.symbol,
+                )
+                return
+        else:
+            limit_price_for_order = None
+
         current_ns = now_ns()
         order = OrderRequest(
             id=f"{signal.strategy}_{signal.symbol}_{signal.exchange_ts_ns}",
             symbol=signal.symbol,
             side=signal.side,
-            quantity=masked.masked_size,
+            quantity=Decimal(str(masked.masked_size)),
             order_type="limit" if is_attack else "market",
-            limit_price=signal.price,
+            limit_price=limit_price_for_order,
             strategy=signal.strategy,
             confidence=signal.confidence,
             exchange_ts_ns=signal.exchange_ts_ns,
@@ -344,14 +369,15 @@ class ExecutionEngine:
             },
         )
 
-        if order.order_type == "limit" and current_price > Decimal("0"):
-            if order.side == "buy":
-                order.limit_price = current_price * (Decimal("1") - self.maker_offset_pct)
-            else:
-                order.limit_price = current_price * (Decimal("1") + self.maker_offset_pct)
-
         try:
             fill = self.order_router.submit_order(order)
+            logger.info(
+                "[EXEC_DIAG] PAPERBROKER_REACH_COUNT: strategy=%s symbol=%s side=%s qty=%s",
+                signal.strategy,
+                order.symbol,
+                order.side,
+                order.quantity,
+            )
             logger.info(
                 "[EXEC_DIAG] ORDER_SUBMIT_ATTEMPT: order_id=%s symbol=%s side=%s qty=%s fill=%s",
                 order.id,
@@ -361,6 +387,13 @@ class ExecutionEngine:
                 fill is not None,
             )
             if fill:
+                logger.info(
+                    "[EXEC_DIAG] PAPER_FILL_COUNT: order_id=%s symbol=%s qty=%s price=%s",
+                    order.id,
+                    order.symbol,
+                    fill.quantity,
+                    fill.price,
+                )
                 with self._lock:
                     self._state.filled_orders.append(fill)
                 self.risk_guard.record_fees(fill.fee)
