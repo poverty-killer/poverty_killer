@@ -70,6 +70,10 @@ def _strategy_admission_env() -> Dict[str, str]:
     return {"POVERTY_KILLER_PACKET": "STRATEGY_ADMISSION"}
 
 
+def _execution_sr_decimal_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "EXECUTION_SR_DECIMAL"}
+
+
 def _override_env(reason: str) -> Dict[str, str]:
     return {
         "POVERTY_KILLER_PACKET": "G0",
@@ -158,6 +162,7 @@ class TestG0Allowlist:
         "docs/packets/f4a_decimal.md",
         "docs/packets/f4b_sentiment.md",
         "docs/packets/f4c_risk_state.md",
+        "docs/packets/execution_sr_decimal.md",
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
@@ -361,6 +366,92 @@ class TestStrategyAdmissionPacket:
         result = evaluate_event(_edit("reports/anything.txt"), _strategy_admission_env())
         assert result["decision"] == "block"
         assert "strategy_admission_outside_allowlist" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# EXECUTION_SR_DECIMAL packet allowlist
+# ---------------------------------------------------------------------------
+
+class TestExecutionSRDecimalPacket:
+    # --- Non-locked allowed paths ---
+
+    def test_esr_allows_order_router(self):
+        result = evaluate_event(_edit("app/execution/order_router.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "approve"
+
+    def test_esr_allows_paper_broker(self):
+        result = evaluate_event(_edit("app/execution/paper_broker.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "approve"
+
+    def test_esr_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_execution_sr_decimal.py"),
+            _execution_sr_decimal_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_esr_write_allowed_for_order_router(self):
+        result = evaluate_event(_write("app/execution/order_router.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "approve"
+
+    # --- Locked authority file with packet-scoped exception ---
+
+    def test_esr_allows_engine(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "approve"
+
+    def test_esr_write_allowed_for_engine(self):
+        result = evaluate_event(_write("app/execution/engine.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "approve"
+
+    # --- Locked authority files NOT in exception list ---
+
+    def test_esr_blocks_signal_fusion(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_esr_blocks_strategy_router(self):
+        result = evaluate_event(_edit("app/strategies/strategy_router.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_esr_blocks_decision_compiler(self):
+        result = evaluate_event(_edit("app/core/decision_compiler.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_esr_blocks_risk_guard(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_esr_blocks_shans_curve(self):
+        result = evaluate_event(_edit("app/brain/shans_curve.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # --- Outside allowlist, not locked ---
+
+    def test_esr_blocks_main_loop(self):
+        result = evaluate_event(_edit("app/main_loop.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "execution_sr_decimal_outside_allowlist" in result["reason"]
+
+    def test_esr_blocks_config(self):
+        result = evaluate_event(_edit("app/config.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "execution_sr_decimal_outside_allowlist" in result["reason"]
+
+    def test_esr_blocks_symbol_runtime(self):
+        result = evaluate_event(_edit("app/symbol_runtime.py"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "execution_sr_decimal_outside_allowlist" in result["reason"]
+
+    def test_esr_blocks_risk_state_json(self):
+        result = evaluate_event(_edit("state/risk_state.json"), _execution_sr_decimal_env())
+        assert result["decision"] == "block"
+        assert "execution_sr_decimal_outside_allowlist" in result["reason"]
 
 
 # ---------------------------------------------------------------------------

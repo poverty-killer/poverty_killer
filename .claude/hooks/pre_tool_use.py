@@ -85,6 +85,7 @@ G0_ALLOWLIST = frozenset(
         "docs/packets/f4a_decimal.md",
         "docs/packets/f4b_sentiment.md",
         "docs/packets/f4c_risk_state.md",
+        "docs/packets/execution_sr_decimal.md",
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
@@ -130,6 +131,20 @@ STRATEGY_ADMISSION_ALLOWED_FILES = frozenset(
     ]
 )
 STRATEGY_ADMISSION_ALLOWED_PREFIXES = ("tests/",)
+
+# EXECUTION_SR_DECIMAL allowlist — signal-routing Decimal discipline, execution layer only.
+EXECUTION_SR_DECIMAL_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/execution/order_router.py",
+        "app/execution/paper_broker.py",
+    ]
+)
+EXECUTION_SR_DECIMAL_LOCKED_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/execution/engine.py",
+    ]
+)
+EXECUTION_SR_DECIMAL_ALLOWED_PREFIXES = ("tests/",)
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +317,8 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
             return True, ""
         if packet == "F4C" and normalized_path in F4C_ALLOWED_FILES:
             return True, ""
+        if packet == "EXECUTION_SR_DECIMAL" and normalized_path in EXECUTION_SR_DECIMAL_LOCKED_ALLOWED_FILES:
+            return True, ""
         return False, f"locked_authority_file_outside_packet_exception:{normalized_path}"
     if packet == "G0":
         if normalized_path in G0_ALLOWLIST:
@@ -331,6 +348,12 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in STRATEGY_ADMISSION_ALLOWED_PREFIXES):
             return True, ""
         return False, f"strategy_admission_outside_allowlist:{normalized_path}"
+    if packet == "EXECUTION_SR_DECIMAL":
+        if normalized_path in EXECUTION_SR_DECIMAL_ALLOWED_FILES:
+            return True, ""
+        if any(normalized_path.startswith(pre) for pre in EXECUTION_SR_DECIMAL_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"execution_sr_decimal_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 

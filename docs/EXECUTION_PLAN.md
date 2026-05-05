@@ -115,6 +115,33 @@ Acceptance: test_g0_hook_verification.py passes with zero failures.
 
 ---
 
+## G0.3 — EXECUTION_SR_DECIMAL Packet Registration
+
+Status: COMPLETE (Phase 1 — governance only)
+
+Objective:
+Register EXECUTION_SR_DECIMAL as a recognized hook packet so the active bundle
+can patch only approved execution-layer files. No runtime files patched in Phase 1.
+
+Files in scope (Phase 1 — governance only):
+- .claude/hooks/pre_tool_use.py
+- tests/test_g0_hook_verification.py
+- docs/EXECUTION_PLAN.md
+- docs/packets/execution_sr_decimal.md
+
+EXECUTION_SR_DECIMAL write allowlist (Phase 2 — active bundle):
+Non-locked:
+- app/execution/order_router.py
+- app/execution/paper_broker.py
+- tests/ (prefix)
+
+Locked authority file with packet-scoped exception:
+- app/execution/engine.py
+
+Acceptance: test_g0_hook_verification.py passes with zero failures.
+
+---
+
 ## F4A - Execution Decimal Discipline
 
 Status: COMPLETE
