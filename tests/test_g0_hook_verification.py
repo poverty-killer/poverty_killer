@@ -74,6 +74,10 @@ def _execution_sr_decimal_env() -> Dict[str, str]:
     return {"POVERTY_KILLER_PACKET": "EXECUTION_SR_DECIMAL"}
 
 
+def _regime_aware_sr_admission_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "REGIME_AWARE_SR_ADMISSION"}
+
+
 def _override_env(reason: str) -> Dict[str, str]:
     return {
         "POVERTY_KILLER_PACKET": "G0",
@@ -163,6 +167,7 @@ class TestG0Allowlist:
         "docs/packets/f4b_sentiment.md",
         "docs/packets/f4c_risk_state.md",
         "docs/packets/execution_sr_decimal.md",
+        "docs/packets/regime_aware_sr_admission.md",
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
@@ -452,6 +457,103 @@ class TestExecutionSRDecimalPacket:
         result = evaluate_event(_edit("state/risk_state.json"), _execution_sr_decimal_env())
         assert result["decision"] == "block"
         assert "execution_sr_decimal_outside_allowlist" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# REGIME_AWARE_SR_ADMISSION packet allowlist
+# ---------------------------------------------------------------------------
+
+class TestRegimeAwareSRAdmissionPacket:
+    # --- Non-locked allowed paths ---
+
+    def test_rasa_allows_config(self):
+        result = evaluate_event(_edit("app/config.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "approve"
+
+    def test_rasa_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_regime_aware_sr_admission.py"),
+            _regime_aware_sr_admission_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_rasa_write_allowed_for_config(self):
+        result = evaluate_event(_write("app/config.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "approve"
+
+    # --- Locked authority file with packet-scoped exception ---
+
+    def test_rasa_allows_signal_fusion(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "approve"
+
+    def test_rasa_write_allowed_for_signal_fusion(self):
+        result = evaluate_event(_write("app/brain/signal_fusion.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "approve"
+
+    # --- Locked authority files NOT in exception list ---
+
+    def test_rasa_blocks_regime_detector(self):
+        result = evaluate_event(_edit("app/brain/regime_detector.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_rasa_blocks_shans_curve(self):
+        result = evaluate_event(_edit("app/brain/shans_curve.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_rasa_blocks_strategy_router(self):
+        result = evaluate_event(_edit("app/strategies/strategy_router.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_rasa_blocks_execution_engine(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_rasa_blocks_risk_guard(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_rasa_blocks_unified_risk(self):
+        result = evaluate_event(_edit("app/risk/unified_risk.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    def test_rasa_blocks_decision_compiler(self):
+        result = evaluate_event(_edit("app/core/decision_compiler.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # --- Outside allowlist, not locked (explicitly blocked per G0.4) ---
+
+    def test_rasa_blocks_main_loop(self):
+        result = evaluate_event(_edit("app/main_loop.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "regime_aware_sr_admission_outside_allowlist" in result["reason"]
+
+    def test_rasa_blocks_sector_rotation(self):
+        result = evaluate_event(_edit("app/strategies/sector_rotation.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "regime_aware_sr_admission_outside_allowlist" in result["reason"]
+
+    def test_rasa_blocks_models_signals(self):
+        result = evaluate_event(_edit("app/models/signals.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "regime_aware_sr_admission_outside_allowlist" in result["reason"]
+
+    def test_rasa_blocks_order_router(self):
+        result = evaluate_event(_edit("app/execution/order_router.py"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "regime_aware_sr_admission_outside_allowlist" in result["reason"]
+
+    def test_rasa_blocks_risk_state_json(self):
+        result = evaluate_event(_edit("state/risk_state.json"), _regime_aware_sr_admission_env())
+        assert result["decision"] == "block"
+        assert "regime_aware_sr_admission_outside_allowlist" in result["reason"]
 
 
 # ---------------------------------------------------------------------------

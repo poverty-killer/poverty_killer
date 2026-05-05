@@ -240,6 +240,47 @@ Next packet candidates (to be defined by Board):
 
 ---
 
+## G0.4 — REGIME_AWARE_SR_ADMISSION Packet Registration
+
+Status: ACTIVE (Step 1 — governance registration only)
+
+Objective:
+Register REGIME_AWARE_SR_ADMISSION as a recognized hook packet so the next
+bundle can patch regime-conditioned SectorRotation eligibility in signal_fusion
+and config only. No runtime behavior patched in Step 1.
+
+Design decision:
+Option B accepted — proof-only / opt-in SR eligibility gate in RANGING regime,
+default OFF. Prior bundle: EXECUTION_SR_DECIMAL closed as PATCH CLOSED / PARTIAL
+PASS (commit 7c50777).
+
+Files in scope (Step 1 — governance registration only):
+- .claude/hooks/pre_tool_use.py
+- tests/test_g0_hook_verification.py
+- docs/EXECUTION_PLAN.md
+- docs/packets/regime_aware_sr_admission.md
+
+REGIME_AWARE_SR_ADMISSION write allowlist (Step 2 — active bundle):
+Non-locked:
+- app/config.py
+- tests/ (prefix)
+
+Locked authority file with packet-scoped exception:
+- app/brain/signal_fusion.py
+
+Explicitly blocked:
+- app/main_loop.py
+- app/strategies/* (all)
+- app/risk/*
+- app/core/*
+- app/execution/*
+- app/models/*
+- app/brain/* except app/brain/signal_fusion.py
+
+Acceptance: test_g0_hook_verification.py passes with zero failures.
+
+---
+
 ## Deferred Items
 
 ### ORPHANED_TMP_FILES

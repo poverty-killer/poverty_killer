@@ -3,7 +3,7 @@
 G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
-- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION)
+- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION)
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
 - dangerous Bash command patterns (live mode, dependency mods, dangerous git/delete)
@@ -86,6 +86,7 @@ G0_ALLOWLIST = frozenset(
         "docs/packets/f4b_sentiment.md",
         "docs/packets/f4c_risk_state.md",
         "docs/packets/execution_sr_decimal.md",
+        "docs/packets/regime_aware_sr_admission.md",
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
@@ -145,6 +146,19 @@ EXECUTION_SR_DECIMAL_LOCKED_ALLOWED_FILES = frozenset(
     ]
 )
 EXECUTION_SR_DECIMAL_ALLOWED_PREFIXES = ("tests/",)
+
+# REGIME_AWARE_SR_ADMISSION allowlist — regime-conditioned SR eligibility, opt-in proof-only.
+REGIME_AWARE_SR_ADMISSION_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/config.py",
+    ]
+)
+REGIME_AWARE_SR_ADMISSION_LOCKED_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/brain/signal_fusion.py",
+    ]
+)
+REGIME_AWARE_SR_ADMISSION_ALLOWED_PREFIXES = ("tests/",)
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +333,8 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
             return True, ""
         if packet == "EXECUTION_SR_DECIMAL" and normalized_path in EXECUTION_SR_DECIMAL_LOCKED_ALLOWED_FILES:
             return True, ""
+        if packet == "REGIME_AWARE_SR_ADMISSION" and normalized_path in REGIME_AWARE_SR_ADMISSION_LOCKED_ALLOWED_FILES:
+            return True, ""
         return False, f"locked_authority_file_outside_packet_exception:{normalized_path}"
     if packet == "G0":
         if normalized_path in G0_ALLOWLIST:
@@ -354,6 +370,12 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in EXECUTION_SR_DECIMAL_ALLOWED_PREFIXES):
             return True, ""
         return False, f"execution_sr_decimal_outside_allowlist:{normalized_path}"
+    if packet == "REGIME_AWARE_SR_ADMISSION":
+        if normalized_path in REGIME_AWARE_SR_ADMISSION_ALLOWED_FILES:
+            return True, ""
+        if any(normalized_path.startswith(pre) for pre in REGIME_AWARE_SR_ADMISSION_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"regime_aware_sr_admission_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 
