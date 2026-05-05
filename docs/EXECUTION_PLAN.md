@@ -86,6 +86,35 @@ bounded, read-only evidence extraction.
 
 ---
 
+## G0.2 — STRATEGY_ADMISSION Packet Registration
+
+Status: COMPLETE
+
+Objective:
+Register STRATEGY_ADMISSION as a recognized hook packet so the next
+Strategy Admission Calibration Bundle can patch only approved strategy files.
+
+Files in scope:
+- .claude/hooks/pre_tool_use.py
+- tests/test_g0_hook_verification.py
+- docs/EXECUTION_PLAN.md
+
+STRATEGY_ADMISSION write allowlist:
+- app/strategies/shadow_front.py
+- app/strategies/sector_rotation.py
+- app/config.py
+- app/models/signals.py
+- tests/ (prefix)
+
+Locked authority files that remain protected (not writable under STRATEGY_ADMISSION):
+- app/brain/whale_flow_engine.py
+- app/brain/whale_zone_engine.py
+- app/strategies/strategy_router.py
+
+Acceptance: test_g0_hook_verification.py passes with zero failures.
+
+---
+
 ## F4A - Execution Decimal Discipline
 
 Status: COMPLETE

@@ -3,7 +3,7 @@
 G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
-- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C)
+- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION)
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
 - dangerous Bash command patterns (live mode, dependency mods, dangerous git/delete)
@@ -119,6 +119,17 @@ F4C_ALLOWED_FILES = frozenset(
     ]
 )
 F4C_ALLOWED_PREFIXES = ("tests/",)
+
+# STRATEGY_ADMISSION allowlist.
+STRATEGY_ADMISSION_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/strategies/shadow_front.py",
+        "app/strategies/sector_rotation.py",
+        "app/config.py",
+        "app/models/signals.py",
+    ]
+)
+STRATEGY_ADMISSION_ALLOWED_PREFIXES = ("tests/",)
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +325,12 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in F4C_ALLOWED_PREFIXES):
             return True, ""
         return False, f"f4c_outside_allowlist:{normalized_path}"
+    if packet == "STRATEGY_ADMISSION":
+        if normalized_path in STRATEGY_ADMISSION_ALLOWED_FILES:
+            return True, ""
+        if any(normalized_path.startswith(pre) for pre in STRATEGY_ADMISSION_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"strategy_admission_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 

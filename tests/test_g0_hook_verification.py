@@ -66,6 +66,10 @@ def _f4c_env() -> Dict[str, str]:
     return {"POVERTY_KILLER_PACKET": "F4C"}
 
 
+def _strategy_admission_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "STRATEGY_ADMISSION"}
+
+
 def _override_env(reason: str) -> Dict[str, str]:
     return {
         "POVERTY_KILLER_PACKET": "G0",
@@ -251,6 +255,112 @@ class TestPacketAllowlists:
         )
         assert result["decision"] == "block"
         assert "no_active_packet" in result["reason"] or "unknown_packet" in result["reason"]
+
+    def test_audit_packet_unknown_blocked(self):
+        result = evaluate_event(
+            _edit("app/main_loop.py"),
+            {"POVERTY_KILLER_PACKET": "AUDIT"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet" in result["reason"] or "unknown_packet" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# STRATEGY_ADMISSION packet allowlist
+# ---------------------------------------------------------------------------
+
+class TestStrategyAdmissionPacket:
+    # --- Allowed paths ---
+
+    def test_sa_allows_shadow_front(self):
+        result = evaluate_event(_edit("app/strategies/shadow_front.py"), _strategy_admission_env())
+        assert result["decision"] == "approve"
+
+    def test_sa_allows_sector_rotation(self):
+        result = evaluate_event(_edit("app/strategies/sector_rotation.py"), _strategy_admission_env())
+        assert result["decision"] == "approve"
+
+    def test_sa_allows_config(self):
+        result = evaluate_event(_edit("app/config.py"), _strategy_admission_env())
+        assert result["decision"] == "approve"
+
+    def test_sa_allows_signals(self):
+        result = evaluate_event(_edit("app/models/signals.py"), _strategy_admission_env())
+        assert result["decision"] == "approve"
+
+    def test_sa_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_strategy_admission_calibration.py"),
+            _strategy_admission_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_sa_write_allowed_for_allowlist_file(self):
+        result = evaluate_event(
+            _write("app/strategies/shadow_front.py"),
+            _strategy_admission_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # --- Blocked paths: locked authority files ---
+
+    def test_sa_blocks_execution_engine(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_risk_guard(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_unified_risk(self):
+        result = evaluate_event(_edit("app/risk/unified_risk.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_signal_fusion(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_shans_curve(self):
+        result = evaluate_event(_edit("app/brain/shans_curve.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_regime_detector(self):
+        result = evaluate_event(_edit("app/brain/regime_detector.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_whale_flow_engine(self):
+        result = evaluate_event(_edit("app/brain/whale_flow_engine.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_whale_zone_engine(self):
+        result = evaluate_event(_edit("app/brain/whale_zone_engine.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    def test_sa_blocks_strategy_router(self):
+        result = evaluate_event(_edit("app/strategies/strategy_router.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+
+    # --- Blocked paths: outside allowlist, not locked ---
+
+    def test_sa_blocks_order_router(self):
+        result = evaluate_event(_edit("app/execution/order_router.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+        assert "strategy_admission_outside_allowlist" in result["reason"]
+
+    def test_sa_blocks_paper_broker(self):
+        result = evaluate_event(_edit("app/execution/paper_broker.py"), _strategy_admission_env())
+        assert result["decision"] == "block"
+        assert "strategy_admission_outside_allowlist" in result["reason"]
+
+    def test_sa_blocks_risk_state_json(self):
+        result = evaluate_event(_edit("state/risk_state.json"), _strategy_admission_env())
+        assert result["decision"] == "block"
+        assert "strategy_admission_outside_allowlist" in result["reason"]
+
+    def test_sa_blocks_reports(self):
+        result = evaluate_event(_edit("reports/anything.txt"), _strategy_admission_env())
+        assert result["decision"] == "block"
+        assert "strategy_admission_outside_allowlist" in result["reason"]
 
 
 # ---------------------------------------------------------------------------
