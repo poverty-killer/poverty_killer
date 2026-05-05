@@ -16,6 +16,27 @@ Core Doctrinal Boundaries:
 - Toxicity: Exponential Suppression, Hazard Velocity, and Hard Veto (is_toxic)
 - Insider: Urgency / Attack Escalation Catalyst (Gated by active/invalidated state)
 - Physical Validator: Base Reality Impact Bounds
+
+BUNDLE DIAGNOSTIC VISIBILITY — FUSION DECISION TRACE (2026-04-28)
+    - Added INFO-level logging for veto reasons and regime decision
+    - NO BEHAVIOR CHANGES. Read-only diagnostic only.
+
+BUNDLE DIAGNOSTIC VISIBILITY — FUSION BREAKDOWN TRACE (PP7B, 2026-04-29)
+    - Added [FUSION_BREAKDOWN] structured log before Phase 7 assembly
+    - Added [FUSION_VETO_DETAIL] structured log in _issue_hard_veto()
+    - Exposes: base_confidence, tox_penalty, entropy_penalty, resonance, direction_alignment
+    - NO BEHAVIOR CHANGES. Read-only diagnostic only.
+
+FUSION LANE REPAIR — KELLY REMOVED FROM FUSION (PP6D, 2026-04-29)
+    - Removed kelly_calibration_curve() from Fusion confidence path
+    - Toxicity: bounded piecewise modulation replaces exponential steepness=3.5
+      [0,0.30]→1.0 | (0.30,0.60]→1.0..0.70 | (0.60,0.88]→0.70..0.40
+    - Entropy: explicit entropy_neutralized flag; ent_multiplier=1.0 when dynamic_entropy<=0
+      Positive branch: max(0.70, 1.0 - dynamic_entropy*0.30) — floor raised, slope reduced
+    - Resonance bonus: non-resonant 0.85 → 1.0 (neutral, not penalty)
+    - final_confidence = clamp(pre_kelly_value, 0.0, 1.0)
+    - kelly_calibration_curve() preserved intact in QuantMath for downstream PositionSizing
+    - [FUSION_BREAKDOWN] updated to expose all new fields + kelly_removed_from_fusion=True
 """
 
 import math
@@ -66,6 +87,22 @@ class QuantMath:
     def kelly_calibration_curve(raw_confidence: float) -> float:
         clamped = max(0.0, min(1.0, raw_confidence))
         return math.pow(clamped, 3)
+
+    @staticmethod
+    def bounded_tox_modulation(tox_score: float) -> float:
+        """
+        Piecewise linear toxicity modulation for Fusion conviction lane.
+        Low tox: neutral. Moderate: mild suppression. High: meaningful suppression.
+        Hard veto gates tox>=0.88 upstream; upper segment never executes above that.
+        Segments: [0,0.30]->1.0 | (0.30,0.60]->1.0..0.70 | (0.60,0.88]->0.70..0.40
+        """
+        tox = max(0.0, min(1.0, tox_score))
+        if tox <= 0.30:
+            return 1.0
+        elif tox <= 0.60:
+            return 1.0 - 0.30 * (tox - 0.30) / 0.30
+        else:
+            return 0.70 - 0.30 * (tox - 0.60) / 0.28
 
 
 # =========================================================================
@@ -246,11 +283,14 @@ class SignalFusion:
         # ---------------------------------------------------------
         for sig, ttl in self._ttl_ns.items():
             if sig not in self._cache:
+                logger.info("[FUSION_DIAG] Missing signal: %s → veto", sig)
                 return self._issue_hard_veto(current_ts_ns, f"Missing requisite signal [{sig}]")
             
             _, ts = self._cache[sig]
             age_ns = current_ts_ns - ts
             if age_ns > ttl:
+                logger.info("[FUSION_DIAG] Stale signal: %s age=%.1fs ttl=%.1fs → veto", 
+                           sig, age_ns/1e9, ttl/1e9)
                 return self._issue_hard_veto(current_ts_ns, f"Stale signal [{sig}] (Age: {age_ns / 1e9:.2f}s)")
 
         # ---------------------------------------------------------
@@ -275,10 +315,30 @@ class SignalFusion:
         phys_dict, _ = self._cache["physical"]
         phys_score = float(phys_dict.get("health_score", 0.0))
         
-        # WhaleFlowAlert (direction is WhaleDirection Enum)
+        # ==========================================================
+        # WHALE FLOW — STRICT CONTRACT VALIDATION
+        # ==========================================================
+        # SignalFusion requires a WhaleFlowAlert-like payload here.
+        # Raw market-data objects such as Candle must never enter this channel.
         whale_payload, whale_ts = self._cache["whale_flow"]
-        whale_dir = int(whale_payload.direction.value)
-        whale_conf_raw = float(whale_payload.confidence)
+
+        if not hasattr(whale_payload, "direction") or not hasattr(whale_payload, "confidence"):
+            logger.error(
+                "[FUSION_ERROR] INVALID_WHALE_PAYLOAD type=%s missing required fields direction/confidence",
+                type(whale_payload).__name__,
+            )
+            return self._issue_hard_veto(current_ts_ns, "Invalid Whale Payload Type")
+
+        try:
+            whale_dir = int(whale_payload.direction.value)
+            whale_conf_raw = float(whale_payload.confidence)
+        except Exception as exc:
+            logger.error(
+                "[FUSION_ERROR] WHALE_PAYLOAD_PARSE_FAILED type=%s error=%s",
+                type(whale_payload).__name__,
+                str(exc),
+            )
+            return self._issue_hard_veto(current_ts_ns, "Corrupted Whale Payload")
         
         whale_age = current_ts_ns - whale_ts
         whale_discount = QuantMath.temporal_discount(whale_age, self._half_life_ns["whale_flow"])
@@ -308,24 +368,39 @@ class SignalFusion:
         # RegimeDetector (Returns exactly Tuple[RegimeType, float])
         regime_payload, _ = self._cache["regime"]
         regime_type = regime_payload[0]
+        regime_confidence = regime_payload[1]
+
+        # DIAGNOSTIC: Log key input values before veto checks
+        logger.info(
+            "[FUSION_DIAG] Inputs: regime=%s (conf=%.2f), whale_dir=%d, tox_score=%.3f, tox_toxic=%s, "
+            "ent_score=%.3f, phys_score=%.3f, shans_superfluid=%.3f, shans_bias=%.3f",
+            regime_type.value, regime_confidence, whale_dir, tox_score, tox_is_toxic,
+            ent_score, phys_score, shans_superfluid, shans_bias_raw
+        )
 
         # ---------------------------------------------------------
         # PHASE 3: CRITICAL HAZARD GATING (Absolute Boundaries)
         # ---------------------------------------------------------
         if whale_dir == 0:
+            logger.info("[FUSION_DIAG] veto: whale_dir=0 (NEUTRAL)")
             return self._issue_hard_veto(current_ts_ns, "Whale Vector Neutral")
             
         if tox_is_toxic or tox_score >= 0.88:
+            logger.info("[FUSION_DIAG] veto: tox_is_toxic=%s or tox_score=%.3f >= 0.88", tox_is_toxic, tox_score)
             return self._issue_hard_veto(current_ts_ns, f"Toxicity Critical (Score:{tox_score:.2f})")
             
         # Kinematic Veto: Toxicity rocketing upward
         if tox_score > 0.60 and self._state.toxicity_velocity > 0.15:
-             return self._issue_hard_veto(current_ts_ns, f"Toxicity Spike (+{self._state.toxicity_velocity:.2f}/s)")
+            logger.info("[FUSION_DIAG] veto: toxicity_velocity=%.3f > 0.15 with tox_score=%.3f > 0.60", 
+                       self._state.toxicity_velocity, tox_score)
+            return self._issue_hard_veto(current_ts_ns, f"Toxicity Spike (+{self._state.toxicity_velocity:.2f}/s)")
              
         if ent_score >= 0.95:
+            logger.info("[FUSION_DIAG] veto: ent_score=%.3f >= 0.95", ent_score)
             return self._issue_hard_veto(current_ts_ns, f"Entropy Disintegration ({ent_score:.2f})")
             
         if phys_score <= 0.15:
+            logger.info("[FUSION_DIAG] veto: phys_score=%.3f <= 0.15", phys_score)
             return self._issue_hard_veto(current_ts_ns, f"Physical Validator Collapse ({phys_score:.2f})")
 
         # ---------------------------------------------------------
@@ -338,24 +413,42 @@ class SignalFusion:
         is_dissonant = resonance < -0.20
 
         if is_dissonant:
+            logger.info("[FUSION_DIAG] veto: resonance=%.3f < -0.20 (dissonant)", resonance)
             return self._issue_hard_veto(current_ts_ns, f"Vector Dissonance (Resonance: {resonance:.2f})")
 
         # Base Alpha Synthesis
         base_conviction = (whale_conf_decayed * 0.40) + (shans_conf_decayed * 0.35) + (phys_score * 0.25)
 
-        # Exponential hazard suppression
-        tox_multiplier = QuantMath.exponential_decay(tox_score, steepness=3.5)
-        
-        # Entropy suppresses confidence, but rising entropy (velocity) suppresses it harder
-        dynamic_entropy = min(1.0, ent_score + max(0.0, self._state.entropy_velocity * 2.0))
-        ent_multiplier = max(0.1, 1.0 - (dynamic_entropy * 0.65))
-        
-        resonance_bonus = 1.15 if is_resonant else 0.85
+        # Toxicity: bounded piecewise modulation. Low tox neutral; moderate mild; high meaningful.
+        # Hard veto gates tox>=0.88 upstream. exponential_decay preserved for other uses.
+        tox_multiplier = QuantMath.bounded_tox_modulation(tox_score)
 
-        final_confidence = base_conviction * tox_multiplier * ent_multiplier * resonance_bonus
-        final_confidence = QuantMath.kelly_calibration_curve(final_confidence)
-        final_confidence = max(0.0, min(1.0, final_confidence))
-        
+        # Entropy: zero or unproven entropy is explicit neutral — no false suppression.
+        # Positive branch: slope=0.30, floor=0.70 — max entropy suppresses to 30%, not 90%.
+        dynamic_entropy = min(1.0, ent_score + max(0.0, self._state.entropy_velocity * 2.0))
+        if dynamic_entropy <= 0.0:
+            ent_multiplier = 1.0
+            entropy_neutralized = True
+        else:
+            ent_multiplier = max(0.70, 1.0 - (dynamic_entropy * 0.30))
+            entropy_neutralized = False
+
+        # Resonance: resonant modestly boosts conviction; non-resonant is neutral (not a penalty).
+        resonance_bonus = 1.15 if is_resonant else 1.0
+
+        # Kelly removed from Fusion — PositionSizing is the downstream Kelly sizing authority.
+        pre_kelly_value = base_conviction * tox_multiplier * ent_multiplier * resonance_bonus
+        final_confidence = max(0.0, min(1.0, pre_kelly_value))
+
+        self._telemetry["base_conviction"] = base_conviction
+        self._telemetry["tox_score"] = tox_score
+        self._telemetry["tox_multiplier"] = tox_multiplier
+        self._telemetry["dynamic_entropy"] = dynamic_entropy
+        self._telemetry["ent_multiplier"] = ent_multiplier
+        self._telemetry["entropy_neutralized"] = entropy_neutralized
+        self._telemetry["resonance_bonus"] = resonance_bonus
+        self._telemetry["pre_kelly_value"] = pre_kelly_value
+        self._telemetry["kelly_removed_from_fusion"] = True
         self._telemetry["final_confidence"] = final_confidence
 
         # ---------------------------------------------------------
@@ -400,23 +493,65 @@ class SignalFusion:
         deprioritized_sleeves = []
         regime_str = regime_type.value
 
+        # DIAGNOSTIC: Log regime type before decision
+        logger.info("[FUSION_DIAG] Regime type: %s", regime_type)
+
         if regime_type in (RegimeType.TRENDING_BULL, RegimeType.TRENDING_BEAR):
             sector_rotation_eligible = True
             preferred_sleeve = SleeveType.SECTOR_ROTATION.value
             deprioritized_sleeves = [SleeveType.SHADOW_FRONT.value, SleeveType.GAMMA_FRONT.value]
+            logger.info("[FUSION_DIAG] Regime TRENDING → preferred_sleeve=SECTOR_ROTATION")
             
         elif regime_type == RegimeType.RANGING:
             shadow_front_eligible = True
             preferred_sleeve = SleeveType.SHADOW_FRONT.value
             deprioritized_sleeves = [SleeveType.GAMMA_FRONT.value, SleeveType.SECTOR_ROTATION.value]
+            logger.info("[FUSION_DIAG] Regime RANGING → preferred_sleeve=SHADOW_FRONT")
             
         elif regime_type == RegimeType.CRISIS:
             gamma_front_eligible = True
             preferred_sleeve = SleeveType.GAMMA_FRONT.value
             deprioritized_sleeves = [SleeveType.SECTOR_ROTATION.value, SleeveType.SHADOW_FRONT.value]
+            logger.info("[FUSION_DIAG] Regime CRISIS → preferred_sleeve=GAMMA_FRONT")
             
         elif regime_type == RegimeType.UNKNOWN:
             preferred_sleeve = SleeveType.FLV.value
+            liquidity_void_eligible = True   # STAGE 2-D2: align eligibility with preferred_sleeve=FLV
+            logger.info("[FUSION_DIAG] Regime UNKNOWN → preferred_sleeve=FLV")
+        else:
+            logger.info("[FUSION_DIAG] Regime UNHANDLED: %s → preferred_sleeve=None", regime_type)
+
+        # DIAGNOSTIC: Log final preferred_sleeve
+        logger.info("[FUSION_DIAG] Final: attack_mode=%s, preferred_sleeve=%s, confidence=%.4f",
+                   attack_mode, preferred_sleeve, final_confidence)
+
+        logger.info(
+            "[FUSION_BREAKDOWN]\nsymbol=%s\nregime=%s\nwhale_dir=%d\n"
+            "shans_bias=%s\nshans_superfluid=%.4f\n"
+            "tox_score=%.4f\ntox_multiplier=%.4f\n"
+            "dynamic_entropy=%.4f\nent_multiplier=%.4f\nentropy_neutralized=%s\n"
+            "resonance=%.4f\nresonance_bonus=%.4f\n"
+            "base_confidence=%.4f\npre_kelly=%.4f\n"
+            "final_confidence=%.4f\nattack_mode=%s\npreferred_sleeve=%s\n"
+            "kelly_removed_from_fusion=True",
+            getattr(self.config, 'symbol', 'UNKNOWN'),
+            regime_str,
+            whale_dir,
+            shans_bias_str,
+            shans_superfluid,
+            tox_score,
+            tox_multiplier,
+            dynamic_entropy,
+            ent_multiplier,
+            entropy_neutralized,
+            resonance,
+            resonance_bonus,
+            base_conviction,
+            pre_kelly_value,
+            final_confidence,
+            attack_mode,
+            preferred_sleeve,
+        )
 
         # ---------------------------------------------------------
         # PHASE 7: DETERMINISTIC ASSEMBLY
@@ -452,6 +587,14 @@ class SignalFusion:
             physical_verification_score=phys_score
         )
 
+        logger.info(
+            "[FUSION_DIAG] DECISION: attack_mode=%s confidence=%.4f preferred_sleeve=%s regime=%s reason=%s",
+            attack_mode,
+            final_confidence,
+            preferred_sleeve,
+            regime_str,
+            base_reason,
+        )
         self._last_fusion = decision
         return decision
 
@@ -467,6 +610,15 @@ class SignalFusion:
         """
         self._telemetry["vetoed"] = True
         self._telemetry["veto_reason"] = reason
+
+        # DIAGNOSTIC: Log veto reason
+        logger.info("[FUSION_DIAG] VETO: %s", reason)
+        _resonance_val = self._telemetry.get("vector_resonance", "N/A")
+        logger.info(
+            "[FUSION_VETO_DETAIL]\nreason=%s\nresonance=%s\nthreshold=N/A",
+            reason,
+            f"{_resonance_val:.4f}" if isinstance(_resonance_val, float) else _resonance_val,
+        )
 
         shans_superfluid = 0.0
         shans_bias_str = "neutral"
