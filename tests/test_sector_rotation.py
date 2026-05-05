@@ -482,3 +482,119 @@ class TestPerformanceAndReset:
         assert not s._macro_kill_active
         assert not s._macro_pause_active
         assert not s._toxicity_high
+
+
+# ---------------------------------------------------------------------------
+# STRATEGY_ADMISSION bundle: PAPER_PROOF_WINDOW_OVERRIDE
+# ---------------------------------------------------------------------------
+
+class TestPaperProofWindowOverride:
+    """
+    Tests for PAPER_PROOF_WINDOW_OVERRIDE env var.
+    Production default (_MIN_BASELINE_CANDLES=10) must be unchanged when absent.
+    Override must be opt-in and paper-proof / testing only.
+    """
+
+    def test_override_reduces_required_candles(self, monkeypatch):
+        """
+        With override=4, only 3 warmup + 1 trigger needed (total count=4).
+        With n=4 data points [100,100,100,500]: mean=200, std≈173, zscore≈1.73 > 1.5.
+        n=3 is insufficient (max zscore = sqrt(2)≈1.41 < threshold=1.5).
+        """
+        monkeypatch.setenv("PAPER_PROOF_WINDOW_OVERRIDE", "4")
+        s = _make_strategy()
+        _warm_baseline(s, n=3, price=100.0, volume=100.0)
+        price, volume, ts_ns = _make_big_buy(ts_ns=10_000_000_000)
+        signal = s.update_candle(price, volume, ts_ns)
+        assert signal is not None, "Override=4 should allow admission at candle count=4"
+
+    def test_override_absent_production_default_unchanged(self, monkeypatch):
+        """Without override, production default=10 applies: 3 warmup + 1 trigger blocks."""
+        monkeypatch.delenv("PAPER_PROOF_WINDOW_OVERRIDE", raising=False)
+        s = _make_strategy()
+        _warm_baseline(s, n=3, price=100.0, volume=100.0)
+        price, volume, ts_ns = _make_big_buy(ts_ns=10_000_000_000)
+        result = s.update_candle(price, volume, ts_ns)
+        assert result is None, "candle_count=4 < production_default=10 must block"
+
+    def test_override_admission_only_when_other_conditions_met(self, monkeypatch):
+        """Override reduces window but cannot bypass volume threshold or direction gates."""
+        monkeypatch.setenv("PAPER_PROOF_WINDOW_OVERRIDE", "4")
+        s = _make_strategy()
+        _warm_baseline(s, n=3, price=100.0, volume=100.0)
+        # Volume same as baseline (z-score ~= 0) — below inflow_threshold=1.5
+        result = s.update_candle(101.0, 100.0, 10_000_000_000)
+        assert result is None, "Override bypasses freshness only; volume gate still applies"
+
+    def test_override_observed_pair_still_blocks(self, monkeypatch):
+        """
+        With override=1, candle_count passes but prev_close=None on first candle
+        → observed pair missing → still blocks.
+        """
+        monkeypatch.setenv("PAPER_PROOF_WINDOW_OVERRIDE", "1")
+        s = _make_strategy()
+        # First candle: count becomes 1 >= 1 (passes freshness), but prev_close=None
+        result = s.update_candle(101.0, 500.0, 0)
+        assert result is None, "First candle has no prev_close: observed pair missing must block"
+
+    def test_effective_min_candles_attribute_set(self, monkeypatch):
+        """_effective_min_candles attribute is set correctly from env var."""
+        monkeypatch.setenv("PAPER_PROOF_WINDOW_OVERRIDE", "4")
+        s = _make_strategy()
+        assert s._effective_min_candles == 4
+
+    def test_effective_min_candles_default_when_env_absent(self, monkeypatch):
+        """_effective_min_candles defaults to _MIN_BASELINE_CANDLES=10 when env absent."""
+        monkeypatch.delenv("PAPER_PROOF_WINDOW_OVERRIDE", raising=False)
+        s = _make_strategy()
+        assert s._effective_min_candles == 10
+
+
+class TestSRFreshnessAndPairTelemetry:
+    """
+    Tests for SR_WINDOW_TOO_SHORT and SR_OBSERVED_PAIR_MISSING log markers.
+    Production safeguards preserved: observed pair missing and freshness fail
+    must still block regardless of telemetry.
+    """
+
+    def test_freshness_fail_still_blocks(self, monkeypatch):
+        """candle_count < effective_min_candles → None returned (with or without log)."""
+        monkeypatch.delenv("PAPER_PROOF_WINDOW_OVERRIDE", raising=False)
+        s = _make_strategy()
+        # First candle: count=1 < 10 → freshness fail blocks
+        result = s.update_candle(101.0, 500.0, 0)
+        assert result is None
+
+    def test_freshness_fail_logs_sr_window_too_short(self, monkeypatch, caplog):
+        """SR_WINDOW_TOO_SHORT marker is logged when freshness fails."""
+        import logging
+        monkeypatch.delenv("PAPER_PROOF_WINDOW_OVERRIDE", raising=False)
+        s = _make_strategy()
+        with caplog.at_level(logging.DEBUG):
+            s.update_candle(101.0, 500.0, 0)
+        assert "SR_WINDOW_TOO_SHORT" in caplog.text
+
+    def test_observed_pair_missing_still_blocks(self, monkeypatch):
+        """prev_close=None → None returned even when freshness passes."""
+        monkeypatch.setenv("PAPER_PROOF_WINDOW_OVERRIDE", "1")
+        s = _make_strategy()
+        result = s.update_candle(101.0, 500.0, 0)  # count=1 >= 1, prev_close=None
+        assert result is None
+
+    def test_observed_pair_missing_logs_marker(self, monkeypatch, caplog):
+        """SR_OBSERVED_PAIR_MISSING marker is logged when prev_close is None."""
+        import logging
+        monkeypatch.setenv("PAPER_PROOF_WINDOW_OVERRIDE", "1")
+        s = _make_strategy()
+        with caplog.at_level(logging.DEBUG):
+            s.update_candle(101.0, 500.0, 0)
+        assert "SR_OBSERVED_PAIR_MISSING" in caplog.text
+
+    def test_no_fake_admission_without_required_inputs(self, monkeypatch):
+        """Override active but volume z-score below threshold → no signal."""
+        monkeypatch.setenv("PAPER_PROOF_WINDOW_OVERRIDE", "3")
+        s = _make_strategy()
+        _warm_baseline(s, n=2)
+        # Small volume identical to baseline → z-score near 0 → below threshold
+        result = s.update_candle(101.0, 100.0, 10_000_000_000)
+        assert result is None

@@ -160,7 +160,9 @@ class StrategyConfig(BaseModel):
     """
 
     # ===== Shadow-Front =====
-    whale_threshold_z: float = Field(default=2.0, ge=0, description="Z-score threshold for whale detection")
+    # whale_score is normalized 0-1 by WhaleFlowEngine (WhaleFlowScore.score field, ge=0, le=1).
+    # Threshold is on the same normalized scale. Not a z-score.
+    whale_threshold: float = Field(default=0.20, ge=0, le=1, description="Normalized 0-1 threshold for whale score detection (WhaleFlowScore.score, not z-score)")
     sentiment_velocity_threshold: float = Field(default=1.5, ge=0, description="Z-score threshold for sentiment ignition")
     min_confidence: float = Field(default=0.6, ge=0, le=1, description="Minimum confidence for trade entry")
     whale_zone_tolerance: float = Field(default=0.02, ge=0, le=0.05, description="Max price deviation from whale zone (%)")

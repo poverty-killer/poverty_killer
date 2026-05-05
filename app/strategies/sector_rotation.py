@@ -30,6 +30,7 @@ in app/constants.py. This must be closed in a future bounded constants session.
 """
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from app.models import StrategySignal
@@ -119,6 +120,20 @@ class SectorRotationStrategy:
         self._win_count: int    = 0
         self._total_pnl: float  = 0.0
 
+        # PAPER_PROOF_WINDOW_OVERRIDE: paper proof / testing only.
+        # Production default (_MIN_BASELINE_CANDLES=10) is preserved when env var is absent.
+        # Set PAPER_PROOF_WINDOW_OVERRIDE=<int> to admit earlier in short proof windows.
+        _ppwo = os.environ.get("PAPER_PROOF_WINDOW_OVERRIDE", "").strip()
+        self._effective_min_candles: int = (
+            int(_ppwo) if _ppwo.isdigit() and int(_ppwo) >= 1 else _MIN_BASELINE_CANDLES
+        )
+        if self._effective_min_candles != _MIN_BASELINE_CANDLES:
+            logger.info(
+                "SECTOR-ROTATION [%s]: PAPER_PROOF_WINDOW_OVERRIDE=%s active — "
+                "effective_min_candles=%d (production default=%d)",
+                symbol, _ppwo, self._effective_min_candles, _MIN_BASELINE_CANDLES,
+            )
+
         logger.info(
             "SectorRotationStrategy initialized for %s: "
             "sector_rotation_enabled=%s, inflow_threshold=%.2f, ttl_s=%.0f",
@@ -188,11 +203,20 @@ class SectorRotationStrategy:
             return None
         if self._toxicity_high:
             return None
-        if self._candle_count < _MIN_BASELINE_CANDLES:
+        if self._candle_count < self._effective_min_candles:
+            logger.debug(
+                "[SR_WINDOW_TOO_SHORT] %s: candle_count=%d < min=%d — freshness fail",
+                self.symbol, self._candle_count, self._effective_min_candles,
+            )
             return None
 
         # Direction requires a known previous close
         if prev_close is None or abs(prev_close) < _EPS:
+            if prev_close is None:
+                logger.debug(
+                    "[SR_OBSERVED_PAIR_MISSING] %s: prev_close not yet observed — observed pair missing",
+                    self.symbol,
+                )
             return None
 
         # Volume Z-score gate
@@ -252,7 +276,7 @@ class SectorRotationStrategy:
         )
 
         return StrategySignal(
-            strategy=SleeveType.SECTOR_ROTATION,
+            strategy=SleeveType.SECTOR_ROTATION.value,
             symbol=self.symbol,
             side=side,
             confidence=confidence,
@@ -351,7 +375,7 @@ class SectorRotationStrategy:
         )
 
         signal = StrategySignal(
-            strategy=SleeveType.SECTOR_ROTATION,
+            strategy=SleeveType.SECTOR_ROTATION.value,
             symbol=self.symbol,
             side=exit_side,
             confidence=0.90,
