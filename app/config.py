@@ -201,6 +201,7 @@ class StrategyConfig(BaseModel):
 
     # ===== Sector Rotation =====
     sector_inflow_threshold: float = Field(default=1.5, ge=0, description="Volume Z-score for sector inflow detection")
+    sector_rotation_ranging_eligible: bool = Field(default=False, description="Opt-in: allow SectorRotation as secondary/fallback in RANGING regime (default OFF preserves current SHADOW_FRONT priority)")
 
     # ===== Strategy Toggles =====
     shadow_front_enabled: bool = True

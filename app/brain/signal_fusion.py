@@ -505,8 +505,14 @@ class SignalFusion:
         elif regime_type == RegimeType.RANGING:
             shadow_front_eligible = True
             preferred_sleeve = SleeveType.SHADOW_FRONT.value
-            deprioritized_sleeves = [SleeveType.GAMMA_FRONT.value, SleeveType.SECTOR_ROTATION.value]
-            logger.info("[FUSION_DIAG] Regime RANGING → preferred_sleeve=SHADOW_FRONT")
+            sr_ranging = getattr(getattr(self.config, 'strategies', None), 'sector_rotation_ranging_eligible', False)
+            if sr_ranging:
+                sector_rotation_eligible = True
+                deprioritized_sleeves = [SleeveType.GAMMA_FRONT.value]
+                logger.info("[FUSION_DIAG] Regime RANGING (sr_ranging=True) → preferred_sleeve=SHADOW_FRONT, SR=secondary")
+            else:
+                deprioritized_sleeves = [SleeveType.GAMMA_FRONT.value, SleeveType.SECTOR_ROTATION.value]
+                logger.info("[FUSION_DIAG] Regime RANGING → preferred_sleeve=SHADOW_FRONT")
             
         elif regime_type == RegimeType.CRISIS:
             gamma_front_eligible = True
