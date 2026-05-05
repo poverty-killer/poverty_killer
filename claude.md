@@ -1245,3 +1245,32 @@ Sanitize all governance file content:
 Run: python -m pytest tests/test_g0_hook_verification.py -q
 
 All tests must pass with zero failures before G0 is marked COMPLETE.
+
+---
+
+# 30. Pre-Patch Blast-Radius Law
+
+Installed by G0.3. Applies to every Edit, Write, or MultiEdit call from G0.3 forward.
+
+Before issuing any patch, you must state all of the following:
+
+1. **Exact target** — the exact function, class, or region being changed (name + line range if known).
+2. **Upstream callers** — what calls or feeds the target region.
+3. **Downstream consumers** — what reads, calls, or depends on the output of the target region.
+4. **Existing tests** — which tests currently cover the target region, if any.
+5. **Authority and safety risks** — whether the region is a locked authority file, creates duplicate authority, crosses a domain boundary, or touches risk/execution/sizing/fusion/routing semantics.
+6. **Out-of-scope proof** — explicit statement of why the patch does not affect any domain outside the active packet boundary.
+7. **Preserved regions** — what immediately surrounding code remains untouched.
+8. **Read scope used** — snippet-local, region-local, or full-file informed.
+
+## Permanent doctrine
+
+- Do not patch from a small snippet only. Read enough surrounding code to prove the patch is safe.
+- Preserve-first. Strengthen, do not flatten.
+- Fix the boundary, not the symptom.
+- No broad refactors.
+- No duplicate authority.
+- No cross-domain edits without explicit packet authorization.
+- No threshold relaxation to hide bugs.
+- No fake integration.
+- If blast radius cannot be proven, stop and issue: `BOARD ESCALATION: BLAST RADIUS UNPROVEN`
