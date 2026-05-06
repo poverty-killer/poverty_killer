@@ -74,9 +74,9 @@ $errors = $tracebacks + $typeerrors + $decimal_errs + $live_leak + $atomic_fail
 if ($sr_freshness_pass -ge 1 -and $signal_submitted -ge 1 -and $pb_reach -ge 1 -and $errors -eq 0) {
     $verdict = "PASS"
 } elseif ($sr_freshness_pass -ge 1 -and $signal_submitted -ge 1 -and $pb_reach -eq 0 -and $errors -eq 0) {
-    $verdict = "PARTIAL PASS — freshness admitted, signal submitted, PaperBroker not reached"
+    $verdict = "PARTIAL PASS - freshness admitted, signal submitted, PaperBroker not reached"
 } elseif ($sr_freshness_pass -ge 1 -and $signal_submitted -eq 0 -and $errors -eq 0) {
-    $verdict = "PARTIAL PASS — freshness gate cleared, submission blocked (downstream gate)"
+    $verdict = "PARTIAL PASS - freshness gate cleared, submission blocked (downstream gate)"
 } elseif ($sr_freshness_pass -eq 0 -and $errors -eq 0) {
     $verdict = "FAIL - SR_FRESHNESS_PASS=0: fresh observed pair never admitted in 900s"
 } elseif ($errors -gt 0) {
