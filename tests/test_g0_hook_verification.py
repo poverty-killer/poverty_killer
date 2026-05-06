@@ -913,3 +913,72 @@ class TestG06BoardAutopilot:
             _proof_only_env(),
         )
         assert result["decision"] == "approve"
+
+
+# ---------------------------------------------------------------------------
+# PAPER_FILL_COMPLETION_PROOF_BUNDLE packet allowlist
+# ---------------------------------------------------------------------------
+
+def _paper_fill_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "PAPER_FILL_COMPLETION_PROOF_BUNDLE"}
+
+
+class TestPaperFillCompletionProofBundle:
+    # test 1: allows app/execution/paper_broker.py
+    def test_pfcp_allows_paper_broker(self):
+        result = evaluate_event(_edit("app/execution/paper_broker.py"), _paper_fill_env())
+        assert result["decision"] == "approve"
+
+    # test 2: allows app/execution/order_router.py
+    def test_pfcp_allows_order_router(self):
+        result = evaluate_event(_edit("app/execution/order_router.py"), _paper_fill_env())
+        assert result["decision"] == "approve"
+
+    # test 3: allows app/execution/engine.py (locked authority, packet-scoped exception)
+    def test_pfcp_allows_engine_locked_exception(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _paper_fill_env())
+        assert result["decision"] == "approve"
+
+    # test 4: allows tests/ prefix
+    def test_pfcp_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_paper_fill_completion.py"),
+            _paper_fill_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # test 5: blocks app/strategies/*
+    def test_pfcp_blocks_strategies(self):
+        result = evaluate_event(_edit("app/strategies/sector_rotation.py"), _paper_fill_env())
+        assert result["decision"] == "block"
+        assert "paper_fill_completion_proof_bundle_outside_allowlist" in result["reason"]
+
+    # test 6: blocks app/brain/* (locked authority file)
+    def test_pfcp_blocks_brain(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _paper_fill_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 7: blocks app/risk/* (locked authority file)
+    def test_pfcp_blocks_risk(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _paper_fill_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 8: blocks app/core/* (locked authority file)
+    def test_pfcp_blocks_core(self):
+        result = evaluate_event(_edit("app/core/decision_compiler.py"), _paper_fill_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 9: blocks docs/CURRENT_STATUS.md during active packet
+    def test_pfcp_blocks_current_status(self):
+        result = evaluate_event(_edit("docs/CURRENT_STATUS.md"), _paper_fill_env())
+        assert result["decision"] == "block"
+        assert "paper_fill_completion_proof_bundle_outside_allowlist" in result["reason"]
+
+    # test 10: dangerous Bash rules unchanged under this packet
+    def test_pfcp_dangerous_bash_still_blocked(self):
+        result = evaluate_event(_bash("git push origin master"), _paper_fill_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]

@@ -312,6 +312,39 @@ Acceptance: test_g0_hook_verification.py passes with zero failures.
 
 ---
 
+## PAPER_FILL_COMPLETION_PROOF_BUNDLE
+
+Status: ACTIVE — governance registration complete
+
+Objective:
+Diagnose and repair the paper fill completion gap. PaperBroker was reached
+(PAPERBROKER_REACH_COUNT=2) but PAPER_FILL_COUNT=0 in the prior proof run.
+Trace the full order-to-fill path in PaperBroker and OrderRouter, locate the
+break, and wire it correctly so a paper fill is recorded on each valid order.
+
+Files in scope (production patch phase — pending Board approval):
+Non-locked:
+- app/execution/paper_broker.py
+- app/execution/order_router.py
+- tests/ (prefix)
+
+Locked authority file with packet-scoped exception:
+- app/execution/engine.py
+
+Explicitly blocked (all phases):
+- app/brain/*, app/strategies/*, app/risk/*, app/core/*
+- main.py, app/main_loop.py
+
+Acceptance:
+- PAPER_FILL_COUNT >= 1 in controlled paper proof
+- PAPERBROKER_REACH_COUNT >= 1
+- TRACEBACK_COUNT=0, DECIMAL_FLOAT_ERROR_COUNT=0, LIVE_MODE_LEAK=0
+- No fake fills, no risk weakening, no threshold relaxation
+
+Prior bundle closed: c6be162 — Close SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE as PASS
+
+---
+
 ## Deferred Items
 
 ### ORPHANED_TMP_FILES
