@@ -3,7 +3,7 @@
 G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
-- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION)
+- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE)
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
 - dangerous Bash command patterns (live mode, dependency mods, dangerous git/delete)
@@ -87,6 +87,7 @@ G0_ALLOWLIST = frozenset(
         "docs/packets/f4c_risk_state.md",
         "docs/packets/execution_sr_decimal.md",
         "docs/packets/regime_aware_sr_admission.md",
+        "docs/packets/sector_rotation_fresh_observed_pair_proof.md",
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
@@ -159,6 +160,9 @@ REGIME_AWARE_SR_ADMISSION_LOCKED_ALLOWED_FILES = frozenset(
     ]
 )
 REGIME_AWARE_SR_ADMISSION_ALLOWED_PREFIXES = ("tests/",)
+
+# SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE allowlist — proof/test tooling only, no production files.
+SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE_ALLOWED_PREFIXES = ("tests/",)
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +380,10 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in REGIME_AWARE_SR_ADMISSION_ALLOWED_PREFIXES):
             return True, ""
         return False, f"regime_aware_sr_admission_outside_allowlist:{normalized_path}"
+    if packet == "SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE":
+        if any(normalized_path.startswith(pre) for pre in SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"sector_rotation_fresh_observed_pair_proof_bundle_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 
