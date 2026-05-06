@@ -4,6 +4,7 @@ G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
 - packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE)
+- G0.6 Board Autopilot Law: GREEN safe commands approved automatically; RED/BLACK blocked
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
 - dangerous Bash command patterns (live mode, dependency mods, dangerous git/delete)
@@ -91,6 +92,12 @@ G0_ALLOWLIST = frozenset(
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
+        # G0.6 additions
+        "docs/board_autopilot_protocol.md",
+        "docs/current_status.md",
+        ".claude/commands/board-execute.md",
+        ".claude/commands/start-session.md",
+        ".claude/commands/end-session.md",
     ]
 )
 
@@ -263,6 +270,25 @@ _DANGEROUS_BASH_PATTERNS = [
     re.compile(r"\bRemove-Item\b.*-Recurse\b.*-Force\b", re.IGNORECASE),
     re.compile(r"\bdel\s+/s\b", re.IGNORECASE),
     re.compile(r"\bRemove-Item\b.*-Force\b.*-Recurse\b", re.IGNORECASE),
+    # G0.6 additions — broader git write operations (danger-first, before safe shapes)
+    re.compile(r"\bgit\s+push\b"),                                          # all git push
+    re.compile(r"\bgit\s+reset\b"),                                         # all git reset
+    re.compile(r"\bgit\s+clean\b"),                                         # git clean
+    re.compile(r"\bgit\s+restore\b"),                                       # git restore
+    re.compile(r"\bgit\s+add\s+(?:\.|--all|-A)(?:\s|$)"),                  # git add . / --all / -A
+    re.compile(r"\bgit\s+checkout\s+--\b"),                                 # destructive checkout
+    # G0.6 additions — destructive file/system operations
+    re.compile(r"\bRemove-Item\b", re.IGNORECASE),                          # any Remove-Item
+    re.compile(r"\brmdir\b", re.IGNORECASE),                                # rmdir
+    re.compile(r"\bdel\s+(?!/s\b)", re.IGNORECASE),                        # Windows del (catches new forms)
+    # G0.6 additions — package managers
+    re.compile(r"\bnpm\s+(?:install|uninstall|ci)\b", re.IGNORECASE),
+    # G0.6 additions — attack mode, live mode, env override via shell
+    re.compile(r"--attack\b", re.IGNORECASE),
+    re.compile(r"\bLIVE_MODE\s*=\s*['\"]?true\b", re.IGNORECASE),
+    re.compile(r"POVERTY_KILLER_OVERRIDE\s*=\s*['\"]?true", re.IGNORECASE),
+    # G0.6 additions — .env / secrets access
+    re.compile(r"(?:^|\s)['\"]?\.env(?:['\"\s]|$)", re.IGNORECASE),
 ]
 
 _DANGEROUS_FILE_TARGETS = [
@@ -284,6 +310,12 @@ _SAFE_BASH_SHAPES = [
     re.compile(r"^\s*python\s+-m\s+pytest\s+tests/[A-Za-z0-9_./-]+\.py(\s+-q)?\s*$"),
     re.compile(r"^\s*pytest\s+tests/[A-Za-z0-9_./-]+\.py(\s+-q)?\s*$"),
     re.compile(r"^\s*echo\s+[^;|&`$]+\s*$"),
+    # G0.6 additions — safe inspection commands
+    re.compile(r"^\s*Test-Path\s+[^;|&`$]+\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Measure-Object(?:\s+[^;|&`$]+)?\s*$", re.IGNORECASE),
+    re.compile(r'^\s*python\s+-c\s+"[^";&|`$\n]{1,500}"\s*$'),
+    re.compile(r"^\s*python\s+\.claude[/\\]hooks[/\\]pre_tool_use\.py\s*$"),
+    re.compile(r"^\s*dir(?:\s+[^;|&`$]+)?\s*$", re.IGNORECASE),
 ]
 
 # Compound separators that must trip an unsafe-shape rejection unless the

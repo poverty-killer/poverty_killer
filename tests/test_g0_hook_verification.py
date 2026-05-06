@@ -171,6 +171,12 @@ class TestG0Allowlist:
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
+        # G0.6 additions
+        "docs/board_autopilot_protocol.md",
+        "docs/current_status.md",
+        ".claude/commands/board-execute.md",
+        ".claude/commands/start-session.md",
+        ".claude/commands/end-session.md",
     ]
 
     def test_g0_allowlist_files_approved(self):
@@ -751,3 +757,159 @@ class TestOverride:
         }
         result = evaluate_event(_edit("app/main_loop.py"), env)
         assert result["decision"] == "block"
+
+
+# ---------------------------------------------------------------------------
+# G0.6 Board Autopilot — safe GREEN commands and new dangerous RED/BLACK
+# ---------------------------------------------------------------------------
+
+def _proof_only_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE"}
+
+
+class TestG06BoardAutopilot:
+    # --- Safe GREEN commands (tests 1-10) ---
+
+    def test_git_status_short_green(self):
+        # test 1: safe git status
+        result = evaluate_event(_bash("git status --short"), _g0_env())
+        assert result["decision"] == "approve"
+
+    def test_git_log_green(self):
+        # test 2: safe git log
+        result = evaluate_event(_bash("git log --oneline -10"), _g0_env())
+        assert result["decision"] == "approve"
+
+    def test_git_diff_green(self):
+        # test 3: safe git diff
+        result = evaluate_event(_bash("git diff"), _g0_env())
+        assert result["decision"] == "approve"
+
+    def test_git_diff_cached_stat_green(self):
+        # test 4: git diff --cached --stat
+        result = evaluate_event(_bash("git diff --cached --stat"), _g0_env())
+        assert result["decision"] == "approve"
+
+    def test_git_diff_cached_name_only_green(self):
+        # test 5: git diff --cached --name-only
+        result = evaluate_event(_bash("git diff --cached --name-only"), _g0_env())
+        assert result["decision"] == "approve"
+
+    def test_targeted_pytest_green(self):
+        # test 6: targeted pytest
+        result = evaluate_event(
+            _bash("python -m pytest tests/test_g0_hook_verification.py -q"),
+            _g0_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_select_string_reports_log_green(self):
+        # test 7: Select-String for report/log files
+        result = evaluate_event(
+            _bash("Select-String 'SIGNAL_PRODUCED' reports/paper_run.log"),
+            _g0_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_get_content_in_repo_non_secret_green(self):
+        # test 8: Get-Content for non-secret in-repo file
+        result = evaluate_event(
+            _bash("Get-Content .claude/settings.json"),
+            _g0_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_python_py_compile_syntax_green(self):
+        # test 9: Python syntax check (py_compile)
+        result = evaluate_event(
+            _bash("python -m py_compile tests/test_g0_hook_verification.py"),
+            _g0_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_python_c_safe_string_green(self):
+        # test 10: python -c with safe single-line string (no compound separators)
+        result = evaluate_event(
+            _bash('python -c "print(True)"'),
+            _g0_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # --- Dangerous RED/BLACK commands (tests 11-20) ---
+
+    def test_git_add_dot_blocked(self):
+        # test 11: git add . is BLACK — always blocked
+        result = evaluate_event(_bash("git add ."), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_git_push_blocked(self):
+        # test 12: git push (all forms) is RED — always blocked
+        result = evaluate_event(_bash("git push origin master"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_git_reset_blocked(self):
+        # test 13: git reset (all forms) is RED — always blocked
+        result = evaluate_event(_bash("git reset HEAD~1"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_git_clean_blocked(self):
+        # test 14: git clean is RED — always blocked
+        result = evaluate_event(_bash("git clean -fd"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_live_mode_flag_blocked(self):
+        # test 15: live mode command blocked
+        result = evaluate_event(_bash("python main.py --live"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_override_env_shell_command_blocked(self):
+        # test 16: POVERTY_KILLER_OVERRIDE=true via shell is BLACK
+        result = evaluate_event(
+            _bash("POVERTY_KILLER_OVERRIDE=true python main.py"),
+            _g0_env(),
+        )
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_npm_install_blocked(self):
+        # test 17: dependency install blocked
+        result = evaluate_event(_bash("npm install"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_remove_item_blocked(self):
+        # test 18: Remove-Item (any form) is RED — blocked
+        result = evaluate_event(_bash("Remove-Item state/risk_state.json"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_get_content_env_blocked(self):
+        # test 19: Get-Content .env must be blocked (secrets access)
+        result = evaluate_event(_bash("Get-Content .env"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_mixed_safe_and_dangerous_blocked(self):
+        # test 20: compound command containing safe + dangerous phrase — must block
+        result = evaluate_event(_bash("git diff; git push"), _g0_env())
+        assert result["decision"] == "block"
+
+    # --- Packet boundary enforcement (tests 21-22) ---
+
+    def test_production_file_blocked_under_proof_only_packet(self):
+        # test 21: app/ production file still blocked under proof-only packet
+        result = evaluate_event(_edit("app/main_loop.py"), _proof_only_env())
+        assert result["decision"] == "block"
+
+    def test_tests_prefix_allowed_under_proof_only_packet(self):
+        # test 22: tests/ prefix still allowed under proof-only packet
+        result = evaluate_event(
+            _edit("tests/test_fresh_observed_pair.py"),
+            _proof_only_env(),
+        )
+        assert result["decision"] == "approve"

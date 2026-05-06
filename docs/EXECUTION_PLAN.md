@@ -240,6 +240,37 @@ Next packet candidates (to be defined by Board):
 
 ---
 
+## G0.6 — BOARD_AUTOPILOT_AND_CONTINUITY_PROTOCOL
+
+Status: ACTIVE
+
+Objective:
+Install Board Autopilot and session continuity framework to reduce repeated approvals
+for safe read/test/diff/log actions while preserving Board stops for commits, production
+patches, live mode, overrides, destructive actions, and out-of-scope edits.
+
+Files in scope:
+- claude.md (Section 31: Board Autopilot Law)
+- docs/BOARD_AUTOPILOT_PROTOCOL.md (new)
+- docs/CURRENT_STATUS.md (new)
+- .claude/commands/board-execute.md (new)
+- .claude/commands/start-session.md (new)
+- .claude/commands/end-session.md (new)
+- .claude/hooks/pre_tool_use.py (G0_ALLOWLIST + dangerous patterns + safe shapes)
+- tests/test_g0_hook_verification.py (22 new tests — TestG06BoardAutopilot)
+- docs/EXECUTION_PLAN.md (this entry)
+
+Deliverables:
+- GREEN/YELLOW/RED/BLACK action classification law
+- Start-session and end-session continuity commands
+- Board-execute phase approval command
+- Expanded hook: 14 new dangerous patterns, 5 new safe shapes
+- 22 new hook verification tests
+
+Acceptance: test_g0_hook_verification.py passes with zero failures.
+
+---
+
 ## G0.4 — REGIME_AWARE_SR_ADMISSION Packet Registration
 
 Status: ACTIVE (Step 1 — governance registration only)

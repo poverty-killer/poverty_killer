@@ -1274,3 +1274,90 @@ Before issuing any patch, you must state all of the following:
 - No threshold relaxation to hide bugs.
 - No fake integration.
 - If blast radius cannot be proven, stop and issue: `BOARD ESCALATION: BLAST RADIUS UNPROVEN`
+
+---
+
+# 31. Board Autopilot Law
+
+Installed by G0.6. These rules extend the constitution and must be followed from G0.6 forward.
+
+## Approve phases, not keystrokes
+
+Claude must ask the Board to approve phases, not individual commands or file reads.
+
+After the Board approves a phase, Claude may execute GREEN actions automatically within the active packet and approved phase scope without stopping for repeated Board confirmation.
+
+Claude stops at the next real risk boundary, not after every safe command.
+
+## GREEN actions — execute automatically after phase approval
+
+- read files
+- search files (Grep, Glob)
+- inspect code regions
+- git status --short
+- git log --oneline -n N
+- git diff for in-scope files
+- git diff --stat for in-scope files
+- git diff --cached --stat
+- git diff --cached --name-only
+- targeted pytest commands (tests/ prefix, named file, -q flag)
+- python -m py_compile syntax-only checks
+- PowerShell Test-Path, Measure-Object, dir, Get-ChildItem, Get-Content (non-secret)
+- Select-String for in-repo proof/report/log files
+- python -c safe single-line checks (no compound separators)
+- python .claude/hooks/pre_tool_use.py hook checks
+- log searches and proof log counter extraction
+- hook allow/block checks
+- show file contents
+- split malformed safe commands into smaller safe commands and continue
+
+## YELLOW actions — one Board approval per phase, then execute the batch
+
+- packet registration phase
+- proof script creation phase
+- test creation phase
+- targeted test batch (multiple test files in one approved run)
+- exact file staging (named files only, no git add .)
+- one approved paper proof run
+
+## RED actions — always stop for explicit Board approval
+
+- production code patch before approved patch boundary
+- git commit
+- git push
+- git add . or git add --all or git add -A
+- git reset / clean / restore / destructive checkout
+- deleting files
+- dependency changes
+- credential / secret / .env edits
+- live mode
+- override mode
+- risk weakening
+- threshold relaxation
+- second proof run
+- broad refactor
+- edit outside active packet allowlist
+- failed test requiring diagnosis
+- hook block requiring investigation
+- diff that exceeds declared scope
+
+## BLACK actions — forbidden unless Board changes governance
+
+- live trading command
+- git push --force
+- git clean -fd
+- git reset --hard
+- recursive destructive delete (rm -rf, Remove-Item -Recurse -Force, rmdir)
+- editing secrets or .env files
+- bypassing SignalFusion, StrategyRouter, Shans Curve, or RiskGuard
+- fake signals, fake fills, fake observed pairs
+- POVERTY_KILLER_OVERRIDE=true via shell command
+- LIVE_MODE=true via shell command
+
+## Command-size rule
+
+If a safe command is too long or malformed, Claude must not ask the Board to approve the malformed form. Claude must split it into smaller safe commands and continue automatically.
+
+## Danger-first rule
+
+Dangerous command checks must run before safe-command checks. A command containing both a safe phrase and a dangerous phrase must block.
