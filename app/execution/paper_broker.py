@@ -752,13 +752,13 @@ class PaperBroker:
         if order.side == OrderSide.BUY:
             if order.limit_price is None or order.limit_price < best_ask:
                 return {"filled_qty": ZERO, "fill_price": best_ask, "liquidity": FillLiquidity.UNKNOWN}
-            touch_depth = market.top_of_book_ask_depth or ZERO
+            touch_depth = getattr(market, 'top_of_book_ask_depth', None) or ZERO
             fill_qty = min(order.remaining_quantity, touch_depth * Decimal("0.25"))
             return {"filled_qty": fill_qty, "fill_price": min(order.limit_price, best_ask), "liquidity": FillLiquidity.MAKER}
 
         if order.limit_price is None or order.limit_price > best_bid:
             return {"filled_qty": ZERO, "fill_price": best_bid, "liquidity": FillLiquidity.UNKNOWN}
-        touch_depth = market.top_of_book_bid_depth or ZERO
+        touch_depth = getattr(market, 'top_of_book_bid_depth', None) or ZERO
         fill_qty = min(order.remaining_quantity, touch_depth * Decimal("0.25"))
         return {"filled_qty": fill_qty, "fill_price": max(order.limit_price, best_bid), "liquidity": FillLiquidity.MAKER}
 
@@ -771,8 +771,13 @@ class PaperBroker:
         levels = market.ask_levels if order.side == OrderSide.BUY else market.bid_levels
 
         if not levels:
-            top_depth = market.top_of_book_ask_depth if order.side == OrderSide.BUY else market.top_of_book_bid_depth
+            top_depth = getattr(market, 'top_of_book_ask_depth', None) if order.side == OrderSide.BUY else getattr(market, 'top_of_book_bid_depth', None)
             if top_depth is None or top_depth <= ZERO:
+                if order.order_type in {OrderType.MARKET, OrderType.IOC, OrderType.FOK}:
+                    base_price = market.best_ask if order.side == OrderSide.BUY else market.best_bid
+                    if base_price is None:
+                        base_price = market.mid_price
+                    return {"filled_qty": order.remaining_quantity, "fill_price": base_price, "liquidity": FillLiquidity.TAKER}
                 return {"filled_qty": ZERO, "fill_price": market.mid_price, "liquidity": FillLiquidity.UNKNOWN}
 
             fill_qty = min(order.remaining_quantity, top_depth)
@@ -833,10 +838,10 @@ class PaperBroker:
                 quantity=fill_qty,
                 current_price=forced_fill_price,
                 depth=DepthProfile(
-                    bid_depth_l1=market.top_of_book_bid_depth,
-                    ask_depth_l1=market.top_of_book_ask_depth,
-                    bid_depth_n=sum((lvl.quantity for lvl in market.bid_levels), start=ZERO) if market.bid_levels else market.top_n_bid_depth,
-                    ask_depth_n=sum((lvl.quantity for lvl in market.ask_levels), start=ZERO) if market.ask_levels else market.top_n_ask_depth,
+                    bid_depth_l1=getattr(market, 'top_of_book_bid_depth', None),
+                    ask_depth_l1=getattr(market, 'top_of_book_ask_depth', None),
+                    bid_depth_n=sum((lvl.quantity for lvl in market.bid_levels), start=ZERO) if market.bid_levels else getattr(market, 'top_n_bid_depth', None),
+                    ask_depth_n=sum((lvl.quantity for lvl in market.ask_levels), start=ZERO) if market.ask_levels else getattr(market, 'top_n_ask_depth', None),
                 ),
                 spread_bps=market.spread_bps,
                 book_imbalance=market.book_imbalance,
@@ -854,7 +859,14 @@ class PaperBroker:
 
         fill_price = impact.expected_execution_price
         notional = abs(fill_qty * fill_price)
-        fee = self.fees.estimate_fees(notional, order.order_type)
+        _fee_est = self.fees.estimate_fees(
+            symbol=order.symbol,
+            notional_value=notional,
+            order_type=order.order_type,
+            liquidity_role=fill_liquidity,
+            compatibility_mode=compatibility_mode,
+        )
+        fee = _fee_est.expected_fee
 
         position = self.positions.get(order.symbol, BrokerPosition(symbol=order.symbol))
         signed_fill = fill_qty if order.side == OrderSide.BUY else -fill_qty

@@ -47,7 +47,7 @@ import requests
 
 from app.execution.fee_model import FeeModel as _FeeModel
 from app.execution.latency_model import LatencyModel as _LatencyModel
-from app.execution.paper_broker import PaperBroker as _SovereignPaperBroker
+from app.execution.paper_broker import PaperBroker as _SovereignPaperBroker, PaperBrokerConfig as _PaperBrokerConfig
 from app.execution.slippage_model import SlippageModel as _SlippageModel
 from app.models import OrderFill, OrderRequest
 from app.models.enums import (
@@ -125,6 +125,7 @@ class OrderRouter:
                 fee_model=_FeeModel(),
                 slippage_model=_SlippageModel(),
                 latency_model=_LatencyModel(),
+                config=_PaperBrokerConfig(enable_short_selling=True),
             )
             logger.info("SovereignPaperBroker (app/execution/paper_broker.py) wired on live paper path")
 
@@ -646,9 +647,10 @@ class OrderRouter:
         self._paper_reports_index = len(reports)
 
     def _paper_mark_price(self, symbol: str) -> _Decimal:
+        if symbol in self._latest_market_mid_by_symbol:
+            return self._latest_market_mid_by_symbol[symbol]
         if symbol in self._paper_last_mid_by_symbol:
             return self._paper_last_mid_by_symbol[symbol]
-
         fallback = self._get_simulated_price(symbol)
         return _Decimal(str(fallback))
 
@@ -658,8 +660,10 @@ class OrderRouter:
 
         mark_price = self._paper_mark_price(order.symbol)
         self._paper_last_mid_by_symbol[order.symbol] = mark_price
+        paper_order = self._paper_broker.open_orders.get(order.id)
+        match_ts_ns = (paper_order.eligible_at_ns + 1) if paper_order is not None else ts_ns
         self._paper_broker.process_matching(
-            current_ts_ns=ts_ns,
+            current_ts_ns=match_ts_ns,
             current_price=mark_price,
             book_imbalance=_Decimal("0"),
             toxicity=_Decimal("0"),
