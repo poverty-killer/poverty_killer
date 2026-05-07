@@ -100,6 +100,8 @@ G0_ALLOWLIST = frozenset(
         ".claude/commands/board-execute.md",
         ".claude/commands/start-session.md",
         ".claude/commands/end-session.md",
+        # G0.7 additions — packet-registration governance process (Option C ruling)
+        "docs/governance_packet_registration_process.md",
     ]
 )
 

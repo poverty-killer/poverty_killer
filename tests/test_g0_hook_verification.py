@@ -177,6 +177,8 @@ class TestG0Allowlist:
         ".claude/commands/board-execute.md",
         ".claude/commands/start-session.md",
         ".claude/commands/end-session.md",
+        # G0.7 additions — packet-registration governance process
+        "docs/governance_packet_registration_process.md",
     ]
 
     def test_g0_allowlist_files_approved(self):
@@ -1084,3 +1086,227 @@ class TestUpstreamDispatchSignalSubmissionProofBundle:
         result = evaluate_event(_edit("docs/CURRENT_STATUS.md"), _upstream_dispatch_env())
         assert result["decision"] == "block"
         assert "upstream_dispatch_signal_submission_proof_bundle_outside_allowlist" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# G0.7 — Packet Registration Process Governance (Option C ruling)
+# ---------------------------------------------------------------------------
+#
+# Proves the registration-process governance is intact:
+# - G0 allows docs/GOVERNANCE_PACKET_REGISTRATION_PROCESS.md.
+# - The unrecognized GOVERNANCE_PACKET_REGISTRATION_PROCESS_BUNDLE name is
+#   still rejected — the Option C ruling did NOT create a new packet.
+# - No bootstrap alias was introduced.
+# - Technical packets cannot edit the hook (no side-channel registration).
+# - The new governance doc is not visible to any non-G0 packet
+#   (no broad/catch-all allowlist).
+# - Live mode, --attack, destructive git, dependency mods, git add .,
+#   and POVERTY_KILLER_OVERRIDE-via-shell remain blocked under G0.
+
+
+class TestGovernancePacketRegistrationProcess:
+    GOVERNANCE_DOC = "docs/GOVERNANCE_PACKET_REGISTRATION_PROCESS.md"
+
+    # --- 1. G0 allows the governance doc ---
+
+    def test_g0_allows_governance_process_doc(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), _g0_env())
+        assert result["decision"] == "approve"
+
+    def test_g0_allows_governance_process_doc_lowercase(self):
+        result = evaluate_event(
+            _edit("docs/governance_packet_registration_process.md"),
+            _g0_env(),
+        )
+        assert result["decision"] == "approve"
+
+    def test_g0_write_allowed_for_governance_process_doc(self):
+        result = evaluate_event(_write(self.GOVERNANCE_DOC), _g0_env())
+        assert result["decision"] == "approve"
+
+    # --- 2. Unrecognized packet/alias names remain blocked ---
+    # The Option C ruling explicitly rejected creating a new packet name.
+
+    def test_governance_bundle_name_remains_unrecognized_for_doc(self):
+        result = evaluate_event(
+            _edit(self.GOVERNANCE_DOC),
+            {"POVERTY_KILLER_PACKET": "GOVERNANCE_PACKET_REGISTRATION_PROCESS_BUNDLE"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet_or_unknown_packet" in result["reason"]
+
+    def test_governance_bundle_name_remains_unrecognized_for_hook(self):
+        result = evaluate_event(
+            _edit(".claude/hooks/pre_tool_use.py"),
+            {"POVERTY_KILLER_PACKET": "GOVERNANCE_PACKET_REGISTRATION_PROCESS_BUNDLE"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet_or_unknown_packet" in result["reason"]
+
+    def test_bootstrap_alias_remains_unrecognized(self):
+        result = evaluate_event(
+            _edit(self.GOVERNANCE_DOC),
+            {"POVERTY_KILLER_PACKET": "BOOTSTRAP_GOVERNANCE_REGISTRATION_BUNDLE"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet_or_unknown_packet" in result["reason"]
+
+    # --- 3. Technical packets cannot edit the hook ---
+
+    def test_f4a_blocks_hook_edit(self):
+        result = evaluate_event(_edit(".claude/hooks/pre_tool_use.py"), _f4a_env())
+        assert result["decision"] == "block"
+
+    def test_f4b_blocks_hook_edit(self):
+        result = evaluate_event(_edit(".claude/hooks/pre_tool_use.py"), _f4b_env())
+        assert result["decision"] == "block"
+
+    def test_f4c_blocks_hook_edit(self):
+        result = evaluate_event(_edit(".claude/hooks/pre_tool_use.py"), _f4c_env())
+        assert result["decision"] == "block"
+
+    def test_strategy_admission_blocks_hook_edit(self):
+        result = evaluate_event(
+            _edit(".claude/hooks/pre_tool_use.py"),
+            _strategy_admission_env(),
+        )
+        assert result["decision"] == "block"
+
+    def test_execution_sr_decimal_blocks_hook_edit(self):
+        result = evaluate_event(
+            _edit(".claude/hooks/pre_tool_use.py"),
+            _execution_sr_decimal_env(),
+        )
+        assert result["decision"] == "block"
+
+    def test_regime_aware_sr_admission_blocks_hook_edit(self):
+        result = evaluate_event(
+            _edit(".claude/hooks/pre_tool_use.py"),
+            _regime_aware_sr_admission_env(),
+        )
+        assert result["decision"] == "block"
+
+    def test_paper_fill_blocks_hook_edit(self):
+        result = evaluate_event(
+            _edit(".claude/hooks/pre_tool_use.py"),
+            _paper_fill_env(),
+        )
+        assert result["decision"] == "block"
+
+    def test_upstream_dispatch_blocks_hook_edit(self):
+        result = evaluate_event(
+            _edit(".claude/hooks/pre_tool_use.py"),
+            _upstream_dispatch_env(),
+        )
+        assert result["decision"] == "block"
+
+    def test_proof_only_packet_blocks_hook_edit(self):
+        result = evaluate_event(
+            _edit(".claude/hooks/pre_tool_use.py"),
+            _proof_only_env(),
+        )
+        assert result["decision"] == "block"
+
+    # --- 4. No broad/catch-all: governance doc invisible to non-G0 packets ---
+
+    def test_governance_doc_blocked_with_no_packet(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), {})
+        assert result["decision"] == "block"
+
+    def test_governance_doc_blocked_under_f4a(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), _f4a_env())
+        assert result["decision"] == "block"
+        assert "f4a_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_f4b(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), _f4b_env())
+        assert result["decision"] == "block"
+        assert "f4b_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_f4c(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), _f4c_env())
+        assert result["decision"] == "block"
+        assert "f4c_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_strategy_admission(self):
+        result = evaluate_event(
+            _edit(self.GOVERNANCE_DOC),
+            _strategy_admission_env(),
+        )
+        assert result["decision"] == "block"
+        assert "strategy_admission_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_execution_sr_decimal(self):
+        result = evaluate_event(
+            _edit(self.GOVERNANCE_DOC),
+            _execution_sr_decimal_env(),
+        )
+        assert result["decision"] == "block"
+        assert "execution_sr_decimal_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_regime_aware_sr_admission(self):
+        result = evaluate_event(
+            _edit(self.GOVERNANCE_DOC),
+            _regime_aware_sr_admission_env(),
+        )
+        assert result["decision"] == "block"
+        assert "regime_aware_sr_admission_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_paper_fill(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), _paper_fill_env())
+        assert result["decision"] == "block"
+        assert "paper_fill_completion_proof_bundle_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_upstream_dispatch(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "upstream_dispatch_signal_submission_proof_bundle_outside_allowlist" in result["reason"]
+
+    def test_governance_doc_blocked_under_proof_only(self):
+        result = evaluate_event(_edit(self.GOVERNANCE_DOC), _proof_only_env())
+        assert result["decision"] == "block"
+
+    # --- 5. Existing protections remain intact under the G0 packet ---
+
+    def test_live_mode_still_blocked_under_g0(self):
+        result = evaluate_event(_bash("python main.py --live"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_attack_flag_still_blocked_under_g0(self):
+        result = evaluate_event(_bash("python main.py --attack"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_git_push_force_still_blocked_under_g0(self):
+        result = evaluate_event(_bash("git push --force origin master"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_git_reset_hard_still_blocked_under_g0(self):
+        result = evaluate_event(_bash("git reset --hard HEAD"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_pip_install_still_blocked_under_g0(self):
+        result = evaluate_event(_bash("pip install numpy"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_npm_install_still_blocked_under_g0(self):
+        result = evaluate_event(_bash("npm install foo"), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_git_add_dot_still_blocked_under_g0(self):
+        result = evaluate_event(_bash("git add ."), _g0_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    def test_override_env_via_shell_still_blocked_under_g0(self):
+        result = evaluate_event(
+            _bash("POVERTY_KILLER_OVERRIDE=true python main.py"),
+            _g0_env(),
+        )
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]

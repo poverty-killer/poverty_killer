@@ -312,6 +312,50 @@ Acceptance: test_g0_hook_verification.py passes with zero failures.
 
 ---
 
+## G0.7 — Packet Registration Process Governance
+
+Status: COMPLETE (governance-only)
+
+Objective:
+Document the lawful process for registering future packet names in
+.claude/hooks/pre_tool_use.py. Resolves the bootstrap question raised when
+GOVERNANCE_PACKET_REGISTRATION_PROCESS_BUNDLE arrived as an unrecognized
+packet and could not self-execute.
+
+Board ruling (Option C — reject and rescope):
+Packet-registration policy lives under G0 governance. No new packet name
+was created to register packet names. No bootstrap packet was created. No
+broad or catch-all allowlist was introduced. The unknown-packet block
+remains intact.
+
+Files in scope:
+- .claude/hooks/pre_tool_use.py (one new G0_ALLOWLIST entry only)
+- docs/GOVERNANCE_PACKET_REGISTRATION_PROCESS.md (new — process doc)
+- tests/test_g0_hook_verification.py (new TestGovernancePacketRegistrationProcess)
+- docs/EXECUTION_PLAN.md (this entry)
+
+G0_ALLOWLIST addition:
+- docs/governance_packet_registration_process.md
+
+Anti-precedent invariants enforced by tests:
+- GOVERNANCE_PACKET_REGISTRATION_PROCESS_BUNDLE remains an unrecognized
+  packet name.
+- BOOTSTRAP_GOVERNANCE_REGISTRATION_BUNDLE remains an unrecognized packet
+  name.
+- No technical packet (F4A, F4B, F4C, STRATEGY_ADMISSION,
+  EXECUTION_SR_DECIMAL, REGIME_AWARE_SR_ADMISSION,
+  SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE,
+  PAPER_FILL_COMPLETION_PROOF_BUNDLE,
+  UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE) may edit
+  .claude/hooks/pre_tool_use.py.
+- The new governance doc is writable only under G0; no other packet sees it.
+- Live mode, --attack, destructive git, dependency mods,
+  git add ., and POVERTY_KILLER_OVERRIDE-via-shell remain blocked under G0.
+
+Acceptance: test_g0_hook_verification.py passes with zero failures.
+
+---
+
 ## PAPER_FILL_COMPLETION_PROOF_BUNDLE
 
 Status: ACTIVE — governance registration complete
