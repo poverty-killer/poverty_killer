@@ -1310,3 +1310,138 @@ class TestGovernancePacketRegistrationProcess:
         )
         assert result["decision"] == "block"
         assert "dangerous_bash" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE — G0.8 packet registration
+# ---------------------------------------------------------------------------
+
+def _same_clock_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE"}
+
+
+class TestSameClockSyntheticPaperWindowHarnessBundle:
+    # test 1: allows tests/ prefix
+    def test_scsp_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_same_clock_synthetic_harness.py"),
+            _same_clock_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # test 2: write allowed for tests/ prefix
+    def test_scsp_write_allowed_tests_prefix(self):
+        result = evaluate_event(
+            _write("tests/test_same_clock_paper_window.py"),
+            _same_clock_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # test 3: allows docs/EXECUTION_PLAN.md (optional status recording)
+    def test_scsp_allows_execution_plan_doc(self):
+        result = evaluate_event(_edit("docs/EXECUTION_PLAN.md"), _same_clock_env())
+        assert result["decision"] == "approve"
+
+    # test 4: blocks app/ writes (production files)
+    def test_scsp_blocks_app_main_loop(self):
+        result = evaluate_event(_edit("app/main_loop.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "same_clock_synthetic_paper_window_harness_bundle_outside_allowlist" in result["reason"]
+
+    # test 5: blocks app/execution/engine.py (locked authority)
+    def test_scsp_blocks_execution_engine(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 6: blocks .claude/hooks/pre_tool_use.py
+    def test_scsp_blocks_hook_edit(self):
+        result = evaluate_event(_edit(".claude/hooks/pre_tool_use.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "same_clock_synthetic_paper_window_harness_bundle_outside_allowlist" in result["reason"]
+
+    # test 7: blocks production/trading files (strategies)
+    def test_scsp_blocks_strategy_router(self):
+        result = evaluate_event(_edit("app/strategies/strategy_router.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 8: blocks production/trading files (risk)
+    def test_scsp_blocks_risk_guard(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 9: blocks production/trading files (signal_fusion)
+    def test_scsp_blocks_signal_fusion(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 10: blocks app/execution/paper_broker.py (not in allowlist)
+    def test_scsp_blocks_paper_broker(self):
+        result = evaluate_event(_edit("app/execution/paper_broker.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "same_clock_synthetic_paper_window_harness_bundle_outside_allowlist" in result["reason"]
+
+    # test 11: blocks main.py
+    def test_scsp_blocks_main_py(self):
+        result = evaluate_event(_edit("main.py"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "same_clock_synthetic_paper_window_harness_bundle_outside_allowlist" in result["reason"]
+
+    # test 12: unknown packet names remain blocked
+    def test_scsp_unknown_packet_typo_blocked(self):
+        result = evaluate_event(
+            _edit("tests/test_something.py"),
+            {"POVERTY_KILLER_PACKET": "SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_TYPO"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet_or_unknown_packet" in result["reason"]
+
+    # test 13: live mode remains blocked
+    def test_scsp_live_mode_blocked(self):
+        result = evaluate_event(_bash("python main.py --live"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 14: --attack remains blocked
+    def test_scsp_attack_flag_blocked(self):
+        result = evaluate_event(_bash("python main.py --attack"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 15: destructive git remains blocked
+    def test_scsp_git_push_force_blocked(self):
+        result = evaluate_event(_bash("git push --force origin master"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 16: destructive git reset blocked
+    def test_scsp_git_reset_hard_blocked(self):
+        result = evaluate_event(_bash("git reset --hard HEAD"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 17: dependency changes blocked
+    def test_scsp_pip_install_blocked(self):
+        result = evaluate_event(_bash("pip install numpy"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 18: git add . blocked
+    def test_scsp_git_add_dot_blocked(self):
+        result = evaluate_event(_bash("git add ."), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 19: unset packet still blocks tests/ (no packet = no write authority)
+    def test_scsp_no_packet_blocks_tests(self):
+        result = evaluate_event(_edit("tests/test_something.py"), {})
+        assert result["decision"] == "block"
+
+    # test 20: docs/ broadly is NOT allowed (only docs/execution_plan.md)
+    def test_scsp_blocks_docs_current_status(self):
+        result = evaluate_event(_edit("docs/current_status.md"), _same_clock_env())
+        assert result["decision"] == "block"
+        assert "same_clock_synthetic_paper_window_harness_bundle_outside_allowlist" in result["reason"]

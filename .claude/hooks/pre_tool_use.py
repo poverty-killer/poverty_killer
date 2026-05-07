@@ -3,7 +3,7 @@
 G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
-- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE|UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE)
+- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE|UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE|SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE)
 - G0.6 Board Autopilot Law: GREEN safe commands approved automatically; RED/BLACK blocked
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
@@ -206,6 +206,14 @@ UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_LOCKED_ALLOWED_FILES = frozense
     ]
 )
 UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_ALLOWED_PREFIXES = ("tests/",)
+
+# SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE allowlist — tests-only same-clock synthetic paper-window harness work.
+SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "docs/execution_plan.md",
+    ]
+)
+SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_ALLOWED_PREFIXES = ("tests/",)
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +476,12 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_ALLOWED_PREFIXES):
             return True, ""
         return False, f"upstream_dispatch_signal_submission_proof_bundle_outside_allowlist:{normalized_path}"
+    if packet == "SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE":
+        if normalized_path in SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_ALLOWED_FILES:
+            return True, ""
+        if any(normalized_path.startswith(pre) for pre in SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"same_clock_synthetic_paper_window_harness_bundle_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 
