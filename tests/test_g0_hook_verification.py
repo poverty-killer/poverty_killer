@@ -982,3 +982,105 @@ class TestPaperFillCompletionProofBundle:
         result = evaluate_event(_bash("git push origin master"), _paper_fill_env())
         assert result["decision"] == "block"
         assert "dangerous_bash" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE — packet registration tests
+# ---------------------------------------------------------------------------
+
+def _upstream_dispatch_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE"}
+
+
+class TestUpstreamDispatchSignalSubmissionProofBundle:
+    # test 1: allows app/main_loop.py
+    def test_uds_allows_main_loop(self):
+        result = evaluate_event(_edit("app/main_loop.py"), _upstream_dispatch_env())
+        assert result["decision"] == "approve"
+
+    # test 2: allows app/brain/signal_fusion.py as locked exception
+    def test_uds_allows_signal_fusion_locked_exception(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _upstream_dispatch_env())
+        assert result["decision"] == "approve"
+
+    # test 3: allows app/core/decision_compiler.py as locked exception
+    def test_uds_allows_decision_compiler_locked_exception(self):
+        result = evaluate_event(_edit("app/core/decision_compiler.py"), _upstream_dispatch_env())
+        assert result["decision"] == "approve"
+
+    # test 4: allows tests/ prefix
+    def test_uds_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_upstream_dispatch_signal_submission.py"),
+            _upstream_dispatch_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # test 5: blocks app/execution/order_router.py
+    def test_uds_blocks_order_router(self):
+        result = evaluate_event(_edit("app/execution/order_router.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "upstream_dispatch_signal_submission_proof_bundle_outside_allowlist" in result["reason"]
+
+    # test 6: blocks app/execution/paper_broker.py
+    def test_uds_blocks_paper_broker(self):
+        result = evaluate_event(_edit("app/execution/paper_broker.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "upstream_dispatch_signal_submission_proof_bundle_outside_allowlist" in result["reason"]
+
+    # test 7: blocks app/risk/guard.py (locked authority, no packet exception)
+    def test_uds_blocks_risk_guard(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 8: blocks app/strategies/sector_rotation.py
+    def test_uds_blocks_sector_rotation(self):
+        result = evaluate_event(_edit("app/strategies/sector_rotation.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "upstream_dispatch_signal_submission_proof_bundle_outside_allowlist" in result["reason"]
+
+    # test 9: blocks app/brain/shans_curve.py (locked authority, no packet exception)
+    def test_uds_blocks_shans_curve(self):
+        result = evaluate_event(_edit("app/brain/shans_curve.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 10: blocks main.py
+    def test_uds_blocks_main_py(self):
+        result = evaluate_event(_edit("main.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "upstream_dispatch_signal_submission_proof_bundle_outside_allowlist" in result["reason"]
+
+    # test 11: dangerous Bash rules remain unchanged under this packet
+    def test_uds_dangerous_bash_still_blocked(self):
+        result = evaluate_event(_bash("git push --force origin master"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 12: unknown packets still block
+    def test_uds_unknown_packet_still_blocks(self):
+        result = evaluate_event(
+            _edit("app/main_loop.py"),
+            {"POVERTY_KILLER_PACKET": "UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_TYPO"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet_or_unknown_packet" in result["reason"]
+
+    # extra: blocks app/brain/regime_detector.py (locked authority, no packet exception)
+    def test_uds_blocks_regime_detector(self):
+        result = evaluate_event(_edit("app/brain/regime_detector.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # extra: blocks app/execution/engine.py (locked authority, no packet exception)
+    def test_uds_blocks_execution_engine(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # extra: blocks docs/CURRENT_STATUS.md during active packet
+    def test_uds_blocks_current_status(self):
+        result = evaluate_event(_edit("docs/CURRENT_STATUS.md"), _upstream_dispatch_env())
+        assert result["decision"] == "block"
+        assert "upstream_dispatch_signal_submission_proof_bundle_outside_allowlist" in result["reason"]

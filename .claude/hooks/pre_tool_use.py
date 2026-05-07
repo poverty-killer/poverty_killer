@@ -3,7 +3,7 @@
 G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
-- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE)
+- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE|UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE)
 - G0.6 Board Autopilot Law: GREEN safe commands approved automatically; RED/BLACK blocked
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
@@ -90,6 +90,7 @@ G0_ALLOWLIST = frozenset(
         "docs/packets/regime_aware_sr_admission.md",
         "docs/packets/sector_rotation_fresh_observed_pair_proof.md",
         "docs/packets/paper_fill_completion_proof.md",
+        "docs/packets/upstream_dispatch_signal_submission_proof.md",
         "tests/test_g0_hook_verification.py",
         "state/override_log.jsonl",
         "state/session_journal.jsonl",
@@ -185,6 +186,24 @@ PAPER_FILL_COMPLETION_PROOF_BUNDLE_LOCKED_ALLOWED_FILES = frozenset(
     ]
 )
 PAPER_FILL_COMPLETION_PROOF_BUNDLE_ALLOWED_PREFIXES = ("tests/",)
+
+# UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE allowlist — diagnose and repair the
+# upstream strategy/fusion/dispatch path that should culminate in
+# ExecutionEngine.submit_signal. Production patch surface: main_loop dispatch seam plus
+# locked-authority signal_fusion / decision_compiler exceptions. Strategy, risk,
+# execution, shans_curve, regime_detector, and main.py are all blocked.
+UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/main_loop.py",
+    ]
+)
+UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_LOCKED_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/brain/signal_fusion.py",
+        "app/core/decision_compiler.py",
+    ]
+)
+UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_ALLOWED_PREFIXES = ("tests/",)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +407,8 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
             return True, ""
         if packet == "PAPER_FILL_COMPLETION_PROOF_BUNDLE" and normalized_path in PAPER_FILL_COMPLETION_PROOF_BUNDLE_LOCKED_ALLOWED_FILES:
             return True, ""
+        if packet == "UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE" and normalized_path in UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_LOCKED_ALLOWED_FILES:
+            return True, ""
         return False, f"locked_authority_file_outside_packet_exception:{normalized_path}"
     if packet == "G0":
         if normalized_path in G0_ALLOWLIST:
@@ -439,6 +460,12 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in PAPER_FILL_COMPLETION_PROOF_BUNDLE_ALLOWED_PREFIXES):
             return True, ""
         return False, f"paper_fill_completion_proof_bundle_outside_allowlist:{normalized_path}"
+    if packet == "UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE":
+        if normalized_path in UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_ALLOWED_FILES:
+            return True, ""
+        if any(normalized_path.startswith(pre) for pre in UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"upstream_dispatch_signal_submission_proof_bundle_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 

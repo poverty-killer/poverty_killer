@@ -345,6 +345,59 @@ Prior bundle closed: c6be162 — Close SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF
 
 ---
 
+## UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE
+
+Status: ACTIVE — governance registration complete
+
+Objective:
+Diagnose and, only if a wiring/state/timing/contract bug is proven, repair the
+upstream strategy/fusion/dispatch path so that a real executable candidate
+reaches ExecutionEngine.submit_signal. Legitimate gating must remain intact —
+no threshold relaxation, no fake signals, no bypass of SignalFusion,
+StrategyRouter, Shans Curve, RegimeDetector, RiskGuard, or DecisionCompiler.
+
+Repo-truth basis:
+PAPER_FILL_COMPLETION_PROOF_BUNDLE proof run produced SIGNAL_SUBMITTED=0,
+PAPERBROKER_REACH_COUNT=0. Paper fill path remains unit-proven (13/13) but
+runtime-unproven because no signal reached ExecutionEngine. Evidence:
+- ETH/USD: SHANS_NOT_READY then LIVE_GATE pass then SHADOW_FRONT decline on
+  whale_condition (score=0.1950 < threshold=0.2000); SECTOR_ROTATION blocked
+  on observed pair missing.
+- SOL/USD: SECTOR_ROTATION dispatch freshness fail (vote/signal ts ~10.4 h
+  older than current candle ts).
+- BTC/USD: fusion preferred_sleeve=None on the live-gate-pass candle.
+- Zero [EXEC_DIAG] markers; submit_signal never called.
+
+Files in scope (governance registration phase — this entry):
+- .claude/hooks/pre_tool_use.py
+- tests/test_g0_hook_verification.py
+- docs/EXECUTION_PLAN.md
+- docs/packets/upstream_dispatch_signal_submission_proof.md
+
+Production patch scope (next phase, pending Board approval):
+Non-locked:
+- app/main_loop.py
+- tests/ (prefix)
+
+Locked authority files with packet-scoped exceptions:
+- app/brain/signal_fusion.py
+- app/core/decision_compiler.py
+
+Explicitly blocked (all phases):
+- app/execution/* (engine.py, order_router.py, paper_broker.py)
+- app/risk/* (guard.py, unified_risk.py, position_sizing.py, etc.)
+- app/strategies/* (shadow_front.py, sector_rotation.py, etc.)
+- app/brain/shans_curve.py
+- app/brain/regime_detector.py
+- main.py
+- docs/CURRENT_STATUS.md (until closeout only)
+- reports/*, state/*, dependency files, secrets/.env
+
+Acceptance:
+- test_g0_hook_verification.py passes with zero failures.
+
+---
+
 ## Deferred Items
 
 ### ORPHANED_TMP_FILES
