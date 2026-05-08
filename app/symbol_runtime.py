@@ -270,15 +270,24 @@ class SymbolRuntime:
         
         self.last_update_timestamp_ns = timestamp_ns
     
-    def update_whale_with_trade(self, buy_volume: float, sell_volume: float, 
-                                 trade_sizes: List[float], timestamp_ns: int) -> Optional[WhaleFlowAlert]:
-        """Update per-symbol whale engine with trade data."""
+    def update_whale_with_trade(self, buy_volume: float, sell_volume: float,
+                                 trade_sizes: List[float], timestamp_ns: int,
+                                 price: float = 0.0) -> Optional[WhaleFlowAlert]:
+        """Update per-symbol whale engine with trade data.
+
+        price is the mark price for the trade and is required by the
+        WhaleFlowEngine to convert raw asset trade sizes into USD notional
+        for whale-tier normalization. Default 0.0 preserves backward
+        compatibility for legacy callers but must not be relied on in
+        production — main_loop.on_trade_with_whale always supplies it.
+        """
         if self.whale_flow_engine:
             alert = self.whale_flow_engine.update(
                 buy_volume=buy_volume,
                 sell_volume=sell_volume,
                 trade_sizes=trade_sizes,
-                exchange_ts_ns=timestamp_ns
+                exchange_ts_ns=timestamp_ns,
+                price=price,
             )
             self.last_whale_alert = alert
             return alert

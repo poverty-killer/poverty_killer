@@ -249,16 +249,21 @@ class WhaleFlowEngine:
         sell_volume: float,
         trade_sizes: List[float],
         exchange_ts_ns: int,
+        price: float = 0.0,
     ) -> WhaleFlowAlert:
         """
         Update whale flow engine with new trade data.
-        
+
         Args:
             buy_volume: Total buy volume in period
             sell_volume: Total sell volume in period
             trade_sizes: List of trade sizes in period
             exchange_ts_ns: Exchange timestamp in nanoseconds
-        
+            price: Mark price used to convert raw asset trade size into
+                USD notional for the 100k whale-threshold normalization.
+                Default 0.0 falls back to legacy raw-units behavior for
+                backward compatibility (must NOT inflate confidence).
+
         Returns:
             WhaleFlowAlert with direction, confidence, and all derived metrics
         """
@@ -278,9 +283,16 @@ class WhaleFlowEngine:
         
         if trade_sizes:
             avg_trade_size = np.mean(trade_sizes)
-            # Normalize average trade size (assuming 100k as "whale" threshold)
-            normalized_avg = min(1.0, avg_trade_size / 100_000.0)
-            
+            # Normalize against $100k USD-notional whale threshold. avg_trade_size
+            # is raw asset units; multiplying by price yields USD notional. The
+            # zero/negative-price branch is a backward-compat fallback only and
+            # must fail safe (uses raw units, which under-states notional and
+            # therefore cannot inflate whale confidence vs. the corrected path).
+            if price > 0.0:
+                normalized_avg = min(1.0, (avg_trade_size * price) / 100_000.0)
+            else:
+                normalized_avg = min(1.0, avg_trade_size / 100_000.0)
+
             # Concentration: how much of volume comes from largest trades
             sorted_sizes = sorted(trade_sizes, reverse=True)
             top_3_volume = sum(sorted_sizes[:3]) if len(sorted_sizes) >= 3 else sum(sorted_sizes)
