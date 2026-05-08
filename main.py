@@ -3,11 +3,32 @@
 Poverty Killer - Sovereign Trading Engine
 Main entry point for current paper-trading bring-up.
 
-Responsibilities:
-- Parse CLI arguments
-- Load environment configuration
-- Initialize top-level runtime components
-- Start and stop the current runtime cleanly
+Authority posture:
+- main.py owns bootstrap, assembly, feed callback registration, startup/shutdown,
+  and monitoring shell behavior.
+- app/main_loop.py owns the live market-data / brain / state / risk-ingress body.
+- app/execution/engine.py owns live execution authority.
+- app/execution/orchestrator.py is explicitly rejected and must not be wired.
+
+BUNDLE F1 — TELEMETRY INTEGRATION
+- Initializes TelemetryEventStore at bootstrap
+- Passes telemetry_store to OrderRouter, ExecutionEngine, and MainLoop
+
+WEBSOCKET HEALTH WIRING — PERMANENT FIX
+- Wires KrakenWebSocketClient health callback to order_router.update_websocket_health()
+- Removes diagnostic-only warnings (heartbeat detection now functional)
+- WebSocket health now reflects actual heartbeat state
+
+BUNDLE MULTI-SYMBOL RUNTIME — PER-SYMBOL OWNERSHIP EXPANSION
+- Passes active_symbols set to create_main_loop
+- Per-symbol engines now created inside MainLoop's SymbolRuntime containers
+- _on_trade() now extracts symbol from trade_info and passes to MainLoop.on_trade()
+- Removes primary-symbol hardcoding from trade/insider path
+
+BUNDLE STRATEGY-GATING REPAIR — WHALE OVERLAY WIRING (2026-04-27)
+- Adds call to MainLoop.on_trade_with_whale() with full trade details
+- Preserves existing on_trade() call for backward compatibility
+- Passes side and volume to enable per-symbol whale detection
 """
 
 import argparse
@@ -19,12 +40,10 @@ import threading
 import time
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Set
 
 from dotenv import load_dotenv
 
-from app.instrument_registry import InstrumentRegistry
-from app.models.enums import ExchangeType
 from app.brain.data_validator import DataContinuityValidator
 from app.brain.entropy_decoder import EntropyDecoder
 from app.brain.insider_signal_engine import (
@@ -38,21 +57,22 @@ from app.brain.recalibrator import Recalibrator
 from app.brain.regime_detector import RegimeDetector
 from app.brain.shans_curve import ShansCurve
 from app.brain.signal_fusion import SignalFusion
-from app.brain.topological_engine import TopologicalEngine
-from app.brain.toxicity_engine import ToxicityEngine
+from app.brain.whale_flow_engine import WhaleFlowEngine
 from app.commander import Commander
 from app.config import Config
+from app.data.polling_client import PollingClient
+from app.data.websocket_client import KrakenWebSocketClient
 from app.execution.engine import ExecutionEngine
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
-from app.brain.whale_flow_engine import WhaleFlowEngine
-from app.data.polling_client import PollingClient
-from app.data.websocket_client import KrakenWebSocketClient
-from app.main_loop import MainLoop, create_main_loop
+from app.instrument_registry import InstrumentRegistry
+from app.main_loop import create_main_loop
 from app.models import Candle
+from app.models.enums import ExchangeType
 from app.monitoring.logger import setup_logger
 from app.risk.guard import HybridRiskGuard
 from app.risk.safety import SafetyGate
+from app.telemetry.event_store import TelemetryEventStore
 
 logger = logging.getLogger(__name__)
 
@@ -60,27 +80,8 @@ logger = logging.getLogger(__name__)
 # ============================================
 # VENUE + MARKET SEAM — symbol filter and fallback
 # ============================================
-# Bot-controlled mapping: venue → registry-backed exchange predicate.
-# User-controlled selection: Config.primary_feed_venue + Config.active_markets.
-#
-# Classification authority: InstrumentRegistry (app/instrument_registry.py).
-# Symbols not registered are excluded and logged — not silently included.
-#
-# Extension point: to add a second venue/market, add one entry here and update:
-#   - Config.primary_feed_venue Literal
-#   - Config.active_markets validator valid set
-#   - SovereignHeartbeat._start_whale_websocket() branch
-#   - PollingClient._endpoints dict (app/data/polling_client.py)
-#
-# NAMED PARALLEL BRANCH — NOT MERGED, NOT DANGEROUS WHILE DISCONNECTED:
-# models/unified_market.py defines its own AssetClass, Exchange, InstrumentSpec.
-# These are NOT the canonical types and are NOT type-compatible with this spine.
-# Consumers (aggregator.py, ghost_tick_detector.py, hydration_manager.py) are
-# also disconnected. See unified_market.py docstring for exact wire-up preconditions.
 
 _VENUE_SYMBOL_FILTER: dict = {
-    # Predicate: symbol belongs to this venue's exchange per InstrumentRegistry.
-    # Replace format heuristic ("/" in s) with authoritative registry lookup.
     "kraken": lambda s: InstrumentRegistry.get_exchange(s) == ExchangeType.KRAKEN,
 }
 
@@ -91,13 +92,13 @@ _VENUE_PRIMARY_SYMBOL_FALLBACK: dict = {
 
 def _feed_symbols_for_venue(venue: str, universe: list, active_markets: list) -> list:
     """
-    Return symbols from universe that satisfy ALL THREE conditions:
-      1. Belong to the given venue (per InstrumentRegistry exchange)
-      2. Have an asset class that is in active_markets
-      3. Are present in symbol_universe
+    Return symbols from universe that satisfy all of:
+      1. belong to the given venue per InstrumentRegistry exchange authority
+      2. have an asset class that is in active_markets
+      3. are present in symbol_universe
 
-    Raises ValueError for unknown venue — fail-fast at startup, not silently.
-    Logs a warning for symbols in universe but absent from InstrumentRegistry.
+    Raises ValueError for unknown venue.
+    Logs and excludes symbols absent from InstrumentRegistry.
     """
     predicate = _VENUE_SYMBOL_FILTER.get(venue)
     if predicate is None:
@@ -105,33 +106,73 @@ def _feed_symbols_for_venue(venue: str, universe: list, active_markets: list) ->
             f"Unknown feed venue: {venue!r}. "
             f"Supported: {list(_VENUE_SYMBOL_FILTER)}"
         )
+
     active_set = {m.lower() for m in active_markets}
     result = []
-    for s in universe:
-        if not predicate(s):
+
+    for symbol in universe:
+        if not predicate(symbol):
             continue
-        asset_cls = InstrumentRegistry.get_asset_class(s)
+
+        asset_cls = InstrumentRegistry.get_asset_class(symbol)
         if asset_cls is None:
             logger.warning(
-                "Symbol %r not found in InstrumentRegistry — excluded from feed", s
+                "Symbol %r not found in InstrumentRegistry — excluded from feed",
+                symbol,
             )
             continue
+
         if asset_cls.value in active_set:
-            result.append(s)
+            result.append(symbol)
+
     return result
+
+
+def get_active_symbols(config: Config) -> Set[str]:
+    """
+    Get the set of active symbols for paper trading from configuration.
+    
+    Returns symbols from symbol_universe that belong to primary_feed_venue
+    and are in active_markets.
+    """
+    return set(_feed_symbols_for_venue(
+        config.primary_feed_venue,
+        config.symbol_universe,
+        config.active_markets,
+    ))
 
 
 class SovereignHeartbeat:
     """
-    Current top-level runtime wrapper.
+    Top-level runtime wrapper.
 
-    This class preserves the live startup/runtime behavior already present in
-    main.py while keeping startup/shutdown control explicit and bounded.
+    Owns:
+    - assembly of runtime components
+    - feed callback registration
+    - process lifecycle start/stop
+    - signal handler registration
+    - health monitoring shell
+
+    Does NOT own:
+    - live market-data / brain / state processing
+    - execution authority
+    
+    BUNDLE F1: Added telemetry_store initialization and injection.
+    
+    BUNDLE MULTI-SYMBOL RUNTIME: Per-symbol engines now created inside MainLoop.
+    Trades now extract symbol from trade_info and route to MainLoop.on_trade().
+    
+    BUNDLE STRATEGY-GATING REPAIR: Also routes to MainLoop.on_trade_with_whale()
+    with full trade details for per-symbol whale detection.
     """
 
     def __init__(self, config: Config, attack_mode: bool = False):
         self.config = config
         self.attack_mode = attack_mode
+
+        # BUNDLE F1: Initialize telemetry store
+        self.telemetry_store = TelemetryEventStore(db_path="data/telemetry.db")
+        logger.info("TelemetryEventStore initialized at data/telemetry.db")
 
         self.commander = Commander(
             initial_equity=config.initial_capital,
@@ -160,6 +201,7 @@ class SovereignHeartbeat:
             websocket_heartbeat_timeout_sec=30.0,
         )
 
+        # BUNDLE F1: Pass telemetry_store to OrderRouter
         self.order_router = OrderRouter(
             primary_exchange="kraken",
             secondary_exchange="coinbase",
@@ -171,6 +213,7 @@ class SovereignHeartbeat:
             pcv_retry_delay_sec=0.5,
             rest_fallback_enabled=True,
             paper_mode=config.broker_mode == "paper",
+            telemetry_store=self.telemetry_store,
         )
 
         self.masking_layer = MaskingLayer(
@@ -185,11 +228,8 @@ class SovereignHeartbeat:
         )
 
         self.signal_fusion = SignalFusion(config)
-
         self.whale_engine = WhaleFlowEngine()
-
         self.entropy_decoder = EntropyDecoder()
-
         self.safety_gate = SafetyGate(config)
 
         self.shans_curve = ShansCurve(
@@ -210,6 +250,7 @@ class SovereignHeartbeat:
             recovery_required_good=3,
         )
 
+        # BUNDLE F1: Pass telemetry_store to ExecutionEngine
         self.execution_engine = ExecutionEngine(
             commander=self.commander,
             risk_guard=self.risk_guard,
@@ -224,26 +265,36 @@ class SovereignHeartbeat:
             recalibration_pause_sec=14400.0,
             maker_offset_pct=0.001,
             emergency_cancel_workers=10,
+            telemetry_store=self.telemetry_store,
         )
 
-        # Venue and symbol selection — all three feed sites use self._feed_symbols.
         self._primary_feed_venue: str = config.primary_feed_venue
         self._feed_symbols: list = _feed_symbols_for_venue(
-            self._primary_feed_venue, config.symbol_universe, config.active_markets
+            self._primary_feed_venue,
+            config.symbol_universe,
+            config.active_markets,
         )
         self._primary_symbol: str = (
             self._feed_symbols[0]
             if self._feed_symbols
-            else _VENUE_PRIMARY_SYMBOL_FALLBACK.get(self._primary_feed_venue, "XBT/USD")
+            else _VENUE_PRIMARY_SYMBOL_FALLBACK.get(
+                self._primary_feed_venue,
+                "XBT/USD",
+            )
         )
 
-        self.tpe_engine = TopologicalEngine(symbol=self._primary_symbol)
+        # Get active symbols set for multi-symbol support
+        self._active_symbols: Set[str] = get_active_symbols(config)
+        logger.info("Active symbols for paper trading: %s", self._active_symbols)
 
-        self.regime_detector = RegimeDetector()
-        self.physical_validator = PhysicalValidator()
-        self.toxicity_engine = ToxicityEngine(symbol=self._primary_symbol)
-        self.insider_engine = InsiderSignalEngine()
+        # BUNDLE MULTI-SYMBOL RUNTIME: Per-symbol engines are now created
+        # inside MainLoop's SymbolRuntime containers. Legacy single-symbol
+        # instances are no longer created here.
+        self.regime_detector = RegimeDetector()  # Global, used per-symbol
+        self.physical_validator = PhysicalValidator()  # Global, used per-symbol
+        self.insider_engine = InsiderSignalEngine()  # Global, used per-symbol
 
+        # BUNDLE F1: Pass telemetry_store to MainLoop via create_main_loop
         self.main_loop = create_main_loop(
             config=config,
             commander=self.commander,
@@ -252,15 +303,18 @@ class SovereignHeartbeat:
             data_validator=self.data_validator,
             recalibrator=self.recalibrator,
             shans_curve=self.shans_curve,
-            tpe_engine=self.tpe_engine,
+            tpe_engine=None,  # Created per-symbol in MainLoop
             regime_detector=self.regime_detector,
             physical_validator=self.physical_validator,
-            toxicity_engine=self.toxicity_engine,
+            toxicity_engine=None,  # Created per-symbol in MainLoop
             entropy_decoder=self.entropy_decoder,
             insider_engine=self.insider_engine,
             execution_engine=self.execution_engine,
             symbol=self._primary_symbol,
             exchange=self._primary_feed_venue,
+            safety_gate=self.safety_gate,
+            telemetry_store=self.telemetry_store,
+            active_symbols=self._active_symbols,
         )
 
         self._running = False
@@ -268,10 +322,11 @@ class SovereignHeartbeat:
         self._threads: list[threading.Thread] = []
         self._health_check_interval = 5.0
         self._signal_handlers_registered = False
-        self._bootstrap_equity = float(config.initial_capital)
-        # TEMPORARY diagnostic counters — remove after callback reachability confirmed
-        self._candle_recv_count: int = 0
-        self._book_recv_count: int = 0
+        self._stop_event = threading.Event()
+
+        # Temporary diagnostics preserved
+        self._candle_recv_count = 0
+        self._book_recv_count = 0
 
         self._register_graceful_death()
 
@@ -280,18 +335,13 @@ class SovereignHeartbeat:
         logger.info("Broker Mode: %s", config.broker_mode)
         logger.info("Initial Capital: $%0.2f", config.initial_capital)
         logger.info("Primary symbol: %s", self._primary_symbol)
+        logger.info("Active symbols: %s", self._active_symbols)
 
     # ============================================
     # GRACEFUL SHUTDOWN
     # ============================================
 
     def _register_graceful_death(self) -> None:
-        """
-        Register process signal handlers when lawful to do so.
-
-        Signal registration is only valid in the main thread on CPython and may
-        be unavailable in some environments.
-        """
         if threading.current_thread() is not threading.main_thread():
             logger.debug("Skipping signal handler registration outside main thread")
             return
@@ -311,26 +361,33 @@ class SovereignHeartbeat:
             logger.warning("Could not register signal handlers: %s", exc)
 
     def _handle_termination_signal(self, signum: int) -> None:
-        """
-        Best-effort emergency shutdown path for OS termination signals.
-        """
         if self._stopping:
-            logger.warning("Termination signal received during active shutdown: %s", signum)
+            logger.warning(
+                "Termination signal received during active shutdown: %s",
+                signum,
+            )
             return
 
         self._stopping = True
         self._running = False
+        self._stop_event.set()
 
         try:
             self.execution_engine.stop()
         except Exception as exc:
-            logger.exception("Failed stopping execution engine during signal shutdown: %s", exc)
+            logger.exception(
+                "Failed stopping execution engine during signal shutdown: %s",
+                exc,
+            )
 
         try:
             self.order_router.close_all_positions()
             logger.critical("PORTFOLIO FLATTENED - SAFE TO EXIT")
         except Exception as exc:
-            logger.exception("Failed to flatten portfolio during signal shutdown: %s", exc)
+            logger.exception(
+                "Failed to flatten portfolio during signal shutdown: %s",
+                exc,
+            )
 
     # ============================================
     # PUBLIC METHODS
@@ -344,24 +401,30 @@ class SovereignHeartbeat:
 
         self._stopping = False
         self._running = True
+        self._stop_event.clear()
 
         if self.attack_mode:
             self.commander.enable_attack_mode(
                 reason="cli_flag",
-                timestamp_ns=int(time.time() * 1_000_000_000),
+                timestamp_ns=time.time_ns(),
             )
             logger.info("ATTACK MODE ENABLED")
 
         self.execution_engine.start()
-        self._seed_initial_equity()
         self.main_loop.start()
         self._start_background_threads()
-        self._main_loop()
+
+        logger.info(
+            "Runtime started: main.py owns lifecycle/feed shell; MainLoop owns live runtime body"
+        )
+
+        self._wait_until_stopped()
 
     def stop(self) -> None:
         """Stop the runtime."""
         if self._stopping:
             logger.debug("Heartbeat stop already in progress")
+
         self._stopping = True
 
         if not self._running:
@@ -370,6 +433,7 @@ class SovereignHeartbeat:
             logger.info("Stopping sovereign heartbeat")
 
         self._running = False
+        self._stop_event.set()
 
         try:
             self.main_loop.stop()
@@ -384,6 +448,22 @@ class SovereignHeartbeat:
         self._join_background_threads()
         logger.info("Sovereign heartbeat stopped")
 
+    def _wait_until_stopped(self) -> None:
+        """
+        Block the main thread while the event-driven runtime is alive.
+
+        This is lifecycle waiting only. It does not perform market-data,
+        fusion, risk, or execution ownership work.
+        """
+        logger.info("Entering runtime wait state")
+        try:
+            while self._running and not self._stop_event.wait(timeout=1.0):
+                pass
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received in runtime wait state")
+            self._running = False
+            self._stop_event.set()
+
     def _start_background_threads(self) -> None:
         health_thread = threading.Thread(
             target=self._health_check_loop,
@@ -392,6 +472,7 @@ class SovereignHeartbeat:
         )
         health_thread.start()
         self._threads.append(health_thread)
+
         self._start_whale_websocket()
         self._start_polling_client()
 
@@ -411,24 +492,24 @@ class SovereignHeartbeat:
 
     def _on_trade(self, trade_info: dict) -> None:
         """
-        Callback from KrakenWebSocketClient on each trade tick.
+        Feed callback from KrakenWebSocketClient.
 
-        Converts a single trade into directional buy/sell volumes,
-        calls WhaleFlowEngine.update(), and injects the resulting
-        WhaleFlowAlert into signal_fusion as the whale_flow slot.
-
-        Additionally routes the trade tick to MainLoop.on_trade() for
-        data continuity tracking and price state.
-
-        exchange_ts_ns authority: comes from trade_info["exchange_ts_ns"],
-        which KrakenWebSocketClient derives from the Kraken message
-        timestamp_ms (strict authoritative path — no wall-clock substitution).
+        Transport/callback ownership lives here.
+        Semantic market-data processing remains in MainLoop.
+        
+        BUNDLE MULTI-SYMBOL RUNTIME: Extracts symbol from trade_info
+        and passes to MainLoop.on_trade() with the real symbol.
+        No longer assumes primary symbol only.
+        
+        BUNDLE STRATEGY-GATING REPAIR: Also passes full trade details
+        to MainLoop.on_trade_with_whale() for per-symbol whale detection.
         """
         try:
             volume = float(trade_info.get("volume", 0.0))
             price = float(trade_info.get("price", 0.0))
             side = int(trade_info.get("side", 0))
             ts_ns = int(trade_info.get("exchange_ts_ns", 0))
+            symbol = trade_info.get("symbol", self._primary_symbol)
 
             if ts_ns <= 0 or volume <= 0:
                 return
@@ -444,17 +525,14 @@ class SovereignHeartbeat:
             )
 
             self.signal_fusion.update_whale(alert, ts_ns)
-            self.main_loop.on_trade(volume, price, side, ts_ns)
+            
+            # Pass symbol to MainLoop.on_trade() (basic price update)
+            self.main_loop.on_trade(symbol, price, ts_ns)
+            
+            # Pass full trade details to MainLoop.on_trade_with_whale() (whale detection)
+            self.main_loop.on_trade_with_whale(symbol, price, side, volume, ts_ns)
 
-            # Insider observation feed from public trade flow.
-            # entity_id="": Kraken public API exposes no account IDs (truthful).
-            # intensity: whale-confidence-normalized signal strength (0-1, real).
-            # notional_weight: normalized average trade size from whale engine (0-1, real).
-            # source_reliability: 0.35 — public exchange flow, not privileged (truthful constant).
-            # event_proximity_weight: 0.0 — no event catalyst feed (truthful).
-            # novelty_weight: 0.0 — no novelty baseline available (truthful).
-            # corroboration_weight: 0.25 if whale direction agrees with trade side, else 0.0.
-            # invalidation_weight: 1 - toxicity suppression factor (real regime proxy).
+            # Insider observation uses the real symbol from trade_info
             if side == 1:
                 obs_direction = ObservationDirection.BUY
             elif side == -1:
@@ -462,21 +540,23 @@ class SovereignHeartbeat:
             else:
                 obs_direction = ObservationDirection.UNKNOWN
 
-            whale_corr = (
-                Decimal("0.25")
-                if side != 0 and int(alert.direction.value) == side
-                else Decimal("0.0")
-            )
-            tox_inv = Decimal(
-                str(round(1.0 - self.toxicity_engine.get_suppression_factor(), 6))
-            )
+            # Get per-symbol suppression factor from runtime if available
+            runtime = self.main_loop.get_runtime(symbol)
+            if runtime and runtime.toxicity_engine:
+                tox_suppression = runtime.toxicity_engine.get_suppression_factor()
+            else:
+                # Fallback to primary symbol's toxicity engine
+                primary_runtime = self.main_loop.get_runtime(self._primary_symbol)
+                tox_suppression = primary_runtime.toxicity_engine.get_suppression_factor() if primary_runtime and primary_runtime.toxicity_engine else 1.0
+
+            tox_inv = Decimal(str(round(1.0 - tox_suppression, 6)))
             intensity = Decimal(str(round(min(1.0, max(0.0, alert.confidence)), 6)))
             notional = Decimal(str(round(min(1.0, max(0.0, alert.avg_trade_size)), 6)))
 
             obs = InsiderObservation(
-                observation_id=f"{self._primary_symbol}_{ts_ns}",
+                observation_id=f"{symbol}_{ts_ns}",
                 timestamp_ns=ts_ns,
-                symbol=self._primary_symbol,
+                symbol=symbol,
                 entity_id="",
                 direction=obs_direction,
                 intensity=intensity,
@@ -484,7 +564,7 @@ class SovereignHeartbeat:
                 source_reliability=Decimal("0.35"),
                 event_proximity_weight=Decimal("0.0"),
                 novelty_weight=Decimal("0.0"),
-                corroboration_weight=whale_corr,
+                corroboration_weight=Decimal("0.25") if side != 0 and int(alert.direction.value) == side else Decimal("0.0"),
                 invalidation_weight=tox_inv,
                 source_type=ObservationSourceType.FLOW,
             )
@@ -497,23 +577,14 @@ class SovereignHeartbeat:
             logger.exception("_on_trade error: %s", exc)
 
     def _on_candle(self, candle: Candle) -> None:
-        """
-        Callback from KrakenWebSocketClient and PollingClient on each candle.
-
-        Routes to MainLoop.on_candle() which drives:
-          - signal_fusion whale/regime updates
-          - fuse(exchange_ts_ns) with authoritative exchange timestamp
-          - risk state assessment with real TPE coherence
-          - recalibration state machine
-          - execution engine event drain
-
-        exchange_ts_ns authority: provided by the candle from the data layer.
-        """
+        """Feed callback routing authoritative candles into MainLoop."""
         self._candle_recv_count += 1
         if self._candle_recv_count <= 3 or self._candle_recv_count % 100 == 0:
             logger.info(
                 "FEED_CANDLE #%d: symbol=%s exchange_ts_ns=%d",
-                self._candle_recv_count, candle.symbol, candle.exchange_ts_ns,
+                self._candle_recv_count,
+                candle.symbol,
+                candle.exchange_ts_ns,
             )
         try:
             self.main_loop.on_candle(candle)
@@ -522,10 +593,11 @@ class SovereignHeartbeat:
 
     def _start_whale_websocket(self) -> None:
         """
-        Launch the venue WS client in a background asyncio daemon thread.
+        Launch venue WebSocket client in a background asyncio daemon thread.
 
-        Uses self._feed_symbols (derived from Config.primary_feed_venue at init).
-        Extension point: add a branch here when a second venue is added.
+        This is transport startup and callback registration ownership only.
+        
+        WEBSOCKET HEALTH WIRING: Registers health callback to order_router.
         """
         ws_symbols = self._feed_symbols
         if not ws_symbols:
@@ -535,7 +607,7 @@ class SovereignHeartbeat:
             )
             return
 
-        running_ref = self  # captured by closure; avoids late-binding issues
+        running_ref = self
 
         async def _ws_run() -> None:
             ws_client = KrakenWebSocketClient(
@@ -543,7 +615,12 @@ class SovereignHeartbeat:
                 on_order_book=running_ref._on_order_book,
                 on_trade=running_ref._on_trade,
                 on_candle=running_ref._on_candle,
+                sentinel=running_ref.safety_gate,
+                on_health=running_ref.order_router.update_websocket_health,
             )
+            
+            logger.info("WebSocket health callback wired to order_router.update_websocket_health")
+            
             try:
                 await ws_client.start()
                 while running_ref._running:
@@ -573,27 +650,21 @@ class SovereignHeartbeat:
         )
         whale_ws_thread.start()
         self._threads.append(whale_ws_thread)
-        logger.info("Whale WebSocket thread started (%d symbols: %s)", len(ws_symbols), ws_symbols)
+        logger.info(
+            "Whale WebSocket thread started (%d symbols: %s)",
+            len(ws_symbols),
+            ws_symbols,
+        )
 
     def _on_order_book(self, snapshot) -> None:
-        """
-        Callback from PollingClient on each order book REST poll (~1s).
-
-        Routes to MainLoop.on_order_book() which drives:
-          - Data continuity (record_data + mark_good)
-          - TPE analysis (real coherence score)
-          - ShansCurve processing → signal_fusion shans slot (ShansCurveSignal payload)
-          - Price update from mid_price
-
-        timestamp authority: snapshot.exchange_ts_ns from PollingClient,
-        which uses now_ns() as REST polling fallback (non-authoritative path
-        — pre-existing behavior in polling_client.py, not introduced here).
-        """
+        """Feed callback routing order books into MainLoop."""
         self._book_recv_count += 1
         if self._book_recv_count <= 3 or self._book_recv_count % 100 == 0:
             logger.info(
                 "FEED_BOOK #%d: symbol=%s exchange_ts_ns=%d",
-                self._book_recv_count, snapshot.symbol, snapshot.exchange_ts_ns,
+                self._book_recv_count,
+                snapshot.symbol,
+                snapshot.exchange_ts_ns,
             )
         try:
             self.main_loop.on_order_book(snapshot)
@@ -604,11 +675,7 @@ class SovereignHeartbeat:
         """
         Launch PollingClient in a background asyncio daemon thread.
 
-        Uses self._feed_symbols (derived from Config.primary_feed_venue at init).
-        Passes exchange=self._primary_feed_venue so PollingClient selects correct endpoints.
-        Polls order book at 1s interval; on_order_book feeds MainLoop.on_order_book().
-        Polls candles; on_candle feeds MainLoop.on_candle() via _on_candle().
-        Thread is daemon so it does not block clean process exit.
+        This is transport startup and callback registration ownership only.
         """
         poll_symbols = self._feed_symbols
         if not poll_symbols:
@@ -659,106 +726,6 @@ class SovereignHeartbeat:
         self._threads.append(polling_thread)
         logger.info("PollingClient thread started (%d symbols)", len(poll_symbols))
 
-    def _seed_initial_equity(self) -> None:
-        """
-        Seed the execution engine with a deterministic bootstrap equity.
-
-        This is a bounded bring-up fallback, not an authoritative market/equity
-        simulation.
-        """
-        try:
-            self.execution_engine.update_equity(self._bootstrap_equity)
-        except Exception as exc:
-            logger.exception("Failed to seed initial equity: %s", exc)
-
-    def _get_authoritative_equity(self) -> float | None:
-        """
-        Best-effort equity read from an existing status surface.
-
-        Returns None if no trustworthy numeric value is available.
-        """
-        try:
-            risk_status = self.risk_guard.get_status()
-        except Exception as exc:
-            logger.debug("Unable to fetch risk status for equity refresh: %s", exc)
-            return None
-
-        current_equity = risk_status.get("current_equity")
-        if isinstance(current_equity, (int, float)):
-            return float(current_equity)
-        return None
-
-    # ============================================
-    # MAIN LOOP
-    # ============================================
-
-    def _main_loop(self) -> None:
-        """
-        Sovereign heartbeat — event-drain and equity-refresh loop.
-
-        Responsibilities after MainLoop wiring:
-          - execution_engine.process_events() heartbeat drain
-          - equity refresh from authoritative surface → main_loop.on_equity_update()
-          - risk_guard.assess_state() warm-up (informational; tpe_coherence=0.8 fallback
-            because _main_loop has no candle-derived TPE signal — real TPE coherence is
-            driven per-order-book in MainLoop.on_order_book() then consumed by on_candle())
-          - health logging at iteration boundary
-
-        Removed (now owned by MainLoop):
-          - signal_fusion.fuse() — MainLoop.on_candle() drives with authoritative exchange_ts_ns
-          - recalibrator.evaluate_regime() + CRISIS_ABORT — MainLoop._advance_recalibration handles
-        """
-        logger.info("Entering main runtime loop")
-
-        iteration_count = 0
-
-        while self._running:
-            try:
-                iteration_start = time.time()
-
-                # 1. Process execution/runtime queue work.
-                self.execution_engine.process_events()
-
-                # 2. Refresh equity only from an existing authoritative surface
-                #    when available; otherwise retain the deterministic bootstrap.
-                authoritative_equity = self._get_authoritative_equity()
-                if authoritative_equity is not None:
-                    self.execution_engine.update_equity(authoritative_equity)
-                    self.main_loop.on_equity_update(authoritative_equity, int(time.time_ns()))
-
-                # 3. Keep risk surface warm for health-check path.
-                #    tpe_coherence=0.8 is a bounded fallback — real coherence is
-                #    driven per-candle by MainLoop (order_book → TPE → on_candle).
-                effective_equity = authoritative_equity
-                if effective_equity is None:
-                    effective_equity = self._bootstrap_equity
-
-                tpe_coherence = 0.8
-                risk_state = self.risk_guard.assess_state(effective_equity, tpe_coherence)
-
-                if risk_state["action"] in ["EMERGENCY_HALT", "RECALIBRATE", "AGGRESSIVE_STAY"]:
-                    logger.info(
-                        "Risk state: %s - %s",
-                        risk_state["action"],
-                        risk_state["reason"],
-                    )
-
-                # 4. Bounded loop pacing.
-                iteration_duration = time.time() - iteration_start
-                if iteration_duration < 0.01:
-                    time.sleep(0.01 - iteration_duration)
-
-                iteration_count += 1
-                if iteration_count % 600 == 0:
-                    self._log_health()
-
-            except KeyboardInterrupt:
-                logger.info("Keyboard interrupt received in main loop")
-                self._running = False
-            except Exception as exc:
-                logger.exception("Main loop error: %s", exc)
-                time.sleep(1.0)
-
     # ============================================
     # HEALTH CHECK
     # ============================================
@@ -784,6 +751,7 @@ class SovereignHeartbeat:
             "order_router": self.order_router.get_ghost_status(),
             "commander": self.commander.get_status(),
             "recalibrator": self.recalibrator.get_status(),
+            "main_loop": self.main_loop.get_status(),
         }
 
         if status["risk_guard"]["physical_fuse_triggered"]:
@@ -792,7 +760,8 @@ class SovereignHeartbeat:
         if status["risk_guard"]["vol_fuse_triggered"]:
             logger.critical("HEALTH ALERT: VoL fuse triggered!")
 
-        if not status["order_router"]["websocket_connected"]:
+        ws_connected = status["order_router"]["websocket_connected"]
+        if not ws_connected:
             logger.warning("HEALTH ALERT: WebSocket disconnected!")
 
         logger.debug("Health check: %s", status["execution_engine"]["is_running"])
@@ -828,6 +797,8 @@ class SovereignHeartbeat:
             "recalibrator": self.recalibrator.get_status(),
             "shans_curve": self.shans_curve.get_stats(),
             "main_loop": self.main_loop.get_status(),
+            "active_symbols": list(self._active_symbols),
+            "primary_symbol": self._primary_symbol,
         }
 
 

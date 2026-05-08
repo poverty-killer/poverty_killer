@@ -6,16 +6,20 @@ from feature outputs, strategy votes, risk overlays, execution constraints,
 and truth status. It produces an immutable DecisionRecord per cycle.
 
 Boundaries:
-- Owns: Decision compilation, DecisionRecord production
+- Owns: Decision compilation, DecisionRecord production, decision_uuid minting authority
 - Does NOT own: Feature computation (brain), strategy logic (strategies),
   risk decisions (risk system), truth reconciliation (truth_reconciler)
 - Consumes: FeatureVector, StrategyVote, RiskDecision, TruthFrame
 - Produces: DecisionRecord (with decision_type and outputs)
 
-Stage 2 Implementation Status:
-- Fully implemented: DecisionRecord creation with basic aggregation
-- Deferred to Stage 3: Complex strategy vote fusion, multi-strategy selection
-- Deferred to Stage 5: Full feature integration with brain components
+BUNDLE 2D Ã¢â‚¬â€ DECISION UUID AUTHORITY / THREADING REPAIR
+- Added reserve_decision_uuid() for orchestration-layer pre-minting
+- compile() now reuses decision_uuid from first StrategyVote if available
+- Preserves backward compatibility: mints new UUID if no votes provided
+
+BUNDLE F1 Ã¢â‚¬â€ TELEMETRY INTEGRATION
+- Accepts optional telemetry_store for decision recording
+- Records each compiled decision to telemetry substrate
 """
 
 import logging
@@ -27,6 +31,8 @@ from app.models.contracts import (
 )
 from app.models.enums import DecisionType, RiskMode
 from app.utils.time_utils import now_ns
+from app.telemetry.event_store import TelemetryEventStore
+from app.telemetry.decision_recorder import DecisionRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +66,51 @@ class DecisionCompiler:
     """
     Decision Compiler - Single authority for deterministic decisions.
     
+    BUNDLE 2D: decision_uuid authority centralized here.
+    - reserve_decision_uuid() allows orchestration layer to pre-mint UUIDs
+    - compile() reuses UUID from first StrategyVote when available
+    
+    BUNDLE F1: Telemetry integration.
+    - Optional telemetry_store enables decision recording
+    
     Features:
     - Aggregates feature vectors, strategy votes, risk decisions, truth status
     - Produces immutable DecisionRecord per cycle
     - Thread-safe (stateless per compilation)
     - Enforces that no decision is reinterpreted without a superseding record
-    
-    Stage 2: Basic aggregation only. Complex fusion (multi-strategy, weighted voting)
-    is deferred to Stage 3.
     """
     
-    def __init__(self):
-        """Initialize decision compiler."""
+    def __init__(self, telemetry_store: Optional[TelemetryEventStore] = None):
+        """
+        Initialize decision compiler.
+        
+        Args:
+            telemetry_store: Optional telemetry store for recording decisions
+        """
         self._last_decision_uuid: Optional[str] = None
+        self._telemetry_recorder: Optional[DecisionRecorder] = None
+        if telemetry_store:
+            self._telemetry_recorder = DecisionRecorder(telemetry_store)
         logger.info("DecisionCompiler initialized")
+    
+    # ============================================
+    # BUNDLE 2D Ã¢â‚¬â€ UUID AUTHORITY SURFACE
+    # ============================================
+    
+    def reserve_decision_uuid(self) -> str:
+        """
+        Reserve a decision UUID for orchestration-layer use.
+        
+        Caller (MainLoop) obtains UUID before creating StrategyVote objects.
+        The same UUID should be passed to StrategyVote.decision_uuid and will
+        become the DecisionRecord.decision_uuid when compile() is called.
+        
+        Returns:
+            New UUID string for this decision cycle.
+        """
+        reserved = str(uuid4())
+        logger.debug(f"Decision UUID reserved: {reserved}")
+        return reserved
     
     # ============================================
     # Main Compilation Entry Point
@@ -90,10 +127,13 @@ class DecisionCompiler:
         """
         Compile a deterministic decision from all inputs.
         
+        BUNDLE 2D: decision_uuid is extracted from first StrategyVote if available.
+        This enables caller-owned UUID threading without breaking existing callers.
+        
         Args:
             truth_frame: Current TruthFrame (required)
             feature_vectors: List of feature vectors from brain components
-            strategy_votes: List of strategy votes
+            strategy_votes: List of strategy votes (each may have decision_uuid populated)
             risk_decision: Current risk decision
             additional_inputs: Any additional inputs for decision context
         
@@ -108,6 +148,22 @@ class DecisionCompiler:
             raise DecisionCompilerStateError("truth_frame is required for decision compilation")
         
         timestamp_ns = now_ns()
+        
+        # BUNDLE 2D: Extract decision_uuid from first vote if available
+        decision_uuid: str
+        if strategy_votes and len(strategy_votes) > 0:
+            first_vote = strategy_votes[0]
+            if first_vote.decision_uuid:
+                decision_uuid = first_vote.decision_uuid
+                logger.debug(f"Using decision_uuid from strategy vote: {decision_uuid}")
+            else:
+                decision_uuid = str(uuid4())
+                logger.debug(f"Strategy vote has no decision_uuid; minted new: {decision_uuid}")
+        else:
+            decision_uuid = str(uuid4())
+            logger.debug(f"No strategy votes provided; minted new decision_uuid: {decision_uuid}")
+        
+        self._last_decision_uuid = decision_uuid
         
         # Build inputs dictionary for traceability
         inputs: Dict[str, List[str]] = {}
@@ -139,10 +195,6 @@ class DecisionCompiler:
             feature_vectors=feature_vectors
         )
         
-        # Create decision record
-        decision_uuid = str(uuid4())
-        self._last_decision_uuid = decision_uuid
-        
         # Safely serialize metadata
         truth_status_str = _safe_str(truth_frame.status)
         risk_mode_str = _safe_str(risk_decision.risk_mode) if risk_decision else None
@@ -158,6 +210,10 @@ class DecisionCompiler:
                 "risk_mode": risk_mode_str
             }
         )
+        
+        # BUNDLE F1: Record decision to telemetry if enabled
+        if self._telemetry_recorder:
+            self._telemetry_recorder.record_decision(record)
         
         logger.debug(f"DecisionRecord created: {decision_uuid}, type={_safe_str(decision_type)}")
         return record
@@ -300,14 +356,17 @@ class DecisionCompiler:
 # Convenience Functions
 # ============================================
 
-def create_decision_compiler() -> DecisionCompiler:
+def create_decision_compiler(telemetry_store: Optional[TelemetryEventStore] = None) -> DecisionCompiler:
     """
     Create a configured decision compiler.
+    
+    Args:
+        telemetry_store: Optional telemetry store for decision recording
     
     Returns:
         DecisionCompiler instance
     """
-    return DecisionCompiler()
+    return DecisionCompiler(telemetry_store=telemetry_store)
 
 
 __all__ = [

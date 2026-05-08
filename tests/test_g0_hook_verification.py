@@ -1641,3 +1641,239 @@ class TestWhaleFlowNotionalNormalizationPatch:
         )
         assert result["decision"] == "block"
         assert "no_active_packet_or_unknown_packet" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE — G0.10 packet registration
+# ---------------------------------------------------------------------------
+# Per-symbol runtime ownership + dispatch seam landing.
+# Locked authority exceptions: shans_curve.py (is_ready() only),
+# decision_compiler.py (telemetry_store + reserve_decision_uuid additions).
+# No threshold / fusion / regime / risk / execution / strategy authority changes.
+
+def _main_loop_per_symbol_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE"}
+
+
+class TestMainLoopPerSymbolRuntimeAndDispatchLandingBundle:
+    # --- Allowed paths: non-locked production files ---
+
+    # test 1: allows app/main_loop.py
+    def test_mlpsr_allows_main_loop(self):
+        result = evaluate_event(_edit("app/main_loop.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 2: allows main.py
+    def test_mlpsr_allows_main_py(self):
+        result = evaluate_event(_edit("main.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 3: allows app/data/websocket_client.py
+    def test_mlpsr_allows_websocket_client(self):
+        result = evaluate_event(_edit("app/data/websocket_client.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 4: allows app/models/enums.py
+    def test_mlpsr_allows_enums(self):
+        result = evaluate_event(_edit("app/models/enums.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 5: allows app/strategies/council_metadata.py
+    def test_mlpsr_allows_council_metadata(self):
+        result = evaluate_event(_edit("app/strategies/council_metadata.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 6: allows app/strategies/strategy_vote_adapters.py
+    def test_mlpsr_allows_strategy_vote_adapters(self):
+        result = evaluate_event(_edit("app/strategies/strategy_vote_adapters.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 7: allows app/telemetry/__init__.py
+    def test_mlpsr_allows_telemetry_init(self):
+        result = evaluate_event(_edit("app/telemetry/__init__.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 8: allows app/telemetry/event_store.py
+    def test_mlpsr_allows_telemetry_event_store(self):
+        result = evaluate_event(_edit("app/telemetry/event_store.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 9: allows app/telemetry/decision_recorder.py
+    def test_mlpsr_allows_telemetry_decision_recorder(self):
+        result = evaluate_event(_edit("app/telemetry/decision_recorder.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 10: allows app/telemetry/feature_recorder.py
+    def test_mlpsr_allows_telemetry_feature_recorder(self):
+        result = evaluate_event(_edit("app/telemetry/feature_recorder.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 11: allows app/telemetry/fill_recorder.py
+    def test_mlpsr_allows_telemetry_fill_recorder(self):
+        result = evaluate_event(_edit("app/telemetry/fill_recorder.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # --- Allowed paths: locked authority files with packet-scoped exception ---
+
+    # test 12: allows app/brain/shans_curve.py (locked authority, packet-scoped exception)
+    def test_mlpsr_allows_shans_curve_locked_exception(self):
+        result = evaluate_event(_edit("app/brain/shans_curve.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 13: allows app/core/decision_compiler.py (locked authority, packet-scoped exception)
+    def test_mlpsr_allows_decision_compiler_locked_exception(self):
+        result = evaluate_event(_edit("app/core/decision_compiler.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 14: write allowed for shans_curve.py
+    def test_mlpsr_write_allowed_shans_curve(self):
+        result = evaluate_event(_write("app/brain/shans_curve.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "approve"
+
+    # test 15: allows tests/ prefix
+    def test_mlpsr_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_ws_book_callback_flow.py"),
+            _main_loop_per_symbol_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # --- Blocked paths: locked authority files NOT in packet exception ---
+
+    # test 16: blocks app/brain/signal_fusion.py (locked, no exception)
+    def test_mlpsr_blocks_signal_fusion(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 17: blocks app/risk/guard.py (locked authority)
+    def test_mlpsr_blocks_risk_guard(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 18: blocks app/execution/engine.py (locked authority)
+    def test_mlpsr_blocks_execution_engine(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 19: blocks app/brain/regime_detector.py (locked authority)
+    def test_mlpsr_blocks_regime_detector(self):
+        result = evaluate_event(_edit("app/brain/regime_detector.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 20: blocks app/brain/whale_flow_engine.py (locked authority)
+    def test_mlpsr_blocks_whale_flow_engine(self):
+        result = evaluate_event(_edit("app/brain/whale_flow_engine.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 21: blocks app/brain/entropy_decoder.py (locked authority)
+    def test_mlpsr_blocks_entropy_decoder(self):
+        result = evaluate_event(_edit("app/brain/entropy_decoder.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 22: blocks app/strategies/strategy_router.py (locked authority)
+    def test_mlpsr_blocks_strategy_router(self):
+        result = evaluate_event(_edit("app/strategies/strategy_router.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 23: blocks app/core/truth_kernel.py (locked authority)
+    def test_mlpsr_blocks_truth_kernel(self):
+        result = evaluate_event(_edit("app/core/truth_kernel.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # --- Blocked paths: outside allowlist, not locked ---
+
+    # test 24: blocks app/execution/order_router.py (outside allowlist)
+    def test_mlpsr_blocks_order_router(self):
+        result = evaluate_event(_edit("app/execution/order_router.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "main_loop_per_symbol_runtime_and_dispatch_landing_bundle_outside_allowlist" in result["reason"]
+
+    # test 25: blocks app/config.py (outside allowlist)
+    def test_mlpsr_blocks_config(self):
+        result = evaluate_event(_edit("app/config.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "main_loop_per_symbol_runtime_and_dispatch_landing_bundle_outside_allowlist" in result["reason"]
+
+    # test 26: blocks app/symbol_runtime.py (outside allowlist)
+    def test_mlpsr_blocks_symbol_runtime(self):
+        result = evaluate_event(_edit("app/symbol_runtime.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "main_loop_per_symbol_runtime_and_dispatch_landing_bundle_outside_allowlist" in result["reason"]
+
+    # test 27: blocks app/strategies/shadow_front.py (outside allowlist)
+    def test_mlpsr_blocks_shadow_front(self):
+        result = evaluate_event(_edit("app/strategies/shadow_front.py"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "main_loop_per_symbol_runtime_and_dispatch_landing_bundle_outside_allowlist" in result["reason"]
+
+    # --- Dangerous commands remain blocked ---
+
+    # test 28: live mode blocked
+    def test_mlpsr_live_mode_blocked(self):
+        result = evaluate_event(_bash("python main.py --live"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 29: --attack blocked
+    def test_mlpsr_attack_flag_blocked(self):
+        result = evaluate_event(_bash("python main.py --attack"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 30: override via shell blocked
+    def test_mlpsr_override_env_shell_blocked(self):
+        result = evaluate_event(
+            _bash("POVERTY_KILLER_OVERRIDE=true python main.py"),
+            _main_loop_per_symbol_env(),
+        )
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 31: git add . blocked
+    def test_mlpsr_git_add_dot_blocked(self):
+        result = evaluate_event(_bash("git add ."), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 32: git push --force blocked
+    def test_mlpsr_git_push_force_blocked(self):
+        result = evaluate_event(_bash("git push --force origin master"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 33: pip install blocked
+    def test_mlpsr_pip_install_blocked(self):
+        result = evaluate_event(_bash("pip install numpy"), _main_loop_per_symbol_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # --- Cross-packet isolation ---
+
+    # test 34: shans_curve.py still blocked under G0 (locked, no G0 exception)
+    def test_mlpsr_shans_curve_blocked_under_g0(self):
+        result = evaluate_event(_edit("app/brain/shans_curve.py"), _g0_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 35: decision_compiler.py blocked under WHALE_FLOW packet (locked, no exception)
+    def test_mlpsr_decision_compiler_blocked_under_whale_flow(self):
+        result = evaluate_event(_edit("app/core/decision_compiler.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 36: unknown packet typo blocked
+    def test_mlpsr_unknown_packet_typo_blocked(self):
+        result = evaluate_event(
+            _edit("app/main_loop.py"),
+            {"POVERTY_KILLER_PACKET": "MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE_TYPO"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet_or_unknown_packet" in result["reason"]

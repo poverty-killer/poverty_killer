@@ -53,7 +53,8 @@ class KrakenWebSocketClient:
         close_timeout: int = 5,
         reconnect_base_delay: float = 1.0,
         reconnect_max_delay: float = 30.0,
-        sentinel: Optional[Any] = None
+        sentinel: Optional[Any] = None,
+        on_health: Optional[Callable[[int, int], None]] = None
     ):
         """
         Initialize Kraken WebSocket client.
@@ -70,6 +71,7 @@ class KrakenWebSocketClient:
             reconnect_base_delay: Initial reconnect delay (seconds)
             reconnect_max_delay: Maximum reconnect delay (seconds)
             sentinel: SovereignSentinel instance for heartbeat monitoring
+            on_health: Optional callback for WebSocket health with (ping_ns, pong_ns)
         """
         self.symbols = symbols
         self.on_order_book = on_order_book
@@ -82,6 +84,7 @@ class KrakenWebSocketClient:
         self.reconnect_base_delay = reconnect_base_delay
         self.reconnect_max_delay = reconnect_max_delay
         self.sentinel = sentinel
+        self.on_health = on_health
         
         # Kraken WebSocket endpoint
         self.ws_url = "wss://ws.kraken.com/v2"
@@ -103,7 +106,16 @@ class KrakenWebSocketClient:
         
         # Message counters for sequence detection
         self._sequence_counters: Dict[str, int] = {}
-        
+
+        # Per-symbol accumulated order book state
+        self._book_bids_by_symbol: Dict[str, Dict[float, float]] = {}
+        self._book_asks_by_symbol: Dict[str, Dict[float, float]] = {}
+
+        # Monotonic timestamp tracking per symbol for Kraken delta stream emission.
+        # Raw exchange timestamps may arrive out of order or with coarse resolution;
+        # emitted internal snapshots must remain strictly monotonic per symbol.
+        self._last_emitted_ts_ns_by_symbol: Dict[str, int] = {}
+
         # Statistics
         self._messages_received = 0
         self._messages_rejected_no_timestamp = 0
@@ -135,6 +147,11 @@ class KrakenWebSocketClient:
             self._last_message_time_ns = now_ns()
             self._last_heartbeat_sent_ns = now_ns()
             
+            # Report initial connection health
+            if self.on_health:
+                current_ns = now_ns()
+                self.on_health(current_ns, current_ns)
+            
             # Send initial ping to Kraken
             await self._send_ping()
             
@@ -158,7 +175,9 @@ class KrakenWebSocketClient:
         """Disconnect WebSocket connection."""
         self._running = False
         self._connected = False
-        
+
+        self._last_emitted_ts_ns_by_symbol.clear()
+
         if self._websocket:
             try:
                 await self._websocket.close()
@@ -185,6 +204,7 @@ class KrakenWebSocketClient:
         """
         Heartbeat loop to monitor connection health.
         Sends pings every 30 seconds and checks for responses.
+        Does NOT report health via on_health to avoid false latency spikes.
         """
         while self._running and self._connected:
             try:
@@ -354,9 +374,14 @@ class KrakenWebSocketClient:
         try:
             data = json.loads(raw_message)
 
+            # Report health on every received message (any message proves connection alive)
+            if self.on_health:
+                self.on_health(receive_ts_ns, receive_ts_ns)
+
             # Check for heartbeat/pong response
             if data.get("method") == "pong":
                 logger.debug("Pong received")
+                # Explicit pong handling preserved (already reported above)
                 return
             
             # Check for subscription confirmation
@@ -506,30 +531,109 @@ class KrakenWebSocketClient:
                 if exchange_ts_ns is None:
                     continue
 
-                bids = []
-                asks = []
+                # Initialize per-symbol book state if not yet present
+                if symbol not in self._book_bids_by_symbol:
+                    self._book_bids_by_symbol[symbol] = {}
+                if symbol not in self._book_asks_by_symbol:
+                    self._book_asks_by_symbol[symbol] = {}
+                if symbol not in self._last_emitted_ts_ns_by_symbol:
+                    self._last_emitted_ts_ns_by_symbol[symbol] = 0
 
+                bid_map = self._book_bids_by_symbol[symbol]
+                ask_map = self._book_asks_by_symbol[symbol]
+
+                # Apply bid updates: qty <= 0 removes level, qty > 0 sets level
                 for bid in book_data.get("bids", []):
                     try:
-                        bids.append((float(bid.get("price", 0)), float(bid.get("qty", 0))))
+                        price_f = float(bid.get("price", 0))
+                        qty_f = float(bid.get("qty", 0))
+                        if price_f <= 0:
+                            continue
+                        if qty_f <= 0:
+                            bid_map.pop(price_f, None)
+                        else:
+                            bid_map[price_f] = qty_f
                     except Exception:
                         continue
 
+                # Apply ask updates: qty <= 0 removes level, qty > 0 sets level
                 for ask in book_data.get("asks", []):
                     try:
-                        asks.append((float(ask.get("price", 0)), float(ask.get("qty", 0))))
+                        price_f = float(ask.get("price", 0))
+                        qty_f = float(ask.get("qty", 0))
+                        if price_f <= 0:
+                            continue
+                        if qty_f <= 0:
+                            ask_map.pop(price_f, None)
+                        else:
+                            ask_map[price_f] = qty_f
                     except Exception:
                         continue
 
-                if not bids and not asks:
-                    logger.debug(f"Empty order book for {symbol} — skipping")
+                # Emit only when accumulated book has both sides
+                if not bid_map or not ask_map:
+                    logger.info(
+                        "[BOOK_DIAG] WAITING_FOR_TWO_SIDED_BOOK symbol=%s bids=%d asks=%d",
+                        symbol,
+                        len(bid_map),
+                        len(ask_map),
+                    )
                     continue
+
+                # Sort bids descending, asks ascending; cap at 50 levels
+                sorted_bids = sorted(bid_map.items(), key=lambda x: x[0], reverse=True)[:50]
+                sorted_asks = sorted(ask_map.items(), key=lambda x: x[0])[:50]
+
+                # Do not emit one-sided books. They are not valid internal market snapshots.
+                if not sorted_bids or not sorted_asks:
+                    if self._messages_processed % 100 == 0:
+                        logger.warning(
+                            "[BOOK_DIAG] ONE_SIDED_BOOK_PREVENTED symbol=%s bids=%d asks=%d",
+                            symbol,
+                            len(sorted_bids),
+                            len(sorted_asks),
+                        )
+                    continue
+
+                # Do not emit crossed or inverted books. Preserve accumulator state and
+                # wait for the next delta to restore a valid market view.
+                best_bid = sorted_bids[0][0]
+                best_ask = sorted_asks[0][0]
+                if best_bid >= best_ask:
+                    if self._messages_processed % 100 == 0:
+                        logger.warning(
+                            "[BOOK_DIAG] CROSSED_BOOK_PREVENTED symbol=%s best_bid=%.8f best_ask=%.8f spread=%.8f bids=%d asks=%d",
+                            symbol,
+                            best_bid,
+                            best_ask,
+                            best_ask - best_bid,
+                            len(sorted_bids),
+                            len(sorted_asks),
+                        )
+                    continue
+
+                # Enforce strictly monotonic internal snapshot timestamps per symbol.
+                # Preserve raw exchange_ts_ns in diagnostic logs; emit only effective_ts_ns.
+                last_emitted = self._last_emitted_ts_ns_by_symbol.get(symbol, 0)
+                effective_ts_ns = exchange_ts_ns or 0
+
+                if effective_ts_ns <= last_emitted:
+                    effective_ts_ns = last_emitted + 1
+                    logger.debug(
+                        "[BOOK_DIAG] TIMESTAMP_ADJUSTED symbol=%s raw_ts_ns=%d effective_ts_ns=%d diff_ns=%d",
+                        symbol,
+                        exchange_ts_ns or 0,
+                        effective_ts_ns,
+                        effective_ts_ns - (exchange_ts_ns or 0),
+                    )
+
+                self._last_emitted_ts_ns_by_symbol[symbol] = effective_ts_ns
 
                 snapshot = OrderBookSnapshot(
                     symbol=symbol,
-                    exchange_ts_ns=exchange_ts_ns,
-                    bids=bids[:50],
-                    asks=asks[:50]
+                    exchange_ts_ns=effective_ts_ns,
+                    bids=sorted_bids,
+                    asks=sorted_asks,
                 )
 
                 self._messages_processed += 1
@@ -732,7 +836,8 @@ def create_kraken_websocket(
     on_order_book: Optional[Callable] = None,
     on_trade: Optional[Callable] = None,
     on_candle: Optional[Callable] = None,
-    sentinel: Optional[Any] = None
+    sentinel: Optional[Any] = None,
+    on_health: Optional[Callable[[int, int], None]] = None
 ) -> KrakenWebSocketClient:
     """
     Factory function to create a configured Kraken WebSocket client.
@@ -743,6 +848,7 @@ def create_kraken_websocket(
         on_trade: Callback for trade updates
         on_candle: Callback for candle updates
         sentinel: SovereignSentinel instance for monitoring
+        on_health: Optional callback for WebSocket health with (ping_ns, pong_ns)
 
     Returns:
         Configured KrakenWebSocketClient
@@ -752,5 +858,6 @@ def create_kraken_websocket(
         on_order_book=on_order_book,
         on_trade=on_trade,
         on_candle=on_candle,
-        sentinel=sentinel
+        sentinel=sentinel,
+        on_health=on_health
     )

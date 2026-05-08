@@ -778,6 +778,21 @@ class ShansCurve:
         )
         return computation.signal
 
+    def is_ready(self) -> bool:
+        """
+        True when the ring buffer has accumulated enough samples for
+        update_order_book() to produce a valid signal.
+
+        Reflects the SAME internal gate (current_buffer_len < curvature_window)
+        that causes update_order_book() to return None after validator passes.
+        No logic duplicated — both reference self._p and self.curvature_window.
+
+        Pure: no side effects.
+        Deterministic: same buffer state always returns same result.
+        Derived from internal state only.
+        """
+        return len(self._p) >= self.curvature_window
+
     def get_last_computation(self) -> Optional[ShansCurveComputation]:
         """
         Return the canonical internal computation artifact for observability

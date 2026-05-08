@@ -862,6 +862,10 @@ class StrategyID(str, Enum):
     """Strategy identifiers for StrategyVote.strategy_id field."""
     SHADOW_FRONT = "shadow_front"
     LIQUIDITY_VOID = "liquidity_void"
+    GAMMA_FRONT = "gamma_front"
+    SECTOR_ROTATION = "sector_rotation"
+    ADAPTIVE_DC = "adaptive_dc"
+    MOVING_FLOOR = "moving_floor"
 
 
 class ResolutionType(str, Enum):

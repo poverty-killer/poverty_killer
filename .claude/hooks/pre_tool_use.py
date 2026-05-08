@@ -3,7 +3,7 @@
 G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
-- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE|UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE|SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE|WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH)
+- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE|UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE|SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE|WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH|MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE)
 - G0.6 Board Autopilot Law: GREEN safe commands approved automatically; RED/BLACK blocked
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
@@ -233,6 +233,38 @@ WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_LOCKED_ALLOWED_FILES = frozenset(
 )
 WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_ALLOWED_PREFIXES = ("tests/",)
 
+# MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE allowlist —
+# per-symbol runtime ownership + dispatch seam landing. Production patch surface:
+# main_loop.py, main.py, data/websocket_client.py, models/enums.py,
+# strategies/council_metadata.py, strategies/strategy_vote_adapters.py, and the
+# telemetry/ package files required for app.telemetry to be importable.
+# Locked authority exceptions: app/brain/shans_curve.py (isolated additive
+# is_ready() only) and app/core/decision_compiler.py (telemetry_store +
+# reserve_decision_uuid additions). No threshold / fusion / regime / risk /
+# execution / strategy authority changes.
+MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/main_loop.py",
+        "main.py",
+        "app/data/websocket_client.py",
+        "app/models/enums.py",
+        "app/strategies/council_metadata.py",
+        "app/strategies/strategy_vote_adapters.py",
+        "app/telemetry/__init__.py",
+        "app/telemetry/event_store.py",
+        "app/telemetry/decision_recorder.py",
+        "app/telemetry/feature_recorder.py",
+        "app/telemetry/fill_recorder.py",
+    ]
+)
+MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE_LOCKED_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/brain/shans_curve.py",
+        "app/core/decision_compiler.py",
+    ]
+)
+MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE_ALLOWED_PREFIXES = ("tests/",)
+
 
 # ---------------------------------------------------------------------------
 # Path normalization
@@ -439,6 +471,8 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
             return True, ""
         if packet == "WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH" and normalized_path in WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_LOCKED_ALLOWED_FILES:
             return True, ""
+        if packet == "MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE" and normalized_path in MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE_LOCKED_ALLOWED_FILES:
+            return True, ""
         return False, f"locked_authority_file_outside_packet_exception:{normalized_path}"
     if packet == "G0":
         if normalized_path in G0_ALLOWLIST:
@@ -508,6 +542,12 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_ALLOWED_PREFIXES):
             return True, ""
         return False, f"whale_flow_notional_normalization_patch_outside_allowlist:{normalized_path}"
+    if packet == "MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE":
+        if normalized_path in MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE_ALLOWED_FILES:
+            return True, ""
+        if any(normalized_path.startswith(pre) for pre in MAIN_LOOP_PER_SYMBOL_RUNTIME_AND_DISPATCH_LANDING_BUNDLE_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"main_loop_per_symbol_runtime_and_dispatch_landing_bundle_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 
