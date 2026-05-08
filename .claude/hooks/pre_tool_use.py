@@ -3,7 +3,7 @@
 G0 PreToolUse hook for POVERTY_KILLER Claude Terminal.
 
 Reads Claude Code hook JSON from stdin, decides allow/block based on:
-- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE|UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE|SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE)
+- packet-scoped allowlists (POVERTY_KILLER_PACKET=G0|F4A|F4B|F4C|STRATEGY_ADMISSION|EXECUTION_SR_DECIMAL|REGIME_AWARE_SR_ADMISSION|SECTOR_ROTATION_FRESH_OBSERVED_PAIR_PROOF_BUNDLE|PAPER_FILL_COMPLETION_PROOF_BUNDLE|UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE|SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE|WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH)
 - G0.6 Board Autopilot Law: GREEN safe commands approved automatically; RED/BLACK blocked
 - locked-authority file blocklist
 - override authorization (POVERTY_KILLER_OVERRIDE=true with valid REASON)
@@ -215,6 +215,24 @@ SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_ALLOWED_FILES = frozenset(
 )
 SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_ALLOWED_PREFIXES = ("tests/",)
 
+# WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH allowlist — surgical notional normalization fix.
+# Locked authority exception: app/brain/whale_flow_engine.py (formula change only).
+# Non-locked production files: app/symbol_runtime.py, app/main_loop.py.
+# No threshold changes, no config changes, no risk/execution/fusion/strategy authority.
+WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/symbol_runtime.py",
+        "app/main_loop.py",
+        "docs/execution_plan.md",
+    ]
+)
+WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_LOCKED_ALLOWED_FILES = frozenset(
+    p.lower() for p in [
+        "app/brain/whale_flow_engine.py",
+    ]
+)
+WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_ALLOWED_PREFIXES = ("tests/",)
+
 
 # ---------------------------------------------------------------------------
 # Path normalization
@@ -419,6 +437,8 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
             return True, ""
         if packet == "UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE" and normalized_path in UPSTREAM_DISPATCH_SIGNAL_SUBMISSION_PROOF_BUNDLE_LOCKED_ALLOWED_FILES:
             return True, ""
+        if packet == "WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH" and normalized_path in WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_LOCKED_ALLOWED_FILES:
+            return True, ""
         return False, f"locked_authority_file_outside_packet_exception:{normalized_path}"
     if packet == "G0":
         if normalized_path in G0_ALLOWLIST:
@@ -482,6 +502,12 @@ def packet_allows_path(packet: str, normalized_path: str) -> Tuple[bool, str]:
         if any(normalized_path.startswith(pre) for pre in SAME_CLOCK_SYNTHETIC_PAPER_WINDOW_HARNESS_BUNDLE_ALLOWED_PREFIXES):
             return True, ""
         return False, f"same_clock_synthetic_paper_window_harness_bundle_outside_allowlist:{normalized_path}"
+    if packet == "WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH":
+        if normalized_path in WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_ALLOWED_FILES:
+            return True, ""
+        if any(normalized_path.startswith(pre) for pre in WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_ALLOWED_PREFIXES):
+            return True, ""
+        return False, f"whale_flow_notional_normalization_patch_outside_allowlist:{normalized_path}"
     return False, f"no_active_packet_or_unknown_packet:{packet!r}"
 
 

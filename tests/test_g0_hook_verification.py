@@ -1445,3 +1445,199 @@ class TestSameClockSyntheticPaperWindowHarnessBundle:
         result = evaluate_event(_edit("docs/current_status.md"), _same_clock_env())
         assert result["decision"] == "block"
         assert "same_clock_synthetic_paper_window_harness_bundle_outside_allowlist" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH — G0.9 packet registration
+# ---------------------------------------------------------------------------
+# Audit proved: avg_trade_size is crypto asset units; divisor 100_000.0 assumes
+# USD notional; price is available at the call site but not passed through.
+# Correct formula: avg_trade_size * price / 100_000.0.
+# Patch surface: whale_flow_engine.py (locked exception), symbol_runtime.py,
+# main_loop.py. No threshold changes, no risk/fusion/strategy authority changes.
+
+def _whale_notional_env() -> Dict[str, str]:
+    return {"POVERTY_KILLER_PACKET": "WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH"}
+
+
+class TestWhaleFlowNotionalNormalizationPatch:
+    # --- Allowed paths ---
+
+    # test 1: allows app/brain/whale_flow_engine.py (locked authority, packet-scoped exception)
+    def test_wfnn_allows_whale_flow_engine_locked_exception(self):
+        result = evaluate_event(_edit("app/brain/whale_flow_engine.py"), _whale_notional_env())
+        assert result["decision"] == "approve"
+
+    # test 2: write allowed for whale_flow_engine.py
+    def test_wfnn_write_allowed_whale_flow_engine(self):
+        result = evaluate_event(_write("app/brain/whale_flow_engine.py"), _whale_notional_env())
+        assert result["decision"] == "approve"
+
+    # test 3: allows app/symbol_runtime.py
+    def test_wfnn_allows_symbol_runtime(self):
+        result = evaluate_event(_edit("app/symbol_runtime.py"), _whale_notional_env())
+        assert result["decision"] == "approve"
+
+    # test 4: allows app/main_loop.py
+    def test_wfnn_allows_main_loop(self):
+        result = evaluate_event(_edit("app/main_loop.py"), _whale_notional_env())
+        assert result["decision"] == "approve"
+
+    # test 5: allows tests/ prefix
+    def test_wfnn_allows_tests_prefix(self):
+        result = evaluate_event(
+            _edit("tests/test_whale_notional_normalization.py"),
+            _whale_notional_env(),
+        )
+        assert result["decision"] == "approve"
+
+    # test 6: allows docs/execution_plan.md (optional status recording)
+    def test_wfnn_allows_execution_plan_doc(self):
+        result = evaluate_event(_edit("docs/execution_plan.md"), _whale_notional_env())
+        assert result["decision"] == "approve"
+
+    # --- Blocked paths: locked authority files NOT in packet exception ---
+
+    # test 7: blocks app/brain/signal_fusion.py (locked, no exception)
+    def test_wfnn_blocks_signal_fusion(self):
+        result = evaluate_event(_edit("app/brain/signal_fusion.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 8: blocks app/risk/guard.py (locked authority)
+    def test_wfnn_blocks_risk_guard(self):
+        result = evaluate_event(_edit("app/risk/guard.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 9: blocks app/execution/engine.py (locked authority)
+    def test_wfnn_blocks_execution_engine(self):
+        result = evaluate_event(_edit("app/execution/engine.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 10: blocks app/core/decision_compiler.py (locked authority)
+    def test_wfnn_blocks_decision_compiler(self):
+        result = evaluate_event(_edit("app/core/decision_compiler.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 11: blocks app/brain/regime_detector.py (locked authority)
+    def test_wfnn_blocks_regime_detector(self):
+        result = evaluate_event(_edit("app/brain/regime_detector.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 12: blocks app/brain/shans_curve.py (locked authority)
+    def test_wfnn_blocks_shans_curve(self):
+        result = evaluate_event(_edit("app/brain/shans_curve.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # --- Blocked paths: outside allowlist, not locked ---
+
+    # test 13: blocks app/strategies/shadow_front.py
+    def test_wfnn_blocks_shadow_front(self):
+        result = evaluate_event(_edit("app/strategies/shadow_front.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "whale_flow_notional_normalization_patch_outside_allowlist" in result["reason"]
+
+    # test 14: blocks app/config.py
+    def test_wfnn_blocks_config(self):
+        result = evaluate_event(_edit("app/config.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "whale_flow_notional_normalization_patch_outside_allowlist" in result["reason"]
+
+    # test 15: blocks main.py
+    def test_wfnn_blocks_main_py(self):
+        result = evaluate_event(_edit("main.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "whale_flow_notional_normalization_patch_outside_allowlist" in result["reason"]
+
+    # test 16: blocks .claude/hooks/pre_tool_use.py
+    def test_wfnn_blocks_hook_edit(self):
+        result = evaluate_event(_edit(".claude/hooks/pre_tool_use.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "whale_flow_notional_normalization_patch_outside_allowlist" in result["reason"]
+
+    # test 17: blocks state/risk_state.json
+    def test_wfnn_blocks_state_risk_state_json(self):
+        result = evaluate_event(_edit("state/risk_state.json"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "whale_flow_notional_normalization_patch_outside_allowlist" in result["reason"]
+
+    # test 18: blocks app/execution/order_router.py
+    def test_wfnn_blocks_order_router(self):
+        result = evaluate_event(_edit("app/execution/order_router.py"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "whale_flow_notional_normalization_patch_outside_allowlist" in result["reason"]
+
+    # --- Dangerous commands remain blocked ---
+
+    # test 19: live mode blocked
+    def test_wfnn_live_mode_blocked(self):
+        result = evaluate_event(_bash("python main.py --live"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 20: --attack blocked
+    def test_wfnn_attack_flag_blocked(self):
+        result = evaluate_event(_bash("python main.py --attack"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 21: override via shell blocked
+    def test_wfnn_override_env_shell_blocked(self):
+        result = evaluate_event(
+            _bash("POVERTY_KILLER_OVERRIDE=true python main.py"),
+            _whale_notional_env(),
+        )
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 22: git add . blocked
+    def test_wfnn_git_add_dot_blocked(self):
+        result = evaluate_event(_bash("git add ."), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 23: git add -A blocked
+    def test_wfnn_git_add_all_blocked(self):
+        result = evaluate_event(_bash("git add -A"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 24: git push --force blocked
+    def test_wfnn_git_push_force_blocked(self):
+        result = evaluate_event(_bash("git push --force origin master"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # test 25: pip install blocked
+    def test_wfnn_pip_install_blocked(self):
+        result = evaluate_event(_bash("pip install numpy"), _whale_notional_env())
+        assert result["decision"] == "block"
+        assert "dangerous_bash" in result["reason"]
+
+    # --- Cross-packet isolation ---
+
+    # test 26: whale_flow_engine.py still blocked under G0 (locked, no G0 exception)
+    def test_wfnn_whale_flow_engine_blocked_under_g0(self):
+        result = evaluate_event(_edit("app/brain/whale_flow_engine.py"), _g0_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 27: whale_flow_engine.py blocked under F4A (locked, no F4A exception)
+    def test_wfnn_whale_flow_engine_blocked_under_f4a(self):
+        result = evaluate_event(_edit("app/brain/whale_flow_engine.py"), _f4a_env())
+        assert result["decision"] == "block"
+        assert "locked_authority_file" in result["reason"]
+
+    # test 28: unknown packet name typo blocked (use non-locked path to hit unknown-packet reason)
+    def test_wfnn_unknown_packet_typo_blocked(self):
+        result = evaluate_event(
+            _edit("app/main_loop.py"),
+            {"POVERTY_KILLER_PACKET": "WHALE_FLOW_NOTIONAL_NORMALIZATION_PATCH_TYPO"},
+        )
+        assert result["decision"] == "block"
+        assert "no_active_packet_or_unknown_packet" in result["reason"]
