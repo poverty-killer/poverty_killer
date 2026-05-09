@@ -1,4 +1,4 @@
-﻿"""
+"""
 app/brain/signal_fusion.py
 
 POVERTY_KILLER Supreme Board Implementation
@@ -50,6 +50,16 @@ from app.models.enums import RegimeType, SleeveType
 from app.brain.toxicity_engine import ToxicityRegime
 
 logger = logging.getLogger(__name__)
+
+MISSING_PENALTY_PER_MISS = 0.95   # 5% reduction per missing/stale non-critical input
+MISSING_PENALTY_FLOOR = 0.75      # do not penalize below 75%
+
+# Backward-compatible export expected by callers/tests
+MISSING_PENALTY_FACTOR: float = MISSING_PENALTY_FLOOR
+# Backward-compatibility aliases for legacy callers/tests
+missing_penalty_factor: float = MISSING_PENALTY_FACTOR
+MISSING_DATA_PENALTY: float = MISSING_PENALTY_FACTOR
+MISSING_DATA_PENALTY_FACTOR: float = MISSING_PENALTY_FACTOR
 
 
 # =========================================================================
@@ -277,21 +287,54 @@ class SignalFusion:
         """
         self._telemetry.clear()
         self._telemetry["execution_ts"] = current_ts_ns
+        self._telemetry["missing_inputs"] = []
+        self._telemetry["missing_penalty_factor"] = 1.0
+        missing_penalty_factor: float = MISSING_PENALTY_FACTOR  # default; refined after non-critical staleness scan
+        self._telemetry["missing_penalty_factor"] = missing_penalty_factor
 
         # ---------------------------------------------------------
-        # PHASE 1: TEMPORAL VETO (Staleness Enforcement)
+        # PHASE 1: TEMPORAL SAFETY GATE (Critical-Only Staleness Enforcement)
         # ---------------------------------------------------------
-        for sig, ttl in self._ttl_ns.items():
+        critical_signals = ("physical", "toxicity")
+        noncritical_signals = ("whale_flow", "shans_curve", "entropy", "insider", "regime")
+
+        missing_or_stale_noncrit: Dict[str, bool] = {}
+        # Enforce presence and freshness only for critical signals
+        for sig in critical_signals:
+            ttl = self._ttl_ns[sig]
             if sig not in self._cache:
-                logger.info("[FUSION_DIAG] Missing signal: %s → veto", sig)
-                return self._issue_hard_veto(current_ts_ns, f"Missing requisite signal [{sig}]")
-            
+                logger.info("[FUSION_DIAG] Missing CRITICAL signal: %s → veto", sig)
+                return self._issue_hard_veto(current_ts_ns, f"Missing critical signal [{sig}]")
             _, ts = self._cache[sig]
             age_ns = current_ts_ns - ts
             if age_ns > ttl:
-                logger.info("[FUSION_DIAG] Stale signal: %s age=%.1fs ttl=%.1fs → veto", 
-                           sig, age_ns/1e9, ttl/1e9)
-                return self._issue_hard_veto(current_ts_ns, f"Stale signal [{sig}] (Age: {age_ns / 1e9:.2f}s)")
+                logger.info("[FUSION_DIAG] Stale CRITICAL signal: %s age=%.1fs ttl=%.1fs → veto",
+                            sig, age_ns/1e9, ttl/1e9)
+                return self._issue_hard_veto(current_ts_ns, f"Stale critical signal [{sig}] (Age: {age_ns/1e9:.2f}s)")
+
+        # Record missing/stale for non-critical signals but do not veto
+        for sig in noncritical_signals:
+            ttl = self._ttl_ns[sig]
+            st = self._cache.get(sig)
+            if st is None:
+                missing_or_stale_noncrit[sig] = True
+                logger.info("[FUSION_DIAG] Missing non-critical signal: %s → neutral default with penalty", sig)
+                continue
+            _, ts = st
+            age_ns = current_ts_ns - ts
+            if age_ns > ttl:
+                missing_or_stale_noncrit[sig] = True
+                logger.info("[FUSION_DIAG] Stale non-critical signal: %s age=%.1fs ttl=%.1fs → neutral default with penalty",
+                            sig, age_ns/1e9, ttl/1e9)
+            else:
+                missing_or_stale_noncrit[sig] = False
+
+        self._telemetry["missing_inputs"] = [k for k, v in missing_or_stale_noncrit.items() if v]
+
+        missing_count = len(self._telemetry.get("missing_inputs", []))
+        missing_penalty_factor = max(MISSING_PENALTY_FLOOR, 1.0 - (0.05 * missing_count))
+
+        # Update telemetry with missing penalty factor
 
         # ---------------------------------------------------------
         # PHASE 2: STRICT CONTRACT EXTRACTION
@@ -302,10 +345,13 @@ class SignalFusion:
         tox_score = float(tox_payload.toxicity_score)
         tox_is_toxic = bool(tox_payload.regime.value >= ToxicityRegime.TOXIC.value)
         
-        # EntropyScore
-        ent_payload, _ = self._cache["entropy"]
-        ent_score = float(ent_payload.entropy)
-        
+        # EntropyScore (neutral default when missing/stale)
+        if missing_or_stale_noncrit.get("entropy", True):
+            ent_score = 0.45
+        else:
+            ent_payload, _ = self._cache["entropy"]
+            ent_score = float(ent_payload.entropy)
+
         # Kinematic Tracking
         self._state.update_kinematics(ent_score, tox_score, current_ts_ns)
         self._telemetry["entropy_velocity"] = self._state.entropy_velocity
@@ -316,59 +362,76 @@ class SignalFusion:
         phys_score = float(phys_dict.get("health_score", 0.0))
         
         # ==========================================================
-        # WHALE FLOW — STRICT CONTRACT VALIDATION
+        # WHALE FLOW — STRICT CONTRACT VALIDATION (neutral defaults allowed)
         # ==========================================================
-        # SignalFusion requires a WhaleFlowAlert-like payload here.
-        # Raw market-data objects such as Candle must never enter this channel.
-        whale_payload, whale_ts = self._cache["whale_flow"]
-
-        if not hasattr(whale_payload, "direction") or not hasattr(whale_payload, "confidence"):
-            logger.error(
-                "[FUSION_ERROR] INVALID_WHALE_PAYLOAD type=%s missing required fields direction/confidence",
-                type(whale_payload).__name__,
-            )
-            return self._issue_hard_veto(current_ts_ns, "Invalid Whale Payload Type")
-
-        try:
-            whale_dir = int(whale_payload.direction.value)
-            whale_conf_raw = float(whale_payload.confidence)
-        except Exception as exc:
-            logger.error(
-                "[FUSION_ERROR] WHALE_PAYLOAD_PARSE_FAILED type=%s error=%s",
-                type(whale_payload).__name__,
-                str(exc),
-            )
-            return self._issue_hard_veto(current_ts_ns, "Corrupted Whale Payload")
-        
-        whale_age = current_ts_ns - whale_ts
-        whale_discount = QuantMath.temporal_discount(whale_age, self._half_life_ns["whale_flow"])
-        whale_conf_decayed = whale_conf_raw * whale_discount
-        
-        # ShansCurveSignal
-        shans_payload, shans_ts = self._cache["shans_curve"]
-        shans_superfluid = float(shans_payload.shans_superfluid_score)
-        shans_bias_raw = float(shans_payload.shans_bias)
-        shans_conf_raw = float(shans_payload.shans_confidence)
-        
-        shans_age = current_ts_ns - shans_ts
-        shans_discount = QuantMath.temporal_discount(shans_age, self._half_life_ns["shans_curve"])
-        shans_conf_decayed = shans_conf_raw * shans_discount
-        shans_bias_str = self._bridge_shans_bias(shans_bias_raw)
-        
-        # InsiderSignalSnapshot (Gated extraction)
-        insider_payload, insider_ts = self._cache["insider"]
-        if bool(insider_payload.active) and not bool(insider_payload.invalidated):
-            insider_urgency_raw = float(insider_payload.urgency) 
+        whale_missing = missing_or_stale_noncrit.get("whale_flow", True)
+        if whale_missing:
+            whale_dir = 0
+            whale_conf_raw = 0.0
+            whale_ts = current_ts_ns
+            whale_conf_decayed = 0.0
         else:
+            whale_payload, whale_ts = self._cache["whale_flow"]
+            if not hasattr(whale_payload, "direction") or not hasattr(whale_payload, "confidence"):
+                logger.error(
+                    "[FUSION_ERROR] INVALID_WHALE_PAYLOAD type=%s missing required fields direction/confidence → veto",
+                    type(whale_payload).__name__,
+                )
+                return self._issue_hard_veto(current_ts_ns, "Invalid Whale Payload Type")
+            try:
+                whale_dir = int(whale_payload.direction.value)
+                whale_conf_raw = float(whale_payload.confidence)
+            except Exception as exc:
+                logger.error(
+                    "[FUSION_ERROR] WHALE_PAYLOAD_PARSE_FAILED type=%s error=%s → veto",
+                    type(whale_payload).__name__,
+                    str(exc),
+                )
+                return self._issue_hard_veto(current_ts_ns, "Corrupted Whale Payload")
+            whale_age = current_ts_ns - whale_ts
+            whale_discount = QuantMath.temporal_discount(whale_age, self._half_life_ns["whale_flow"])
+            whale_conf_decayed = whale_conf_raw * whale_discount
+
+        # ShansCurveSignal (neutral defaults when missing/stale)
+        shans_missing = missing_or_stale_noncrit.get("shans_curve", True)
+        if shans_missing:
+            shans_superfluid = 0.0
+            shans_bias_raw = 0.0
+            shans_conf_decayed = 0.0
+            shans_bias_str = self._bridge_shans_bias(shans_bias_raw)
+        else:
+            shans_payload, shans_ts = self._cache["shans_curve"]
+            shans_superfluid = float(shans_payload.shans_superfluid_score)
+            shans_bias_raw = float(shans_payload.shans_bias)
+            shans_conf_raw = float(shans_payload.shans_confidence)
+            shans_age = current_ts_ns - shans_ts
+            shans_discount = QuantMath.temporal_discount(shans_age, self._half_life_ns["shans_curve"])
+            shans_conf_decayed = shans_conf_raw * shans_discount
+            shans_bias_str = self._bridge_shans_bias(shans_bias_raw)
+        
+        # InsiderSignalSnapshot (neutral default when missing/stale)
+        insider_missing = missing_or_stale_noncrit.get("insider", True)
+        if insider_missing:
             insider_urgency_raw = 0.0
-            
+            insider_ts = current_ts_ns
+        else:
+            insider_payload, insider_ts = self._cache["insider"]
+            if bool(insider_payload.active) and not bool(insider_payload.invalidated):
+                insider_urgency_raw = float(insider_payload.urgency)
+            else:
+                insider_urgency_raw = 0.0
         insider_age = current_ts_ns - insider_ts
         insider_urgency = insider_urgency_raw * QuantMath.temporal_discount(insider_age, self._half_life_ns["insider"])
-        
-        # RegimeDetector (Returns exactly Tuple[RegimeType, float])
-        regime_payload, _ = self._cache["regime"]
-        regime_type = regime_payload[0]
-        regime_confidence = regime_payload[1]
+
+        # RegimeDetector (neutral default when missing/stale)
+        regime_missing = missing_or_stale_noncrit.get("regime", True)
+        if regime_missing:
+            regime_type = RegimeType.RANGING
+            regime_confidence = 0.0
+        else:
+            regime_payload, _ = self._cache["regime"]
+            regime_type = regime_payload[0]
+            regime_confidence = regime_payload[1]
 
         # DIAGNOSTIC: Log key input values before veto checks
         logger.info(
@@ -382,8 +445,7 @@ class SignalFusion:
         # PHASE 3: CRITICAL HAZARD GATING (Absolute Boundaries)
         # ---------------------------------------------------------
         if whale_dir == 0:
-            logger.info("[FUSION_DIAG] veto: whale_dir=0 (NEUTRAL)")
-            return self._issue_hard_veto(current_ts_ns, "Whale Vector Neutral")
+            logger.info("[FUSION_DIAG] whale_dir=0 (NEUTRAL) → continuing with neutral whale contribution")
             
         if tox_is_toxic or tox_score >= 0.88:
             logger.info("[FUSION_DIAG] veto: tox_is_toxic=%s or tox_score=%.3f >= 0.88", tox_is_toxic, tox_score)
@@ -412,9 +474,11 @@ class SignalFusion:
         is_resonant = resonance > 0.10
         is_dissonant = resonance < -0.20
 
+        # Dissonance now applies a confidence penalty instead of hard veto
+        dissonance_penalty = 0.85 if is_dissonant else 1.0
         if is_dissonant:
-            logger.info("[FUSION_DIAG] veto: resonance=%.3f < -0.20 (dissonant)", resonance)
-            return self._issue_hard_veto(current_ts_ns, f"Vector Dissonance (Resonance: {resonance:.2f})")
+            logger.info("[FUSION_DIAG] penalty: resonance=%.3f < -0.20 (dissonant) dissonance_penalty=%.2f",
+                        resonance, dissonance_penalty)
 
         # Base Alpha Synthesis
         base_conviction = (whale_conf_decayed * 0.40) + (shans_conf_decayed * 0.35) + (phys_score * 0.25)
@@ -437,16 +501,26 @@ class SignalFusion:
         resonance_bonus = 1.15 if is_resonant else 1.0
 
         # Kelly removed from Fusion — PositionSizing is the downstream Kelly sizing authority.
-        pre_kelly_value = base_conviction * tox_multiplier * ent_multiplier * resonance_bonus
+        pre_kelly_value = (
+            base_conviction
+            * tox_multiplier
+            * ent_multiplier
+            * resonance_bonus
+            * dissonance_penalty
+            * missing_penalty_factor
+        )
         final_confidence = max(0.0, min(1.0, pre_kelly_value))
 
         self._telemetry["base_conviction"] = base_conviction
+        self._telemetry["base_confidence"] = base_conviction
         self._telemetry["tox_score"] = tox_score
         self._telemetry["tox_multiplier"] = tox_multiplier
         self._telemetry["dynamic_entropy"] = dynamic_entropy
         self._telemetry["ent_multiplier"] = ent_multiplier
         self._telemetry["entropy_neutralized"] = entropy_neutralized
         self._telemetry["resonance_bonus"] = resonance_bonus
+        self._telemetry["dissonance_penalty"] = dissonance_penalty
+        self._telemetry["missing_penalty_factor"] = missing_penalty_factor
         self._telemetry["pre_kelly_value"] = pre_kelly_value
         self._telemetry["kelly_removed_from_fusion"] = True
         self._telemetry["final_confidence"] = final_confidence
