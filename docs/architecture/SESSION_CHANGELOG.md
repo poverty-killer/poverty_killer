@@ -1,5 +1,24 @@
 # POVERTY_KILLER Session Changelog
 
+## 2026-05-10 - Bundle 1 Decision UUID Order Telemetry Seam
+
+Commit:
+- ccd54bb - Thread decision UUID through order telemetry path
+
+Summary:
+- Added typed optional decision_uuid to OrderRequest.
+- ExecutionEngine now carries decision_uuid into OrderRequest.
+- OrderRouter now emits fill/rejection telemetry only when decision_uuid is present.
+- MainLoop stamps compiled decision_uuid into signal metadata before execution submit.
+- No risk, strategy threshold, live-mode, or world-awareness activation changes.
+- Targeted verification passed: 41 tests.
+- Full collect-only passed: 718 tests collected.
+
+Board classification:
+- First Bundle 1 runtime contract seam closed.
+- decision_uuid propagation gap is closed for order telemetry path.
+- Remaining Bundle 1 work: broader OrderIntent/OrderRequest and FillEvent/OrderFill contract reconciliation.
+
 ## 2026-05-10 - Bundle 0B Evidence Collection Seam
 
 Commits:

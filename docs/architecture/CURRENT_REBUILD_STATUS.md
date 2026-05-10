@@ -3,6 +3,7 @@
 ## Latest Pushed Master
 
 Latest pushed master:
+- ccd54bb - Thread decision UUID through order telemetry path
 - 1fb2441 - Register world awareness pre-integration package
 - ff5d0c7 - Fix collection syntax in legacy tests
 - 868aa7b - Add architecture context spine
@@ -47,6 +48,21 @@ High-authority active modules:
 - app/telemetry/fill_recorder.py
 
 ## Accepted Recent Packets
+
+### Bundle 1 - Decision UUID Order Telemetry Seam
+
+Status:
+- PUSHED / CLOSED
+
+Commit:
+- ccd54bb - Thread decision UUID through order telemetry path
+
+Accepted outcome:
+- decision_uuid now threads from decision context into OrderRequest and order telemetry.
+- Fill/rejection telemetry no longer relies on untyped getattr(order, "decision_uuid", None).
+- Targeted tests passed: 41.
+- Full collect-only passed: 718 tests collected.
+- No live mode, risk weakening, strategy threshold change, or world-awareness activation.
 
 ### Bundle 0B - Evidence Collection Seam
 
