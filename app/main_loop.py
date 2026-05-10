@@ -1074,6 +1074,11 @@ class MainLoop:
             getattr(decision_record, 'decision_type', '<missing>'),
         )
 
+        decision_uuid = getattr(decision_record, "decision_uuid", None)
+        signal_metadata = getattr(signal, "metadata", None)
+        if decision_uuid and isinstance(signal_metadata, dict):
+            signal_metadata.setdefault("decision_uuid", decision_uuid)
+
         submitted = self.execution_engine.submit_signal(
             signal=signal,
             current_price=runtime.last_price,

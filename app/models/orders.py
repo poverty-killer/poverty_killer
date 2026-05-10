@@ -53,6 +53,7 @@ class OrderRequest(BaseModel):
     - limit_price: Required for LIMIT and POST_ONLY orders (Decimal)
     - strategy: SleeveType enum (canonical sleeve identity)
     - confidence: Signal confidence (0-1)
+    - decision_uuid: Optional decision ID for telemetry causality
     - exchange_ts_ns: Authoritative exchange timestamp (REQUIRED, no default)
     - receive_ts_ns: Local receive timestamp for monitoring (REQUIRED, no default)
     - metadata: Additional context
@@ -68,6 +69,7 @@ class OrderRequest(BaseModel):
     limit_price: Optional[Decimal] = None
     strategy: SleeveType
     confidence: float = Field(ge=0.0, le=1.0)
+    decision_uuid: Optional[str] = None
     exchange_ts_ns: int  # REQUIRED — no default
     receive_ts_ns: int   # REQUIRED — monitoring/telemetry only
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -76,6 +78,13 @@ class OrderRequest(BaseModel):
     @classmethod
     def validate_required_strings(cls, v, info):
         return _require_non_blank(v, info.field_name)
+
+    @field_validator("decision_uuid", mode="before")
+    @classmethod
+    def validate_optional_decision_uuid(cls, v):
+        if v is None:
+            return v
+        return _require_non_blank(v, "decision_uuid")
     
     @field_validator("quantity", mode="before")
     @classmethod

@@ -76,6 +76,7 @@ class QueuedSignal:
     enqueue_time_ns: int
     enqueue_price: Decimal
     enqueue_regime: str
+    decision_uuid: Optional[str] = None
 
 
 class ExecutionEngine:
@@ -202,7 +203,13 @@ class ExecutionEngine:
         with self._lock:
             self._state.last_regime = regime
 
-    def submit_signal(self, signal: StrategySignal, current_price: Decimal, is_attack: bool) -> bool:
+    def submit_signal(
+        self,
+        signal: StrategySignal,
+        current_price: Decimal,
+        is_attack: bool,
+        decision_uuid: Optional[str] = None,
+    ) -> bool:
         """
         Submit a trading signal for execution.
 
@@ -235,8 +242,15 @@ class ExecutionEngine:
         if expected_net_profit < Decimal("0.005"):
             return False
 
+        resolved_decision_uuid = decision_uuid
+        if resolved_decision_uuid is None and isinstance(signal.metadata, dict):
+            candidate = signal.metadata.get("decision_uuid")
+            if isinstance(candidate, str) and candidate.strip():
+                resolved_decision_uuid = candidate.strip()
+
         queued_signal = QueuedSignal(
             signal=signal,
+            decision_uuid=resolved_decision_uuid,
             is_attack=is_attack,
             enqueue_time_ns=current_ns,
             enqueue_price=current_price if isinstance(current_price, Decimal) else Decimal(str(current_price)),
@@ -361,6 +375,7 @@ class ExecutionEngine:
             confidence=signal.confidence,
             exchange_ts_ns=signal.exchange_ts_ns,
             receive_ts_ns=current_ns,
+            decision_uuid=queued.decision_uuid,
             metadata={
                 "original_size": signal.quantity,
                 "masked_size": masked.masked_size,

@@ -179,6 +179,53 @@ class OrderRouter:
         self._session = requests.Session()
         self._lock = threading.Lock()
 
+    def _record_fill_telemetry(
+        self,
+        order: OrderRequest,
+        fill: OrderFill,
+        *,
+        venue_fill_id: str,
+    ) -> None:
+        if not self._fill_recorder:
+            return
+        if not order.decision_uuid:
+            logger.warning("Skipping fill telemetry for order %s: missing decision_uuid", order.id)
+            return
+
+        from decimal import Decimal
+        from app.models.contracts import FillEvent
+
+        fill_event = FillEvent(
+            fill_event_id=f"fill_{order.id}_{fill.exchange_ts_ns}",
+            execution_event_id=order.id,
+            order_intent_id=order.id,
+            decision_uuid=order.decision_uuid,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=Decimal(str(fill.quantity)),
+            price=Decimal(str(fill.price)),
+            fee=Decimal(str(fill.fee)),
+            fee_currency=fill.fee_currency,
+            venue_fill_id=venue_fill_id,
+            exchange_ts_ns=fill.exchange_ts_ns,
+            receive_ts_ns=fill.receive_ts_ns,
+        )
+        self._fill_recorder.record_fill(fill_event)
+
+    def _record_rejection_telemetry(self, order: OrderRequest, reason: str) -> None:
+        if not self._fill_recorder:
+            return
+        if not order.decision_uuid:
+            logger.warning("Skipping rejection telemetry for order %s: missing decision_uuid", order.id)
+            return
+
+        self._fill_recorder.record_rejection(
+            client_order_id=order.id,
+            decision_uuid=order.decision_uuid,
+            reason=reason,
+            reject_ts_ns=now_ns(),
+        )
+
     # ============================================
     # WEBSOCKET HEALTH MONITORING
     # ============================================
@@ -783,27 +830,7 @@ class OrderRouter:
         )
 
         # BUNDLE F1: Record fill to telemetry
-        if self._fill_recorder:
-            from decimal import Decimal
-            from app.models.contracts import FillEvent
-            from app.models.enums import OrderSide as CanonicalOrderSide
-            
-            fill_event = FillEvent(
-                fill_event_id=f"fill_{order.id}_{exchange_fill_ts_ns}",
-                execution_event_id=order.id,
-                order_intent_id=order.id,
-                decision_uuid=getattr(order, "decision_uuid", None),
-                symbol=order.symbol,
-                side=order.side,
-                quantity=Decimal(str(status.filled_quantity)),
-                price=Decimal(str(status.filled_price)),
-                fee=Decimal(str(fill_fee)),
-                fee_currency=fee_currency,
-                venue_fill_id=order.id,
-                exchange_ts_ns=exchange_fill_ts_ns,
-                receive_ts_ns=receive_ns,
-            )
-            self._fill_recorder.record_fill(fill_event)
+        self._record_fill_telemetry(order, fill, venue_fill_id=order.id)
 
         return fill
 
@@ -832,13 +859,7 @@ class OrderRouter:
                 if result.get("error"):
                     logger.error("Kraken order error: %s", result["error"])
                     # BUNDLE F1: Record rejection
-                    if self._fill_recorder:
-                        self._fill_recorder.record_rejection(
-                            client_order_id=order.id,
-                            decision_uuid=getattr(order, "decision_uuid", None),
-                            reason=f"Kraken error: {result['error']}",
-                            reject_ts_ns=now_ns()
-                        )
+                    self._record_rejection_telemetry(order, f"Kraken error: {result['error']}")
                     return None
 
                 txid = result.get("result", {}).get("txid", [])
@@ -852,24 +873,12 @@ class OrderRouter:
 
             logger.error("Kraken order failed: %s", response.status_code)
             # BUNDLE F1: Record rejection
-            if self._fill_recorder:
-                self._fill_recorder.record_rejection(
-                    client_order_id=order.id,
-                    decision_uuid=getattr(order, "decision_uuid", None),
-                    reason=f"Kraken HTTP {response.status_code}",
-                    reject_ts_ns=now_ns()
-                )
+            self._record_rejection_telemetry(order, f"Kraken HTTP {response.status_code}")
             return None
         except Exception as e:
             logger.error("Kraken order exception: %s", e)
             # BUNDLE F1: Record rejection
-            if self._fill_recorder:
-                self._fill_recorder.record_rejection(
-                    client_order_id=order.id,
-                    decision_uuid=getattr(order, "decision_uuid", None),
-                    reason=f"Kraken exception: {str(e)}",
-                    reject_ts_ns=now_ns()
-                )
+            self._record_rejection_telemetry(order, f"Kraken exception: {str(e)}")
             return None
 
     def _submit_order_alpaca(self, order: OrderRequest) -> Optional[OrderFill]:
@@ -903,24 +912,12 @@ class OrderRouter:
 
             logger.error("Alpaca order failed: %s - %s", response.status_code, response.text)
             # BUNDLE F1: Record rejection
-            if self._fill_recorder:
-                self._fill_recorder.record_rejection(
-                    client_order_id=order.id,
-                    decision_uuid=getattr(order, "decision_uuid", None),
-                    reason=f"Alpaca HTTP {response.status_code}: {response.text[:200]}",
-                    reject_ts_ns=now_ns()
-                )
+            self._record_rejection_telemetry(order, f"Alpaca HTTP {response.status_code}: {response.text[:200]}")
             return None
         except Exception as e:
             logger.error("Alpaca order exception: %s", e)
             # BUNDLE F1: Record rejection
-            if self._fill_recorder:
-                self._fill_recorder.record_rejection(
-                    client_order_id=order.id,
-                    decision_uuid=getattr(order, "decision_uuid", None),
-                    reason=f"Alpaca exception: {str(e)}",
-                    reject_ts_ns=now_ns()
-                )
+            self._record_rejection_telemetry(order, f"Alpaca exception: {str(e)}")
             return None
 
     def _submit_order_rest(self, order: OrderRequest) -> Optional[OrderFill]:
@@ -973,25 +970,7 @@ class OrderRouter:
                         latency_ms=self.measure_latency(),
                     )
                     # BUNDLE F1: Record fill to telemetry
-                    if self._fill_recorder:
-                        from decimal import Decimal
-                        from app.models.contracts import FillEvent
-                        fill_event = FillEvent(
-                            fill_event_id=f"fill_{order.id}_{ts_ns}",
-                            execution_event_id=order.id,
-                            order_intent_id=order.id,
-                            decision_uuid=getattr(order, "decision_uuid", None),
-                            symbol=order.symbol,
-                            side=order.side,
-                            quantity=Decimal(str(fill.quantity)),
-                            price=Decimal(str(fill.price)),
-                            fee=Decimal(str(fill.fee)),
-                            fee_currency=fill.fee_currency,
-                            venue_fill_id=order_id,
-                            exchange_ts_ns=ts_ns,
-                            receive_ts_ns=ts_ns,
-                        )
-                        self._fill_recorder.record_fill(fill_event)
+                    self._record_fill_telemetry(order, fill, venue_fill_id=order_id)
                     return fill
             return None
         except Exception as e:
@@ -1022,25 +1001,7 @@ class OrderRouter:
                         latency_ms=self.measure_latency(),
                     )
                     # BUNDLE F1: Record fill to telemetry
-                    if self._fill_recorder:
-                        from decimal import Decimal
-                        from app.models.contracts import FillEvent
-                        fill_event = FillEvent(
-                            fill_event_id=f"fill_{order.id}_{ts_ns}",
-                            execution_event_id=order.id,
-                            order_intent_id=order.id,
-                            decision_uuid=getattr(order, "decision_uuid", None),
-                            symbol=order.symbol,
-                            side=order.side,
-                            quantity=Decimal(str(fill.quantity)),
-                            price=Decimal(str(fill.price)),
-                            fee=Decimal(str(fill.fee)),
-                            fee_currency=fill.fee_currency,
-                            venue_fill_id=order_id,
-                            exchange_ts_ns=ts_ns,
-                            receive_ts_ns=ts_ns,
-                        )
-                        self._fill_recorder.record_fill(fill_event)
+                    self._record_fill_telemetry(order, fill, venue_fill_id=order_id)
                     return fill
             return None
         except Exception as e:
