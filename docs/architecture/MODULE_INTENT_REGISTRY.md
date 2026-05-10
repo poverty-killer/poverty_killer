@@ -68,7 +68,7 @@ These files are not junk. They are future-engine organs and must be preserved un
 
 | Path | Classification | Intended Purpose | Current Wiring | Activation Prerequisites |
 |---|---|---|---|---|
-| app/world_awareness/* | PRE_INTEGRATION_INTENTIONAL | External/world context subsystem | Not active runtime authority | Import safety, event schema, trust/decay contract, replay determinism |
+| app/world_awareness/* | PRE_INTEGRATION_INTENTIONAL | External/world context subsystem | Registered, tested, not active runtime authority | Registered in commit 1fb2441; app/world_awareness/tests passed 11/11; full collection passed 718 tests; still requires event schema, trust/decay contract, replay determinism, and Board-approved integration before activation |
 | app/data/market_data_adapter.py | PRE_INTEGRATION_INTENTIONAL | Future market data adapter protocol | Not active spine | Bridge to current websocket/polling contracts |
 | app/execution/broker_adapter.py | PRE_INTEGRATION_INTENTIONAL | Future broker adapter protocol | Not active spine | Bridge to OrderRouter/PaperBroker/live broker contracts |
 | app/models/instrument_profile.py | PRE_INTEGRATION_INTENTIONAL | Universal instrument profile | Not active spine | Symbol/enum alignment |

@@ -1,5 +1,47 @@
 # POVERTY_KILLER Session Changelog
 
+## 2026-05-10 - Bundle 0B Evidence Collection Seam
+
+Commits:
+- ff5d0c7 - Fix collection syntax in legacy tests
+- 1fb2441 - Register world awareness pre-integration package
+
+Summary:
+- Repaired escaped docstring syntax corruption in 12 legacy test files.
+- Registered app/world_awareness/ as a preserved PRE_INTEGRATION_INTENTIONAL package.
+- Staged only the 25 approved world-awareness .py files.
+- Excluded __pycache__ and .pyc generated files.
+- No runtime activation was performed.
+- No SignalFusion, risk, execution, main-loop, strategy, or live-mode wiring was changed.
+- app/world_awareness/tests passed: 11/11.
+- Full pytest collection passed: 718 tests collected.
+
+Board classification:
+- app/world_awareness is intentional world-aware subsystem work.
+- It is registered but not active trading authority.
+- It remains subordinate, non-authoritative, and pre-integration until a future Board-approved seam packet.
+
+## 2026-05-10 - Architecture Context Spine
+
+Commit:
+- 868aa7b - Add architecture context spine
+
+Summary:
+- Added durable repo-carried architecture memory under docs/architecture.
+- Created CURRENT_REBUILD_STATUS.md.
+- Created MODULE_INTENT_REGISTRY.md.
+- Created AUTHORITY_WIRING_MAP.md.
+- Created SEAM_ACTIVATION_QUEUE.md.
+- Created OPEN_QUESTIONS.md.
+- Created DO_NOT_REPEAT_AUDITS.md.
+- Created SESSION_CHANGELOG.md.
+
+Board rules:
+- Context spine gives direction.
+- Repo truth gives proof.
+- New OpenCode sessions should read context spine before broad repo scans.
+- Do not redo full repo audits unless a packet requires it.
+
 ## 2026-05-10 - OpenCode Supreme Board Governance
 
 Commit:
@@ -50,10 +92,11 @@ Summary:
 OpenCode audits found:
 - Active production spine exists and is wired.
 - Many advanced modules are intentional pre-integration assets, not junk.
-- pytest collection has known blockers.
+- Evidence collection seam is now repaired.
+- app/world_awareness is registered but not activated.
 - Duplicate authority risks exist and must be controlled before wiring.
 - Work should proceed through seams, not isolated fixes.
 
 Next foundation direction:
-- Build and maintain architecture context spine.
-- Then perform Bundle 0: Evidence and Module Registry Foundation.
+- Proceed to contract surface reconciliation.
+- Keep context spine updated after every packet.

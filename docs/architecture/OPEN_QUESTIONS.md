@@ -8,10 +8,16 @@ Only inspect files related to these questions or files changed since the last ch
 
 ## Evidence / Collection Questions
 
-- Which exact files currently break `python -m pytest --collect-only -q`?
-- Are the collection errors only syntax/import defects, or do they reveal deeper contract drift?
-- Which broken tests are intentional future tests versus corrupted/legacy tests?
-- Does `app/world_awareness/normalizer.py` only need syntax repair, or does it reveal a world-awareness contract issue?
+Closed:
+- Bundle 0B repaired the collection seam.
+- Legacy escaped docstring corruption was repaired in 12 test files.
+- app/world_awareness was registered as PRE_INTEGRATION_INTENTIONAL.
+- app/world_awareness/tests passed 11/11.
+- Full pytest collection passed: 718 tests collected.
+
+Remaining:
+- Keep collection clean after every future packet.
+- If new collection errors appear, classify them by seam before editing.
 
 ## Authority Questions
 
@@ -30,7 +36,7 @@ Only inspect files related to these questions or files changed since the last ch
 
 ## Pre-Integration Module Questions
 
-- What is the exact activation path for `app/world_awareness/*`?
+- What is the exact future activation path for `app/world_awareness/*` now that it is registered but still non-authoritative and not runtime-wired?
 - What is the exact activation path for `app/markets/*` and `app/models/instrument_profile.py`?
 - What is the exact activation path for `app/portfolio/*`?
 - What is the exact activation path for `app/risk/cross_asset_risk_model.py`?
@@ -46,6 +52,5 @@ Only inspect files related to these questions or files changed since the last ch
 
 ## Next Decision Questions
 
-- Should Bundle 0 be split into separate commits for collection integrity and docs registry?
+- What is the first runtime seam after Bundle 0: contract surface reconciliation, telemetry fill UUID, or adapter boundary mapping?
 - What is the smallest safe evidence-seam packet that improves trust without drifting into isolated bug fixing?
-- What is the first runtime seam after Bundle 0: adapter contracts, telemetry fill UUID, or world-awareness import safety?
