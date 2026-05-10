@@ -1,7 +1,7 @@
-﻿\"\"\"
+﻿"""
 test_liquidity_void
 Poverty Killer module - Under construction.
-\"\"\"
+"""
 
 def main():
     pass

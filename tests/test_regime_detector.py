@@ -1,7 +1,7 @@
-﻿\"\"\"
+﻿"""
 test_regime_detector
 Poverty Killer module - Under construction.
-\"\"\"
+"""
 
 def main():
     pass

@@ -1,7 +1,7 @@
-﻿\"\"\"
+﻿"""
 test_config
 Poverty Killer module - Under construction.
-\"\"\"
+"""
 
 def main():
     pass

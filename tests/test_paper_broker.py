@@ -1,7 +1,7 @@
-﻿\"\"\"
+﻿"""
 test_paper_broker
 Poverty Killer module - Under construction.
-\"\"\"
+"""
 
 def main():
     pass
