@@ -18,6 +18,18 @@ from app.utils.time_utils import now_ns
 logger = logging.getLogger(__name__)
 
 
+def _safe_side_value(value: Any) -> str:
+    """Safely serialize side as string for telemetry payloads."""
+    if hasattr(value, "value"):
+        return str(value.value)
+    return str(value)
+
+
+def _supports_order_rejected_event_type() -> bool:
+    """Check whether EventType authority exposes ORDER_REJECTED."""
+    return hasattr(EventType, "ORDER_REJECTED")
+
+
 class FillRecorder:
     """
     Records FillEvent fills and decision-linked rejections to telemetry.
@@ -62,7 +74,7 @@ class FillRecorder:
             "order_intent_id": fill_event.order_intent_id,
             "decision_uuid": fill_event.decision_uuid,
             "symbol": fill_event.symbol,
-            "side": fill_event.side.value,
+            "side": _safe_side_value(fill_event.side),
             "quantity": str(fill_event.quantity),
             "price": str(fill_event.price),
             "fee": str(fill_event.fee),
@@ -94,7 +106,13 @@ class FillRecorder:
         client_order_id: str,
         decision_uuid: str,
         reason: str,
-        reject_ts_ns: Optional[int] = None
+        reject_ts_ns: Optional[int] = None,
+        symbol: Optional[str] = None,
+        side: Optional[Any] = None,
+        quantity: Optional[Any] = None,
+        order_type: Optional[Any] = None,
+        limit_price: Optional[Any] = None,
+        venue_order_id: Optional[str] = None,
     ) -> str:
         """
         Record an order rejection as a telemetry event.
@@ -117,13 +135,26 @@ class FillRecorder:
             "reason": reason,
             "reject_ts_ns": reject_ts_ns,
         }
+        if symbol is not None:
+            payload["symbol"] = str(symbol)
+        if side is not None:
+            payload["side"] = _safe_side_value(side)
+        if quantity is not None:
+            payload["quantity"] = str(quantity)
+        if order_type is not None:
+            payload["order_type"] = str(order_type.value) if hasattr(order_type, "value") else str(order_type)
+        if limit_price is not None:
+            payload["limit_price"] = str(limit_price)
+        if venue_order_id is not None:
+            payload["venue_order_id"] = str(venue_order_id)
         
         event_id = str(uuid4())
+        event_type = EventType.ORDER_REJECTED if _supports_order_rejected_event_type() else EventType.ERROR
         event = EventEnvelope(
             event_id=event_id,
             decision_uuid=decision_uuid,
             parent_uuid=None,
-            event_type=EventType.ORDER_REJECTED,
+            event_type=event_type,
             source_module="order_router",
             exchange_ts_ns=reject_ts_ns,
             receive_ts_ns=now_ns(),
@@ -132,6 +163,9 @@ class FillRecorder:
             payload=payload,
             schema_version=1,
         )
+
+        if not _supports_order_rejected_event_type():
+            event.event_type = "order_rejected"
         
         self._store.record_event(event)
         logger.warning(f"Rejection recorded: {client_order_id} - {reason}")

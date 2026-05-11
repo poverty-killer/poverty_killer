@@ -367,15 +367,6 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     masking_layer.mask_order.return_value = masked
 
     router = OrderRouter(paper_mode=True, telemetry_store=store)
-    original_record_fill = router._fill_recorder.record_fill
-
-    def _record_fill_side_enum_wrapper(fill_event):
-        if isinstance(fill_event.side, str):
-            fill_event.side = OrderSide(fill_event.side)
-        return original_record_fill(fill_event)
-
-    router._fill_recorder.record_fill = _record_fill_side_enum_wrapper
-
     engine = ExecutionEngine(
         commander=commander,
         risk_guard=risk_guard,
@@ -433,3 +424,51 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     assert "e" not in payload["fee"].lower()
 
     assert int(match["receive_ts_ns"]) >= int(match["exchange_ts_ns"])
+
+
+def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
+    """
+    Rejection telemetry should persist decision-linked replay context using
+    available order-level fields when provided.
+    """
+    from app.models.enums import OrderType
+
+    telemetry_path = tmp_path / "rejection_replay_context.db"
+    store = TelemetryEventStore(str(telemetry_path))
+    recorder = FillRecorder(store)
+
+    decision_uuid = "rejection-replay-decision-uuid"
+    event_id = recorder.record_rejection(
+        client_order_id="reject_client_order_001",
+        decision_uuid=decision_uuid,
+        reason="simulated rejection for replay parity",
+        reject_ts_ns=1_700_000_000_000_000_000,
+        symbol="ETH/USD",
+        side=OrderSide.SELL,
+        quantity=Decimal("0.250"),
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("2999.50"),
+        venue_order_id="venue_reject_001",
+    )
+
+    events = store.get_events_by_type("order_rejected", limit=20)
+    assert events, "Expected persisted order_rejected telemetry event"
+
+    match = next((event for event in events if event.get("event_id") == event_id), None)
+    assert match is not None, "Expected rejection event to be queryable by event_id"
+    assert match["decision_uuid"] == decision_uuid
+    assert match["event_type"] == "order_rejected"
+    assert int(match["receive_ts_ns"]) >= int(match["exchange_ts_ns"])
+
+    payload = json.loads(match["payload_json"])
+    assert payload["client_order_id"] == "reject_client_order_001"
+    assert payload["decision_uuid"] == decision_uuid
+    assert payload["symbol"] == "ETH/USD"
+    assert payload["side"] == "sell"
+    assert payload["quantity"] == "0.250"
+    assert payload["order_type"] == "limit"
+    assert payload["limit_price"] == "2999.50"
+    assert payload["venue_order_id"] == "venue_reject_001"
+
+    assert "e" not in payload["quantity"].lower()
+    assert "e" not in payload["limit_price"].lower()
