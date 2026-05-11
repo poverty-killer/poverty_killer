@@ -59,6 +59,7 @@ Forbidden in this file (per packet doctrine)
 
 from __future__ import annotations
 
+import inspect
 import os
 import types
 from decimal import Decimal
@@ -72,6 +73,11 @@ from app.models import OrderFill, OrderRequest, StrategySignal
 from app.models.enums import OrderSide, OrderType, SleeveType
 from app.models.market_data import Candle, OrderBookSnapshot
 from app.execution.order_router import OrderRouter
+from app.risk.exposure_manager import (
+    EXPOSURE_AUTHORITY_STATUS,
+    ExposureManager,
+    exposure_authority_seam_metadata,
+)
 from app.strategies.strategy_vote_adapters import adapt_sector_rotation_to_vote
 from app.symbol_runtime import SymbolRuntime
 from app.utils.time_utils import (
@@ -444,6 +450,57 @@ def _drive_one_trade(
         "fill": fill,
         "replay_active_after": is_replay_mode(),
     }
+
+
+# =============================================================================
+# 0. Bundle 7A authority seam clarity
+# =============================================================================
+
+
+class TestExposureAuthoritySeamClarity:
+
+    def test_exposure_manager_import_safe_and_marked_dormant_seam(self):
+        metadata = exposure_authority_seam_metadata()
+
+        assert metadata["authority_module"] == "app.risk.exposure_manager"
+        assert metadata["authority_class"] == "ExposureManager"
+        assert metadata["status"] == EXPOSURE_AUTHORITY_STATUS
+        assert metadata["status"] == "DORMANT_SEAM"
+        assert metadata["live_wired"] is False
+        assert metadata["active_veto_owner"] is False
+
+        manager = ExposureManager(initial_equity=Decimal("20000"))
+        assert manager is not None
+
+    def test_exposure_manager_not_live_wired_into_execution_path(self):
+        import app.main_loop as main_loop_module
+        import app.execution.engine as execution_engine_module
+
+        create_main_loop_src = inspect.getsource(main_loop_module.create_main_loop)
+        submit_signal_src = inspect.getsource(execution_engine_module.ExecutionEngine.submit_signal)
+
+        assert "ExposureManager" not in create_main_loop_src
+        assert "ExposureManager" not in submit_signal_src
+
+    def test_no_duplicate_portfolio_veto_owner_active_in_live_path(self):
+        import app.main_loop as main_loop_module
+        import app.execution.engine as execution_engine_module
+
+        dispatch_src = inspect.getsource(main_loop_module.MainLoop._dispatch_fusion)
+        submit_signal_src = inspect.getsource(execution_engine_module.ExecutionEngine.submit_signal)
+
+        # Live path keeps existing risk_guard veto owner and has no exposure-manager veto.
+        assert "validate_intent" not in dispatch_src
+        assert "ExposureManager" not in dispatch_src
+        assert "risk_guard.can_trade" in submit_signal_src
+
+    def test_portfolio_truth_hydration_source_contract_unchanged(self):
+        import app.main_loop as main_loop_module
+
+        truth_frame_src = inspect.getsource(main_loop_module.MainLoop._build_truth_frame)
+
+        assert "get_exchange_truth_snapshot" in truth_frame_src
+        assert "PortfolioTruth(" in truth_frame_src
 
 
 # =============================================================================

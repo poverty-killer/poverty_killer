@@ -74,6 +74,13 @@ getcontext().prec = 28
 logger = logging.getLogger(__name__)
 
 
+# Bundle 7A authority seam marker (non-runtime):
+# ExposureManager is designated as the future canonical portfolio/exposure
+# authority seam, but remains dormant/non-authoritative in the current live
+# runtime until a separate Board-approved wiring packet is executed.
+EXPOSURE_AUTHORITY_STATUS = "DORMANT_SEAM"
+
+
 # ============================================================================
 # CONSTANTS / HELPERS
 # ============================================================================
@@ -492,6 +499,11 @@ class ExposureManager:
     - status-weighted reservations
     - hedge-aware residual exposure
     - mutation journaling
+
+    Bundle 7A authority posture:
+    - This class is the future canonical exposure authority seam.
+    - It is intentionally NOT wired into the current live execution path.
+    - It is intentionally NOT the active runtime veto owner yet.
     """
 
     def __init__(
@@ -540,7 +552,6 @@ class ExposureManager:
         self._sleeve_usage_mark: Dict[SleeveType, Decimal] = {sleeve: ZERO for sleeve in SleeveType}
         self._sleeve_reserved_notional: Dict[SleeveType, Decimal] = {sleeve: ZERO for sleeve in SleeveType}
         self._sleeve_reserved_hedge_notional: Dict[SleeveType, Decimal] = {sleeve: ZERO for sleeve in SleeveType}
-
     # ------------------------------------------------------------------
     # Legacy + canonical validation
     # ------------------------------------------------------------------
@@ -1964,6 +1975,25 @@ class ExposureManager:
         self._version += 1
 
 
+def exposure_authority_seam_metadata() -> Dict[str, Any]:
+    """
+    Return static seam metadata for governance/test visibility.
+
+    This helper has no runtime side effects and does not activate wiring.
+    """
+    return {
+        "authority_module": "app.risk.exposure_manager",
+        "authority_class": "ExposureManager",
+        "status": EXPOSURE_AUTHORITY_STATUS,
+        "live_wired": False,
+        "active_veto_owner": False,
+        "notes": (
+            "Future canonical portfolio/exposure authority seam",
+            "Requires separate Board-approved wiring packet",
+        ),
+    }
+
+
 __all__ = [
     "ReservationStatus",
     "ExposureSnapshotQuality",
@@ -1981,4 +2011,5 @@ __all__ = [
     "ReconciliationResult",
     "ExposureInvariantReport",
     "ExposureManager",
+    "exposure_authority_seam_metadata",
 ]
