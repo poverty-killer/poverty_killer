@@ -719,6 +719,62 @@ class TestSameClockSafetyInvariants:
             assert len(captured) == 1
             assert captured[0]["is_attack"] is False
 
+    def test_attack_mode_flag_and_aggression_metadata_remain_passive_in_submit_path(self):
+        """
+        Even if fusion.attack_mode=True and aggression metadata is present on
+        the observed signal, the live dispatch seam must still submit with
+        is_attack=False and preserve the existing paper harness behavior.
+        """
+        with ReplayTimeContext(T0_NS):
+            signal = _build_strategy_signal(T0_NS, side="buy", quantity=0.5)
+            signal.metadata = {
+                "aggression_context": {
+                    "attack_mode_hint": True,
+                    "aggression_tier": "elevated",
+                    "metadata_only": True,
+                },
+                "aggression_snapshot_id": "bundle9a-same-clock-1",
+            }
+            vote = _build_vote_via_real_adapter(signal, T0_NS)
+            runtime = _build_runtime("ETH/USD")
+            runtime.update_candle(_build_candle(T0_NS, close=2500.0))
+            runtime.update_order_book(_build_book(T0_NS, mid=2500.0))
+            runtime.record_observed_signal("sector_rotation", signal)
+            runtime.record_observed_vote("sector_rotation", vote)
+
+            captured: List[dict] = []
+            loop = _build_test_loop(broker_mode="paper")
+            loop.execution_engine.submit_signal = MagicMock(
+                side_effect=lambda signal, current_price, is_attack:
+                    captured.append(
+                        {
+                            "signal": signal,
+                            "current_price": current_price,
+                            "is_attack": is_attack,
+                        }
+                    ) or True
+            )
+
+            fusion = types.SimpleNamespace(
+                exchange_ts_ns=T0_NS,
+                attack_mode=True,
+                preferred_sleeve="shadow_front",
+                sector_rotation_eligible=True,
+                shadow_front_eligible=True,
+            )
+            dispatch = _bind(loop, "_dispatch_fusion")
+            dispatch("ETH/USD", runtime, fusion=fusion, exchange_ts_ns=T0_NS)
+
+            assert len(captured) == 1
+            assert captured[0]["is_attack"] is False
+            assert captured[0]["signal"].metadata["aggression_snapshot_id"] == "bundle9a-same-clock-1"
+
+            order = _strategy_signal_to_order_request(captured[0]["signal"], receive_ts_ns=T0_NS)
+            router = OrderRouter(paper_mode=True)
+            fill = router.submit_order(order)
+            assert fill is not None
+            assert isinstance(fill, OrderFill)
+
     def test_real_adapter_metadata_flags_execution_candidate_not_attack(self):
         """
         The production adapter must mark the vote as execution_candidate=True

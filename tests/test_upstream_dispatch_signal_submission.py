@@ -683,11 +683,92 @@ class TestAdvisoryMetadataSpine:
         loop.execution_engine.submit_signal.assert_not_called()
         loop.decision_compiler.compile.assert_not_called()
 
-    def test_dispatch_path_does_not_import_dormant_advisory_modules(self):
+    def test_aggression_metadata_with_attack_mode_flag_is_passive_on_admit_path(self):
+        loop = _make_test_loop()
+        ts = 16_200_000_000_000
+        aggression_context = {
+            "aggression_context": {
+                "attack_mode_hint": True,
+                "aggression_tier": "elevated",
+                "metadata_only": True,
+            },
+            "aggression_snapshot_id": "bundle9a-aggression-1",
+        }
+        observed_sig = _make_signal(
+            exchange_ts_ns=ts,
+            symbol="ETH/USD",
+            metadata=aggression_context,
+        )
+        observed_vote = _make_vote(timestamp_ns=ts)
+        rt = _make_runtime(
+            shadow_strategy=MagicMock(),
+            sector_strategy=MagicMock(),
+            sector_signal=observed_sig,
+            sector_vote=observed_vote,
+            last_price=2500.0,
+        )
+
+        fusion = types.SimpleNamespace(
+            exchange_ts_ns=ts,
+            attack_mode=True,
+            preferred_sleeve="shadow_front",
+            sector_rotation_eligible=True,
+            shadow_front_eligible=True,
+        )
+
+        dispatch = _bind(loop, "_dispatch_fusion")
+        dispatch("ETH/USD", rt, fusion=fusion, exchange_ts_ns=ts)
+
+        assert loop.decision_compiler.compile.call_count == 1
+        assert loop.execution_engine.submit_signal.call_count == 1
+        _, submit_kwargs = loop.execution_engine.submit_signal.call_args
+        submitted_signal = submit_kwargs.get("signal")
+        assert submitted_signal is observed_sig
+        assert submitted_signal.metadata["aggression_context"]["attack_mode_hint"] is True
+        assert submitted_signal.metadata["aggression_snapshot_id"] == "bundle9a-aggression-1"
+        assert submit_kwargs.get("is_attack") is False
+
+    def test_aggression_metadata_and_attack_mode_flag_do_not_bypass_stale_gate(self):
+        loop = _make_test_loop()
+        stored_ts = 16_300_000_000_000
+        dispatch_ts = stored_ts + 1
+        observed_sig = _make_signal(
+            exchange_ts_ns=stored_ts,
+            metadata={
+                "aggression_context": {
+                    "attack_mode_hint": True,
+                    "metadata_only": True,
+                },
+                "aggression_snapshot_id": "bundle9a-stale-case",
+            },
+        )
+        observed_vote = _make_vote(timestamp_ns=stored_ts)
+        rt = _make_runtime(
+            shadow_strategy=MagicMock(),
+            sector_strategy=MagicMock(),
+            sector_signal=observed_sig,
+            sector_vote=observed_vote,
+        )
+        fusion = types.SimpleNamespace(
+            exchange_ts_ns=dispatch_ts,
+            attack_mode=True,
+            preferred_sleeve="shadow_front",
+            sector_rotation_eligible=True,
+            shadow_front_eligible=True,
+        )
+        dispatch = _bind(loop, "_dispatch_fusion")
+        dispatch("ETH/USD", rt, fusion=fusion, exchange_ts_ns=dispatch_ts)
+
+        loop.execution_engine.submit_signal.assert_not_called()
+        loop.decision_compiler.compile.assert_not_called()
+
+    def test_dispatch_and_submit_paths_do_not_import_dormant_advisory_or_aggression_modules(self):
         import inspect
         import app.main_loop as main_loop_module
+        import app.execution.engine as execution_engine_module
 
         dispatch_src = inspect.getsource(main_loop_module.MainLoop._dispatch_fusion)
+        submit_src = inspect.getsource(execution_engine_module.ExecutionEngine.submit_signal)
 
         forbidden_tokens = (
             "cross_asset_risk_model",
@@ -696,6 +777,9 @@ class TestAdvisoryMetadataSpine:
             "opportunity_ranking",
             "world_awareness",
             "moving_floor",
+            "net_edge_governor",
+            "trade_efficiency_governor",
         )
         for token in forbidden_tokens:
             assert token not in dispatch_src
+            assert token not in submit_src

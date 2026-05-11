@@ -1222,6 +1222,72 @@ class TestAdvisoryMetadataSpine:
         assert stale["order"] is None
         assert len(router._paper_broker.execution_reports) == reports_after_first  # type: ignore[attr-defined]
 
+    def test_adaptive_aggression_metadata_preserves_paper_harness_behavior(self):
+        router = OrderRouter(paper_mode=True)
+
+        base = _drive_one_trade(
+            t_ns=T0_NS,
+            side="buy",
+            quantity=0.5,
+            router=router,
+        )
+        with_aggression_meta = _drive_one_trade(
+            t_ns=T1_NS,
+            side="sell",
+            quantity=0.25,
+            router=router,
+            advisory_metadata={
+                "aggression_context": {
+                    "attack_mode_hint": True,
+                    "aggression_tier": "elevated",
+                    "metadata_only": True,
+                },
+                "aggression_snapshot_id": "bundle9a-multi-trade-1",
+            },
+        )
+
+        assert base["fill"] is not None
+        assert with_aggression_meta["fill"] is not None
+        assert len(base["captured"]) == 1
+        assert len(with_aggression_meta["captured"]) == 1
+        assert base["captured"][0]["is_attack"] is False
+        assert with_aggression_meta["captured"][0]["is_attack"] is False
+        signal_with_meta = with_aggression_meta["captured"][0]["signal"]
+        assert signal_with_meta.metadata["aggression_snapshot_id"] == "bundle9a-multi-trade-1"
+        assert signal_with_meta.metadata["aggression_context"]["attack_mode_hint"] is True
+
+    def test_adaptive_aggression_metadata_does_not_change_stale_reject_behavior(self):
+        router = OrderRouter(paper_mode=True)
+        first = _drive_one_trade(
+            t_ns=T0_NS,
+            side="buy",
+            quantity=0.5,
+            router=router,
+        )
+        assert first["fill"] is not None
+
+        reports_after_first = len(router._paper_broker.execution_reports)  # type: ignore[attr-defined]
+        stale = _drive_one_trade(
+            t_ns=T1_NS,
+            side="sell",
+            quantity=0.25,
+            router=router,
+            observed_signal_ts_ns=T1_NS - 1,
+            observed_vote_ts_ns=T1_NS - 1,
+            advisory_metadata={
+                "aggression_context": {
+                    "attack_mode_hint": True,
+                    "metadata_only": True,
+                },
+                "aggression_snapshot_id": "bundle9a-stale-reject",
+            },
+        )
+
+        assert stale["captured"] == []
+        assert stale["fill"] is None
+        assert stale["order"] is None
+        assert len(router._paper_broker.execution_reports) == reports_after_first  # type: ignore[attr-defined]
+
     def test_no_dormant_advisory_module_activation_in_dispatch_or_execution_gate(self):
         import app.main_loop as main_loop_module
         import app.execution.engine as execution_engine_module
@@ -1236,6 +1302,8 @@ class TestAdvisoryMetadataSpine:
             "opportunity_ranking",
             "world_awareness",
             "moving_floor",
+            "net_edge_governor",
+            "trade_efficiency_governor",
         )
         for token in forbidden_tokens:
             assert token not in dispatch_src
