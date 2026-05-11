@@ -11,12 +11,17 @@ Covers:
 """
 
 import logging
+import json
 from decimal import Decimal
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
 from app.execution.engine import ExecutionEngine, QueuedSignal
+from app.models.contracts import FillEvent
+from app.models.enums import OrderSide
+from app.telemetry.event_store import TelemetryEventStore
+from app.telemetry.fill_recorder import FillRecorder
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +283,56 @@ def test_execute_signal_no_paper_fill_count_when_pending(caplog):
     assert not any("PAPER_FILL_COUNT" in m for m in messages), (
         "PAPER_FILL_COUNT must NOT appear when order is pending (fill=None)"
     )
+
+
+def test_execution_sr_fill_telemetry_decimal_stringification_regression(tmp_path):
+    """
+    Regression lock:
+    - deterministic FillEvent seam keeps Decimal quantity/price/fee types
+    - persisted telemetry payload stores those fields as plain strings
+      (no float coercion and no scientific notation)
+    """
+    telemetry_path = tmp_path / "sr_decimal_telemetry.db"
+    store = TelemetryEventStore(str(telemetry_path))
+    recorder = FillRecorder(store)
+
+    fill_event = FillEvent(
+        fill_event_id="fill_decimal_regression",
+        execution_event_id="exec_decimal_regression",
+        order_intent_id="order_decimal_regression",
+        decision_uuid="sr-decimal-regression-uuid",
+        symbol="ETH/USD",
+        side=OrderSide.BUY,
+        quantity=Decimal("0.001"),
+        price=Decimal("3000.125"),
+        fee=Decimal("0.0105"),
+        fee_currency="USD",
+        venue_fill_id="venue_decimal_regression",
+        exchange_ts_ns=1_700_000_000_000_000_000,
+        receive_ts_ns=1_700_000_000_000_000_001,
+    )
+    # FillEvent currently stores enum values as strings; FillRecorder expects
+    # a side object with .value. Normalize to enum for this telemetry seam.
+    fill_event.side = OrderSide.BUY
+    recorder.record_fill(fill_event)
+
+    assert isinstance(fill_event.quantity, Decimal)
+    assert isinstance(fill_event.price, Decimal)
+    assert isinstance(fill_event.fee, Decimal)
+
+    events = store.get_events_by_type("fill", limit=10)
+    assert events, "Expected persisted fill telemetry event"
+    payload_json = events[0]["payload_json"]
+    payload = json.loads(payload_json)
+
+    assert isinstance(payload["quantity"], str)
+    assert isinstance(payload["price"], str)
+    assert isinstance(payload["fee"], str)
+
+    assert payload["quantity"] == str(fill_event.quantity)
+    assert payload["price"] == str(fill_event.price)
+    assert payload["fee"] == str(fill_event.fee)
+
+    assert "e" not in payload["quantity"].lower()
+    assert "e" not in payload["price"].lower()
+    assert "e" not in payload["fee"].lower()
