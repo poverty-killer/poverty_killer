@@ -776,7 +776,6 @@ class OrderRouter:
         pb_order_type = self._paper_order_type(order)
 
         ts_ns: int = getattr(order, "exchange_ts_ns", None) or now_ns()
-        receive_ns: int = getattr(order, "receive_ts_ns", None) or now_ns()
 
         submit_price: Optional[_Decimal] = None
         if pb_order_type == _pb_enums.OrderType.LIMIT and order.limit_price is not None:
@@ -810,11 +809,13 @@ class OrderRouter:
         fill_fee = _Decimal("0")
         fee_currency = "USD"
         exchange_fill_ts_ns = ts_ns
+        fill_receive_ts_ns = ts_ns
 
         if fill_report is not None:
             fill_fee = _Decimal(str(fill_report.fee))
             if int(fill_report.timestamp_ns) > 0:
                 exchange_fill_ts_ns = int(fill_report.timestamp_ns)
+                fill_receive_ts_ns = int(fill_report.timestamp_ns)
 
         latency_ms = float(self._paper_broker.latency.get_current_latency_ns()) / 1_000_000
         logger.info(
@@ -835,7 +836,7 @@ class OrderRouter:
             fee_currency=fee_currency,
             status=InternalOrderStatus.FILLED,
             exchange_ts_ns=exchange_fill_ts_ns,
-            receive_ts_ns=receive_ns,
+            receive_ts_ns=fill_receive_ts_ns,
             latency_ms=latency_ms,
         )
 

@@ -336,3 +336,100 @@ def test_execution_sr_fill_telemetry_decimal_stringification_regression(tmp_path
     assert "e" not in payload["quantity"].lower()
     assert "e" not in payload["price"].lower()
     assert "e" not in payload["fee"].lower()
+
+
+def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
+    """
+    End-to-end regression lock:
+    StrategySignal metadata decision_uuid flows through execution into
+    persisted fill telemetry with Decimal monetary fields stringified.
+    """
+    from app.execution.order_router import OrderRouter
+    from app.models.signals import StrategySignal
+    from app.utils.time_utils import now_ns
+
+    telemetry_path = tmp_path / "e2e_fill_telemetry.db"
+    store = TelemetryEventStore(str(telemetry_path))
+
+    commander = MagicMock()
+    risk_guard = MagicMock()
+    risk_guard.can_trade.return_value = True
+    risk_guard.is_vol_fuse_triggered.return_value = False
+    risk_guard.register_recalibrate_callback = MagicMock()
+    risk_guard.register_emergency_callback = MagicMock()
+    risk_guard.register_zombie_callback = MagicMock()
+    risk_guard.register_lag_callback = MagicMock()
+    risk_guard.register_vol_fuse_callback = MagicMock()
+
+    masking_layer = MagicMock()
+    masked = MagicMock()
+    masked.masked_size = Decimal("0.05")
+    masking_layer.mask_order.return_value = masked
+
+    router = OrderRouter(paper_mode=True, telemetry_store=store)
+    original_record_fill = router._fill_recorder.record_fill
+
+    def _record_fill_side_enum_wrapper(fill_event):
+        if isinstance(fill_event.side, str):
+            fill_event.side = OrderSide(fill_event.side)
+        return original_record_fill(fill_event)
+
+    router._fill_recorder.record_fill = _record_fill_side_enum_wrapper
+
+    engine = ExecutionEngine(
+        commander=commander,
+        risk_guard=risk_guard,
+        order_router=router,
+        masking_layer=masking_layer,
+    )
+    engine._state.is_running = True
+    engine._state.last_regime = "neutral"
+
+    decision_uuid = "bundle3a-e2e-decision-uuid"
+    signal_ts_ns = now_ns() - 1_000_000
+    signal = StrategySignal(
+        strategy="sector_rotation",
+        symbol="ETH/USD",
+        side="buy",
+        confidence=0.9,
+        quantity=0.05,
+        price=None,
+        exchange_ts_ns=signal_ts_ns,
+        reason="bundle3a e2e telemetry guardrail",
+        metadata={"decision_uuid": decision_uuid},
+    )
+
+    admitted = engine.submit_signal(
+        signal=signal,
+        current_price=Decimal("3000.00"),
+        is_attack=False,
+    )
+    assert admitted is True
+
+    queued = engine._execution_queue.get_nowait()
+    assert queued.decision_uuid == decision_uuid
+
+    engine._execute_signal(queued)
+
+    events = store.get_events_by_type("fill", limit=20)
+    assert events, "Expected persisted fill telemetry event from end-to-end execution path"
+
+    match = next((event for event in events if event.get("decision_uuid") == decision_uuid), None)
+    assert match is not None, "Expected fill event with submitted decision_uuid"
+
+    payload = json.loads(match["payload_json"])
+    assert payload["decision_uuid"] == decision_uuid
+
+    assert isinstance(payload["quantity"], str)
+    assert isinstance(payload["price"], str)
+    assert isinstance(payload["fee"], str)
+
+    assert payload["quantity"] == str(Decimal(payload["quantity"]))
+    assert payload["price"] == str(Decimal(payload["price"]))
+    assert payload["fee"] == str(Decimal(payload["fee"]))
+
+    assert "e" not in payload["quantity"].lower()
+    assert "e" not in payload["price"].lower()
+    assert "e" not in payload["fee"].lower()
+
+    assert int(match["receive_ts_ns"]) >= int(match["exchange_ts_ns"])
