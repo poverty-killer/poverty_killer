@@ -186,6 +186,15 @@ class OrderRouter:
         *,
         venue_fill_id: str,
     ) -> None:
+        """
+        Bridge active OrderFill execution output into FillEvent telemetry.
+
+        Compatibility mapping:
+        - execution_event_id uses OrderRequest.id as the execution source ID.
+        - order_intent_id intentionally mirrors OrderRequest.id while
+          OrderIntent remains dormant and not runtime-wired.
+        - decision_uuid preserves causal decision-chain linkage.
+        """
         if not self._fill_recorder:
             return
         if not order.decision_uuid:
@@ -213,6 +222,7 @@ class OrderRouter:
         self._fill_recorder.record_fill(fill_event)
 
     def _record_rejection_telemetry(self, order: OrderRequest, reason: str) -> None:
+        """Record order rejection telemetry without changing routing authority."""
         if not self._fill_recorder:
             return
         if not order.decision_uuid:

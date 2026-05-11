@@ -911,7 +911,15 @@ class TruthFrame(BaseModel):
 
 
 class OrderIntent(BaseModel):
-    """Legal order intent from DecisionCompiler."""
+    """
+    Legal pre-execution order intent from decision/risk layers.
+
+    Compatibility note:
+    - OrderIntent is not currently the active execution submit contract.
+    - Active execution submits use OrderRequest (app/models/orders.py).
+    - This model remains conceptual/dormant until a future Board-approved
+      runtime wiring packet activates it.
+    """
 
     model_config = _base_model_config(use_enum_values=True)
 
@@ -1067,7 +1075,15 @@ class ExecutionEvent(BaseModel):
 
 
 class FillEvent(BaseModel):
-    """Fill confirmation from venue."""
+    """
+    Fill telemetry contract emitted from execution fill outcomes.
+
+    Active compatibility mapping:
+    - execution_event_id identifies the execution/order event source.
+    - order_intent_id may carry active OrderRequest.id as a compatibility
+      bridge until OrderIntent is runtime-wired.
+    - decision_uuid remains the causal decision-chain authority.
+    """
 
     model_config = _base_model_config(use_enum_values=True)
 

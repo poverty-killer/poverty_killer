@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 class FillRecorder:
     """
-    Records fills and rejections to the telemetry event store.
+    Records FillEvent fills and decision-linked rejections to telemetry.
+
+    Authority boundary:
+    - decision_uuid is the sequencing key for event chains.
+    - FillRecorder does not own execution authority.
+    - FillRecorder must not create orders or fills.
     
     Usage:
         recorder = FillRecorder(event_store)
@@ -34,7 +39,7 @@ class FillRecorder:
         logger.info("FillRecorder initialized")
     
     def _next_sequence(self, decision_uuid: str) -> int:
-        """Get next sequence number for a decision."""
+        """Get next sequence number keyed by decision_uuid."""
         if decision_uuid not in self._sequence_map:
             self._sequence_map[decision_uuid] = 0
         seq = self._sequence_map[decision_uuid]

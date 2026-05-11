@@ -41,8 +41,8 @@ class OrderRequest(BaseModel):
     """
     Order request from strategy/execution layer to broker.
     
-    This is the canonical order request contract. All order submissions
-    must use this model.
+    This is the active canonical execution submit contract.
+    All runtime order submissions must use this model.
     
     Fields:
     - id: Unique order identifier (client-generated)
@@ -53,7 +53,8 @@ class OrderRequest(BaseModel):
     - limit_price: Required for LIMIT and POST_ONLY orders (Decimal)
     - strategy: SleeveType enum (canonical sleeve identity)
     - confidence: Signal confidence (0-1)
-    - decision_uuid: Optional decision ID for telemetry causality
+    - decision_uuid: Optional decision ID for backward compatibility;
+      required for fill/rejection telemetry emission
     - exchange_ts_ns: Authoritative exchange timestamp (REQUIRED, no default)
     - receive_ts_ns: Local receive timestamp for monitoring (REQUIRED, no default)
     - metadata: Additional context
@@ -136,8 +137,8 @@ class OrderFill(BaseModel):
     """
     Order fill confirmation from broker/exchange.
     
-    This is the canonical fill contract. All fill confirmations
-    must use this model.
+    This is the active canonical router/broker fill result contract.
+    It represents execution fill outcomes, not the telemetry envelope.
     
     Fields:
     - order_id: Client order ID (matches OrderRequest.id)
