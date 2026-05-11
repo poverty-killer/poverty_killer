@@ -100,6 +100,54 @@ class FillRecorder:
         self._store.record_event(event)
         logger.info(f"Fill recorded: {fill_event.fill_event_id} for decision {fill_event.decision_uuid}")
         return event.event_id
+
+    def record_order_submitted(
+        self,
+        client_order_id: str,
+        decision_uuid: str,
+        symbol: str,
+        side: Any,
+        quantity: Any,
+        order_type: Any,
+        *,
+        exchange_ts_ns: int,
+        receive_ts_ns: int,
+        limit_price: Optional[Any] = None,
+        venue_order_id: Optional[str] = None,
+    ) -> str:
+        """Record first-class order submission telemetry for replay chains."""
+        payload = {
+            "telemetry_event": "order_submitted",
+            "client_order_id": client_order_id,
+            "decision_uuid": decision_uuid,
+            "symbol": str(symbol),
+            "side": _safe_side_value(side),
+            "quantity": str(quantity),
+            "order_type": str(order_type.value) if hasattr(order_type, "value") else str(order_type),
+            "limit_price": str(limit_price) if limit_price is not None else None,
+            "venue_order_id": str(venue_order_id) if venue_order_id is not None else None,
+            "exchange_ts_ns": int(exchange_ts_ns),
+            "receive_ts_ns": int(receive_ts_ns),
+        }
+
+        submit_ts_ns = int(receive_ts_ns)
+        event = EventEnvelope(
+            event_id=str(uuid4()),
+            decision_uuid=decision_uuid,
+            parent_uuid=None,
+            event_type=EventType.ORDER,
+            source_module="order_router",
+            exchange_ts_ns=submit_ts_ns,
+            receive_ts_ns=submit_ts_ns,
+            decision_ts_ns=submit_ts_ns,
+            sequence=self._next_sequence(decision_uuid),
+            payload=payload,
+            schema_version=1,
+        )
+
+        self._store.record_event(event)
+        logger.info("Order submission recorded: %s decision=%s", client_order_id, decision_uuid)
+        return event.event_id
     
     def record_rejection(
         self,

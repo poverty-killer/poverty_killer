@@ -425,6 +425,37 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
 
     assert int(match["receive_ts_ns"]) >= int(match["exchange_ts_ns"])
 
+    order_events = store.get_events_by_type("order", limit=20)
+    assert order_events, "Expected persisted order submission telemetry event"
+
+    order_submit = next(
+        (
+            event
+            for event in order_events
+            if event.get("decision_uuid") == decision_uuid
+            and json.loads(event["payload_json"]).get("telemetry_event") == "order_submitted"
+        ),
+        None,
+    )
+    assert order_submit is not None, "Expected decision-linked order_submitted event"
+
+    order_payload = json.loads(order_submit["payload_json"])
+    assert order_payload["client_order_id"] == queued.signal.strategy + "_" + queued.signal.symbol + "_" + str(queued.signal.exchange_ts_ns)
+    assert order_payload["decision_uuid"] == decision_uuid
+    assert order_payload["symbol"] == "ETH/USD"
+    assert order_payload["side"] == "buy"
+    assert isinstance(order_payload["quantity"], str)
+    assert Decimal(order_payload["quantity"]) == Decimal("0.05")
+    assert order_payload["order_type"] == "market"
+    assert order_payload["limit_price"] is None
+    assert int(order_submit["receive_ts_ns"]) >= int(order_submit["exchange_ts_ns"])
+    assert "e" not in order_payload["quantity"].lower()
+
+    chain = store.get_decision_chain(decision_uuid)
+    chain_event_ids = [event["event_id"] for event in chain]
+    assert order_submit["event_id"] in chain_event_ids
+    assert match["event_id"] in chain_event_ids
+
 
 def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
     """

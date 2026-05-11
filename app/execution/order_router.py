@@ -234,6 +234,32 @@ class OrderRouter:
             decision_uuid=order.decision_uuid,
             reason=reason,
             reject_ts_ns=now_ns(),
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            order_type=order.order_type,
+            limit_price=order.limit_price,
+        )
+
+    def _record_order_submission_telemetry(self, order: OrderRequest) -> None:
+        """Record order-submission telemetry as a first-class replay event."""
+        if not self._fill_recorder:
+            return
+        if not order.decision_uuid:
+            logger.warning("Skipping order submission telemetry for order %s: missing decision_uuid", order.id)
+            return
+
+        self._fill_recorder.record_order_submitted(
+            client_order_id=order.id,
+            decision_uuid=order.decision_uuid,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            order_type=order.order_type,
+            limit_price=order.limit_price,
+            exchange_ts_ns=order.exchange_ts_ns,
+            receive_ts_ns=order.receive_ts_ns,
+            venue_order_id=None,
         )
 
     # ============================================
@@ -733,6 +759,7 @@ class OrderRouter:
 
     def submit_order(self, order: OrderRequest) -> Optional[OrderFill]:
         """Submit order to exchange or sovereign paper broker."""
+        self._record_order_submission_telemetry(order)
         if self.paper_mode:
             return self._submit_order_paper(order)
 
