@@ -61,6 +61,7 @@ def _make_signal(
     quantity: float = 1.0,
     confidence: float = 0.75,
     symbol: str = "ETH/USD",
+    metadata: Optional[dict] = None,
 ):
     """Stand-in for app.models.signals.StrategySignal (duck-typed)."""
     return types.SimpleNamespace(
@@ -72,7 +73,7 @@ def _make_signal(
         price=None,
         exchange_ts_ns=exchange_ts_ns,
         reason="test_signal",
-        metadata={},
+        metadata={} if metadata is None else dict(metadata),
         regime=None,
     )
 
@@ -592,3 +593,109 @@ class TestPacketDoctrineInvariants:
         dispatch("ETH/USD", rt, fusion=fusion, exchange_ts_ns=ts)
         loop.execution_engine.submit_signal.assert_not_called()
         loop.decision_compiler.compile.assert_not_called()
+
+
+class TestAdvisoryMetadataSpine:
+    """
+    Bundle 8A metadata-only proof:
+    advisory context may exist in metadata but must not alter gating behavior.
+    """
+
+    def _make_fusion(self, ts_ns: int):
+        return types.SimpleNamespace(
+            exchange_ts_ns=ts_ns,
+            attack_mode=False,
+            preferred_sleeve="shadow_front",
+            sector_rotation_eligible=True,
+            shadow_front_eligible=True,
+        )
+
+    def test_advisory_metadata_passes_through_admit_path_without_behavior_change(self):
+        loop = _make_test_loop()
+        ts = 16_000_000_000_000
+        advisory_context = {
+            "advisory_context": {
+                "cross_asset_note": "passive_only",
+                "session_note": "non_authoritative",
+            },
+            "advisory_snapshot_id": "bundle8a-advisory-1",
+        }
+        observed_sig = _make_signal(
+            exchange_ts_ns=ts,
+            symbol="ETH/USD",
+            metadata=advisory_context,
+        )
+        observed_vote = _make_vote(timestamp_ns=ts)
+        rt = _make_runtime(
+            shadow_strategy=MagicMock(),
+            sector_strategy=MagicMock(),
+            sector_signal=observed_sig,
+            sector_vote=observed_vote,
+            last_price=2500.0,
+        )
+
+        loop.decision_compiler.compile = MagicMock(
+            return_value=types.SimpleNamespace(
+                decision_uuid="uuid-test",
+                decision_type="STRATEGY_VOTE",
+                metadata={
+                    "advisory_context": {
+                        "risk_cluster": "advisory-only",
+                        "portfolio_state": "passive",
+                    }
+                },
+            )
+        )
+
+        dispatch = _bind(loop, "_dispatch_fusion")
+        dispatch("ETH/USD", rt, fusion=self._make_fusion(ts), exchange_ts_ns=ts)
+
+        assert loop.decision_compiler.compile.call_count == 1
+        assert loop.execution_engine.submit_signal.call_count == 1
+        _, submit_kwargs = loop.execution_engine.submit_signal.call_args
+        submitted_signal = submit_kwargs.get("signal")
+        assert submitted_signal is observed_sig
+        assert submitted_signal.metadata["advisory_context"]["cross_asset_note"] == "passive_only"
+        assert submitted_signal.metadata["advisory_snapshot_id"] == "bundle8a-advisory-1"
+        assert submitted_signal.metadata["decision_uuid"] == "uuid-test"
+
+    def test_advisory_metadata_does_not_bypass_stale_gate(self):
+        loop = _make_test_loop()
+        stored_ts = 16_100_000_000_000
+        dispatch_ts = stored_ts + 1
+        observed_sig = _make_signal(
+            exchange_ts_ns=stored_ts,
+            metadata={
+                "advisory_context": {"cross_asset_note": "present_but_non_authoritative"},
+                "advisory_snapshot_id": "bundle8a-stale-case",
+            },
+        )
+        observed_vote = _make_vote(timestamp_ns=stored_ts)
+        rt = _make_runtime(
+            shadow_strategy=MagicMock(),
+            sector_strategy=MagicMock(),
+            sector_signal=observed_sig,
+            sector_vote=observed_vote,
+        )
+        dispatch = _bind(loop, "_dispatch_fusion")
+        dispatch("ETH/USD", rt, fusion=self._make_fusion(dispatch_ts), exchange_ts_ns=dispatch_ts)
+
+        loop.execution_engine.submit_signal.assert_not_called()
+        loop.decision_compiler.compile.assert_not_called()
+
+    def test_dispatch_path_does_not_import_dormant_advisory_modules(self):
+        import inspect
+        import app.main_loop as main_loop_module
+
+        dispatch_src = inspect.getsource(main_loop_module.MainLoop._dispatch_fusion)
+
+        forbidden_tokens = (
+            "cross_asset_risk_model",
+            "instrument_qualifier",
+            "session_calendar",
+            "opportunity_ranking",
+            "world_awareness",
+            "moving_floor",
+        )
+        for token in forbidden_tokens:
+            assert token not in dispatch_src

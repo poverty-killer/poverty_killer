@@ -134,6 +134,7 @@ def _build_strategy_signal(
     side: str = "buy",
     quantity: float = 0.5,
     confidence: float = 0.9,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> StrategySignal:
     return StrategySignal(
         strategy="sector_rotation",
@@ -144,7 +145,7 @@ def _build_strategy_signal(
         price=None,
         exchange_ts_ns=t0_ns,
         reason="multi_trade_portfolio_truth",
-        metadata={},
+        metadata={} if metadata is None else dict(metadata),
         regime=None,
     )
 
@@ -382,6 +383,7 @@ def _drive_one_trade(
     book_mid: float = 2500.0,
     observed_signal_ts_ns: Optional[int] = None,
     observed_vote_ts_ns: Optional[int] = None,
+    advisory_metadata: Optional[Dict[str, Any]] = None,
     broker_mode: str = "paper",
 ) -> Dict[str, Any]:
     """
@@ -402,7 +404,10 @@ def _drive_one_trade(
         candle = _build_candle(t_ns, close=candle_close)
         book = _build_book(t_ns, mid=book_mid)
         observed_signal = _build_strategy_signal(
-            signal_ts, side=side, quantity=quantity
+            signal_ts,
+            side=side,
+            quantity=quantity,
+            metadata=advisory_metadata,
         )
         observed_vote = _build_vote_via_real_adapter(observed_signal, vote_ts)
 
@@ -1148,3 +1153,90 @@ class TestMultiTradeSafetyInvariants:
             "replay mode leaked across multi-trade portfolio truth tests; "
             "ReplayTimeContext must always be used as a context manager"
         )
+
+
+class TestAdvisoryMetadataSpine:
+    """Bundle 8A metadata-only proof on the paper-trade harness path."""
+
+    def test_advisory_metadata_preserves_submit_and_fill_path(self):
+        router = OrderRouter(paper_mode=True)
+
+        advisory_payload = {
+            "advisory_context": {
+                "cross_asset": "passive",
+                "session": "non_authoritative",
+            },
+            "advisory_snapshot_id": "bundle8a-multi-trade-1",
+        }
+        with_meta = _drive_one_trade(
+            t_ns=T0_NS,
+            side="buy",
+            quantity=0.5,
+            router=router,
+            advisory_metadata=advisory_payload,
+        )
+        without_meta = _drive_one_trade(
+            t_ns=T1_NS,
+            side="sell",
+            quantity=0.25,
+            router=router,
+        )
+
+        assert len(with_meta["captured"]) == 1
+        assert len(without_meta["captured"]) == 1
+        assert with_meta["fill"] is not None
+        assert without_meta["fill"] is not None
+
+        signal_with_meta = with_meta["captured"][0]["signal"]
+        assert signal_with_meta.metadata["advisory_snapshot_id"] == "bundle8a-multi-trade-1"
+        assert signal_with_meta.metadata["advisory_context"]["cross_asset"] == "passive"
+
+    def test_advisory_metadata_does_not_change_reject_behavior(self):
+        router = OrderRouter(paper_mode=True)
+
+        first = _drive_one_trade(
+            t_ns=T0_NS,
+            side="buy",
+            quantity=0.5,
+            router=router,
+        )
+        assert first["fill"] is not None
+
+        reports_after_first = len(router._paper_broker.execution_reports)  # type: ignore[attr-defined]
+
+        stale = _drive_one_trade(
+            t_ns=T1_NS,
+            side="sell",
+            quantity=0.25,
+            router=router,
+            observed_signal_ts_ns=T1_NS - 1,
+            observed_vote_ts_ns=T1_NS - 1,
+            advisory_metadata={
+                "advisory_context": {"cross_asset": "present_but_non_authoritative"},
+                "advisory_snapshot_id": "bundle8a-stale-reject",
+            },
+        )
+
+        assert stale["captured"] == []
+        assert stale["fill"] is None
+        assert stale["order"] is None
+        assert len(router._paper_broker.execution_reports) == reports_after_first  # type: ignore[attr-defined]
+
+    def test_no_dormant_advisory_module_activation_in_dispatch_or_execution_gate(self):
+        import app.main_loop as main_loop_module
+        import app.execution.engine as execution_engine_module
+
+        dispatch_src = inspect.getsource(main_loop_module.MainLoop._dispatch_fusion)
+        submit_src = inspect.getsource(execution_engine_module.ExecutionEngine.submit_signal)
+
+        forbidden_tokens = (
+            "cross_asset_risk_model",
+            "instrument_qualifier",
+            "session_calendar",
+            "opportunity_ranking",
+            "world_awareness",
+            "moving_floor",
+        )
+        for token in forbidden_tokens:
+            assert token not in dispatch_src
+            assert token not in submit_src
