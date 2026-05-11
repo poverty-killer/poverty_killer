@@ -7,10 +7,12 @@ Decimal-from-float construction at order/fill boundaries.
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
-from app.execution.engine import QueuedSignal
+from app.execution.engine import ExecutionEngine, QueuedSignal
 from app.execution.order_router import OrderStatus
 from app.models import OrderFill
 from app.models.enums import InternalOrderStatus, OrderSide
@@ -195,6 +197,92 @@ def test_calculate_signal_net_profit_uses_metadata_move():
     assert isinstance(result, Decimal)
     expected = Decimal("0.05") * Decimal("0.80") - Decimal("0.0036")
     assert result == expected
+
+
+def _make_execution_engine_for_admissibility(*, can_trade: bool = True) -> ExecutionEngine:
+    """Build a minimal ExecutionEngine for submit_signal gate tests."""
+    commander = MagicMock()
+    risk_guard = MagicMock()
+    risk_guard.can_trade.return_value = can_trade
+    risk_guard.is_vol_fuse_triggered.return_value = False
+    risk_guard.register_recalibrate_callback = MagicMock()
+    risk_guard.register_emergency_callback = MagicMock()
+    risk_guard.register_zombie_callback = MagicMock()
+    risk_guard.register_lag_callback = MagicMock()
+    risk_guard.register_vol_fuse_callback = MagicMock()
+
+    order_router = MagicMock()
+    masking_layer = MagicMock()
+
+    engine = ExecutionEngine(
+        commander=commander,
+        risk_guard=risk_guard,
+        order_router=order_router,
+        masking_layer=masking_layer,
+    )
+    engine._state.is_running = True
+    engine._state.last_regime = "neutral"
+    return engine
+
+
+def _make_submit_signal_candidate(*, confidence: float, expected_move: str) -> SimpleNamespace:
+    """Build the minimum StrategySignal shape submit_signal needs."""
+    return SimpleNamespace(
+        strategy="sector_rotation",
+        symbol="ETH/USD",
+        side="buy",
+        quantity=0.05,
+        confidence=confidence,
+        metadata={"expected_move": expected_move},
+    )
+
+
+def test_submit_signal_rejects_when_expected_net_profit_below_floor():
+    engine = _make_execution_engine_for_admissibility(can_trade=True)
+    signal = _make_submit_signal_candidate(confidence=0.10, expected_move="0.02")
+
+    admitted = engine.submit_signal(signal, current_price=Decimal("3000.00"), is_attack=False)
+
+    assert admitted is False
+
+
+def test_submit_signal_admits_when_expected_net_profit_above_floor():
+    engine = _make_execution_engine_for_admissibility(can_trade=True)
+    signal = _make_submit_signal_candidate(confidence=0.75, expected_move="0.02")
+
+    admitted = engine.submit_signal(signal, current_price=Decimal("3000.00"), is_attack=False)
+
+    assert admitted is True
+
+
+def test_submit_signal_boundary_at_floor_is_admitted():
+    engine = _make_execution_engine_for_admissibility(can_trade=True)
+    signal = _make_submit_signal_candidate(confidence=0.86, expected_move="0.01")
+
+    expected_net = engine._calculate_signal_net_profit(signal)
+    admitted = engine.submit_signal(signal, current_price=Decimal("3000.00"), is_attack=False)
+
+    assert expected_net == Decimal("0.005")
+    assert admitted is True
+
+
+def test_submit_signal_risk_guard_veto_still_blocks_profitable_signal():
+    engine = _make_execution_engine_for_admissibility(can_trade=False)
+    signal = _make_submit_signal_candidate(confidence=0.75, expected_move="0.02")
+
+    admitted = engine.submit_signal(signal, current_price=Decimal("3000.00"), is_attack=False)
+
+    assert admitted is False
+
+
+def test_submit_signal_admission_gate_does_not_submit_orders():
+    engine = _make_execution_engine_for_admissibility(can_trade=True)
+    signal = _make_submit_signal_candidate(confidence=0.75, expected_move="0.02")
+
+    admitted = engine.submit_signal(signal, current_price=Decimal("3000.00"), is_attack=False)
+
+    assert admitted is True
+    engine.order_router.submit_order.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

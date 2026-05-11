@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 NS_PER_SECOND = 1_000_000_000
 NS_PER_MS = 1_000_000
+ECONOMIC_NET_PROFIT_FLOOR = Decimal("0.005")
 
 
 @dataclass(slots=True)
@@ -238,8 +239,7 @@ class ExecutionEngine:
         if self.data_validator and not self.data_validator.is_data_healthy(signal.symbol):
             return False
 
-        expected_net_profit = self._calculate_signal_net_profit(signal)
-        if expected_net_profit < Decimal("0.005"):
+        if not self._is_signal_economically_admissible(signal):
             return False
 
         resolved_decision_uuid = decision_uuid
@@ -288,6 +288,19 @@ class ExecutionEngine:
     # ============================================
     # INTERNAL METHODS
     # ============================================
+
+    def _is_signal_economically_admissible(self, signal: StrategySignal) -> bool:
+        """
+        Canonical execution-side economic admissibility boundary.
+
+        Behavior is intentionally preserved:
+        - expected net profit formula remains _calculate_signal_net_profit()
+        - admissibility floor remains exactly 0.005
+
+        NetEdgeGovernor remains dormant/non-authoritative in this bundle.
+        """
+        expected_net_profit = self._calculate_signal_net_profit(signal)
+        return expected_net_profit >= ECONOMIC_NET_PROFIT_FLOOR
 
     def _calculate_signal_net_profit(self, signal: StrategySignal) -> Decimal:
         expected_move = Decimal("0.02")
