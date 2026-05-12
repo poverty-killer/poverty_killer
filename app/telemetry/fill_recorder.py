@@ -37,6 +37,7 @@ _REPLAY_METADATA_KEYS = (
     "execution_is_attack_matches_contract",
     "is_attack",
     "portfolio_replay_context",
+    "exposure_snapshot_replay_context",
     "advisory_aggression_metadata_present",
     "advisory_aggression_snapshot_id",
 )

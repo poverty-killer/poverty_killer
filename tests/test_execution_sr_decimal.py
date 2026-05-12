@@ -148,6 +148,37 @@ def _passive_portfolio_replay_context():
     }
 
 
+def _passive_exposure_snapshot_replay_context():
+    """Passive exposure snapshot context; never a veto or dormant activation."""
+    return {
+        "exposure_authority_version": "exposure.passive_replay.v1",
+        "exposure_manager_active": False,
+        "exposure_veto_authority": None,
+        "exposure_veto_applied": False,
+        "exposure_veto_reason": None,
+        "exposure_snapshot_id": "exposure-snapshot-passive-001",
+        "exposure_snapshot_version": 1,
+        "snapshot_quality": "PASSIVE_REPLAY_CONTEXT",
+        "pre_trade_equity": "100000.00",
+        "pre_trade_cash": "100000.00",
+        "pre_trade_positions_hash": "sha256:positions-passive-empty",
+        "pre_trade_reservations_hash": "sha256:reservations-passive-empty",
+        "projected_order_notional": "1250.00",
+        "projected_global_utilization": "9.9900",
+        "projected_sleeve_utilization": "9.9900",
+        "projected_asset_concentration": "9.9900",
+        "reservation_id": "reservation-passive-001",
+        "reservation_status": "PASSIVE_NOT_RESERVED",
+        "reserved_buying_power_before": "0",
+        "reserved_buying_power_after": "0",
+        "effective_gross_before": "0",
+        "effective_gross_after": "1250.00",
+        "residual_net_exposure_before": "0",
+        "residual_net_exposure_after": "1250.00",
+        "source_truth_frame_id": "truth-frame-passive-001",
+    }
+
+
 def _assert_aggression_replay_payload(payload, *, telemetry_event):
     """Assert persisted telemetry uses Commander authority, not advisory hints."""
     assert payload["canonical_aggression_contract"]["authority_owner"] == "Commander"
@@ -206,6 +237,53 @@ def _assert_passive_portfolio_replay_payload(
     assert str(order_metadata["original_size"]) == str(expected_original_size)
     assert str(order_metadata["masked_size"]) == str(expected_masked_size)
     assert order_metadata["is_attack"] is False
+
+
+def _assert_passive_exposure_snapshot_replay_payload(payload):
+    context = payload["exposure_snapshot_replay_context"]
+    expected_keys = {
+        "exposure_authority_version",
+        "exposure_manager_active",
+        "exposure_veto_authority",
+        "exposure_veto_applied",
+        "exposure_veto_reason",
+        "exposure_snapshot_id",
+        "exposure_snapshot_version",
+        "snapshot_quality",
+        "pre_trade_equity",
+        "pre_trade_cash",
+        "pre_trade_positions_hash",
+        "pre_trade_reservations_hash",
+        "projected_order_notional",
+        "projected_global_utilization",
+        "projected_sleeve_utilization",
+        "projected_asset_concentration",
+        "reservation_id",
+        "reservation_status",
+        "reserved_buying_power_before",
+        "reserved_buying_power_after",
+        "effective_gross_before",
+        "effective_gross_after",
+        "residual_net_exposure_before",
+        "residual_net_exposure_after",
+        "source_truth_frame_id",
+    }
+    assert set(context) == expected_keys
+    assert context["exposure_authority_version"] == "exposure.passive_replay.v1"
+    assert context["exposure_manager_active"] is False
+    assert context["exposure_veto_authority"] is None
+    assert context["exposure_veto_applied"] is False
+    assert context["exposure_veto_reason"] is None
+    assert context["snapshot_quality"] == "PASSIVE_REPLAY_CONTEXT"
+    assert context["reservation_status"] == "PASSIVE_NOT_RESERVED"
+    assert context["projected_global_utilization"] == "9.9900"
+    assert context["projected_sleeve_utilization"] == "9.9900"
+    assert context["projected_asset_concentration"] == "9.9900"
+
+    order_metadata = payload["order_metadata"]
+    assert order_metadata["exposure_snapshot_replay_context"] == context
+    assert "ExposureManager" not in json.dumps(payload)
+    assert "validate_intent" not in json.dumps(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +590,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     signal_ts_ns = now_ns() - 1_000_000
     replay_metadata = _canonical_aggression_replay_metadata()
     portfolio_replay_context = _passive_portfolio_replay_context()
+    exposure_snapshot_replay_context = _passive_exposure_snapshot_replay_context()
     signal = StrategySignal(
         strategy="sector_rotation",
         symbol="ETH/USD",
@@ -524,6 +603,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         metadata={
             "decision_uuid": decision_uuid,
             "portfolio_replay_context": portfolio_replay_context,
+            "exposure_snapshot_replay_context": exposure_snapshot_replay_context,
             **replay_metadata,
         },
     )
@@ -534,11 +614,14 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         is_attack=False,
     )
     assert admitted is True
+    risk_guard.can_trade.assert_called_once_with()
+    risk_guard.is_vol_fuse_triggered.assert_called_once_with()
 
     queued = engine._execution_queue.get_nowait()
     assert queued.decision_uuid == decision_uuid
 
     engine._execute_signal(queued)
+    masking_layer.mask_order.assert_called_once_with(0.05)
 
     events = store.get_events_by_type("fill", limit=20)
     assert events, "Expected persisted fill telemetry event from end-to-end execution path"
@@ -554,6 +637,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         expected_original_size="0.05",
         expected_masked_size="0.05",
     )
+    _assert_passive_exposure_snapshot_replay_payload(payload)
 
     assert isinstance(payload["quantity"], str)
     assert isinstance(payload["price"], str)
@@ -592,6 +676,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         expected_original_size="0.05",
         expected_masked_size="0.05",
     )
+    _assert_passive_exposure_snapshot_replay_payload(order_payload)
     assert order_payload["symbol"] == "ETH/USD"
     assert order_payload["side"] == "buy"
     assert isinstance(order_payload["quantity"], str)
@@ -623,6 +708,9 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
         _canonical_aggression_replay_metadata()
     )
     replay_metadata["portfolio_replay_context"] = _passive_portfolio_replay_context()
+    replay_metadata["exposure_snapshot_replay_context"] = (
+        _passive_exposure_snapshot_replay_context()
+    )
     event_id = recorder.record_rejection(
         client_order_id="reject_client_order_001",
         decision_uuid=decision_uuid,
@@ -661,6 +749,7 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
         expected_original_size="0.250",
         expected_masked_size="0.250",
     )
+    _assert_passive_exposure_snapshot_replay_payload(payload)
 
     assert "e" not in payload["quantity"].lower()
     assert "e" not in payload["limit_price"].lower()

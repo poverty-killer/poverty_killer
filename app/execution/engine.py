@@ -406,6 +406,14 @@ class ExecutionEngine:
         if isinstance(portfolio_replay_context, dict):
             order_metadata["portfolio_replay_context"] = dict(portfolio_replay_context)
 
+        exposure_snapshot_replay_context = signal_metadata.get(
+            "exposure_snapshot_replay_context"
+        )
+        if isinstance(exposure_snapshot_replay_context, dict):
+            order_metadata["exposure_snapshot_replay_context"] = dict(
+                exposure_snapshot_replay_context
+            )
+
         if "aggression_context" in signal_metadata or "aggression_snapshot_id" in signal_metadata:
             order_metadata["advisory_aggression_metadata_present"] = True
             if "aggression_snapshot_id" in signal_metadata:
