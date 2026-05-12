@@ -38,6 +38,7 @@ _REPLAY_METADATA_KEYS = (
     "is_attack",
     "portfolio_replay_context",
     "exposure_snapshot_replay_context",
+    "order_lifecycle_replay_context",
     "advisory_aggression_metadata_present",
     "advisory_aggression_snapshot_id",
 )
@@ -52,6 +53,64 @@ def _attach_replay_metadata(payload: Dict[str, Any], metadata: Optional[Dict[str
     for key in _REPLAY_METADATA_KEYS:
         if key in metadata:
             payload[key] = metadata[key]
+
+
+def _passive_order_lifecycle_context(
+    *,
+    lifecycle_source: str,
+    client_order_id: str,
+    decision_uuid: str,
+    lifecycle_phase: str,
+    submit_seen: bool,
+    ack_seen: Optional[bool] = None,
+    reject_seen: Optional[bool] = None,
+    partial_fill_seen: Optional[bool] = None,
+    full_fill_seen: Optional[bool] = None,
+    cancel_seen: Optional[bool] = None,
+    terminal_state: Optional[str] = None,
+    venue_order_id: Optional[str] = None,
+    cumulative_filled_qty: Optional[Any] = None,
+    remaining_qty: Optional[Any] = None,
+    avg_fill_price: Optional[Any] = None,
+    cumulative_fee: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Build passive lifecycle replay metadata without claiming authority."""
+    return {
+        "lifecycle_context_version": 1,
+        "lifecycle_source": lifecycle_source,
+        "client_order_id": str(client_order_id),
+        "venue_order_id": str(venue_order_id) if venue_order_id is not None else None,
+        "decision_uuid": str(decision_uuid),
+        "event_family": "order_lifecycle",
+        "lifecycle_phase": lifecycle_phase,
+        "submit_seen": bool(submit_seen),
+        "ack_seen": ack_seen,
+        "reject_seen": reject_seen,
+        "partial_fill_seen": partial_fill_seen,
+        "full_fill_seen": full_fill_seen,
+        "cancel_seen": cancel_seen,
+        "terminal_state": terminal_state,
+        "cumulative_filled_qty": (
+            str(cumulative_filled_qty) if cumulative_filled_qty is not None else None
+        ),
+        "remaining_qty": str(remaining_qty) if remaining_qty is not None else None,
+        "avg_fill_price": str(avg_fill_price) if avg_fill_price is not None else None,
+        "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
+        "router_cache_authoritative": False,
+        "exposure_reservation_authority": False,
+        "exposure_reservation_mutated": False,
+        "reservation_delta_authoritative": False,
+    }
+
+
+def _metadata_with_lifecycle_context(
+    metadata: Optional[Dict[str, Any]],
+    lifecycle_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Attach fallback passive lifecycle metadata without mutating caller input."""
+    result = dict(metadata) if isinstance(metadata, dict) else {}
+    result.setdefault("order_lifecycle_replay_context", lifecycle_context)
+    return result
 
 
 class FillRecorder:
@@ -96,6 +155,20 @@ class FillRecorder:
         Returns:
             event_id
         """
+        metadata = _metadata_with_lifecycle_context(
+            metadata,
+            _passive_order_lifecycle_context(
+                lifecycle_source="fill_recorder.fill_event",
+                client_order_id=fill_event.order_intent_id,
+                decision_uuid=fill_event.decision_uuid,
+                lifecycle_phase="fill",
+                submit_seen=True,
+                cumulative_filled_qty=fill_event.quantity,
+                avg_fill_price=fill_event.price,
+                cumulative_fee=fill_event.fee,
+            ),
+        )
+
         payload = {
             "fill_event_id": fill_event.fill_event_id,
             "execution_event_id": fill_event.execution_event_id,
@@ -146,6 +219,21 @@ class FillRecorder:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Record first-class order submission telemetry for replay chains."""
+        metadata = _metadata_with_lifecycle_context(
+            metadata,
+            _passive_order_lifecycle_context(
+                lifecycle_source="fill_recorder.order_submitted",
+                client_order_id=client_order_id,
+                decision_uuid=decision_uuid,
+                lifecycle_phase="order_submitted",
+                submit_seen=True,
+                venue_order_id=venue_order_id,
+                cumulative_filled_qty="0",
+                remaining_qty=quantity,
+                cumulative_fee="0",
+            ),
+        )
+
         payload = {
             "telemetry_event": "order_submitted",
             "client_order_id": client_order_id,
@@ -227,6 +315,22 @@ class FillRecorder:
             payload["limit_price"] = str(limit_price)
         if venue_order_id is not None:
             payload["venue_order_id"] = str(venue_order_id)
+        metadata = _metadata_with_lifecycle_context(
+            metadata,
+            _passive_order_lifecycle_context(
+                lifecycle_source="fill_recorder.rejection",
+                client_order_id=client_order_id,
+                decision_uuid=decision_uuid,
+                lifecycle_phase="rejected",
+                submit_seen=True,
+                reject_seen=True,
+                terminal_state="rejected",
+                venue_order_id=venue_order_id,
+                cumulative_filled_qty="0",
+                remaining_qty=quantity,
+                cumulative_fee="0",
+            ),
+        )
         _attach_replay_metadata(payload, metadata)
 
         event_id = str(uuid4())

@@ -185,6 +185,7 @@ class OrderRouter:
         fill: OrderFill,
         *,
         venue_fill_id: str,
+        venue_order_id: Optional[str] = None,
     ) -> None:
         """
         Bridge active OrderFill execution output into FillEvent telemetry.
@@ -204,6 +205,23 @@ class OrderRouter:
         from decimal import Decimal
         from app.models.contracts import FillEvent
 
+        metadata = self._metadata_with_lifecycle_context(
+            order,
+            self._build_order_lifecycle_replay_context(
+                order,
+                lifecycle_source="order_router.fill_observation",
+                lifecycle_phase="full_fill",
+                submit_seen=True,
+                full_fill_seen=True,
+                terminal_state="filled",
+                venue_order_id=venue_order_id,
+                cumulative_filled_qty=fill.quantity,
+                remaining_qty=_Decimal("0"),
+                avg_fill_price=fill.price,
+                cumulative_fee=fill.fee,
+            ),
+        )
+
         fill_event = FillEvent(
             fill_event_id=f"fill_{order.id}_{fill.exchange_ts_ns}",
             execution_event_id=order.id,
@@ -219,7 +237,7 @@ class OrderRouter:
             exchange_ts_ns=fill.exchange_ts_ns,
             receive_ts_ns=fill.receive_ts_ns,
         )
-        self._fill_recorder.record_fill(fill_event, metadata=order.metadata)
+        self._fill_recorder.record_fill(fill_event, metadata=metadata)
 
     def _record_rejection_telemetry(self, order: OrderRequest, reason: str) -> None:
         """Record order rejection telemetry without changing routing authority."""
@@ -228,6 +246,21 @@ class OrderRouter:
         if not order.decision_uuid:
             logger.warning("Skipping rejection telemetry for order %s: missing decision_uuid", order.id)
             return
+
+        metadata = self._metadata_with_lifecycle_context(
+            order,
+            self._build_order_lifecycle_replay_context(
+                order,
+                lifecycle_source="order_router.rejection_observation",
+                lifecycle_phase="rejected",
+                submit_seen=True,
+                reject_seen=True,
+                terminal_state="rejected",
+                cumulative_filled_qty=_Decimal("0"),
+                remaining_qty=order.quantity,
+                cumulative_fee=_Decimal("0"),
+            ),
+        )
 
         self._fill_recorder.record_rejection(
             client_order_id=order.id,
@@ -239,7 +272,7 @@ class OrderRouter:
             quantity=order.quantity,
             order_type=order.order_type,
             limit_price=order.limit_price,
-            metadata=order.metadata,
+            metadata=metadata,
         )
 
     def _record_order_submission_telemetry(self, order: OrderRequest) -> None:
@@ -249,6 +282,19 @@ class OrderRouter:
         if not order.decision_uuid:
             logger.warning("Skipping order submission telemetry for order %s: missing decision_uuid", order.id)
             return
+
+        metadata = self._metadata_with_lifecycle_context(
+            order,
+            self._build_order_lifecycle_replay_context(
+                order,
+                lifecycle_source="order_router.submit_attempt",
+                lifecycle_phase="order_submitted",
+                submit_seen=True,
+                cumulative_filled_qty=_Decimal("0"),
+                remaining_qty=order.quantity,
+                cumulative_fee=_Decimal("0"),
+            ),
+        )
 
         self._fill_recorder.record_order_submitted(
             client_order_id=order.id,
@@ -261,8 +307,70 @@ class OrderRouter:
             exchange_ts_ns=order.exchange_ts_ns,
             receive_ts_ns=order.receive_ts_ns,
             venue_order_id=None,
-            metadata=order.metadata,
+            metadata=metadata,
         )
+
+    def _build_order_lifecycle_replay_context(
+        self,
+        order: OrderRequest,
+        *,
+        lifecycle_source: str,
+        lifecycle_phase: str,
+        submit_seen: bool = False,
+        ack_seen: Optional[bool] = None,
+        reject_seen: Optional[bool] = None,
+        partial_fill_seen: Optional[bool] = None,
+        full_fill_seen: Optional[bool] = None,
+        cancel_seen: Optional[bool] = None,
+        terminal_state: Optional[str] = None,
+        venue_order_id: Optional[str] = None,
+        cumulative_filled_qty: Optional[Any] = None,
+        remaining_qty: Optional[Any] = None,
+        avg_fill_price: Optional[Any] = None,
+        cumulative_fee: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Passive lifecycle replay facts only.
+
+        This context is emitted for audit/replay analysis and deliberately
+        refuses execution, cache, or exposure authority. It does not mutate
+        router, broker, risk, or reservation state.
+        """
+        return {
+            "lifecycle_context_version": 1,
+            "lifecycle_source": lifecycle_source,
+            "client_order_id": order.id,
+            "venue_order_id": str(venue_order_id) if venue_order_id is not None else None,
+            "decision_uuid": order.decision_uuid,
+            "event_family": "order_lifecycle",
+            "lifecycle_phase": lifecycle_phase,
+            "submit_seen": bool(submit_seen),
+            "ack_seen": ack_seen,
+            "reject_seen": reject_seen,
+            "partial_fill_seen": partial_fill_seen,
+            "full_fill_seen": full_fill_seen,
+            "cancel_seen": cancel_seen,
+            "terminal_state": terminal_state,
+            "cumulative_filled_qty": (
+                str(cumulative_filled_qty) if cumulative_filled_qty is not None else None
+            ),
+            "remaining_qty": str(remaining_qty) if remaining_qty is not None else None,
+            "avg_fill_price": str(avg_fill_price) if avg_fill_price is not None else None,
+            "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
+            "router_cache_authoritative": False,
+            "exposure_reservation_authority": False,
+            "exposure_reservation_mutated": False,
+            "reservation_delta_authoritative": False,
+        }
+
+    def _metadata_with_lifecycle_context(
+        self,
+        order: OrderRequest,
+        lifecycle_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        metadata = dict(order.metadata) if isinstance(order.metadata, dict) else {}
+        metadata["order_lifecycle_replay_context"] = lifecycle_context
+        return metadata
 
     # ============================================
     # WEBSOCKET HEALTH MONITORING
@@ -870,7 +978,13 @@ class OrderRouter:
         )
 
         # BUNDLE F1: Record fill to telemetry
-        self._record_fill_telemetry(order, fill, venue_fill_id=order.id)
+        paper_venue_order_id = str(fill_report.order_id) if fill_report is not None else None
+        self._record_fill_telemetry(
+            order,
+            fill,
+            venue_fill_id=order.id,
+            venue_order_id=paper_venue_order_id,
+        )
 
         return fill
 
@@ -1010,7 +1124,12 @@ class OrderRouter:
                         latency_ms=self.measure_latency(),
                     )
                     # BUNDLE F1: Record fill to telemetry
-                    self._record_fill_telemetry(order, fill, venue_fill_id=order_id)
+                    self._record_fill_telemetry(
+                        order,
+                        fill,
+                        venue_fill_id=order_id,
+                        venue_order_id=order_id,
+                    )
                     return fill
             return None
         except Exception as e:
@@ -1041,7 +1160,12 @@ class OrderRouter:
                         latency_ms=self.measure_latency(),
                     )
                     # BUNDLE F1: Record fill to telemetry
-                    self._record_fill_telemetry(order, fill, venue_fill_id=order_id)
+                    self._record_fill_telemetry(
+                        order,
+                        fill,
+                        venue_fill_id=order_id,
+                        venue_order_id=order_id,
+                    )
                     return fill
             return None
         except Exception as e:

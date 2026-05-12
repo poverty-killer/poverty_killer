@@ -286,6 +286,33 @@ def _assert_passive_exposure_snapshot_replay_payload(payload):
     assert "validate_intent" not in json.dumps(payload)
 
 
+def _assert_passive_order_lifecycle_replay_payload(
+    payload,
+    *,
+    expected_client_order_id,
+    expected_decision_uuid,
+    expected_lifecycle_phase,
+    expected_venue_order_id,
+    expected_terminal_state=None,
+):
+    context = payload["order_lifecycle_replay_context"]
+    assert context["lifecycle_context_version"] == 1
+    assert context["event_family"] == "order_lifecycle"
+    assert context["client_order_id"] == expected_client_order_id
+    assert context["venue_order_id"] == expected_venue_order_id
+    assert context["decision_uuid"] == expected_decision_uuid
+    assert context["lifecycle_phase"] == expected_lifecycle_phase
+    assert context["terminal_state"] == expected_terminal_state
+
+    assert context["router_cache_authoritative"] is False
+    assert context["exposure_reservation_authority"] is False
+    assert context["exposure_reservation_mutated"] is False
+    assert context["reservation_delta_authoritative"] is False
+
+    order_metadata = payload["order_metadata"]
+    assert order_metadata["order_lifecycle_replay_context"] == context
+
+
 # ---------------------------------------------------------------------------
 # B1: float current_price -> Decimal enqueue_price
 # ---------------------------------------------------------------------------
@@ -638,6 +665,26 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         expected_masked_size="0.05",
     )
     _assert_passive_exposure_snapshot_replay_payload(payload)
+    expected_client_order_id = (
+        queued.signal.strategy + "_" + queued.signal.symbol + "_" + str(queued.signal.exchange_ts_ns)
+    )
+    _assert_passive_order_lifecycle_replay_payload(
+        payload,
+        expected_client_order_id=expected_client_order_id,
+        expected_decision_uuid=decision_uuid,
+        expected_lifecycle_phase="full_fill",
+        expected_venue_order_id=payload["order_lifecycle_replay_context"]["venue_order_id"],
+        expected_terminal_state="filled",
+    )
+    assert payload["order_lifecycle_replay_context"]["venue_order_id"] is not None
+    assert payload["order_lifecycle_replay_context"]["submit_seen"] is True
+    assert payload["order_lifecycle_replay_context"]["partial_fill_seen"] is None
+    assert payload["order_lifecycle_replay_context"]["full_fill_seen"] is True
+    assert payload["order_lifecycle_replay_context"]["cumulative_filled_qty"] == payload["quantity"]
+    assert Decimal(payload["order_lifecycle_replay_context"]["cumulative_filled_qty"]) == Decimal("0.05")
+    assert payload["order_lifecycle_replay_context"]["remaining_qty"] == "0"
+    assert payload["order_lifecycle_replay_context"]["avg_fill_price"] == payload["price"]
+    assert payload["order_lifecycle_replay_context"]["cumulative_fee"] == payload["fee"]
 
     assert isinstance(payload["quantity"], str)
     assert isinstance(payload["price"], str)
@@ -668,7 +715,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     assert order_submit is not None, "Expected decision-linked order_submitted event"
 
     order_payload = json.loads(order_submit["payload_json"])
-    assert order_payload["client_order_id"] == queued.signal.strategy + "_" + queued.signal.symbol + "_" + str(queued.signal.exchange_ts_ns)
+    assert order_payload["client_order_id"] == expected_client_order_id
     assert order_payload["decision_uuid"] == decision_uuid
     _assert_aggression_replay_payload(order_payload, telemetry_event="order_submitted")
     _assert_passive_portfolio_replay_payload(
@@ -677,6 +724,21 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         expected_masked_size="0.05",
     )
     _assert_passive_exposure_snapshot_replay_payload(order_payload)
+    _assert_passive_order_lifecycle_replay_payload(
+        order_payload,
+        expected_client_order_id=expected_client_order_id,
+        expected_decision_uuid=decision_uuid,
+        expected_lifecycle_phase="order_submitted",
+        expected_venue_order_id=None,
+    )
+    assert order_payload["order_lifecycle_replay_context"]["submit_seen"] is True
+    assert order_payload["order_lifecycle_replay_context"]["reject_seen"] is None
+    assert order_payload["order_lifecycle_replay_context"]["partial_fill_seen"] is None
+    assert order_payload["order_lifecycle_replay_context"]["full_fill_seen"] is None
+    assert order_payload["order_lifecycle_replay_context"]["cancel_seen"] is None
+    assert order_payload["order_lifecycle_replay_context"]["cumulative_filled_qty"] == "0"
+    assert Decimal(order_payload["order_lifecycle_replay_context"]["remaining_qty"]) == Decimal("0.05")
+    assert order_payload["order_lifecycle_replay_context"]["cumulative_fee"] == "0"
     assert order_payload["symbol"] == "ETH/USD"
     assert order_payload["side"] == "buy"
     assert isinstance(order_payload["quantity"], str)
@@ -750,6 +812,20 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
         expected_masked_size="0.250",
     )
     _assert_passive_exposure_snapshot_replay_payload(payload)
+    _assert_passive_order_lifecycle_replay_payload(
+        payload,
+        expected_client_order_id="reject_client_order_001",
+        expected_decision_uuid=decision_uuid,
+        expected_lifecycle_phase="rejected",
+        expected_venue_order_id="venue_reject_001",
+        expected_terminal_state="rejected",
+    )
+    assert payload["order_lifecycle_replay_context"]["submit_seen"] is True
+    assert payload["order_lifecycle_replay_context"]["reject_seen"] is True
+    assert payload["order_lifecycle_replay_context"]["full_fill_seen"] is None
+    assert payload["order_lifecycle_replay_context"]["cumulative_filled_qty"] == "0"
+    assert payload["order_lifecycle_replay_context"]["remaining_qty"] == "0.250"
+    assert payload["order_lifecycle_replay_context"]["cumulative_fee"] == "0"
 
     assert "e" not in payload["quantity"].lower()
     assert "e" not in payload["limit_price"].lower()
