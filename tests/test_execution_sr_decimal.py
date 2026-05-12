@@ -76,6 +76,91 @@ def _make_signal(side="buy", price=None, strategy="sector_rotation"):
     )
 
 
+def _canonical_aggression_replay_metadata():
+    """Commander-owned aggression replay context with hostile advisory hints."""
+    return {
+        "canonical_aggression_contract": {
+            "authority_owner": "Commander",
+            "authority_version": "commander.aggression.v1",
+            "mode": "SAFE",
+            "execution_is_attack": False,
+            "risk_guard_final_veto_preserved": True,
+            "economic_admissibility_final_veto_preserved": True,
+            "stale_gate_final_veto_preserved": True,
+            "moving_floor_active": False,
+            "dormant_governors_active": False,
+        },
+        "aggression_replay_proof": {
+            "authority_owner": "Commander",
+            "execution_is_attack": False,
+            "execution_is_attack_source": (
+                "Commander.canonical_aggression_contract.execution_is_attack"
+            ),
+            "fusion_attack_mode": True,
+            "fusion_attack_mode_authoritative": False,
+            "advisory_aggression_metadata_present": True,
+            "advisory_aggression_metadata_authoritative": False,
+            "risk_guard_final_veto_preserved": True,
+            "economic_admissibility_final_veto_preserved": True,
+            "stale_gate_final_veto_preserved": True,
+        },
+        "aggression_context": {
+            "attack_mode_hint": True,
+            "execution_is_attack": True,
+            "authority_owner": "Fusion",
+            "metadata_only": True,
+        },
+        "aggression_snapshot_id": "bundle12b-hostile-advisory-fusion",
+    }
+
+
+def _order_replay_metadata_from_signal_metadata(signal_metadata):
+    return {
+        "is_attack": False,
+        "canonical_aggression_contract": dict(signal_metadata["canonical_aggression_contract"]),
+        "aggression_replay_proof": dict(signal_metadata["aggression_replay_proof"]),
+        "execution_is_attack_source": (
+            "Commander.canonical_aggression_contract.execution_is_attack"
+        ),
+        "execution_is_attack_matches_contract": True,
+        "advisory_aggression_metadata_present": True,
+        "advisory_aggression_snapshot_id": signal_metadata["aggression_snapshot_id"],
+    }
+
+
+def _assert_aggression_replay_payload(payload, *, telemetry_event):
+    """Assert persisted telemetry uses Commander authority, not advisory hints."""
+    assert payload["canonical_aggression_contract"]["authority_owner"] == "Commander"
+    assert payload["canonical_aggression_contract"]["execution_is_attack"] is False
+    assert payload["canonical_aggression_contract"]["mode"] == "SAFE"
+    assert payload["canonical_aggression_contract"]["moving_floor_active"] is False
+    assert payload["canonical_aggression_contract"]["dormant_governors_active"] is False
+
+    assert payload["aggression_replay_proof"]["authority_owner"] == "Commander"
+    assert payload["aggression_replay_proof"]["execution_is_attack"] is False
+    assert payload["aggression_replay_proof"]["execution_is_attack_source"] == (
+        "Commander.canonical_aggression_contract.execution_is_attack"
+    )
+    assert payload["aggression_replay_proof"]["fusion_attack_mode"] is True
+    assert payload["aggression_replay_proof"]["fusion_attack_mode_authoritative"] is False
+    assert payload["aggression_replay_proof"]["advisory_aggression_metadata_present"] is True
+    assert payload["aggression_replay_proof"]["advisory_aggression_metadata_authoritative"] is False
+
+    assert payload["execution_is_attack_source"] == (
+        "Commander.canonical_aggression_contract.execution_is_attack"
+    )
+    assert payload["execution_is_attack_matches_contract"] is True
+    assert payload["advisory_aggression_metadata_present"] is True
+    assert payload["advisory_aggression_snapshot_id"] == "bundle12b-hostile-advisory-fusion"
+
+    order_metadata = payload["order_metadata"]
+    assert order_metadata["is_attack"] is False
+    assert order_metadata["canonical_aggression_contract"] == payload["canonical_aggression_contract"]
+    assert order_metadata["aggression_replay_proof"] == payload["aggression_replay_proof"]
+    assert "aggression_context" not in order_metadata
+    assert telemetry_event in {"order_submitted", "fill", "order_rejected"}
+
+
 # ---------------------------------------------------------------------------
 # B1: float current_price -> Decimal enqueue_price
 # ---------------------------------------------------------------------------
@@ -378,6 +463,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
 
     decision_uuid = "bundle3a-e2e-decision-uuid"
     signal_ts_ns = now_ns() - 1_000_000
+    replay_metadata = _canonical_aggression_replay_metadata()
     signal = StrategySignal(
         strategy="sector_rotation",
         symbol="ETH/USD",
@@ -387,7 +473,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         price=None,
         exchange_ts_ns=signal_ts_ns,
         reason="bundle3a e2e telemetry guardrail",
-        metadata={"decision_uuid": decision_uuid},
+        metadata={"decision_uuid": decision_uuid, **replay_metadata},
     )
 
     admitted = engine.submit_signal(
@@ -410,6 +496,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
 
     payload = json.loads(match["payload_json"])
     assert payload["decision_uuid"] == decision_uuid
+    _assert_aggression_replay_payload(payload, telemetry_event="fill")
 
     assert isinstance(payload["quantity"], str)
     assert isinstance(payload["price"], str)
@@ -442,6 +529,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     order_payload = json.loads(order_submit["payload_json"])
     assert order_payload["client_order_id"] == queued.signal.strategy + "_" + queued.signal.symbol + "_" + str(queued.signal.exchange_ts_ns)
     assert order_payload["decision_uuid"] == decision_uuid
+    _assert_aggression_replay_payload(order_payload, telemetry_event="order_submitted")
     assert order_payload["symbol"] == "ETH/USD"
     assert order_payload["side"] == "buy"
     assert isinstance(order_payload["quantity"], str)
@@ -469,6 +557,9 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
     recorder = FillRecorder(store)
 
     decision_uuid = "rejection-replay-decision-uuid"
+    replay_metadata = _order_replay_metadata_from_signal_metadata(
+        _canonical_aggression_replay_metadata()
+    )
     event_id = recorder.record_rejection(
         client_order_id="reject_client_order_001",
         decision_uuid=decision_uuid,
@@ -480,6 +571,7 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
         order_type=OrderType.LIMIT,
         limit_price=Decimal("2999.50"),
         venue_order_id="venue_reject_001",
+        metadata=replay_metadata,
     )
 
     events = store.get_events_by_type("order_rejected", limit=20)
@@ -500,6 +592,7 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
     assert payload["order_type"] == "limit"
     assert payload["limit_price"] == "2999.50"
     assert payload["venue_order_id"] == "venue_reject_001"
+    _assert_aggression_replay_payload(payload, telemetry_event="order_rejected")
 
     assert "e" not in payload["quantity"].lower()
     assert "e" not in payload["limit_price"].lower()
