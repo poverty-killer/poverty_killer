@@ -30,6 +30,28 @@ def _supports_order_rejected_event_type() -> bool:
     return hasattr(EventType, "ORDER_REJECTED")
 
 
+_REPLAY_METADATA_KEYS = (
+    "canonical_aggression_contract",
+    "aggression_replay_proof",
+    "execution_is_attack_source",
+    "execution_is_attack_matches_contract",
+    "is_attack",
+    "advisory_aggression_metadata_present",
+    "advisory_aggression_snapshot_id",
+)
+
+
+def _attach_replay_metadata(payload: Dict[str, Any], metadata: Optional[Dict[str, Any]]) -> None:
+    """Copy replay/audit metadata into telemetry without creating authority."""
+    if not isinstance(metadata, dict):
+        return
+
+    payload["order_metadata"] = metadata
+    for key in _REPLAY_METADATA_KEYS:
+        if key in metadata:
+            payload[key] = metadata[key]
+
+
 class FillRecorder:
     """
     Records FillEvent fills and decision-linked rejections to telemetry.
@@ -38,18 +60,18 @@ class FillRecorder:
     - decision_uuid is the sequencing key for event chains.
     - FillRecorder does not own execution authority.
     - FillRecorder must not create orders or fills.
-    
+
     Usage:
         recorder = FillRecorder(event_store)
         recorder.record_fill(fill_event)
         recorder.record_rejection(client_order_id, decision_uuid, reason)
     """
-    
+
     def __init__(self, event_store: TelemetryEventStore):
         self._store = event_store
         self._sequence_map: Dict[str, int] = {}
         logger.info("FillRecorder initialized")
-    
+
     def _next_sequence(self, decision_uuid: str) -> int:
         """Get next sequence number keyed by decision_uuid."""
         if decision_uuid not in self._sequence_map:
@@ -57,14 +79,18 @@ class FillRecorder:
         seq = self._sequence_map[decision_uuid]
         self._sequence_map[decision_uuid] += 1
         return seq
-    
-    def record_fill(self, fill_event: FillEvent) -> str:
+
+    def record_fill(
+        self,
+        fill_event: FillEvent,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Record a fill as a telemetry event.
-        
+
         Args:
             fill_event: FillEvent from order router
-            
+
         Returns:
             event_id
         """
@@ -82,7 +108,8 @@ class FillRecorder:
             "venue_fill_id": fill_event.venue_fill_id,
             "exchange_ts_ns": fill_event.exchange_ts_ns,
         }
-        
+        _attach_replay_metadata(payload, metadata)
+
         event = EventEnvelope(
             event_id=fill_event.fill_event_id,
             decision_uuid=fill_event.decision_uuid,
@@ -96,7 +123,7 @@ class FillRecorder:
             payload=payload,
             schema_version=1,
         )
-        
+
         self._store.record_event(event)
         logger.info(f"Fill recorded: {fill_event.fill_event_id} for decision {fill_event.decision_uuid}")
         return event.event_id
@@ -114,6 +141,7 @@ class FillRecorder:
         receive_ts_ns: int,
         limit_price: Optional[Any] = None,
         venue_order_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Record first-class order submission telemetry for replay chains."""
         payload = {
@@ -129,6 +157,7 @@ class FillRecorder:
             "exchange_ts_ns": int(exchange_ts_ns),
             "receive_ts_ns": int(receive_ts_ns),
         }
+        _attach_replay_metadata(payload, metadata)
 
         submit_ts_ns = int(receive_ts_ns)
         event = EventEnvelope(
@@ -148,7 +177,7 @@ class FillRecorder:
         self._store.record_event(event)
         logger.info("Order submission recorded: %s decision=%s", client_order_id, decision_uuid)
         return event.event_id
-    
+
     def record_rejection(
         self,
         client_order_id: str,
@@ -161,22 +190,23 @@ class FillRecorder:
         order_type: Optional[Any] = None,
         limit_price: Optional[Any] = None,
         venue_order_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Record an order rejection as a telemetry event.
-        
+
         Args:
             client_order_id: Client order ID that was rejected
             decision_uuid: Decision UUID that generated the order
             reason: Rejection reason
             reject_ts_ns: Rejection timestamp (defaults to now)
-            
+
         Returns:
             event_id
         """
         if reject_ts_ns is None:
             reject_ts_ns = now_ns()
-        
+
         payload = {
             "client_order_id": client_order_id,
             "decision_uuid": decision_uuid,
@@ -195,7 +225,8 @@ class FillRecorder:
             payload["limit_price"] = str(limit_price)
         if venue_order_id is not None:
             payload["venue_order_id"] = str(venue_order_id)
-        
+        _attach_replay_metadata(payload, metadata)
+
         event_id = str(uuid4())
         event_type = EventType.ORDER_REJECTED if _supports_order_rejected_event_type() else EventType.ERROR
         event = EventEnvelope(
@@ -214,20 +245,20 @@ class FillRecorder:
 
         if not _supports_order_rejected_event_type():
             event.event_type = "order_rejected"
-        
+
         self._store.record_event(event)
         logger.warning(f"Rejection recorded: {client_order_id} - {reason}")
         return event.event_id
-    
+
     def get_fills_for_decision(self, decision_uuid: str) -> List[Dict[str, Any]]:
         """Get all fills for a decision."""
         events = self._store.get_decision_chain(decision_uuid)
         return [e for e in events if e["event_type"] == "fill"]
-    
+
     def get_fill_latency_ms(self, fill_event_id: str) -> Optional[float]:
         """
         Calculate decision-to-fill latency in milliseconds.
-        
+
         Requires fill event to have decision_uuid and exchange_ts_ns.
         """
         events = self._store.get_events_by_type("fill", limit=1000)

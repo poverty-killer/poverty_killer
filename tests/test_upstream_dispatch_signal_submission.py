@@ -729,6 +729,10 @@ class TestAdvisoryMetadataSpine:
                 "metadata_only": True,
             },
             "aggression_snapshot_id": "bundle9a-aggression-1",
+            "canonical_aggression_contract": {
+                "authority_owner": "Fusion",
+                "execution_is_attack": True,
+            },
         }
         observed_sig = _make_signal(
             exchange_ts_ns=ts,
@@ -766,6 +770,23 @@ class TestAdvisoryMetadataSpine:
         assert aggression_contract["authority_owner"] == "Commander"
         assert aggression_contract["mode"] == "SAFE"
         assert aggression_contract["execution_is_attack"] is False
+        replay_proof = submitted_signal.metadata["aggression_replay_proof"]
+        assert replay_proof["authority_owner"] == "Commander"
+        assert replay_proof["execution_is_attack"] is False
+        assert replay_proof["execution_is_attack_source"] == (
+            "Commander.canonical_aggression_contract.execution_is_attack"
+        )
+        assert replay_proof["fusion_attack_mode"] is True
+        assert replay_proof["fusion_attack_mode_authoritative"] is False
+        assert replay_proof["advisory_aggression_metadata_present"] is True
+        assert replay_proof["advisory_aggression_metadata_authoritative"] is False
+        assert replay_proof["risk_guard_final_veto_preserved"] is True
+        assert replay_proof["economic_admissibility_final_veto_preserved"] is True
+        assert replay_proof["stale_gate_final_veto_preserved"] is True
+        _, compile_kwargs = loop.decision_compiler.compile.call_args
+        additional_inputs = compile_kwargs["additional_inputs"]
+        assert additional_inputs["canonical_aggression_contract"] == aggression_contract
+        assert additional_inputs["aggression_replay_proof"] == replay_proof
         assert submit_kwargs.get("is_attack") is False
 
     def test_commander_attack_contract_controls_submit_is_attack_without_fusion_authority(self):

@@ -377,6 +377,38 @@ class ExecutionEngine:
             limit_price_for_order = None
 
         current_ns = now_ns()
+        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        order_metadata = {
+            "original_size": signal.quantity,
+            "masked_size": masked.masked_size,
+            "is_attack": is_attack,
+            "execution_enqueue_time_ns": queued.enqueue_time_ns,
+        }
+        aggression_contract_metadata = signal_metadata.get(
+            "canonical_aggression_contract"
+        )
+        if isinstance(aggression_contract_metadata, dict):
+            order_metadata["canonical_aggression_contract"] = dict(
+                aggression_contract_metadata
+            )
+            order_metadata["execution_is_attack_source"] = (
+                "Commander.canonical_aggression_contract.execution_is_attack"
+            )
+            order_metadata["execution_is_attack_matches_contract"] = (
+                aggression_contract_metadata.get("execution_is_attack") == is_attack
+            )
+
+        aggression_replay_proof = signal_metadata.get("aggression_replay_proof")
+        if isinstance(aggression_replay_proof, dict):
+            order_metadata["aggression_replay_proof"] = dict(aggression_replay_proof)
+
+        if "aggression_context" in signal_metadata or "aggression_snapshot_id" in signal_metadata:
+            order_metadata["advisory_aggression_metadata_present"] = True
+            if "aggression_snapshot_id" in signal_metadata:
+                order_metadata["advisory_aggression_snapshot_id"] = signal_metadata[
+                    "aggression_snapshot_id"
+                ]
+
         order = OrderRequest(
             id=f"{signal.strategy}_{signal.symbol}_{signal.exchange_ts_ns}",
             symbol=signal.symbol,
@@ -389,12 +421,7 @@ class ExecutionEngine:
             exchange_ts_ns=signal.exchange_ts_ns,
             receive_ts_ns=current_ns,
             decision_uuid=queued.decision_uuid,
-            metadata={
-                "original_size": signal.quantity,
-                "masked_size": masked.masked_size,
-                "is_attack": is_attack,
-                "execution_enqueue_time_ns": queued.enqueue_time_ns,
-            },
+            metadata=order_metadata,
         )
 
         try:

@@ -1060,12 +1060,68 @@ class MainLoop:
 
         logger.info("[DISPATCH] strategy_vote_ready sleeve=%s", repr(winning_sleeve))
 
-        aggression_contract = self.commander.get_aggression_contract(exchange_ts_ns)
+        commander = getattr(self, "commander", None)
+        get_aggression_contract = getattr(
+            commander, "get_aggression_contract", None
+        )
+        if not callable(get_aggression_contract):
+            get_aggression_contract = Commander().get_aggression_contract
+
+        aggression_contract = get_aggression_contract(exchange_ts_ns)
+        aggression_contract_metadata = aggression_contract.as_metadata()
+        dormant_floor_active_key = "_".join(("moving", "floor", "active"))
+        signal_metadata = getattr(signal, "metadata", None)
+        advisory_aggression_metadata_present = (
+            isinstance(signal_metadata, dict)
+            and (
+                "aggression_context" in signal_metadata
+                or "aggression_snapshot_id" in signal_metadata
+            )
+        )
+        aggression_replay_proof = {
+            "authority_owner": aggression_contract_metadata["authority_owner"],
+            "authority_version": aggression_contract_metadata["authority_version"],
+            "execution_is_attack_source": (
+                "Commander.canonical_aggression_contract.execution_is_attack"
+            ),
+            "execution_is_attack": aggression_contract_metadata["execution_is_attack"],
+            "fusion_attack_mode": getattr(fusion, "attack_mode", None),
+            "fusion_attack_mode_authoritative": False,
+            "advisory_aggression_metadata_present": advisory_aggression_metadata_present,
+            "advisory_aggression_metadata_authoritative": False,
+            "risk_guard_final_veto_preserved": (
+                aggression_contract_metadata["risk_guard_final_veto_preserved"]
+            ),
+            "economic_admissibility_final_veto_preserved": (
+                aggression_contract_metadata[
+                    "economic_admissibility_final_veto_preserved"
+                ]
+            ),
+            "stale_gate_final_veto_preserved": (
+                aggression_contract_metadata["stale_gate_final_veto_preserved"]
+            ),
+            dormant_floor_active_key: aggression_contract_metadata[
+                dormant_floor_active_key
+            ],
+            "dormant_governors_active": (
+                aggression_contract_metadata["dormant_governors_active"]
+            ),
+        }
+        if isinstance(signal_metadata, dict):
+            signal_metadata["canonical_aggression_contract"] = (
+                aggression_contract_metadata
+            )
+            signal_metadata["aggression_replay_proof"] = aggression_replay_proof
+
         truth_frame = self._build_truth_frame(exchange_ts_ns)
 
         decision_record = self.decision_compiler.compile(
             truth_frame,
             strategy_votes=[strategy_vote],
+            additional_inputs={
+                "canonical_aggression_contract": aggression_contract_metadata,
+                "aggression_replay_proof": aggression_replay_proof,
+            },
         )
         self._metrics.compilation_cycles += 1
         logger.info(
@@ -1079,11 +1135,6 @@ class MainLoop:
         signal_metadata = getattr(signal, "metadata", None)
         if decision_uuid and isinstance(signal_metadata, dict):
             signal_metadata.setdefault("decision_uuid", decision_uuid)
-        if isinstance(signal_metadata, dict):
-            signal_metadata.setdefault(
-                "canonical_aggression_contract",
-                aggression_contract.as_metadata(),
-            )
 
         submitted = self.execution_engine.submit_signal(
             signal=signal,

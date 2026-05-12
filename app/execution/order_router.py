@@ -219,7 +219,7 @@ class OrderRouter:
             exchange_ts_ns=fill.exchange_ts_ns,
             receive_ts_ns=fill.receive_ts_ns,
         )
-        self._fill_recorder.record_fill(fill_event)
+        self._fill_recorder.record_fill(fill_event, metadata=order.metadata)
 
     def _record_rejection_telemetry(self, order: OrderRequest, reason: str) -> None:
         """Record order rejection telemetry without changing routing authority."""
@@ -239,6 +239,7 @@ class OrderRouter:
             quantity=order.quantity,
             order_type=order.order_type,
             limit_price=order.limit_price,
+            metadata=order.metadata,
         )
 
     def _record_order_submission_telemetry(self, order: OrderRequest) -> None:
@@ -260,6 +261,7 @@ class OrderRouter:
             exchange_ts_ns=order.exchange_ts_ns,
             receive_ts_ns=order.receive_ts_ns,
             venue_order_id=None,
+            metadata=order.metadata,
         )
 
     # ============================================
