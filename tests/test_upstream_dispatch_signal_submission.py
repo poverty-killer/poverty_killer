@@ -45,6 +45,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.commander import Commander
 from app.main_loop import MainLoop
 from app.models.enums import SleeveType
 
@@ -124,6 +125,7 @@ def _make_test_loop(
     preferred_sleeve: SleeveType = SleeveType.SHADOW_FRONT,
     eligible_sleeves: Optional[List[SleeveType]] = None,
     gen_sf_signal: Optional[Tuple[Any, Any]] = None,
+    commander_attack: bool = False,
 ):
     """
     Build a minimal MainLoop-shaped test double with just the fields the dispatch
@@ -135,6 +137,9 @@ def _make_test_loop(
 
     loop = types.SimpleNamespace()
     loop.config = types.SimpleNamespace(broker_mode=broker_mode)
+    loop.commander = Commander()
+    if commander_attack:
+        loop.commander.enable_attack_mode("test_governed_attack_contract", 1)
 
     # StrategyRouter is mocked — its policy is exercised by its own tests.
     loop.strategy_router = MagicMock()
@@ -188,6 +193,33 @@ def _bind(loop, method_name):
     """Bind an unbound MainLoop method to our test-double instance."""
     func = getattr(MainLoop, method_name)
     return func.__get__(loop, MainLoop)
+
+
+# =============================================================================
+# 0. Commander canonical aggression contract
+# =============================================================================
+
+
+class TestCommanderCanonicalAggressionContract:
+    def test_safe_mode_contract_is_deterministic_and_preserves_final_vetoes(self):
+        commander = Commander()
+        ts = 1_234_000_000_000
+
+        first = commander.get_aggression_contract(ts)
+        second = commander.get_aggression_contract(ts)
+
+        assert first == second
+        assert first.authority_owner == "Commander"
+        assert first.authority_version == "commander.aggression.v1"
+        assert first.mode == "SAFE"
+        assert first.execution_is_attack is False
+        assert first.veto_reasons == ("safe_mode",)
+        assert first.economic_admissibility_final_veto_preserved is True
+        assert first.risk_guard_final_veto_preserved is True
+        assert first.stale_gate_final_veto_preserved is True
+        assert first.moving_floor_active is False
+        assert first.dormant_governors_active is False
+        assert first.as_metadata() == second.as_metadata()
 
 
 # =============================================================================
@@ -423,6 +455,10 @@ class TestDispatchFusionFallbackAndDecline:
         assert submit_kwargs.get("signal") is observed_sig
         assert submit_kwargs.get("current_price") == 2500.0
         assert submit_kwargs.get("is_attack") is False
+        aggression_contract = observed_sig.metadata["canonical_aggression_contract"]
+        assert aggression_contract["authority_owner"] == "Commander"
+        assert aggression_contract["execution_is_attack"] is False
+        assert aggression_contract["stale_gate_final_veto_preserved"] is True
 
         # Metrics record the submission.
         assert loop._metrics.orders_submitted == 1
@@ -683,7 +719,7 @@ class TestAdvisoryMetadataSpine:
         loop.execution_engine.submit_signal.assert_not_called()
         loop.decision_compiler.compile.assert_not_called()
 
-    def test_aggression_metadata_with_attack_mode_flag_is_passive_on_admit_path(self):
+    def test_fusion_aggression_metadata_is_advisory_to_commander_contract_on_admit_path(self):
         loop = _make_test_loop()
         ts = 16_200_000_000_000
         aggression_context = {
@@ -726,7 +762,47 @@ class TestAdvisoryMetadataSpine:
         assert submitted_signal is observed_sig
         assert submitted_signal.metadata["aggression_context"]["attack_mode_hint"] is True
         assert submitted_signal.metadata["aggression_snapshot_id"] == "bundle9a-aggression-1"
+        aggression_contract = submitted_signal.metadata["canonical_aggression_contract"]
+        assert aggression_contract["authority_owner"] == "Commander"
+        assert aggression_contract["mode"] == "SAFE"
+        assert aggression_contract["execution_is_attack"] is False
         assert submit_kwargs.get("is_attack") is False
+
+    def test_commander_attack_contract_controls_submit_is_attack_without_fusion_authority(self):
+        loop = _make_test_loop(commander_attack=True)
+        ts = 16_250_000_000_000
+        observed_sig = _make_signal(exchange_ts_ns=ts, symbol="ETH/USD")
+        observed_vote = _make_vote(timestamp_ns=ts)
+        rt = _make_runtime(
+            shadow_strategy=MagicMock(),
+            sector_strategy=MagicMock(),
+            sector_signal=observed_sig,
+            sector_vote=observed_vote,
+            last_price=2500.0,
+        )
+        fusion = types.SimpleNamespace(
+            exchange_ts_ns=ts,
+            attack_mode=False,
+            preferred_sleeve="shadow_front",
+            sector_rotation_eligible=True,
+            shadow_front_eligible=True,
+        )
+
+        dispatch = _bind(loop, "_dispatch_fusion")
+        dispatch("ETH/USD", rt, fusion=fusion, exchange_ts_ns=ts)
+
+        assert loop.decision_compiler.compile.call_count == 1
+        assert loop.execution_engine.submit_signal.call_count == 1
+        _, submit_kwargs = loop.execution_engine.submit_signal.call_args
+        assert submit_kwargs.get("is_attack") is True
+        aggression_contract = observed_sig.metadata["canonical_aggression_contract"]
+        assert aggression_contract["authority_owner"] == "Commander"
+        assert aggression_contract["mode"] == "ATTACK"
+        assert aggression_contract["execution_is_attack"] is True
+        assert aggression_contract["economic_admissibility_final_veto_preserved"] is True
+        assert aggression_contract["risk_guard_final_veto_preserved"] is True
+        assert aggression_contract["moving_floor_active"] is False
+        assert aggression_contract["dormant_governors_active"] is False
 
     def test_aggression_metadata_and_attack_mode_flag_do_not_bypass_stale_gate(self):
         loop = _make_test_loop()

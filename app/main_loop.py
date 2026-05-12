@@ -793,7 +793,7 @@ class MainLoop:
                 logger.info("[DISPATCH] %s: fusion is None", symbol)
             else:
                 logger.info(
-                    "[DISPATCH] %s: fusion has attack_mode=%s, preferred_sleeve=%s",
+                    "[DISPATCH] %s: fusion advisory_attack_mode=%s, preferred_sleeve=%s",
                     symbol,
                     getattr(fusion, 'attack_mode', '<missing>'),
                     getattr(fusion, 'preferred_sleeve', '<missing>'),
@@ -1060,6 +1060,7 @@ class MainLoop:
 
         logger.info("[DISPATCH] strategy_vote_ready sleeve=%s", repr(winning_sleeve))
 
+        aggression_contract = self.commander.get_aggression_contract(exchange_ts_ns)
         truth_frame = self._build_truth_frame(exchange_ts_ns)
 
         decision_record = self.decision_compiler.compile(
@@ -1078,11 +1079,16 @@ class MainLoop:
         signal_metadata = getattr(signal, "metadata", None)
         if decision_uuid and isinstance(signal_metadata, dict):
             signal_metadata.setdefault("decision_uuid", decision_uuid)
+        if isinstance(signal_metadata, dict):
+            signal_metadata.setdefault(
+                "canonical_aggression_contract",
+                aggression_contract.as_metadata(),
+            )
 
         submitted = self.execution_engine.submit_signal(
             signal=signal,
             current_price=runtime.last_price,
-            is_attack=False,
+            is_attack=aggression_contract.execution_is_attack,
         )
         if submitted:
             self._metrics.orders_submitted += 1

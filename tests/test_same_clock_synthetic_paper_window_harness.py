@@ -71,6 +71,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.commander import Commander
 from app.main_loop import MainLoop
 from app.models import OrderFill, OrderRequest, StrategySignal
 from app.models.enums import OrderSide, OrderType, SleeveType
@@ -175,8 +176,8 @@ def _build_fusion_decision(t0_ns: int, *, preferred: str = "shadow_front"):
     """
     FusionDecision-shaped namespace whose exchange_ts_ns equals t0_ns. The
     deterministic harness uses the same SimpleNamespace convention; production
-    _dispatch_fusion only reads ``exchange_ts_ns``, ``attack_mode``,
-    ``preferred_sleeve``, ``sector_rotation_eligible`` and ``shadow_front_eligible``.
+    _dispatch_fusion treats ``attack_mode`` as advisory and routes execution
+    attack state from Commander's canonical aggression contract.
     """
     return types.SimpleNamespace(
         exchange_ts_ns=t0_ns,
@@ -196,6 +197,7 @@ def _build_test_loop(*, broker_mode: str = "paper") -> types.SimpleNamespace:
     """
     loop = types.SimpleNamespace()
     loop.config = types.SimpleNamespace(broker_mode=broker_mode)
+    loop.commander = Commander()
 
     loop.strategy_router = MagicMock()
     loop.strategy_router.update_macro_state = MagicMock()
@@ -722,8 +724,8 @@ class TestSameClockSafetyInvariants:
     def test_attack_mode_flag_and_aggression_metadata_remain_passive_in_submit_path(self):
         """
         Even if fusion.attack_mode=True and aggression metadata is present on
-        the observed signal, the live dispatch seam must still submit with
-        is_attack=False and preserve the existing paper harness behavior.
+        the observed signal, the safe Commander contract must still submit
+        with is_attack=False and preserve the existing paper harness behavior.
         """
         with ReplayTimeContext(T0_NS):
             signal = _build_strategy_signal(T0_NS, side="buy", quantity=0.5)
@@ -768,6 +770,10 @@ class TestSameClockSafetyInvariants:
             assert len(captured) == 1
             assert captured[0]["is_attack"] is False
             assert captured[0]["signal"].metadata["aggression_snapshot_id"] == "bundle9a-same-clock-1"
+            aggression_contract = captured[0]["signal"].metadata["canonical_aggression_contract"]
+            assert aggression_contract["authority_owner"] == "Commander"
+            assert aggression_contract["mode"] == "SAFE"
+            assert aggression_contract["execution_is_attack"] is False
 
             order = _strategy_signal_to_order_request(captured[0]["signal"], receive_ts_ns=T0_NS)
             router = OrderRouter(paper_mode=True)
