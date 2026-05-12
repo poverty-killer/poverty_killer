@@ -186,6 +186,9 @@ class OrderRouter:
         *,
         venue_fill_id: str,
         venue_order_id: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        exchange_txid: Optional[str] = None,
+        id_mapping_source: Optional[str] = None,
     ) -> None:
         """
         Bridge active OrderFill execution output into FillEvent telemetry.
@@ -214,11 +217,19 @@ class OrderRouter:
                 submit_seen=True,
                 full_fill_seen=True,
                 terminal_state="filled",
+                terminal_reason="full_fill_observed",
                 venue_order_id=venue_order_id,
+                broker_order_id=broker_order_id,
+                exchange_txid=exchange_txid,
+                venue_fill_id=venue_fill_id,
+                original_qty=order.quantity,
                 cumulative_filled_qty=fill.quantity,
                 remaining_qty=_Decimal("0"),
                 avg_fill_price=fill.price,
                 cumulative_fee=fill.fee,
+                is_terminal=True,
+                status_source="order_router.fill_observation",
+                id_mapping_source=id_mapping_source,
             ),
         )
 
@@ -256,9 +267,14 @@ class OrderRouter:
                 submit_seen=True,
                 reject_seen=True,
                 terminal_state="rejected",
+                terminal_reason=reason,
+                original_qty=order.quantity,
                 cumulative_filled_qty=_Decimal("0"),
                 remaining_qty=order.quantity,
                 cumulative_fee=_Decimal("0"),
+                is_terminal=True,
+                status_source="order_router.rejection_observation",
+                id_mapping_source="order_router.client_order_id",
             ),
         )
 
@@ -290,9 +306,13 @@ class OrderRouter:
                 lifecycle_source="order_router.submit_attempt",
                 lifecycle_phase="order_submitted",
                 submit_seen=True,
+                original_qty=order.quantity,
                 cumulative_filled_qty=_Decimal("0"),
                 remaining_qty=order.quantity,
                 cumulative_fee=_Decimal("0"),
+                is_terminal=False,
+                status_source="order_router.submit_attempt",
+                id_mapping_source="order_router.client_order_id",
             ),
         )
 
@@ -323,11 +343,19 @@ class OrderRouter:
         full_fill_seen: Optional[bool] = None,
         cancel_seen: Optional[bool] = None,
         terminal_state: Optional[str] = None,
+        terminal_reason: Optional[str] = None,
         venue_order_id: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        exchange_txid: Optional[str] = None,
+        venue_fill_id: Optional[str] = None,
+        original_qty: Optional[Any] = None,
         cumulative_filled_qty: Optional[Any] = None,
         remaining_qty: Optional[Any] = None,
         avg_fill_price: Optional[Any] = None,
         cumulative_fee: Optional[Any] = None,
+        is_terminal: Optional[bool] = None,
+        status_source: Optional[str] = None,
+        id_mapping_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Passive lifecycle replay facts only.
@@ -344,23 +372,36 @@ class OrderRouter:
             "decision_uuid": order.decision_uuid,
             "event_family": "order_lifecycle",
             "lifecycle_phase": lifecycle_phase,
+            "order_id_namespace": "client_order_id",
             "submit_seen": bool(submit_seen),
             "ack_seen": ack_seen,
             "reject_seen": reject_seen,
             "partial_fill_seen": partial_fill_seen,
             "full_fill_seen": full_fill_seen,
             "cancel_seen": cancel_seen,
+            "is_terminal": is_terminal,
             "terminal_state": terminal_state,
+            "terminal_reason": terminal_reason,
+            "broker_order_id": str(broker_order_id) if broker_order_id is not None else None,
+            "exchange_txid": str(exchange_txid) if exchange_txid is not None else None,
+            "venue_fill_id": str(venue_fill_id) if venue_fill_id is not None else None,
+            "original_qty": str(original_qty) if original_qty is not None else None,
             "cumulative_filled_qty": (
                 str(cumulative_filled_qty) if cumulative_filled_qty is not None else None
             ),
             "remaining_qty": str(remaining_qty) if remaining_qty is not None else None,
             "avg_fill_price": str(avg_fill_price) if avg_fill_price is not None else None,
             "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
+            "status_source": status_source,
+            "id_mapping_source": id_mapping_source,
+            "idempotency_key": f"{order.decision_uuid}:{order.id}:{lifecycle_phase}",
+            "mapping_authoritative": False,
             "router_cache_authoritative": False,
             "exposure_reservation_authority": False,
             "exposure_reservation_mutated": False,
             "reservation_delta_authoritative": False,
+            "reservation_candidate_delta": None,
+            "reservation_candidate_authoritative": False,
         }
 
     def _metadata_with_lifecycle_context(
@@ -984,6 +1025,8 @@ class OrderRouter:
             fill,
             venue_fill_id=order.id,
             venue_order_id=paper_venue_order_id,
+            broker_order_id=paper_venue_order_id,
+            id_mapping_source="paper_broker.execution_report",
         )
 
         return fill
@@ -1129,6 +1172,8 @@ class OrderRouter:
                         fill,
                         venue_fill_id=order_id,
                         venue_order_id=order_id,
+                        exchange_txid=order_id,
+                        id_mapping_source="kraken.query_order_status",
                     )
                     return fill
             return None
@@ -1165,6 +1210,7 @@ class OrderRouter:
                         fill,
                         venue_fill_id=order_id,
                         venue_order_id=order_id,
+                        id_mapping_source="alpaca.order_status",
                     )
                     return fill
             return None

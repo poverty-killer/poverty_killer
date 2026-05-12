@@ -12,6 +12,7 @@ Proves:
 """
 
 from decimal import Decimal
+import json
 import time
 
 import pytest
@@ -25,6 +26,7 @@ from app.execution.fee_model import FeeModel
 from app.execution.slippage_model import SlippageModel
 from app.execution.latency_model import LatencyModel
 from app.execution.order_router import OrderRouter
+from app.telemetry.event_store import TelemetryEventStore
 from app.utils.enums import (
     OrderSide as PbOrderSide,
     OrderType as PbOrderType,
@@ -331,6 +333,50 @@ def test_order_router_returns_fill_for_market_buy():
     assert fill.quantity > Decimal("0")
     assert fill.price > Decimal("0")
     assert fill.symbol == "ETH/USD"
+
+
+def test_order_router_paper_fill_preserves_passive_broker_id_mapping(tmp_path):
+    telemetry_path = tmp_path / "paper_broker_id_mapping.db"
+    store = TelemetryEventStore(str(telemetry_path))
+    router = OrderRouter(paper_mode=True, telemetry_store=store)
+    ts = _now_ns()
+
+    order = OrderRequest(
+        id="paper-client-order-001",
+        symbol="ETH/USD",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("0.5"),
+        strategy=SleeveType.SECTOR_ROTATION,
+        confidence=0.9,
+        decision_uuid="paper-broker-id-mapping-decision",
+        exchange_ts_ns=ts,
+        receive_ts_ns=ts,
+    )
+
+    fill = router.submit_order(order)
+
+    assert fill is not None
+    fill_events = store.get_events_by_type("fill", limit=10)
+    assert fill_events
+
+    payload = json.loads(fill_events[0]["payload_json"])
+    context = payload["order_lifecycle_replay_context"]
+
+    assert context["client_order_id"] == order.id
+    assert context["order_id_namespace"] == "client_order_id"
+    assert context["broker_order_id"] is not None
+    assert context["broker_order_id"] != order.id
+    assert context["venue_order_id"] == context["broker_order_id"]
+    assert context["venue_fill_id"] == order.id
+    assert context["is_terminal"] is True
+    assert context["terminal_state"] == "filled"
+    assert context["mapping_authoritative"] is False
+    assert context["router_cache_authoritative"] is False
+    assert context["exposure_reservation_authority"] is False
+    assert context["exposure_reservation_mutated"] is False
+    assert context["reservation_delta_authoritative"] is False
+    assert context["reservation_candidate_authoritative"] is False
 
 
 def test_order_router_returns_fill_for_market_sell():

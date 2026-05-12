@@ -294,6 +294,7 @@ def _assert_passive_order_lifecycle_replay_payload(
     expected_lifecycle_phase,
     expected_venue_order_id,
     expected_terminal_state=None,
+    expected_is_terminal=None,
 ):
     context = payload["order_lifecycle_replay_context"]
     assert context["lifecycle_context_version"] == 1
@@ -302,12 +303,20 @@ def _assert_passive_order_lifecycle_replay_payload(
     assert context["venue_order_id"] == expected_venue_order_id
     assert context["decision_uuid"] == expected_decision_uuid
     assert context["lifecycle_phase"] == expected_lifecycle_phase
+    assert context["order_id_namespace"] == "client_order_id"
+    assert context["is_terminal"] is expected_is_terminal
     assert context["terminal_state"] == expected_terminal_state
+    assert context["idempotency_key"] == (
+        f"{expected_decision_uuid}:{expected_client_order_id}:{expected_lifecycle_phase}"
+    )
 
+    assert context["mapping_authoritative"] is False
     assert context["router_cache_authoritative"] is False
     assert context["exposure_reservation_authority"] is False
     assert context["exposure_reservation_mutated"] is False
     assert context["reservation_delta_authoritative"] is False
+    assert context["reservation_candidate_delta"] is None
+    assert context["reservation_candidate_authoritative"] is False
 
     order_metadata = payload["order_metadata"]
     assert order_metadata["order_lifecycle_replay_context"] == context
@@ -569,6 +578,20 @@ def test_execution_sr_fill_telemetry_decimal_stringification_regression(tmp_path
     assert payload["quantity"] == str(fill_event.quantity)
     assert payload["price"] == str(fill_event.price)
     assert payload["fee"] == str(fill_event.fee)
+    context = payload["order_lifecycle_replay_context"]
+    assert context["client_order_id"] == fill_event.order_intent_id
+    assert context["venue_order_id"] is None
+    assert context["venue_fill_id"] == fill_event.venue_fill_id
+    assert context["original_qty"] == str(fill_event.quantity)
+    assert context["cumulative_filled_qty"] == str(fill_event.quantity)
+    assert context["avg_fill_price"] == str(fill_event.price)
+    assert context["cumulative_fee"] == str(fill_event.fee)
+    assert context["mapping_authoritative"] is False
+    assert context["router_cache_authoritative"] is False
+    assert context["exposure_reservation_authority"] is False
+    assert context["exposure_reservation_mutated"] is False
+    assert context["reservation_delta_authoritative"] is False
+    assert context["reservation_candidate_authoritative"] is False
 
     assert "e" not in payload["quantity"].lower()
     assert "e" not in payload["price"].lower()
@@ -675,8 +698,16 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         expected_lifecycle_phase="full_fill",
         expected_venue_order_id=payload["order_lifecycle_replay_context"]["venue_order_id"],
         expected_terminal_state="filled",
+        expected_is_terminal=True,
     )
     assert payload["order_lifecycle_replay_context"]["venue_order_id"] is not None
+    assert payload["order_lifecycle_replay_context"]["broker_order_id"] is not None
+    assert payload["order_lifecycle_replay_context"]["venue_fill_id"] == expected_client_order_id
+    assert isinstance(payload["order_lifecycle_replay_context"]["original_qty"], str)
+    assert Decimal(payload["order_lifecycle_replay_context"]["original_qty"]) == Decimal("0.05")
+    assert payload["order_lifecycle_replay_context"]["terminal_reason"] == "full_fill_observed"
+    assert payload["order_lifecycle_replay_context"]["status_source"] == "order_router.fill_observation"
+    assert payload["order_lifecycle_replay_context"]["id_mapping_source"] == "paper_broker.execution_report"
     assert payload["order_lifecycle_replay_context"]["submit_seen"] is True
     assert payload["order_lifecycle_replay_context"]["partial_fill_seen"] is None
     assert payload["order_lifecycle_replay_context"]["full_fill_seen"] is True
@@ -730,7 +761,17 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         expected_decision_uuid=decision_uuid,
         expected_lifecycle_phase="order_submitted",
         expected_venue_order_id=None,
+        expected_is_terminal=False,
     )
+    assert order_payload["order_lifecycle_replay_context"]["broker_order_id"] is None
+    assert order_payload["order_lifecycle_replay_context"]["exchange_txid"] is None
+    assert order_payload["order_lifecycle_replay_context"]["venue_fill_id"] is None
+    assert isinstance(order_payload["order_lifecycle_replay_context"]["original_qty"], str)
+    assert Decimal(order_payload["order_lifecycle_replay_context"]["original_qty"]) == Decimal("0.05")
+    assert order_payload["order_lifecycle_replay_context"]["terminal_state"] is None
+    assert order_payload["order_lifecycle_replay_context"]["terminal_reason"] is None
+    assert order_payload["order_lifecycle_replay_context"]["status_source"] == "order_router.submit_attempt"
+    assert order_payload["order_lifecycle_replay_context"]["id_mapping_source"] == "order_router.client_order_id"
     assert order_payload["order_lifecycle_replay_context"]["submit_seen"] is True
     assert order_payload["order_lifecycle_replay_context"]["reject_seen"] is None
     assert order_payload["order_lifecycle_replay_context"]["partial_fill_seen"] is None
@@ -819,7 +860,14 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
         expected_lifecycle_phase="rejected",
         expected_venue_order_id="venue_reject_001",
         expected_terminal_state="rejected",
+        expected_is_terminal=True,
     )
+    assert payload["order_lifecycle_replay_context"]["terminal_reason"] == (
+        "simulated rejection for replay parity"
+    )
+    assert payload["order_lifecycle_replay_context"]["original_qty"] == "0.250"
+    assert payload["order_lifecycle_replay_context"]["status_source"] == "fill_recorder.rejection"
+    assert payload["order_lifecycle_replay_context"]["id_mapping_source"] == "fill_recorder.client_order_id"
     assert payload["order_lifecycle_replay_context"]["submit_seen"] is True
     assert payload["order_lifecycle_replay_context"]["reject_seen"] is True
     assert payload["order_lifecycle_replay_context"]["full_fill_seen"] is None

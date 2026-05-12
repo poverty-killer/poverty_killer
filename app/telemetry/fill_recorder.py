@@ -68,11 +68,19 @@ def _passive_order_lifecycle_context(
     full_fill_seen: Optional[bool] = None,
     cancel_seen: Optional[bool] = None,
     terminal_state: Optional[str] = None,
+    terminal_reason: Optional[str] = None,
     venue_order_id: Optional[str] = None,
+    broker_order_id: Optional[str] = None,
+    exchange_txid: Optional[str] = None,
+    venue_fill_id: Optional[str] = None,
+    original_qty: Optional[Any] = None,
     cumulative_filled_qty: Optional[Any] = None,
     remaining_qty: Optional[Any] = None,
     avg_fill_price: Optional[Any] = None,
     cumulative_fee: Optional[Any] = None,
+    is_terminal: Optional[bool] = None,
+    status_source: Optional[str] = None,
+    id_mapping_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build passive lifecycle replay metadata without claiming authority."""
     return {
@@ -83,23 +91,36 @@ def _passive_order_lifecycle_context(
         "decision_uuid": str(decision_uuid),
         "event_family": "order_lifecycle",
         "lifecycle_phase": lifecycle_phase,
+        "order_id_namespace": "client_order_id",
         "submit_seen": bool(submit_seen),
         "ack_seen": ack_seen,
         "reject_seen": reject_seen,
         "partial_fill_seen": partial_fill_seen,
         "full_fill_seen": full_fill_seen,
         "cancel_seen": cancel_seen,
+        "is_terminal": is_terminal,
         "terminal_state": terminal_state,
+        "terminal_reason": terminal_reason,
+        "broker_order_id": str(broker_order_id) if broker_order_id is not None else None,
+        "exchange_txid": str(exchange_txid) if exchange_txid is not None else None,
+        "venue_fill_id": str(venue_fill_id) if venue_fill_id is not None else None,
+        "original_qty": str(original_qty) if original_qty is not None else None,
         "cumulative_filled_qty": (
             str(cumulative_filled_qty) if cumulative_filled_qty is not None else None
         ),
         "remaining_qty": str(remaining_qty) if remaining_qty is not None else None,
         "avg_fill_price": str(avg_fill_price) if avg_fill_price is not None else None,
         "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
+        "status_source": status_source,
+        "id_mapping_source": id_mapping_source,
+        "idempotency_key": f"{decision_uuid}:{client_order_id}:{lifecycle_phase}",
+        "mapping_authoritative": False,
         "router_cache_authoritative": False,
         "exposure_reservation_authority": False,
         "exposure_reservation_mutated": False,
         "reservation_delta_authoritative": False,
+        "reservation_candidate_delta": None,
+        "reservation_candidate_authoritative": False,
     }
 
 
@@ -163,9 +184,13 @@ class FillRecorder:
                 decision_uuid=fill_event.decision_uuid,
                 lifecycle_phase="fill",
                 submit_seen=True,
+                venue_fill_id=fill_event.venue_fill_id,
+                original_qty=fill_event.quantity,
                 cumulative_filled_qty=fill_event.quantity,
                 avg_fill_price=fill_event.price,
                 cumulative_fee=fill_event.fee,
+                status_source="fill_recorder.fill_event",
+                id_mapping_source="fill_event.order_intent_id",
             ),
         )
 
@@ -216,6 +241,8 @@ class FillRecorder:
         receive_ts_ns: int,
         limit_price: Optional[Any] = None,
         venue_order_id: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        exchange_txid: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Record first-class order submission telemetry for replay chains."""
@@ -228,9 +255,15 @@ class FillRecorder:
                 lifecycle_phase="order_submitted",
                 submit_seen=True,
                 venue_order_id=venue_order_id,
+                broker_order_id=broker_order_id,
+                exchange_txid=exchange_txid,
+                original_qty=quantity,
                 cumulative_filled_qty="0",
                 remaining_qty=quantity,
                 cumulative_fee="0",
+                is_terminal=False,
+                status_source="fill_recorder.order_submitted",
+                id_mapping_source="fill_recorder.client_order_id",
             ),
         )
 
@@ -244,6 +277,8 @@ class FillRecorder:
             "order_type": str(order_type.value) if hasattr(order_type, "value") else str(order_type),
             "limit_price": str(limit_price) if limit_price is not None else None,
             "venue_order_id": str(venue_order_id) if venue_order_id is not None else None,
+            "broker_order_id": str(broker_order_id) if broker_order_id is not None else None,
+            "exchange_txid": str(exchange_txid) if exchange_txid is not None else None,
             "exchange_ts_ns": int(exchange_ts_ns),
             "receive_ts_ns": int(receive_ts_ns),
         }
@@ -280,6 +315,8 @@ class FillRecorder:
         order_type: Optional[Any] = None,
         limit_price: Optional[Any] = None,
         venue_order_id: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        exchange_txid: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
@@ -315,6 +352,10 @@ class FillRecorder:
             payload["limit_price"] = str(limit_price)
         if venue_order_id is not None:
             payload["venue_order_id"] = str(venue_order_id)
+        if broker_order_id is not None:
+            payload["broker_order_id"] = str(broker_order_id)
+        if exchange_txid is not None:
+            payload["exchange_txid"] = str(exchange_txid)
         metadata = _metadata_with_lifecycle_context(
             metadata,
             _passive_order_lifecycle_context(
@@ -325,10 +366,17 @@ class FillRecorder:
                 submit_seen=True,
                 reject_seen=True,
                 terminal_state="rejected",
+                terminal_reason=reason,
                 venue_order_id=venue_order_id,
+                broker_order_id=broker_order_id,
+                exchange_txid=exchange_txid,
+                original_qty=quantity,
                 cumulative_filled_qty="0",
                 remaining_qty=quantity,
                 cumulative_fee="0",
+                is_terminal=True,
+                status_source="fill_recorder.rejection",
+                id_mapping_source="fill_recorder.client_order_id",
             ),
         )
         _attach_replay_metadata(payload, metadata)
