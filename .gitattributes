@@ -1,0 +1,42 @@
+# POVERTY_KILLER line-ending policy
+# Prevent Windows/WSL/editor CRLF drift from polluting governance diffs.
+
+* text=auto eol=lf
+
+# Source / config / docs should stay LF.
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.env text eol=lf
+.env* text eol=lf
+
+# Windows scripts may remain CRLF-friendly.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary/runtime artifacts must never be line-ending normalized.
+*.db binary
+*.db-shm binary
+*.db-wal binary
+*.sqlite binary
+*.sqlite3 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
