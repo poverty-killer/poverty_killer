@@ -74,6 +74,7 @@ def _passive_order_lifecycle_context(
     exchange_txid: Optional[str] = None,
     venue_fill_id: Optional[str] = None,
     original_qty: Optional[Any] = None,
+    fill_delta_qty: Optional[Any] = None,
     cumulative_filled_qty: Optional[Any] = None,
     remaining_qty: Optional[Any] = None,
     avg_fill_price: Optional[Any] = None,
@@ -81,6 +82,7 @@ def _passive_order_lifecycle_context(
     is_terminal: Optional[bool] = None,
     status_source: Optional[str] = None,
     id_mapping_source: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build passive lifecycle replay metadata without claiming authority."""
     return {
@@ -105,6 +107,7 @@ def _passive_order_lifecycle_context(
         "exchange_txid": str(exchange_txid) if exchange_txid is not None else None,
         "venue_fill_id": str(venue_fill_id) if venue_fill_id is not None else None,
         "original_qty": str(original_qty) if original_qty is not None else None,
+        "fill_delta_qty": str(fill_delta_qty) if fill_delta_qty is not None else None,
         "cumulative_filled_qty": (
             str(cumulative_filled_qty) if cumulative_filled_qty is not None else None
         ),
@@ -113,7 +116,7 @@ def _passive_order_lifecycle_context(
         "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
         "status_source": status_source,
         "id_mapping_source": id_mapping_source,
-        "idempotency_key": f"{decision_uuid}:{client_order_id}:{lifecycle_phase}",
+        "idempotency_key": idempotency_key or f"{decision_uuid}:{client_order_id}:{lifecycle_phase}",
         "mapping_authoritative": False,
         "router_cache_authoritative": False,
         "exposure_reservation_authority": False,
@@ -301,6 +304,141 @@ class FillRecorder:
 
         self._store.record_event(event)
         logger.info("Order submission recorded: %s decision=%s", client_order_id, decision_uuid)
+        return event.event_id
+
+    def record_order_lifecycle_event(
+        self,
+        *,
+        lifecycle_phase: str,
+        client_order_id: str,
+        decision_uuid: str,
+        event_ts_ns: int,
+        lifecycle_source: str,
+        symbol: Optional[str] = None,
+        side: Optional[Any] = None,
+        order_type: Optional[Any] = None,
+        limit_price: Optional[Any] = None,
+        submit_seen: bool = True,
+        ack_seen: Optional[bool] = None,
+        reject_seen: Optional[bool] = None,
+        partial_fill_seen: Optional[bool] = None,
+        full_fill_seen: Optional[bool] = None,
+        cancel_seen: Optional[bool] = None,
+        terminal_state: Optional[str] = None,
+        terminal_reason: Optional[str] = None,
+        venue_order_id: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        exchange_txid: Optional[str] = None,
+        venue_fill_id: Optional[str] = None,
+        original_qty: Optional[Any] = None,
+        fill_delta_qty: Optional[Any] = None,
+        cumulative_filled_qty: Optional[Any] = None,
+        remaining_qty: Optional[Any] = None,
+        avg_fill_price: Optional[Any] = None,
+        cumulative_fee: Optional[Any] = None,
+        is_terminal: Optional[bool] = None,
+        status_source: Optional[str] = None,
+        id_mapping_source: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Record passive order-lifecycle observations without creating authority.
+
+        These events are replay/audit facts only. They do not mutate router,
+        broker, risk, reservation, or cache state.
+        """
+        lifecycle_context = _passive_order_lifecycle_context(
+            lifecycle_source=lifecycle_source,
+            client_order_id=client_order_id,
+            decision_uuid=decision_uuid,
+            lifecycle_phase=lifecycle_phase,
+            submit_seen=submit_seen,
+            ack_seen=ack_seen,
+            reject_seen=reject_seen,
+            partial_fill_seen=partial_fill_seen,
+            full_fill_seen=full_fill_seen,
+            cancel_seen=cancel_seen,
+            terminal_state=terminal_state,
+            terminal_reason=terminal_reason,
+            venue_order_id=venue_order_id,
+            broker_order_id=broker_order_id,
+            exchange_txid=exchange_txid,
+            venue_fill_id=venue_fill_id,
+            original_qty=original_qty,
+            fill_delta_qty=fill_delta_qty,
+            cumulative_filled_qty=cumulative_filled_qty,
+            remaining_qty=remaining_qty,
+            avg_fill_price=avg_fill_price,
+            cumulative_fee=cumulative_fee,
+            is_terminal=is_terminal,
+            status_source=status_source,
+            id_mapping_source=id_mapping_source,
+            idempotency_key=idempotency_key,
+        )
+        metadata = _metadata_with_lifecycle_context(metadata, lifecycle_context)
+
+        payload = {
+            "telemetry_event": lifecycle_phase,
+            "event_family": "order_lifecycle",
+            "lifecycle_phase": lifecycle_phase,
+            "client_order_id": str(client_order_id),
+            "decision_uuid": str(decision_uuid),
+            "venue_order_id": str(venue_order_id) if venue_order_id is not None else None,
+            "broker_order_id": str(broker_order_id) if broker_order_id is not None else None,
+            "exchange_txid": str(exchange_txid) if exchange_txid is not None else None,
+            "venue_fill_id": str(venue_fill_id) if venue_fill_id is not None else None,
+            "original_qty": str(original_qty) if original_qty is not None else None,
+            "fill_delta_qty": str(fill_delta_qty) if fill_delta_qty is not None else None,
+            "cumulative_filled_qty": (
+                str(cumulative_filled_qty) if cumulative_filled_qty is not None else None
+            ),
+            "remaining_qty": str(remaining_qty) if remaining_qty is not None else None,
+            "avg_fill_price": str(avg_fill_price) if avg_fill_price is not None else None,
+            "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
+            "status_source": status_source,
+            "id_mapping_source": id_mapping_source,
+            "order_id_namespace": "client_order_id",
+            "is_terminal": is_terminal,
+            "terminal_state": terminal_state,
+            "terminal_reason": terminal_reason,
+            "idempotency_key": lifecycle_context["idempotency_key"],
+            "mapping_authoritative": False,
+            "router_cache_authoritative": False,
+            "exposure_reservation_authority": False,
+            "exposure_reservation_mutated": False,
+            "reservation_delta_authoritative": False,
+            "reservation_candidate_delta": None,
+            "reservation_candidate_authoritative": False,
+            "exchange_ts_ns": int(event_ts_ns),
+        }
+        if symbol is not None:
+            payload["symbol"] = str(symbol)
+        if side is not None:
+            payload["side"] = _safe_side_value(side)
+        if order_type is not None:
+            payload["order_type"] = str(order_type.value) if hasattr(order_type, "value") else str(order_type)
+        if limit_price is not None:
+            payload["limit_price"] = str(limit_price)
+        _attach_replay_metadata(payload, metadata)
+
+        receive_ts_ns = max(now_ns(), int(event_ts_ns))
+        event = EventEnvelope(
+            event_id=str(uuid4()),
+            decision_uuid=decision_uuid,
+            parent_uuid=client_order_id,
+            event_type=EventType.ORDER,
+            source_module="order_router",
+            exchange_ts_ns=int(event_ts_ns),
+            receive_ts_ns=receive_ts_ns,
+            decision_ts_ns=int(event_ts_ns),
+            sequence=self._next_sequence(decision_uuid),
+            payload=payload,
+            schema_version=1,
+        )
+
+        self._store.record_event(event)
+        logger.info("Order lifecycle recorded: %s order=%s decision=%s", lifecycle_phase, client_order_id, decision_uuid)
         return event.event_id
 
     def record_rejection(

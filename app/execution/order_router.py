@@ -223,6 +223,7 @@ class OrderRouter:
                 exchange_txid=exchange_txid,
                 venue_fill_id=venue_fill_id,
                 original_qty=order.quantity,
+                fill_delta_qty=fill.quantity,
                 cumulative_filled_qty=fill.quantity,
                 remaining_qty=_Decimal("0"),
                 avg_fill_price=fill.price,
@@ -350,12 +351,14 @@ class OrderRouter:
         venue_fill_id: Optional[str] = None,
         original_qty: Optional[Any] = None,
         cumulative_filled_qty: Optional[Any] = None,
+        fill_delta_qty: Optional[Any] = None,
         remaining_qty: Optional[Any] = None,
         avg_fill_price: Optional[Any] = None,
         cumulative_fee: Optional[Any] = None,
         is_terminal: Optional[bool] = None,
         status_source: Optional[str] = None,
         id_mapping_source: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Passive lifecycle replay facts only.
@@ -389,12 +392,13 @@ class OrderRouter:
             "cumulative_filled_qty": (
                 str(cumulative_filled_qty) if cumulative_filled_qty is not None else None
             ),
+            "fill_delta_qty": str(fill_delta_qty) if fill_delta_qty is not None else None,
             "remaining_qty": str(remaining_qty) if remaining_qty is not None else None,
             "avg_fill_price": str(avg_fill_price) if avg_fill_price is not None else None,
             "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
             "status_source": status_source,
             "id_mapping_source": id_mapping_source,
-            "idempotency_key": f"{order.decision_uuid}:{order.id}:{lifecycle_phase}",
+            "idempotency_key": idempotency_key or f"{order.decision_uuid}:{order.id}:{lifecycle_phase}",
             "mapping_authoritative": False,
             "router_cache_authoritative": False,
             "exposure_reservation_authority": False,
@@ -412,6 +416,106 @@ class OrderRouter:
         metadata = dict(order.metadata) if isinstance(order.metadata, dict) else {}
         metadata["order_lifecycle_replay_context"] = lifecycle_context
         return metadata
+
+    def _record_order_lifecycle_telemetry(
+        self,
+        order: OrderRequest,
+        *,
+        lifecycle_source: str,
+        lifecycle_phase: str,
+        event_ts_ns: int,
+        submit_seen: bool = True,
+        ack_seen: Optional[bool] = None,
+        reject_seen: Optional[bool] = None,
+        partial_fill_seen: Optional[bool] = None,
+        full_fill_seen: Optional[bool] = None,
+        cancel_seen: Optional[bool] = None,
+        terminal_state: Optional[str] = None,
+        terminal_reason: Optional[str] = None,
+        venue_order_id: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        exchange_txid: Optional[str] = None,
+        venue_fill_id: Optional[str] = None,
+        original_qty: Optional[Any] = None,
+        fill_delta_qty: Optional[Any] = None,
+        cumulative_filled_qty: Optional[Any] = None,
+        remaining_qty: Optional[Any] = None,
+        avg_fill_price: Optional[Any] = None,
+        cumulative_fee: Optional[Any] = None,
+        is_terminal: Optional[bool] = None,
+        status_source: Optional[str] = None,
+        id_mapping_source: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> None:
+        """Emit passive lifecycle telemetry without creating router authority."""
+        if not self._fill_recorder:
+            return
+        if not order.decision_uuid:
+            logger.warning("Skipping lifecycle telemetry for order %s: missing decision_uuid", order.id)
+            return
+
+        lifecycle_context = self._build_order_lifecycle_replay_context(
+            order,
+            lifecycle_source=lifecycle_source,
+            lifecycle_phase=lifecycle_phase,
+            submit_seen=submit_seen,
+            ack_seen=ack_seen,
+            reject_seen=reject_seen,
+            partial_fill_seen=partial_fill_seen,
+            full_fill_seen=full_fill_seen,
+            cancel_seen=cancel_seen,
+            terminal_state=terminal_state,
+            terminal_reason=terminal_reason,
+            venue_order_id=venue_order_id,
+            broker_order_id=broker_order_id,
+            exchange_txid=exchange_txid,
+            venue_fill_id=venue_fill_id,
+            original_qty=original_qty,
+            fill_delta_qty=fill_delta_qty,
+            cumulative_filled_qty=cumulative_filled_qty,
+            remaining_qty=remaining_qty,
+            avg_fill_price=avg_fill_price,
+            cumulative_fee=cumulative_fee,
+            is_terminal=is_terminal,
+            status_source=status_source,
+            id_mapping_source=id_mapping_source,
+            idempotency_key=idempotency_key,
+        )
+        metadata = self._metadata_with_lifecycle_context(order, lifecycle_context)
+        self._fill_recorder.record_order_lifecycle_event(
+            lifecycle_phase=lifecycle_phase,
+            client_order_id=order.id,
+            decision_uuid=order.decision_uuid,
+            event_ts_ns=int(event_ts_ns),
+            lifecycle_source=lifecycle_source,
+            symbol=order.symbol,
+            side=order.side,
+            order_type=order.order_type,
+            limit_price=order.limit_price,
+            submit_seen=submit_seen,
+            ack_seen=ack_seen,
+            reject_seen=reject_seen,
+            partial_fill_seen=partial_fill_seen,
+            full_fill_seen=full_fill_seen,
+            cancel_seen=cancel_seen,
+            terminal_state=terminal_state,
+            terminal_reason=terminal_reason,
+            venue_order_id=venue_order_id,
+            broker_order_id=broker_order_id,
+            exchange_txid=exchange_txid,
+            venue_fill_id=venue_fill_id,
+            original_qty=original_qty,
+            fill_delta_qty=fill_delta_qty,
+            cumulative_filled_qty=cumulative_filled_qty,
+            remaining_qty=remaining_qty,
+            avg_fill_price=avg_fill_price,
+            cumulative_fee=cumulative_fee,
+            is_terminal=is_terminal,
+            status_source=status_source,
+            id_mapping_source=id_mapping_source,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+        )
 
     # ============================================
     # WEBSOCKET HEALTH MONITORING
@@ -844,6 +948,157 @@ class OrderRouter:
                 return report
         return None
 
+    def _paper_lifecycle_idempotency_key(
+        self,
+        order: OrderRequest,
+        *,
+        lifecycle_phase: str,
+        broker_order_id: Optional[str],
+        event_ts_ns: int,
+        source_event_id: str,
+    ) -> str:
+        venue_or_broker_id = broker_order_id or "unknown_broker_order_id"
+        return (
+            f"{order.decision_uuid}:{order.id}:{lifecycle_phase}:"
+            f"{venue_or_broker_id}:{int(event_ts_ns)}:{source_event_id}"
+        )
+
+    def _record_paper_report_lifecycle(
+        self,
+        order: OrderRequest,
+        report: Any,
+        *,
+        source_event_id: str,
+    ) -> None:
+        """Record passive lifecycle facts already emitted by PaperBroker."""
+        report_status = getattr(report, "status", None)
+        event_ts_ns = int(getattr(report, "timestamp_ns", 0) or now_ns())
+        broker_order_id = str(getattr(report, "order_id", "")) or None
+        paper_order = self._paper_broker.open_orders.get(order.id) if self._paper_broker else None
+
+        original_qty = order.quantity
+        fill_delta_qty = getattr(report, "filled_quantity", None)
+        fill_price = getattr(report, "fill_price", None)
+        report_fee = getattr(report, "fee", None)
+
+        if report_status == _pb_enums.OrderStatus.ACKNOWLEDGED:
+            remaining_qty = paper_order.remaining_quantity if paper_order is not None else original_qty
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source="order_router.paper_report",
+                lifecycle_phase="order_acknowledged",
+                event_ts_ns=event_ts_ns,
+                ack_seen=True,
+                venue_order_id=broker_order_id,
+                broker_order_id=broker_order_id,
+                original_qty=original_qty,
+                cumulative_filled_qty=_Decimal("0"),
+                remaining_qty=remaining_qty,
+                cumulative_fee=_Decimal("0"),
+                is_terminal=False,
+                status_source="paper_broker.execution_report",
+                id_mapping_source="paper_broker.execution_report",
+                idempotency_key=self._paper_lifecycle_idempotency_key(
+                    order,
+                    lifecycle_phase="order_acknowledged",
+                    broker_order_id=broker_order_id,
+                    event_ts_ns=event_ts_ns,
+                    source_event_id=source_event_id,
+                ),
+            )
+            return
+
+        if report_status == _pb_enums.OrderStatus.PARTIAL_FILL:
+            cumulative_filled = (
+                paper_order.filled_quantity
+                if paper_order is not None
+                else (fill_delta_qty or _Decimal("0"))
+            )
+            remaining_qty = (
+                paper_order.remaining_quantity
+                if paper_order is not None
+                else max(_Decimal("0"), _Decimal(str(original_qty)) - _Decimal(str(cumulative_filled)))
+            )
+            avg_fill_price = paper_order.average_fill_price if paper_order is not None else fill_price
+            cumulative_fee = paper_order.fee_paid if paper_order is not None else report_fee
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source="order_router.paper_report",
+                lifecycle_phase="order_partially_filled",
+                event_ts_ns=event_ts_ns,
+                partial_fill_seen=True,
+                venue_order_id=broker_order_id,
+                broker_order_id=broker_order_id,
+                venue_fill_id=source_event_id,
+                original_qty=original_qty,
+                fill_delta_qty=fill_delta_qty,
+                cumulative_filled_qty=cumulative_filled,
+                remaining_qty=remaining_qty,
+                avg_fill_price=avg_fill_price,
+                cumulative_fee=cumulative_fee,
+                is_terminal=False,
+                status_source="paper_broker.execution_report",
+                id_mapping_source="paper_broker.execution_report",
+                idempotency_key=self._paper_lifecycle_idempotency_key(
+                    order,
+                    lifecycle_phase="order_partially_filled",
+                    broker_order_id=broker_order_id,
+                    event_ts_ns=event_ts_ns,
+                    source_event_id=source_event_id,
+                ),
+            )
+            return
+
+        if report_status == _pb_enums.OrderStatus.CANCELLED:
+            remaining_qty = paper_order.remaining_quantity if paper_order is not None else None
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source="order_router.paper_report",
+                lifecycle_phase="order_canceled",
+                event_ts_ns=event_ts_ns,
+                cancel_seen=True,
+                terminal_state="canceled",
+                terminal_reason="paper_broker_cancelled",
+                venue_order_id=broker_order_id,
+                broker_order_id=broker_order_id,
+                original_qty=original_qty,
+                remaining_qty=remaining_qty,
+                is_terminal=True,
+                status_source="paper_broker.execution_report",
+                id_mapping_source="paper_broker.execution_report",
+                idempotency_key=self._paper_lifecycle_idempotency_key(
+                    order,
+                    lifecycle_phase="order_canceled",
+                    broker_order_id=broker_order_id,
+                    event_ts_ns=event_ts_ns,
+                    source_event_id=source_event_id,
+                ),
+            )
+            return
+
+        if report_status == _pb_enums.OrderStatus.EXPIRED:
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source="order_router.paper_report",
+                lifecycle_phase="order_expired",
+                event_ts_ns=event_ts_ns,
+                terminal_state="expired",
+                terminal_reason="paper_broker_expired",
+                venue_order_id=broker_order_id,
+                broker_order_id=broker_order_id,
+                original_qty=original_qty,
+                is_terminal=True,
+                status_source="paper_broker.execution_report",
+                id_mapping_source="paper_broker.execution_report",
+                idempotency_key=self._paper_lifecycle_idempotency_key(
+                    order,
+                    lifecycle_phase="order_expired",
+                    broker_order_id=broker_order_id,
+                    event_ts_ns=event_ts_ns,
+                    source_event_id=source_event_id,
+                ),
+            )
+
     def _sync_paper_reports(self) -> None:
         """Synchronize paper broker execution reports into router status cache."""
         if self._paper_broker is None:
@@ -854,15 +1109,24 @@ class OrderRouter:
             return
 
         new_reports = reports[self._paper_reports_index:]
-        for report in new_reports:
+        for offset, report in enumerate(new_reports):
             client_id = report.client_id
             mapped_status = self._map_paper_report_status_to_cache(report.status)
+            order = self._pending_orders.get(client_id)
+            source_event_id = f"paper_report_{self._paper_reports_index + offset}"
 
             filled_qty = report.filled_quantity or _Decimal("0")
             filled_price = report.fill_price if report.fill_price is not None else _Decimal("0")
             remaining_qty = _Decimal("0")
             if client_id in self._paper_broker.open_orders:
                 remaining_qty = self._paper_broker.open_orders[client_id].remaining_quantity
+
+            if order is not None:
+                self._record_paper_report_lifecycle(
+                    order,
+                    report,
+                    source_event_id=source_event_id,
+                )
 
             self._order_status_cache[client_id] = OrderStatus(
                 order_id=client_id,
@@ -1063,6 +1327,28 @@ class OrderRouter:
                 if txid:
                     order_id = txid[0]
                     logger.info("Kraken order submitted: %s", order_id)
+                    ack_ts_ns = now_ns()
+                    self._record_order_lifecycle_telemetry(
+                        order,
+                        lifecycle_source="order_router.kraken_submit_response",
+                        lifecycle_phase="order_acknowledged",
+                        event_ts_ns=ack_ts_ns,
+                        ack_seen=True,
+                        venue_order_id=order_id,
+                        broker_order_id=order_id,
+                        exchange_txid=order_id,
+                        original_qty=order.quantity,
+                        cumulative_filled_qty=_Decimal("0"),
+                        remaining_qty=order.quantity,
+                        cumulative_fee=_Decimal("0"),
+                        is_terminal=False,
+                        status_source="kraken.add_order_response",
+                        id_mapping_source="kraken.add_order_response",
+                        idempotency_key=(
+                            f"{order.decision_uuid}:{order.id}:order_acknowledged:"
+                            f"{order_id}:{ack_ts_ns}:kraken_add_order"
+                        ),
+                    )
                     if order.order_type == "market":
                         return self._get_order_fill(order_id, order)
                     self._pending_orders[order.id] = order
@@ -1102,6 +1388,27 @@ class OrderRouter:
                 result = response.json()
                 order_id = result.get("id")
                 logger.info("Alpaca order submitted: %s", order_id)
+                ack_ts_ns = now_ns()
+                self._record_order_lifecycle_telemetry(
+                    order,
+                    lifecycle_source="order_router.alpaca_submit_response",
+                    lifecycle_phase="order_acknowledged",
+                    event_ts_ns=ack_ts_ns,
+                    ack_seen=True,
+                    venue_order_id=order_id,
+                    broker_order_id=order_id,
+                    original_qty=order.quantity,
+                    cumulative_filled_qty=_Decimal("0"),
+                    remaining_qty=order.quantity,
+                    cumulative_fee=_Decimal("0"),
+                    is_terminal=False,
+                    status_source="alpaca.submit_order_response",
+                    id_mapping_source="alpaca.submit_order_response",
+                    idempotency_key=(
+                        f"{order.decision_uuid}:{order.id}:order_acknowledged:"
+                        f"{order_id}:{ack_ts_ns}:alpaca_submit_order"
+                    ),
+                )
                 if order.order_type == "market":
                     return self._get_order_fill(order_id, order)
                 self._pending_orders[order.id] = order
@@ -1253,11 +1560,91 @@ class OrderRouter:
     def _cancel_order_paper(self, order_id: str) -> bool:
         """Cancel paper order through sovereign paper broker when available."""
         logger.info("PAPER MODE: Cancelling order %s", order_id)
+        order = self._pending_orders.get(order_id)
+        paper_order = self._paper_broker.open_orders.get(order_id) if self._paper_broker else None
+        broker_order_id = str(paper_order.order_id) if paper_order is not None else None
+        cancel_request_ts_ns = now_ns()
+        if order is not None:
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source="order_router.cancel_request",
+                lifecycle_phase="cancel_requested",
+                event_ts_ns=cancel_request_ts_ns,
+                cancel_seen=True,
+                venue_order_id=broker_order_id,
+                broker_order_id=broker_order_id,
+                original_qty=order.quantity,
+                remaining_qty=paper_order.remaining_quantity if paper_order is not None else None,
+                is_terminal=False,
+                status_source="order_router.cancel_request",
+                id_mapping_source=(
+                    "paper_broker.open_orders" if broker_order_id is not None else "order_router.client_order_id"
+                ),
+                idempotency_key=self._paper_lifecycle_idempotency_key(
+                    order,
+                    lifecycle_phase="cancel_requested",
+                    broker_order_id=broker_order_id,
+                    event_ts_ns=cancel_request_ts_ns,
+                    source_event_id="cancel_request",
+                ),
+            )
         self._pending_orders.pop(order_id, None)
 
         if self._paper_broker and order_id in self._paper_broker.open_orders:
             try:
-                self._paper_broker.cancel_order(order_id, now_ns())
+                report = self._paper_broker.cancel_order(order_id, now_ns())
+                if order is not None and report is not None:
+                    report_status = getattr(report, "status", None)
+                    report_ts_ns = int(getattr(report, "timestamp_ns", 0) or now_ns())
+                    report_broker_id = str(getattr(report, "order_id", "")) or broker_order_id
+                    if report_status == _pb_enums.OrderStatus.CANCELLED:
+                        self._record_order_lifecycle_telemetry(
+                            order,
+                            lifecycle_source="order_router.paper_cancel_report",
+                            lifecycle_phase="order_canceled",
+                            event_ts_ns=report_ts_ns,
+                            cancel_seen=True,
+                            terminal_state="canceled",
+                            terminal_reason="paper_broker_cancelled",
+                            venue_order_id=report_broker_id,
+                            broker_order_id=report_broker_id,
+                            original_qty=order.quantity,
+                            remaining_qty=paper_order.remaining_quantity if paper_order is not None else None,
+                            is_terminal=True,
+                            status_source="paper_broker.cancel_order",
+                            id_mapping_source="paper_broker.execution_report",
+                            idempotency_key=self._paper_lifecycle_idempotency_key(
+                                order,
+                                lifecycle_phase="order_canceled",
+                                broker_order_id=report_broker_id,
+                                event_ts_ns=report_ts_ns,
+                                source_event_id="cancel_report",
+                            ),
+                        )
+                    elif report_status == _pb_enums.OrderStatus.REJECTED:
+                        self._record_order_lifecycle_telemetry(
+                            order,
+                            lifecycle_source="order_router.paper_cancel_report",
+                            lifecycle_phase="cancel_rejected",
+                            event_ts_ns=report_ts_ns,
+                            cancel_seen=True,
+                            terminal_state=None,
+                            terminal_reason=None,
+                            venue_order_id=report_broker_id,
+                            broker_order_id=report_broker_id,
+                            original_qty=order.quantity,
+                            remaining_qty=paper_order.remaining_quantity if paper_order is not None else None,
+                            is_terminal=False,
+                            status_source="paper_broker.cancel_order",
+                            id_mapping_source="paper_broker.execution_report",
+                            idempotency_key=self._paper_lifecycle_idempotency_key(
+                                order,
+                                lifecycle_phase="cancel_rejected",
+                                broker_order_id=report_broker_id,
+                                event_ts_ns=report_ts_ns,
+                                source_event_id="cancel_report",
+                            ),
+                        )
                 self._sync_paper_reports()
             except Exception as exc:
                 logger.debug("Paper broker cancel delegation failed for %s: %s", order_id, exc)
