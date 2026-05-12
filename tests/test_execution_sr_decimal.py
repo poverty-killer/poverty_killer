@@ -116,6 +116,8 @@ def _canonical_aggression_replay_metadata():
 
 def _order_replay_metadata_from_signal_metadata(signal_metadata):
     return {
+        "original_size": Decimal("0.250"),
+        "masked_size": Decimal("0.250"),
         "is_attack": False,
         "canonical_aggression_contract": dict(signal_metadata["canonical_aggression_contract"]),
         "aggression_replay_proof": dict(signal_metadata["aggression_replay_proof"]),
@@ -125,6 +127,24 @@ def _order_replay_metadata_from_signal_metadata(signal_metadata):
         "execution_is_attack_matches_contract": True,
         "advisory_aggression_metadata_present": True,
         "advisory_aggression_snapshot_id": signal_metadata["aggression_snapshot_id"],
+    }
+
+
+def _passive_portfolio_replay_context():
+    """Passive portfolio replay context; never an exposure veto authority."""
+    return {
+        "portfolio_context_authoritative": False,
+        "portfolio_context_source": "test/passive_replay_fixture",
+        "account_truth_source": "paper_broker_snapshot",
+        "pre_trade_equity": "100000.00",
+        "pre_trade_cash": "100000.00",
+        "pre_trade_position_qty": "0",
+        "projected_order_notional": "1250.00",
+        "projected_exposure_after_order": "1250.00",
+        "exposure_veto_authority": None,
+        "exposure_veto_applied": False,
+        "exposure_manager_active": False,
+        "reserved_buying_power": None,
     }
 
 
@@ -159,6 +179,33 @@ def _assert_aggression_replay_payload(payload, *, telemetry_event):
     assert order_metadata["aggression_replay_proof"] == payload["aggression_replay_proof"]
     assert "aggression_context" not in order_metadata
     assert telemetry_event in {"order_submitted", "fill", "order_rejected"}
+
+
+def _assert_passive_portfolio_replay_payload(
+    payload,
+    *,
+    expected_original_size,
+    expected_masked_size,
+):
+    context = payload["portfolio_replay_context"]
+    assert context["portfolio_context_authoritative"] is False
+    assert context["portfolio_context_source"] == "test/passive_replay_fixture"
+    assert context["account_truth_source"] == "paper_broker_snapshot"
+    assert context["pre_trade_equity"] == "100000.00"
+    assert context["pre_trade_cash"] == "100000.00"
+    assert context["pre_trade_position_qty"] == "0"
+    assert context["projected_order_notional"] == "1250.00"
+    assert context["projected_exposure_after_order"] == "1250.00"
+    assert context["exposure_veto_authority"] is None
+    assert context["exposure_veto_applied"] is False
+    assert context["exposure_manager_active"] is False
+    assert context["reserved_buying_power"] is None
+
+    order_metadata = payload["order_metadata"]
+    assert order_metadata["portfolio_replay_context"] == context
+    assert str(order_metadata["original_size"]) == str(expected_original_size)
+    assert str(order_metadata["masked_size"]) == str(expected_masked_size)
+    assert order_metadata["is_attack"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +511,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     decision_uuid = "bundle3a-e2e-decision-uuid"
     signal_ts_ns = now_ns() - 1_000_000
     replay_metadata = _canonical_aggression_replay_metadata()
+    portfolio_replay_context = _passive_portfolio_replay_context()
     signal = StrategySignal(
         strategy="sector_rotation",
         symbol="ETH/USD",
@@ -473,7 +521,11 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         price=None,
         exchange_ts_ns=signal_ts_ns,
         reason="bundle3a e2e telemetry guardrail",
-        metadata={"decision_uuid": decision_uuid, **replay_metadata},
+        metadata={
+            "decision_uuid": decision_uuid,
+            "portfolio_replay_context": portfolio_replay_context,
+            **replay_metadata,
+        },
     )
 
     admitted = engine.submit_signal(
@@ -497,6 +549,11 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     payload = json.loads(match["payload_json"])
     assert payload["decision_uuid"] == decision_uuid
     _assert_aggression_replay_payload(payload, telemetry_event="fill")
+    _assert_passive_portfolio_replay_payload(
+        payload,
+        expected_original_size="0.05",
+        expected_masked_size="0.05",
+    )
 
     assert isinstance(payload["quantity"], str)
     assert isinstance(payload["price"], str)
@@ -530,6 +587,11 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     assert order_payload["client_order_id"] == queued.signal.strategy + "_" + queued.signal.symbol + "_" + str(queued.signal.exchange_ts_ns)
     assert order_payload["decision_uuid"] == decision_uuid
     _assert_aggression_replay_payload(order_payload, telemetry_event="order_submitted")
+    _assert_passive_portfolio_replay_payload(
+        order_payload,
+        expected_original_size="0.05",
+        expected_masked_size="0.05",
+    )
     assert order_payload["symbol"] == "ETH/USD"
     assert order_payload["side"] == "buy"
     assert isinstance(order_payload["quantity"], str)
@@ -560,6 +622,7 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
     replay_metadata = _order_replay_metadata_from_signal_metadata(
         _canonical_aggression_replay_metadata()
     )
+    replay_metadata["portfolio_replay_context"] = _passive_portfolio_replay_context()
     event_id = recorder.record_rejection(
         client_order_id="reject_client_order_001",
         decision_uuid=decision_uuid,
@@ -593,6 +656,11 @@ def test_rejection_telemetry_payload_replay_context_parity(tmp_path):
     assert payload["limit_price"] == "2999.50"
     assert payload["venue_order_id"] == "venue_reject_001"
     _assert_aggression_replay_payload(payload, telemetry_event="order_rejected")
+    _assert_passive_portfolio_replay_payload(
+        payload,
+        expected_original_size="0.250",
+        expected_masked_size="0.250",
+    )
 
     assert "e" not in payload["quantity"].lower()
     assert "e" not in payload["limit_price"].lower()
