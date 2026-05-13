@@ -884,6 +884,7 @@ class TruthFrame(BaseModel):
     divergence_ns: int = Field(default=0, description="Divergence duration in nanoseconds")
     divergence_reasons: List[str] = Field(default_factory=list)
     reconcile_alerts: List[Dict[str, Any]] = Field(default_factory=list)
+    terminal_mapping_proofs: List[Dict[str, Any]] = Field(default_factory=list)
     schema_version: int = Field(default=1)
 
     @field_validator("truth_frame_id", mode="before")

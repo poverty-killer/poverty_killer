@@ -49,8 +49,9 @@ from app.execution.fee_model import FeeModel as _FeeModel
 from app.execution.latency_model import LatencyModel as _LatencyModel
 from app.execution.paper_broker import PaperBroker as _SovereignPaperBroker, PaperBrokerConfig as _PaperBrokerConfig
 from app.execution.slippage_model import SlippageModel as _SlippageModel
-from app.models import OrderFill, OrderRequest
+from app.models import EventEnvelope, OrderFill, OrderRequest
 from app.models.enums import (
+    EventType,
     InternalOrderStatus,
     OrderSide as _CanonicalOrderSide,
     OrderType as _CanonicalOrderType,
@@ -161,6 +162,7 @@ class OrderRouter:
         self.pcv_retry_delay_sec = pcv_retry_delay_sec
         self.rest_fallback_enabled = rest_fallback_enabled
         self.paper_mode = paper_mode
+        self._telemetry_store = telemetry_store
         self._state_store = state_store
 
         self._paper_broker: Optional[_SovereignPaperBroker] = None
@@ -180,6 +182,7 @@ class OrderRouter:
         self._pending_orders: Dict[str, OrderRequest] = {}
         self._order_status_cache: Dict[str, OrderStatus] = {}
         self._active_order_id_mappings: Dict[Tuple[str, str], ActiveOrderIdMapping] = {}
+        self._terminal_mapping_proofs: List[Dict[str, Any]] = []
         self._paper_reports_index: int = 0
         self._paper_last_mid_by_symbol: Dict[str, _Decimal] = {}
 
@@ -1013,7 +1016,70 @@ class OrderRouter:
         result["applied"] = True
         result["reason"] = "terminal_mapping_updated"
         result["mutation_scope"] = mutation_scope
+        self._record_terminal_mapping_proof(evidence, result, mapping)
         return result
+
+    def _record_terminal_mapping_proof(
+        self,
+        evidence: Dict[str, Any],
+        result: Dict[str, Any],
+        mapping: ActiveOrderIdMapping,
+    ) -> None:
+        timestamp_ns = now_ns()
+        proof = {
+            "event_type": "terminal_mapping_proof",
+            "proof_type": "terminal_mapping_proof",
+            "client_order_id": mapping.client_order_id,
+            "broker": mapping.broker,
+            "venue": evidence.get("venue") or mapping.broker,
+            "command_id_namespace": mapping.command_id_namespace,
+            "command_order_id": mapping.command_order_id,
+            "terminal_status": result.get("terminal_status"),
+            "terminal_reason": result.get("terminal_reason"),
+            "status_evidence_classification": evidence.get("status_classification"),
+            "mutation_applied": bool(result.get("applied")),
+            "mutation_scope": "mapping_only",
+            "mapping_mutation_scope": list(result.get("mutation_scope") or []),
+            "pending_cleanup_performed": False,
+            "exposure_release_performed": False,
+            "reservation_release_performed": False,
+            "orphan_repair_performed": False,
+            "cancel_command_performed": False,
+            "submit_command_performed": False,
+            "broker_command_performed": False,
+            "command_authority": False,
+            "repair_authority": False,
+            "source": "mark_terminal_from_status_evidence",
+            "timestamp_ns": timestamp_ns,
+        }
+        self._terminal_mapping_proofs.append(proof)
+        self._terminal_mapping_proofs = self._terminal_mapping_proofs[-100:]
+        self._emit_terminal_mapping_proof_event(proof, timestamp_ns)
+
+    def _emit_terminal_mapping_proof_event(self, proof: Dict[str, Any], timestamp_ns: int) -> None:
+        if self._telemetry_store is None:
+            return
+        try:
+            event = EventEnvelope(
+                decision_uuid=None,
+                parent_uuid=None,
+                event_type=EventType.AUDIT_EVENT,
+                source_module="order_router",
+                exchange_ts_ns=timestamp_ns,
+                receive_ts_ns=timestamp_ns,
+                decision_ts_ns=0,
+                sequence=0,
+                payload=dict(proof),
+                schema_version=1,
+            )
+            self._telemetry_store.record_event(event)
+        except Exception as exc:
+            logger.debug("Terminal mapping proof telemetry append skipped: %s", exc)
+
+    def get_terminal_mapping_proofs(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return passive terminal mapping proof facts for audit/status surfaces."""
+        proofs = self._terminal_mapping_proofs if limit is None else self._terminal_mapping_proofs[-int(limit):]
+        return [dict(proof) for proof in proofs]
 
     def get_order_id_mapping_fact(self, client_order_id: str) -> Optional[Dict[str, Any]]:
         """Return the durable mapping fact for truth/reconcile hydration."""

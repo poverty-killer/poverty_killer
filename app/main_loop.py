@@ -1963,6 +1963,12 @@ class MainLoop:
             strategy_truth=strategy_truth,
             risk_truth=risk_truth,
         )
+        terminal_mapping_proofs = []
+        if order_router is not None and hasattr(order_router, "get_terminal_mapping_proofs"):
+            try:
+                terminal_mapping_proofs = order_router.get_terminal_mapping_proofs(limit=20)
+            except Exception as e:
+                logger.debug(f"Failed to read terminal mapping proofs: {e}")
 
         return TruthFrame(
             exchange_truth=exchange_truth,
@@ -1972,6 +1978,7 @@ class MainLoop:
             risk_truth=risk_truth,
             status=TruthStatus.DRIFTING,
             reconcile_alerts=reconcile_alerts,
+            terminal_mapping_proofs=terminal_mapping_proofs,
         )
 
     def _compute_volatility(self, candle: Candle) -> float:

@@ -21,6 +21,15 @@ class _MockResponse:
         return self._payload
 
 
+class _FakeTelemetryStore:
+    def __init__(self):
+        self.events = []
+
+    def record_event(self, event):
+        self.events.append(event)
+        return event.event_id
+
+
 def _order(order_id: str = "client-order-001") -> OrderRequest:
     ts_ns = now_ns()
     return OrderRequest(
@@ -377,6 +386,30 @@ def _assert_cache_pending_unchanged(router: OrderRouter, snapshot):
     assert dict(router._pending_orders) == snapshot["pending"]
 
 
+def _assert_terminal_proof_is_passive(proof: dict, order_id: str, namespace: str, command_id: str, status: str):
+    assert proof["event_type"] == "terminal_mapping_proof"
+    assert proof["proof_type"] == "terminal_mapping_proof"
+    assert proof["client_order_id"] == order_id
+    assert proof["command_id_namespace"] == namespace
+    assert proof["command_order_id"] == command_id
+    assert proof["terminal_status"] == status
+    assert proof["terminal_reason"] == f"status_evidence_{status}"
+    assert proof["status_evidence_classification"] == "terminal_observed"
+    assert proof["mutation_applied"] is True
+    assert proof["mutation_scope"] == "mapping_only"
+    assert proof["pending_cleanup_performed"] is False
+    assert proof["exposure_release_performed"] is False
+    assert proof["reservation_release_performed"] is False
+    assert proof["orphan_repair_performed"] is False
+    assert proof["cancel_command_performed"] is False
+    assert proof["submit_command_performed"] is False
+    assert proof["broker_command_performed"] is False
+    assert proof["command_authority"] is False
+    assert proof["repair_authority"] is False
+    assert proof["source"] == "mark_terminal_from_status_evidence"
+    assert proof["timestamp_ns"] > 0
+
+
 def _terminal_evidence(order_id: str, broker: str, namespace: str, command_id: str, status: str) -> dict:
     return {
         "client_order_id": order_id,
@@ -638,11 +671,13 @@ def test_paper_status_evidence_absence_is_not_terminal_proof(tmp_path):
 
 def test_kraken_terminal_status_evidence_marks_mapping_only(tmp_path):
     state_store = _store(tmp_path)
+    telemetry_store = _FakeTelemetryStore()
     router = OrderRouter(
         primary_exchange="kraken",
         paper_mode=False,
         rest_fallback_enabled=False,
         state_store=state_store,
+        telemetry_store=telemetry_store,
     )
     order = _order("kraken-terminal-apply")
     assert router._register_active_order_id_mapping(
@@ -685,6 +720,21 @@ def test_kraken_terminal_status_evidence_marks_mapping_only(tmp_path):
     active_mapping = router._active_order_id_mappings[("kraken", order.id)]
     assert active_mapping.status == "closed"
     assert active_mapping.is_terminal is True
+    proofs = router.get_terminal_mapping_proofs()
+    assert len(proofs) == 1
+    _assert_terminal_proof_is_passive(proofs[0], order.id, "exchange_txid", "KRAKEN-TERMINAL-APPLY", "closed")
+    assert proofs[0]["mapping_mutation_scope"] == ["state_store_order_id_mapping", "active_order_id_mapping"]
+    assert len(telemetry_store.events) == 1
+    event = telemetry_store.events[0]
+    assert event.event_type == "audit_event"
+    assert event.source_module == "order_router"
+    _assert_terminal_proof_is_passive(
+        event.payload,
+        order.id,
+        "exchange_txid",
+        "KRAKEN-TERMINAL-APPLY",
+        "closed",
+    )
     _assert_cache_pending_unchanged(router, snapshot)
     assert broker_calls == []
     assert cancel_calls == []
@@ -807,6 +857,7 @@ def test_terminal_update_rejects_open_unknown_missing_or_orphan_evidence(tmp_pat
         result = router.mark_terminal_from_status_evidence(evidence)
         assert result["applied"] is False
 
+    assert router.get_terminal_mapping_proofs() == []
     _assert_mutation_snapshot_unchanged(router, state_store, order.id, "kraken", snapshot)
 
 

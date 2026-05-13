@@ -289,6 +289,7 @@ def test_main_loop_surfaces_reconcile_alerts_without_execution_side_effects():
             self.cancel_calls = 0
             self.submit_calls = 0
             self.status_calls = 0
+            self.proof_calls = 0
 
         def get_exchange_truth_snapshot(self, symbol):
             return {
@@ -311,6 +312,36 @@ def test_main_loop_surfaces_reconcile_alerts_without_execution_side_effects():
         def get_order_status(self, *_args, **_kwargs):
             self.status_calls += 1
             return "unknown"
+
+        def get_terminal_mapping_proofs(self, limit=None):
+            self.proof_calls += 1
+            return [
+                {
+                    "event_type": "terminal_mapping_proof",
+                    "proof_type": "terminal_mapping_proof",
+                    "client_order_id": "terminal-proof-client",
+                    "broker": "kraken",
+                    "venue": "kraken",
+                    "command_id_namespace": "exchange_txid",
+                    "command_order_id": "TERMINAL-PROOF-TXID",
+                    "terminal_status": "closed",
+                    "terminal_reason": "status_evidence_closed",
+                    "status_evidence_classification": "terminal_observed",
+                    "mutation_applied": True,
+                    "mutation_scope": "mapping_only",
+                    "pending_cleanup_performed": False,
+                    "exposure_release_performed": False,
+                    "reservation_release_performed": False,
+                    "orphan_repair_performed": False,
+                    "cancel_command_performed": False,
+                    "submit_command_performed": False,
+                    "broker_command_performed": False,
+                    "command_authority": False,
+                    "repair_authority": False,
+                    "source": "mark_terminal_from_status_evidence",
+                    "timestamp_ns": now_ns(),
+                }
+            ]
 
         def cancel_order(self, *_args, **_kwargs):
             self.cancel_calls += 1
@@ -336,7 +367,11 @@ def test_main_loop_surfaces_reconcile_alerts_without_execution_side_effects():
     frame = loop._build_truth_frame(now_ns())
 
     assert _reason(frame.reconcile_alerts, "broker_orphan_unresolved")
+    assert frame.terminal_mapping_proofs[0]["proof_type"] == "terminal_mapping_proof"
+    assert frame.terminal_mapping_proofs[0]["mutation_scope"] == "mapping_only"
+    assert frame.terminal_mapping_proofs[0]["cancel_command_performed"] is False
     assert frame.status == "drifting"
     assert router.cancel_calls == 0
     assert router.submit_calls == 0
     assert router.status_calls == 0
+    assert router.proof_calls == 1
