@@ -56,6 +56,7 @@ from app.models.enums import (
     OrderType as _CanonicalOrderType,
     SleeveType,
 )
+from app.state.state_store import StateStore
 from app.utils.time_utils import now_ns
 from app.telemetry.event_store import TelemetryEventStore
 from app.telemetry.fill_recorder import FillRecorder
@@ -73,6 +74,28 @@ class OrderStatus:
     filled_price: _Decimal = _Decimal("0")
     remaining_quantity: _Decimal = _Decimal("0")
     timestamp_ns: int = 0
+
+
+@dataclass(slots=True)
+class ActiveOrderIdMapping:
+    """Namespace-safe command mapping for active cancel/status."""
+    client_order_id: str
+    broker: str
+    symbol: str
+    side: str
+    order_type: str
+    venue_order_id: Optional[str]
+    broker_order_id: Optional[str]
+    exchange_txid: Optional[str]
+    command_id_namespace: str
+    command_order_id: str
+    id_mapping_source: str
+    submit_ts_ns: int
+    ack_ts_ns: int
+    status: str = "acknowledged"
+    is_terminal: bool = False
+    terminal_reason: Optional[str] = None
+    durable: bool = False
 
 
 class OrderRouter:
@@ -104,7 +127,8 @@ class OrderRouter:
         pcv_retry_delay_sec: float = 0.5,
         rest_fallback_enabled: bool = True,
         paper_mode: bool = True,
-        telemetry_store: Optional[TelemetryEventStore] = None
+        telemetry_store: Optional[TelemetryEventStore] = None,
+        state_store: Optional[StateStore] = None
     ):
         self.primary_exchange = primary_exchange
         self.secondary_exchange = secondary_exchange
@@ -118,6 +142,7 @@ class OrderRouter:
         self.pcv_retry_delay_sec = pcv_retry_delay_sec
         self.rest_fallback_enabled = rest_fallback_enabled
         self.paper_mode = paper_mode
+        self._state_store = state_store
 
         self._paper_broker: Optional[_SovereignPaperBroker] = None
         if paper_mode:
@@ -135,6 +160,7 @@ class OrderRouter:
 
         self._pending_orders: Dict[str, OrderRequest] = {}
         self._order_status_cache: Dict[str, OrderStatus] = {}
+        self._active_order_id_mappings: Dict[Tuple[str, str], ActiveOrderIdMapping] = {}
         self._paper_reports_index: int = 0
         self._paper_last_mid_by_symbol: Dict[str, _Decimal] = {}
 
@@ -433,6 +459,169 @@ class OrderRouter:
         metadata = dict(order.metadata) if isinstance(order.metadata, dict) else {}
         metadata["order_lifecycle_replay_context"] = lifecycle_context
         return metadata
+
+    def _mapping_broker(self) -> str:
+        return "paper" if self.paper_mode else str(self.primary_exchange).lower()
+
+    def _value_as_str(self, value: Any) -> str:
+        if hasattr(value, "value"):
+            return str(value.value)
+        return str(value)
+
+    def _command_namespace_for_broker(self, broker: str) -> str:
+        if broker == "kraken":
+            return "exchange_txid"
+        if broker == "alpaca":
+            return "venue_order_id"
+        if broker == "paper":
+            return "client_order_id"
+        return ""
+
+    def _mapping_to_store_record(self, mapping: ActiveOrderIdMapping) -> Dict[str, Any]:
+        return {
+            "client_order_id": mapping.client_order_id,
+            "broker": mapping.broker,
+            "symbol": mapping.symbol,
+            "side": mapping.side,
+            "order_type": mapping.order_type,
+            "venue_order_id": mapping.venue_order_id,
+            "broker_order_id": mapping.broker_order_id,
+            "exchange_txid": mapping.exchange_txid,
+            "command_id_namespace": mapping.command_id_namespace,
+            "command_order_id": mapping.command_order_id,
+            "id_mapping_source": mapping.id_mapping_source,
+            "submit_ts_ns": mapping.submit_ts_ns,
+            "ack_ts_ns": mapping.ack_ts_ns,
+            "status": mapping.status,
+            "is_terminal": mapping.is_terminal,
+            "terminal_reason": mapping.terminal_reason,
+        }
+
+    def _mapping_from_record(self, record: Dict[str, Any]) -> Optional[ActiveOrderIdMapping]:
+        try:
+            return ActiveOrderIdMapping(
+                client_order_id=str(record["client_order_id"]),
+                broker=str(record["broker"]),
+                symbol=str(record.get("symbol") or ""),
+                side=str(record.get("side") or ""),
+                order_type=str(record.get("order_type") or ""),
+                venue_order_id=record.get("venue_order_id"),
+                broker_order_id=record.get("broker_order_id"),
+                exchange_txid=record.get("exchange_txid"),
+                command_id_namespace=str(record["command_id_namespace"]),
+                command_order_id=str(record["command_order_id"]),
+                id_mapping_source=str(record.get("id_mapping_source") or ""),
+                submit_ts_ns=int(record.get("submit_ts_ns") or 0),
+                ack_ts_ns=int(record.get("ack_ts_ns") or 0),
+                status=str(record.get("status") or "unknown"),
+                is_terminal=bool(record.get("is_terminal")),
+                terminal_reason=record.get("terminal_reason"),
+                durable=True,
+            )
+        except Exception as exc:
+            logger.error("Invalid stored order ID mapping: %s", exc)
+            return None
+
+    def _register_active_order_id_mapping(
+        self,
+        order: OrderRequest,
+        *,
+        broker: str,
+        venue_order_id: Optional[str],
+        broker_order_id: Optional[str],
+        exchange_txid: Optional[str],
+        id_mapping_source: str,
+        ack_ts_ns: int,
+        status: str = "acknowledged",
+        is_terminal: bool = False,
+        terminal_reason: Optional[str] = None,
+    ) -> bool:
+        namespace = self._command_namespace_for_broker(broker)
+        command_order_id = {
+            "client_order_id": order.id,
+            "venue_order_id": venue_order_id,
+            "exchange_txid": exchange_txid,
+        }.get(namespace)
+        if not namespace or not command_order_id:
+            logger.error("Unsafe order ID mapping for %s/%s: missing %s", broker, order.id, namespace)
+            return False
+
+        mapping = ActiveOrderIdMapping(
+            client_order_id=order.id,
+            broker=broker,
+            symbol=order.symbol,
+            side=self._value_as_str(order.side),
+            order_type=self._value_as_str(order.order_type),
+            venue_order_id=str(venue_order_id) if venue_order_id is not None else None,
+            broker_order_id=str(broker_order_id) if broker_order_id is not None else None,
+            exchange_txid=str(exchange_txid) if exchange_txid is not None else None,
+            command_id_namespace=namespace,
+            command_order_id=str(command_order_id),
+            id_mapping_source=id_mapping_source,
+            submit_ts_ns=int(getattr(order, "exchange_ts_ns", 0) or 0),
+            ack_ts_ns=int(ack_ts_ns),
+            status=status,
+            is_terminal=is_terminal,
+            terminal_reason=terminal_reason,
+        )
+
+        if self._state_store is not None:
+            mapping.durable = self._state_store.upsert_order_id_mapping(
+                self._mapping_to_store_record(mapping)
+            )
+        self._active_order_id_mappings[(broker, order.id)] = mapping
+        return mapping.durable or self.paper_mode
+
+    def _get_active_order_id_mapping(self, client_order_id: str, broker: str) -> Optional[ActiveOrderIdMapping]:
+        mapping = self._active_order_id_mappings.get((broker, client_order_id))
+        if mapping is not None:
+            return mapping
+        if self._state_store is None:
+            return None
+        record = self._state_store.get_order_id_mapping(client_order_id, broker)
+        if record is None:
+            return None
+        mapping = self._mapping_from_record(record)
+        if mapping is not None:
+            self._active_order_id_mappings[(broker, client_order_id)] = mapping
+        return mapping
+
+    def _mark_active_order_mapping_terminal(
+        self,
+        client_order_id: str,
+        *,
+        status: str,
+        terminal_reason: Optional[str],
+    ) -> None:
+        broker = self._mapping_broker()
+        mapping = self._get_active_order_id_mapping(client_order_id, broker)
+        if mapping is None:
+            return
+        mapping.status = status
+        mapping.is_terminal = True
+        mapping.terminal_reason = terminal_reason
+        if self._state_store is not None:
+            mapping.durable = self._state_store.upsert_order_id_mapping(
+                self._mapping_to_store_record(mapping)
+            )
+
+    def _resolve_live_command_order_id(self, client_order_id: str, *, allow_terminal_status: bool = False) -> Optional[str]:
+        broker = self._mapping_broker()
+        mapping = self._get_active_order_id_mapping(client_order_id, broker)
+        if mapping is None:
+            logger.error("No active order ID mapping for %s/%s; refusing live command", broker, client_order_id)
+            return None
+        if not mapping.durable:
+            logger.error("Non-durable order ID mapping for %s/%s; refusing live command", broker, client_order_id)
+            return None
+        if mapping.is_terminal and not allow_terminal_status:
+            logger.info("Terminal order mapping for %s/%s prevents live cancel", broker, client_order_id)
+            return None
+        expected_namespace = self._command_namespace_for_broker(broker)
+        if mapping.command_id_namespace != expected_namespace or not mapping.command_order_id:
+            logger.error("Unsafe order ID namespace for %s/%s; refusing live command", broker, client_order_id)
+            return None
+        return mapping.command_order_id
 
     def _record_order_lifecycle_telemetry(
         self,
@@ -1155,8 +1344,18 @@ class OrderRouter:
             )
 
             if mapped_status == "filled":
+                self._mark_active_order_mapping_terminal(
+                    client_id,
+                    status="filled",
+                    terminal_reason="paper_broker_filled",
+                )
                 self._pending_orders.pop(client_id, None)
             elif mapped_status in {"cancelled", "expired", "rejected"}:
+                self._mark_active_order_mapping_terminal(
+                    client_id,
+                    status=mapped_status,
+                    terminal_reason=f"paper_broker_{mapped_status}",
+                )
                 self._pending_orders.pop(client_id, None)
 
         self._paper_reports_index = len(reports)
@@ -1240,7 +1439,7 @@ class OrderRouter:
         if pb_order_type == _pb_enums.OrderType.LIMIT and order.limit_price is not None:
             submit_price = _Decimal(str(order.limit_price))
 
-        self._paper_broker.submit_order(
+        paper_order = self._paper_broker.submit_order(
             symbol=order.symbol,
             side=pb_side,
             order_type=pb_order_type,
@@ -1248,6 +1447,20 @@ class OrderRouter:
             price=submit_price,
             ts_ns=ts_ns,
             client_id=order.id,
+        )
+        paper_order_id = (
+            paper_order.get("order_id")
+            if isinstance(paper_order, dict)
+            else getattr(paper_order, "order_id", None)
+        )
+        self._register_active_order_id_mapping(
+            order,
+            broker="paper",
+            venue_order_id=str(paper_order_id) if paper_order_id is not None else None,
+            broker_order_id=str(paper_order_id) if paper_order_id is not None else None,
+            exchange_txid=None,
+            id_mapping_source="paper_broker.submit_order",
+            ack_ts_ns=ts_ns,
         )
 
         self._pending_orders[order.id] = order
@@ -1345,6 +1558,15 @@ class OrderRouter:
                     order_id = txid[0]
                     logger.info("Kraken order submitted: %s", order_id)
                     ack_ts_ns = now_ns()
+                    self._register_active_order_id_mapping(
+                        order,
+                        broker="kraken",
+                        venue_order_id=order_id,
+                        broker_order_id=None,
+                        exchange_txid=order_id,
+                        id_mapping_source="order_router.kraken_submit_response",
+                        ack_ts_ns=ack_ts_ns,
+                    )
                     self._record_order_lifecycle_telemetry(
                         order,
                         lifecycle_source="order_router.kraken_submit_response",
@@ -1406,6 +1628,15 @@ class OrderRouter:
                 order_id = result.get("id")
                 logger.info("Alpaca order submitted: %s", order_id)
                 ack_ts_ns = now_ns()
+                self._register_active_order_id_mapping(
+                    order,
+                    broker="alpaca",
+                    venue_order_id=order_id,
+                    broker_order_id=order_id,
+                    exchange_txid=None,
+                    id_mapping_source="order_router.alpaca_submit_response",
+                    ack_ts_ns=ack_ts_ns,
+                )
                 self._record_order_lifecycle_telemetry(
                     order,
                     lifecycle_source="order_router.alpaca_submit_response",
@@ -1499,6 +1730,11 @@ class OrderRouter:
                         exchange_txid=order_id,
                         id_mapping_source="kraken.query_order_status",
                     )
+                    self._mark_active_order_mapping_terminal(
+                        order.id,
+                        status="filled",
+                        terminal_reason="kraken_query_order_status_closed",
+                    )
                     return fill
             return None
         except Exception as e:
@@ -1536,6 +1772,11 @@ class OrderRouter:
                         venue_order_id=order_id,
                         id_mapping_source="alpaca.order_status",
                     )
+                    self._mark_active_order_mapping_terminal(
+                        order.id,
+                        status="filled",
+                        terminal_reason="alpaca_order_status_filled",
+                    )
                     return fill
             return None
         except Exception as e:
@@ -1563,10 +1804,28 @@ class OrderRouter:
             if not self._websocket_connected and self.rest_fallback_enabled:
                 return self._cancel_order_rest(order_id)
 
+            command_order_id = self._resolve_live_command_order_id(order_id)
+            if command_order_id is None:
+                return False
+
             if self.primary_exchange == "kraken":
-                return self._cancel_order_kraken(order_id)
+                success = self._cancel_order_kraken(command_order_id)
+                if success:
+                    self._mark_active_order_mapping_terminal(
+                        order_id,
+                        status="cancelled",
+                        terminal_reason="kraken_cancel_accepted",
+                    )
+                return success
             if self.primary_exchange == "alpaca":
-                return self._cancel_order_alpaca(order_id)
+                success = self._cancel_order_alpaca(command_order_id)
+                if success:
+                    self._mark_active_order_mapping_terminal(
+                        order_id,
+                        status="cancelled",
+                        terminal_reason="alpaca_cancel_accepted",
+                    )
+                return success
             return False
         except Exception as e:
             logger.error("Order cancellation failed: %s", e)
@@ -1709,10 +1968,27 @@ class OrderRouter:
 
     def _cancel_order_rest(self, order_id: str) -> bool:
         logger.info("REST cancellation for order %s", order_id)
+        command_order_id = self._resolve_live_command_order_id(order_id)
+        if command_order_id is None:
+            return False
         if self.primary_exchange == "kraken":
-            return self._cancel_order_kraken(order_id)
+            success = self._cancel_order_kraken(command_order_id)
+            if success:
+                self._mark_active_order_mapping_terminal(
+                    order_id,
+                    status="cancelled",
+                    terminal_reason="kraken_cancel_accepted",
+                )
+            return success
         if self.primary_exchange == "alpaca":
-            return self._cancel_order_alpaca(order_id)
+            success = self._cancel_order_alpaca(command_order_id)
+            if success:
+                self._mark_active_order_mapping_terminal(
+                    order_id,
+                    status="cancelled",
+                    terminal_reason="alpaca_cancel_accepted",
+                )
+            return success
         return self._cancel_order_paper(order_id)
 
     def get_order_status(self, order_id: str) -> str:
@@ -1744,9 +2020,35 @@ class OrderRouter:
             return "cancelled"
 
         if self.primary_exchange == "kraken":
-            return self._query_kraken_order_status(order_id)
+            mapping = self._get_active_order_id_mapping(order_id, "kraken")
+            if mapping is not None and mapping.is_terminal:
+                return mapping.status
+            command_order_id = self._resolve_live_command_order_id(order_id)
+            if command_order_id is None:
+                return "unknown"
+            status = self._query_kraken_order_status(command_order_id)
+            if status in {"filled", "cancelled", "expired", "rejected"}:
+                self._mark_active_order_mapping_terminal(
+                    order_id,
+                    status=status,
+                    terminal_reason="kraken_status_terminal",
+                )
+            return status
         if self.primary_exchange == "alpaca":
-            return self._query_alpaca_order_status(order_id)
+            mapping = self._get_active_order_id_mapping(order_id, "alpaca")
+            if mapping is not None and mapping.is_terminal:
+                return mapping.status
+            command_order_id = self._resolve_live_command_order_id(order_id)
+            if command_order_id is None:
+                return "unknown"
+            status = self._query_alpaca_order_status(command_order_id)
+            if status in {"filled", "cancelled", "expired", "rejected"}:
+                self._mark_active_order_mapping_terminal(
+                    order_id,
+                    status=status,
+                    terminal_reason="alpaca_status_terminal",
+                )
+            return status
         return "unknown"
 
     def _query_kraken_order_status(self, order_id: str) -> str:

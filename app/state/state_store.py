@@ -120,6 +120,31 @@ class StateStore:
                 )
             """)
 
+            # Active order ID mapping table.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS order_id_mappings (
+                    client_order_id TEXT NOT NULL,
+                    broker TEXT NOT NULL,
+                    symbol TEXT,
+                    side TEXT,
+                    order_type TEXT,
+                    venue_order_id TEXT,
+                    broker_order_id TEXT,
+                    exchange_txid TEXT,
+                    command_id_namespace TEXT NOT NULL,
+                    command_order_id TEXT NOT NULL,
+                    id_mapping_source TEXT,
+                    submit_ts_ns INTEGER,
+                    ack_ts_ns INTEGER,
+                    status TEXT NOT NULL,
+                    is_terminal INTEGER NOT NULL DEFAULT 0,
+                    terminal_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (client_order_id, broker)
+                )
+            """)
+
             # Fills table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS fills (
@@ -228,6 +253,10 @@ class StateStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_strategy ON positions(strategy)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_order_id_mappings_client ON order_id_mappings(client_order_id)")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_venue ON order_id_mappings(broker, venue_order_id) WHERE venue_order_id IS NOT NULL")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_broker ON order_id_mappings(broker, broker_order_id) WHERE broker_order_id IS NOT NULL")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_txid ON order_id_mappings(broker, exchange_txid) WHERE exchange_txid IS NOT NULL")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_state_strategy ON strategy_state(strategy)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_physical_verification_timestamp ON physical_verification(timestamp)")
@@ -516,6 +545,138 @@ class StateStore:
         except Exception as e:
             logger.error(f"Failed to update order {order_id}: {e}")
             return False
+
+    def upsert_order_id_mapping(self, mapping: Dict[str, Any]) -> bool:
+        """Idempotently persist active client-to-venue order ID mapping."""
+        required = ("client_order_id", "broker", "command_id_namespace", "command_order_id", "status")
+        if any(not str(mapping.get(field) or "").strip() for field in required):
+            logger.error("Order ID mapping missing required field")
+            return False
+
+        client_order_id = str(mapping["client_order_id"])
+        broker = str(mapping["broker"])
+        now = datetime.utcnow().isoformat()
+        is_terminal = 1 if bool(mapping.get("is_terminal")) else 0
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+
+                cursor.execute("""
+                    SELECT * FROM order_id_mappings
+                    WHERE client_order_id = ? AND broker = ?
+                """, (client_order_id, broker))
+                existing = cursor.fetchone()
+                if existing and existing["is_terminal"] and not is_terminal:
+                    logger.error("Refusing to reopen terminal order mapping: %s/%s", broker, client_order_id)
+                    conn.rollback()
+                    return False
+
+                for column in ("venue_order_id", "broker_order_id", "exchange_txid"):
+                    value = mapping.get(column)
+                    if value is None:
+                        continue
+                    cursor.execute(
+                        f"""
+                        SELECT client_order_id FROM order_id_mappings
+                        WHERE broker = ? AND {column} = ? AND client_order_id != ?
+                        LIMIT 1
+                        """,
+                        (broker, str(value), client_order_id),
+                    )
+                    duplicate = cursor.fetchone()
+                    if duplicate:
+                        logger.error(
+                            "Conflicting order ID mapping for %s %s=%s: existing client=%s new client=%s",
+                            broker,
+                            column,
+                            value,
+                            duplicate["client_order_id"],
+                            client_order_id,
+                        )
+                        conn.rollback()
+                        return False
+
+                created_at = existing["created_at"] if existing else now
+                record = {
+                    "client_order_id": client_order_id,
+                    "broker": broker,
+                    "symbol": mapping.get("symbol"),
+                    "side": mapping.get("side"),
+                    "order_type": mapping.get("order_type"),
+                    "venue_order_id": mapping.get("venue_order_id"),
+                    "broker_order_id": mapping.get("broker_order_id"),
+                    "exchange_txid": mapping.get("exchange_txid"),
+                    "command_id_namespace": mapping["command_id_namespace"],
+                    "command_order_id": mapping["command_order_id"],
+                    "id_mapping_source": mapping.get("id_mapping_source"),
+                    "submit_ts_ns": mapping.get("submit_ts_ns"),
+                    "ack_ts_ns": mapping.get("ack_ts_ns"),
+                    "status": mapping["status"],
+                    "is_terminal": is_terminal,
+                    "terminal_reason": mapping.get("terminal_reason"),
+                    "created_at": created_at,
+                    "updated_at": now,
+                }
+
+                columns = list(record.keys())
+                placeholders = ", ".join(["?" for _ in columns])
+                update_clause = ", ".join([
+                    f"{column}=excluded.{column}"
+                    for column in columns
+                    if column not in {"client_order_id", "broker", "created_at"}
+                ])
+                cursor.execute(
+                    f"""
+                    INSERT INTO order_id_mappings ({", ".join(columns)})
+                    VALUES ({placeholders})
+                    ON CONFLICT(client_order_id, broker) DO UPDATE SET {update_clause}
+                    """,
+                    [record[column] for column in columns],
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error("Failed to upsert order ID mapping %s/%s: %s", broker, client_order_id, e)
+            return False
+
+    def get_order_id_mapping(self, client_order_id: str, broker: str) -> Optional[Dict[str, Any]]:
+        """Resolve active order ID mapping by client order ID and broker."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM order_id_mappings
+                    WHERE client_order_id = ? AND broker = ?
+                """, (client_order_id, broker))
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                result = dict(row)
+                result["is_terminal"] = bool(result.get("is_terminal"))
+                return result
+        except Exception as e:
+            logger.error("Failed to get order ID mapping %s/%s: %s", broker, client_order_id, e)
+            return None
+
+    def mark_order_id_mapping_terminal(
+        self,
+        client_order_id: str,
+        broker: str,
+        *,
+        status: str,
+        terminal_reason: Optional[str] = None,
+    ) -> bool:
+        """Idempotently mark an order ID mapping terminal."""
+        existing = self.get_order_id_mapping(client_order_id, broker)
+        if existing is None:
+            return False
+        updated = dict(existing)
+        updated["status"] = status
+        updated["is_terminal"] = True
+        updated["terminal_reason"] = terminal_reason
+        return self.upsert_order_id_mapping(updated)
 
     def insert_fill(self, fill: Dict[str, Any]) -> bool:
         """Insert a fill record."""
