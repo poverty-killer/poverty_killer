@@ -623,6 +623,125 @@ class OrderRouter:
             return None
         return mapping.command_order_id
 
+    def get_order_id_mapping_fact(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        """Return the durable mapping fact for truth/reconcile hydration."""
+        mapping = self._get_active_order_id_mapping(client_order_id, self._mapping_broker())
+        if mapping is None:
+            return None
+        return self._mapping_to_store_record(mapping)
+
+    def _get_order_id_mapping_by_namespace(
+        self,
+        broker: str,
+        id_namespace: str,
+        order_id: str,
+    ) -> Optional[ActiveOrderIdMapping]:
+        if not order_id:
+            return None
+        if self._state_store is not None:
+            record = self._state_store.get_order_id_mapping_by_namespace(
+                broker,
+                id_namespace,
+                order_id,
+            )
+            if record is not None:
+                return self._mapping_from_record(record)
+
+        for mapping_broker, client_order_id in list(self._active_order_id_mappings.keys()):
+            if mapping_broker != broker:
+                continue
+            mapping = self._active_order_id_mappings[(mapping_broker, client_order_id)]
+            if str(getattr(mapping, id_namespace, "") or "") == str(order_id):
+                return mapping
+            if id_namespace == "command_order_id" and mapping.command_order_id == str(order_id):
+                return mapping
+        return None
+
+    def _normalized_open_order_fact(
+        self,
+        *,
+        broker: str,
+        raw_order_id: str,
+        order_id_namespace: str,
+        symbol: str,
+        side: str,
+        order_type: str = "",
+        quantity: Any = 0,
+        remaining_quantity: Any = None,
+        limit_price: Any = None,
+        status: str = "open",
+        created_at_ns: int = 0,
+        client_order_id: Optional[str] = None,
+        paper_internal_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        mapping = None
+        if client_order_id:
+            mapping = self._get_active_order_id_mapping(client_order_id, broker)
+        if mapping is None and raw_order_id:
+            mapping = self._get_order_id_mapping_by_namespace(
+                broker,
+                order_id_namespace,
+                raw_order_id,
+            )
+
+        mapping_status = "broker_orphan"
+        resolved_client_id = client_order_id
+        venue_order_id = None
+        broker_order_id = paper_internal_order_id
+        exchange_txid = None
+        command_id_namespace = None
+        command_order_id = None
+        is_terminal_mapping = False
+        terminal_reason = None
+
+        if mapping is not None:
+            resolved_client_id = mapping.client_order_id
+            venue_order_id = mapping.venue_order_id
+            broker_order_id = mapping.broker_order_id
+            exchange_txid = mapping.exchange_txid
+            command_id_namespace = mapping.command_id_namespace
+            command_order_id = mapping.command_order_id
+            is_terminal_mapping = mapping.is_terminal
+            terminal_reason = mapping.terminal_reason
+            mapping_status = "terminal_local_broker_open" if mapping.is_terminal else "mapped"
+        elif broker == "paper" and client_order_id:
+            command_id_namespace = "client_order_id"
+            command_order_id = client_order_id
+            mapping_status = "mapped"
+
+        if broker == "kraken":
+            exchange_txid = exchange_txid or raw_order_id
+            venue_order_id = venue_order_id or raw_order_id
+        elif broker == "alpaca":
+            venue_order_id = venue_order_id or raw_order_id
+            broker_order_id = broker_order_id or raw_order_id
+        elif broker == "paper":
+            venue_order_id = venue_order_id or paper_internal_order_id
+            broker_order_id = broker_order_id or paper_internal_order_id
+
+        return {
+            "broker": broker,
+            "order_id": str(raw_order_id),
+            "order_id_namespace": order_id_namespace,
+            "client_order_id": resolved_client_id,
+            "venue_order_id": venue_order_id,
+            "broker_order_id": broker_order_id,
+            "exchange_txid": exchange_txid,
+            "command_id_namespace": command_id_namespace,
+            "command_order_id": command_order_id,
+            "mapping_status": mapping_status,
+            "is_terminal_mapping": is_terminal_mapping,
+            "terminal_reason": terminal_reason,
+            "symbol": symbol,
+            "side": side,
+            "order_type": order_type,
+            "quantity": quantity,
+            "remaining_quantity": remaining_quantity,
+            "limit_price": limit_price,
+            "status": status,
+            "created_at_ns": created_at_ns,
+        }
+
     def _record_order_lifecycle_telemetry(
         self,
         order: OrderRequest,
@@ -907,6 +1026,104 @@ class OrderRouter:
 
         return orders
 
+    def fetch_normalized_open_orders(self) -> List[Dict[str, Any]]:
+        """Fetch broker open orders with explicit ID namespaces for reconcile."""
+        if self.paper_mode:
+            if self._paper_broker is None:
+                return []
+            facts = []
+            for client_id, order in self._paper_broker.open_orders.items():
+                facts.append(
+                    self._normalized_open_order_fact(
+                        broker="paper",
+                        raw_order_id=str(order.order_id),
+                        order_id_namespace="paper_broker_internal_order_id",
+                        symbol=order.symbol,
+                        side=order.side.value,
+                        order_type=order.order_type.value,
+                        quantity=str(order.quantity),
+                        remaining_quantity=str(order.remaining_quantity),
+                        limit_price=str(order.limit_price) if order.limit_price else None,
+                        status=order.status.value,
+                        created_at_ns=order.created_at_ns,
+                        client_order_id=client_id,
+                        paper_internal_order_id=str(order.order_id),
+                    )
+                )
+            return facts
+
+        if self.primary_exchange == "kraken":
+            result = self._call_kraken_private(self._endpoints["kraken"]["open_orders"])
+            if not result:
+                return []
+            facts = []
+            open_data = result.get("open", {})
+            for order_id, order_info in open_data.items():
+                descr = order_info.get("descr", {})
+                quantity = _Decimal(str(order_info.get("vol", 0)))
+                filled_quantity = _Decimal(str(order_info.get("vol_exec", 0)))
+                remaining_quantity = max(_Decimal("0"), quantity - filled_quantity)
+                facts.append(
+                    self._normalized_open_order_fact(
+                        broker="kraken",
+                        raw_order_id=str(order_id),
+                        order_id_namespace="exchange_txid",
+                        symbol=descr.get("pair", ""),
+                        side=descr.get("type", ""),
+                        order_type=descr.get("ordertype", ""),
+                        quantity=str(quantity),
+                        remaining_quantity=str(remaining_quantity),
+                        limit_price=str(descr.get("price")) if descr.get("price") else None,
+                        status=order_info.get("status", "open"),
+                        created_at_ns=(
+                            int(order_info.get("opentm", 0)) * 1_000_000_000
+                            if order_info.get("opentm")
+                            else 0
+                        ),
+                    )
+                )
+            return facts
+
+        if self.primary_exchange == "alpaca":
+            endpoint = self._endpoints["alpaca"]["open_orders"]
+            url = f"{self._endpoints['alpaca']['rest']}{endpoint}"
+            try:
+                response = self._session.get(url, timeout=5.0)
+                if response.status_code != 200:
+                    return []
+                facts = []
+                for order in response.json():
+                    status = str(order.get("status", "open"))
+                    if status in {"filled", "canceled", "cancelled", "expired", "rejected"}:
+                        continue
+                    order_id = str(order.get("id", ""))
+                    if not order_id:
+                        continue
+                    quantity = _Decimal(str(order.get("qty", 0)))
+                    filled_quantity = _Decimal(str(order.get("filled_qty", 0) or 0))
+                    remaining_quantity = max(_Decimal("0"), quantity - filled_quantity)
+                    facts.append(
+                        self._normalized_open_order_fact(
+                            broker="alpaca",
+                            raw_order_id=order_id,
+                            order_id_namespace="venue_order_id",
+                            symbol=order.get("symbol", ""),
+                            side=order.get("side", ""),
+                            order_type=order.get("type", ""),
+                            quantity=str(quantity),
+                            remaining_quantity=str(remaining_quantity),
+                            limit_price=str(order.get("limit_price")) if order.get("limit_price") else None,
+                            status=status,
+                            created_at_ns=0,
+                        )
+                    )
+                return facts
+            except Exception as e:
+                logger.error("Failed to fetch Alpaca normalized open orders: %s", e)
+                return []
+
+        return []
+
     # ============================================
     # BUNDLE 3B-P: FILL HISTORY FETCHING
     # ============================================
@@ -1065,7 +1282,7 @@ class OrderRouter:
         return {
             "balances": self.fetch_balances(),
             "positions": self.fetch_positions(),
-            "open_orders": self.fetch_open_orders(),
+            "open_orders": self.fetch_normalized_open_orders(),
             "fills_since_last_call": self.fetch_fills(limit=100),
         }
 

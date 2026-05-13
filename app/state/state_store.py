@@ -660,6 +660,95 @@ class StateStore:
             logger.error("Failed to get order ID mapping %s/%s: %s", broker, client_order_id, e)
             return None
 
+    def get_order_id_mapping_by_namespace(
+        self,
+        broker: str,
+        id_namespace: str,
+        order_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve an order ID mapping by an explicit broker ID namespace."""
+        column_by_namespace = {
+            "client_order_id": "client_order_id",
+            "venue_order_id": "venue_order_id",
+            "broker_order_id": "broker_order_id",
+            "exchange_txid": "exchange_txid",
+            "command_order_id": "command_order_id",
+        }
+        column = column_by_namespace.get(id_namespace)
+        if column is None:
+            logger.error("Unsupported order ID mapping namespace: %s", id_namespace)
+            return None
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"""
+                    SELECT * FROM order_id_mappings
+                    WHERE broker = ? AND {column} = ?
+                    """,
+                    (str(broker), str(order_id)),
+                )
+                rows = cursor.fetchall()
+                if len(rows) != 1:
+                    if len(rows) > 1:
+                        logger.error(
+                            "Ambiguous order ID mapping for %s %s=%s",
+                            broker,
+                            id_namespace,
+                            order_id,
+                        )
+                    return None
+                result = dict(rows[0])
+                result["is_terminal"] = bool(result.get("is_terminal"))
+                return result
+        except Exception as e:
+            logger.error(
+                "Failed to resolve order ID mapping by %s/%s %s=%s: %s",
+                broker,
+                id_namespace,
+                id_namespace,
+                order_id,
+                e,
+            )
+            return None
+
+    def list_order_id_mappings(
+        self,
+        broker: Optional[str] = None,
+        *,
+        include_terminal: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """List persisted order ID mappings for read-only reconcile scans."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                clauses = []
+                values: List[Any] = []
+                if broker is not None:
+                    clauses.append("broker = ?")
+                    values.append(str(broker))
+                if not include_terminal:
+                    clauses.append("is_terminal = 0")
+                where_clause = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                cursor.execute(
+                    f"""
+                    SELECT * FROM order_id_mappings
+                    {where_clause}
+                    ORDER BY updated_at DESC
+                    """,
+                    values,
+                )
+                results = []
+                for row in cursor.fetchall():
+                    result = dict(row)
+                    result["is_terminal"] = bool(result.get("is_terminal"))
+                    results.append(result)
+                return results
+        except Exception as e:
+            logger.error("Failed to list order ID mappings: %s", e)
+            return []
+
     def mark_order_id_mapping_terminal(
         self,
         client_order_id: str,

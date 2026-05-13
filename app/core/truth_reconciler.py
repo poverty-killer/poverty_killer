@@ -56,6 +56,13 @@ def _safe_str(value: Any) -> str:
     return str(value)
 
 
+def _optional_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass
 class DivergenceInfo:
     """Information about a detected divergence."""
@@ -189,29 +196,58 @@ class TruthReconciler:
         """
         divergences: List[DivergenceInfo] = []
         
-        # Get sets of order IDs from each truth
-        exchange_order_ids = {order.order_id for order in exchange.open_orders}
+        # Compare explicit client IDs only. Raw exchange order IDs may be
+        # exchange_txid, venue_order_id, broker_order_id, or paper proof IDs.
+        exchange_client_ids = set()
         execution_order_ids = {order.client_order_id for order in execution.submitted_orders}
-        
-        # Orders in exchange but not in execution
-        missing_in_execution = exchange_order_ids - execution_order_ids
-        for order_id in missing_in_execution:
+
+        for order in exchange.open_orders:
+            client_order_id = _optional_str(getattr(order, "client_order_id", None))
+            mapping_status = _optional_str(getattr(order, "mapping_status", None))
+            order_namespace = _optional_str(getattr(order, "order_id_namespace", None)) or "unknown"
+            raw_order_id = _optional_str(getattr(order, "order_id", None)) or "unknown"
+
+            if client_order_id:
+                exchange_client_ids.add(client_order_id)
+
+            if mapping_status == "terminal_local_broker_open":
+                divergences.append(DivergenceInfo(
+                    domain_pair="exchange/execution",
+                    field="terminal_local_broker_open",
+                    expected=f"terminal local mapping not open at broker for client {client_order_id}",
+                    observed=f"broker open order {order_namespace}:{raw_order_id}",
+                    severity="critical"
+                ))
+                continue
+
+            if not client_order_id:
+                divergences.append(DivergenceInfo(
+                    domain_pair="exchange/execution",
+                    field="broker_orphan_unresolved",
+                    expected="broker open order resolved to local client_order_id",
+                    observed=f"unmapped broker open order {order_namespace}:{raw_order_id}",
+                    severity="warning"
+                ))
+
+        # Orders in exchange but not in execution after namespace normalization.
+        missing_in_execution = exchange_client_ids - execution_order_ids
+        for client_order_id in missing_in_execution:
             divergences.append(DivergenceInfo(
                 domain_pair="exchange/execution",
                 field="order_presence",
-                expected=f"order {order_id} in execution",
-                observed=f"order {order_id} only in exchange",
+                expected=f"client order {client_order_id} in execution",
+                observed=f"client order {client_order_id} only in exchange",
                 severity="warning"
             ))
-        
-        # Orders in execution but not in exchange
-        missing_in_exchange = execution_order_ids - exchange_order_ids
-        for order_id in missing_in_exchange:
+
+        # Orders in execution but not in normalized exchange open orders.
+        missing_in_exchange = execution_order_ids - exchange_client_ids
+        for client_order_id in missing_in_exchange:
             divergences.append(DivergenceInfo(
                 domain_pair="exchange/execution",
-                field="order_presence",
-                expected=f"order {order_id} acknowledged by exchange",
-                observed=f"order {order_id} only in execution",
+                field="local_pending_unresolved",
+                expected=f"client order {client_order_id} acknowledged/open at broker",
+                observed=f"client order {client_order_id} only in execution",
                 severity="critical"
             ))
         

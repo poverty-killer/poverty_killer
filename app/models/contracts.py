@@ -129,10 +129,38 @@ class ExchangeOpenOrder(BaseModel):
     side: OrderSide
     quantity: Decimal
     limit_price: Optional[Decimal] = None
+    order_id_namespace: Optional[str] = None
+    client_order_id: Optional[str] = None
+    venue_order_id: Optional[str] = None
+    broker_order_id: Optional[str] = None
+    exchange_txid: Optional[str] = None
+    command_id_namespace: Optional[str] = None
+    command_order_id: Optional[str] = None
+    mapping_status: Optional[str] = None
+    is_terminal_mapping: bool = False
+    terminal_reason: Optional[str] = None
 
     @field_validator("order_id", "symbol", mode="before")
     @classmethod
     def validate_required_strings(cls, v, info):
+        return _require_non_blank(v, info.field_name)
+
+    @field_validator(
+        "order_id_namespace",
+        "client_order_id",
+        "venue_order_id",
+        "broker_order_id",
+        "exchange_txid",
+        "command_id_namespace",
+        "command_order_id",
+        "mapping_status",
+        "terminal_reason",
+        mode="before",
+    )
+    @classmethod
+    def validate_optional_strings(cls, v, info):
+        if v is None:
+            return v
         return _require_non_blank(v, info.field_name)
 
     @field_validator("quantity", mode="before")

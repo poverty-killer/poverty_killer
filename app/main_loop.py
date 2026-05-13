@@ -1756,6 +1756,16 @@ class MainLoop:
                     side=side,
                     quantity=Decimal(str(order.get("quantity", 0))),
                     limit_price=Decimal(str(order.get("limit_price", 0))) if order.get("limit_price") else None,
+                    order_id_namespace=order.get("order_id_namespace"),
+                    client_order_id=order.get("client_order_id"),
+                    venue_order_id=order.get("venue_order_id"),
+                    broker_order_id=order.get("broker_order_id"),
+                    exchange_txid=order.get("exchange_txid"),
+                    command_id_namespace=order.get("command_id_namespace"),
+                    command_order_id=order.get("command_order_id"),
+                    mapping_status=order.get("mapping_status"),
+                    is_terminal_mapping=bool(order.get("is_terminal_mapping", False)),
+                    terminal_reason=order.get("terminal_reason"),
                 ))
             except Exception as e:
                 logger.debug(f"Failed to convert open order: {e}")
@@ -1834,10 +1844,15 @@ class MainLoop:
         if exec_state is not None:
             for order_id, order in exec_state.pending_orders.items():
                 try:
+                    venue_order_id = None
+                    if order_router is not None and hasattr(order_router, "get_order_id_mapping_fact"):
+                        mapping_fact = order_router.get_order_id_mapping_fact(order_id)
+                        if mapping_fact is not None:
+                            venue_order_id = mapping_fact.get("venue_order_id")
                     status = InternalOrderStatus.SUBMITTED
                     submitted_orders.append(SubmittedOrder(
                         client_order_id=order_id,
-                        venue_order_id=None,
+                        venue_order_id=venue_order_id,
                         status=status,
                         submitted_ts_ns=order.exchange_ts_ns if hasattr(order, 'exchange_ts_ns') else exchange_ts_ns,
                     ))
