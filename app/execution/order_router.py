@@ -65,6 +65,25 @@ import app.utils.enums as _pb_enums
 logger = logging.getLogger(__name__)
 
 
+_STATUS_EVIDENCE_OPEN_OR_PENDING = {
+    "open",
+    "pending",
+    "accepted",
+    "acknowledged",
+    "partially_filled",
+    "partial_fill",
+    "partial",
+}
+_STATUS_EVIDENCE_TERMINAL = {
+    "filled",
+    "closed",
+    "canceled",
+    "cancelled",
+    "rejected",
+    "expired",
+}
+
+
 @dataclass(slots=True)
 class OrderStatus:
     """Order status from exchange or paper broker cache."""
@@ -622,6 +641,293 @@ class OrderRouter:
             logger.error("Unsafe order ID namespace for %s/%s; refusing live command", broker, client_order_id)
             return None
         return mapping.command_order_id
+
+    def _get_order_id_mapping_read_only(
+        self,
+        client_order_id: str,
+        broker: str,
+    ) -> Optional[ActiveOrderIdMapping]:
+        mapping = self._active_order_id_mappings.get((broker, client_order_id))
+        if mapping is not None:
+            return mapping
+        if self._state_store is None:
+            return None
+        record = self._state_store.get_order_id_mapping(client_order_id, broker)
+        if record is None:
+            return None
+        return self._mapping_from_record(record)
+
+    def _status_evidence_base(
+        self,
+        *,
+        client_order_id: str,
+        broker: str,
+        command_id_namespace: Optional[str] = None,
+        command_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "client_order_id": client_order_id,
+            "broker": broker,
+            "venue": broker,
+            "command_id_namespace": command_id_namespace,
+            "command_order_id": command_order_id,
+            "status_raw": None,
+            "status_classification": "unknown_or_failed",
+            "terminal_observed": False,
+            "status_refresh_succeeded": False,
+            "failure_reason": None,
+            "mutation_performed": False,
+            "command_performed": False,
+            "recommended_action": "alert_only_retry_under_guard_or_board_review",
+            "prohibited_actions": [
+                "auto_cancel",
+                "auto_terminalize",
+                "broker_repair",
+                "pending_cleanup",
+                "exposure_release",
+                "reservation_mutation",
+            ],
+        }
+
+    def _classify_status_evidence(self, status_raw: Any) -> Tuple[str, bool]:
+        status = str(status_raw or "").strip().lower()
+        if status in _STATUS_EVIDENCE_TERMINAL:
+            return "terminal_observed", True
+        if status in _STATUS_EVIDENCE_OPEN_OR_PENDING:
+            return "open_or_pending", False
+        return "unknown_or_failed", False
+
+    def _status_evidence_with_result(
+        self,
+        evidence: Dict[str, Any],
+        *,
+        status_raw: Any,
+        failure_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        classification, terminal_observed = self._classify_status_evidence(status_raw)
+        evidence["status_raw"] = str(status_raw) if status_raw is not None else None
+        evidence["status_classification"] = classification
+        evidence["terminal_observed"] = terminal_observed
+        evidence["status_refresh_succeeded"] = failure_reason is None and classification != "unknown_or_failed"
+        evidence["failure_reason"] = failure_reason
+        if classification == "open_or_pending":
+            evidence["recommended_action"] = "preserve_pending_and_continue_alert_monitoring"
+        elif classification == "terminal_observed":
+            evidence["recommended_action"] = "record_terminal_proof_for_board_policy_review"
+        return evidence
+
+    def _status_evidence_failure(
+        self,
+        evidence: Dict[str, Any],
+        *,
+        classification: str,
+        failure_reason: str,
+    ) -> Dict[str, Any]:
+        evidence["status_classification"] = classification
+        evidence["failure_reason"] = failure_reason
+        evidence["status_refresh_succeeded"] = False
+        evidence["terminal_observed"] = False
+        if classification == "mapping_missing_or_unsafe":
+            evidence["recommended_action"] = "fail_closed_mapping_review"
+            evidence["prohibited_actions"] = ["live_status_request", *evidence["prohibited_actions"]]
+        elif classification == "broker_orphan_no_mapping":
+            evidence["recommended_action"] = "manual_orphan_review"
+            evidence["prohibited_actions"] = ["live_status_request", *evidence["prohibited_actions"]]
+        return evidence
+
+    def _status_evidence_http_failure(self, status_code: int) -> str:
+        if status_code == 429:
+            return "rate_limited"
+        if status_code in {401, 403}:
+            return "auth_failed"
+        return f"http_{status_code}"
+
+    def _status_evidence_broker_error(self, errors: Any) -> str:
+        text = " ".join(str(item) for item in errors) if isinstance(errors, list) else str(errors)
+        lowered = text.lower()
+        if "rate" in lowered:
+            return "rate_limited"
+        if "auth" in lowered or "key" in lowered or "permission" in lowered:
+            return "auth_failed"
+        return "broker_error"
+
+    def _query_kraken_status_evidence(
+        self,
+        command_order_id: str,
+        evidence: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        endpoint = self._endpoints["kraken"]["status"]
+        url = f"{self._endpoints['kraken']['rest']}{endpoint}"
+        data = {"txid": command_order_id}
+        headers = self._kraken_sign(endpoint, data)
+
+        try:
+            response = self._session.post(url, data=data, headers=headers, timeout=5.0)
+            if response.status_code != 200:
+                return self._status_evidence_with_result(
+                    evidence,
+                    status_raw=None,
+                    failure_reason=self._status_evidence_http_failure(response.status_code),
+                )
+            result = response.json()
+        except Exception:
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=None,
+                failure_reason="malformed_or_unavailable_response",
+            )
+
+        if not isinstance(result, dict):
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=None,
+                failure_reason="malformed_response",
+            )
+        if result.get("error"):
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=None,
+                failure_reason=self._status_evidence_broker_error(result.get("error")),
+            )
+        order_data = result.get("result", {}).get(command_order_id)
+        if not isinstance(order_data, dict):
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=None,
+                failure_reason="missing_order_status",
+            )
+        return self._status_evidence_with_result(
+            evidence,
+            status_raw=order_data.get("status", "unknown"),
+        )
+
+    def _query_alpaca_status_evidence(
+        self,
+        command_order_id: str,
+        evidence: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        endpoint = self._endpoints["alpaca"]["status"].replace("{order_id}", command_order_id)
+        url = f"{self._endpoints['alpaca']['rest']}{endpoint}"
+
+        try:
+            response = self._session.get(url, timeout=5.0)
+            if response.status_code != 200:
+                return self._status_evidence_with_result(
+                    evidence,
+                    status_raw=None,
+                    failure_reason=self._status_evidence_http_failure(response.status_code),
+                )
+            result = response.json()
+        except Exception:
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=None,
+                failure_reason="malformed_or_unavailable_response",
+            )
+
+        if not isinstance(result, dict):
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=None,
+                failure_reason="malformed_response",
+            )
+        return self._status_evidence_with_result(
+            evidence,
+            status_raw=result.get("status", "unknown"),
+        )
+
+    def _query_paper_status_evidence(
+        self,
+        client_order_id: str,
+        evidence: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if self._paper_broker is None:
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=None,
+                failure_reason="paper_broker_unavailable",
+            )
+
+        for report in reversed(self._paper_broker.execution_reports):
+            if getattr(report, "client_id", None) != client_order_id:
+                continue
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=self._map_paper_report_status_to_cache(getattr(report, "status", None)),
+            )
+
+        paper_order = self._paper_broker.open_orders.get(client_order_id)
+        if paper_order is not None:
+            return self._status_evidence_with_result(
+                evidence,
+                status_raw=self._map_paper_report_status_to_cache(getattr(paper_order, "status", None)),
+            )
+
+        return self._status_evidence_with_result(
+            evidence,
+            status_raw=None,
+            failure_reason="paper_order_absent_not_terminal_proof",
+        )
+
+    def get_order_status_evidence(
+        self,
+        client_order_id: str,
+        broker: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return guarded read-only status evidence without cache or terminal mutation."""
+        broker_name = str(broker or self._mapping_broker()).lower()
+        client_id = str(client_order_id or "").strip()
+        evidence = self._status_evidence_base(client_order_id=client_id, broker=broker_name)
+
+        if not client_id:
+            return self._status_evidence_failure(
+                evidence,
+                classification="broker_orphan_no_mapping",
+                failure_reason="missing_client_order_id",
+            )
+
+        mapping = self._get_order_id_mapping_read_only(client_id, broker_name)
+        if mapping is None:
+            return self._status_evidence_failure(
+                evidence,
+                classification="mapping_missing_or_unsafe",
+                failure_reason="missing_mapping",
+            )
+
+        evidence["command_id_namespace"] = mapping.command_id_namespace
+        evidence["command_order_id"] = mapping.command_order_id
+        expected_namespace = self._command_namespace_for_broker(broker_name)
+        if not expected_namespace or mapping.command_id_namespace != expected_namespace or not mapping.command_order_id:
+            return self._status_evidence_failure(
+                evidence,
+                classification="mapping_missing_or_unsafe",
+                failure_reason="unsafe_command_namespace",
+            )
+        if not mapping.durable:
+            return self._status_evidence_failure(
+                evidence,
+                classification="mapping_missing_or_unsafe",
+                failure_reason="non_durable_mapping",
+            )
+        if mapping.is_terminal:
+            evidence["status_raw"] = mapping.status
+            return self._status_evidence_failure(
+                evidence,
+                classification="mapping_missing_or_unsafe",
+                failure_reason="terminal_mapping",
+            )
+
+        if broker_name == "kraken":
+            return self._query_kraken_status_evidence(mapping.command_order_id, evidence)
+        if broker_name == "alpaca":
+            return self._query_alpaca_status_evidence(mapping.command_order_id, evidence)
+        if broker_name == "paper":
+            return self._query_paper_status_evidence(client_id, evidence)
+        return self._status_evidence_failure(
+            evidence,
+            classification="mapping_missing_or_unsafe",
+            failure_reason="unsupported_broker",
+        )
 
     def get_order_id_mapping_fact(self, client_order_id: str) -> Optional[Dict[str, Any]]:
         """Return the durable mapping fact for truth/reconcile hydration."""

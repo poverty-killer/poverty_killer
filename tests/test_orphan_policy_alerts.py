@@ -202,7 +202,7 @@ def test_guarded_status_refresh_uses_order_router_mapping_path_without_cancel(tm
 
     router._session.post = post
 
-    alerts = _alerts([], [_submitted(order.id)], status_refresh=router.get_order_status)
+    alerts = _alerts([], [_submitted(order.id)], status_refresh=router.get_order_status_evidence)
 
     assert _reason(alerts, "local_pending_unresolved")
     assert not _reason(alerts, "status_refresh_failed")
@@ -237,10 +237,13 @@ def test_broker_terminal_status_refresh_is_evidence_not_reconciler_terminalizati
     )
     submitted = _submitted(order.id)
 
-    alerts = _alerts([], [submitted], status_refresh=router.get_order_status)
+    before_mapping = state_store.get_order_id_mapping(order.id, "kraken")
+
+    alerts = _alerts([], [submitted], status_refresh=router.get_order_status_evidence)
 
     assert _reason(alerts, "broker_terminal_local_pending_requires_status_proof")
     assert submitted.status == InternalOrderStatus.SUBMITTED
+    assert state_store.get_order_id_mapping(order.id, "kraken") == before_mapping
 
 
 def test_status_refresh_timeout_or_malformed_emits_failed_alert_and_preserves_pending():

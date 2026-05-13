@@ -472,14 +472,23 @@ class TruthReconciler:
             if status_refresh is None:
                 continue
             try:
-                refreshed_status = _safe_str(status_refresh(client_order_id)).lower()
+                status_result = status_refresh(client_order_id)
             except Exception as exc:
                 refreshed_status = "unknown"
                 observed = f"status refresh exception: {exc.__class__.__name__}"
             else:
-                observed = f"guarded status refresh returned {refreshed_status}"
+                if isinstance(status_result, dict):
+                    refreshed_status = _safe_str(
+                        status_result.get("status_classification")
+                        or status_result.get("status_raw")
+                        or "unknown"
+                    ).lower()
+                    observed = f"guarded status evidence returned {refreshed_status}"
+                else:
+                    refreshed_status = _safe_str(status_result).lower()
+                    observed = f"guarded status refresh returned {refreshed_status}"
 
-            if refreshed_status in _TERMINAL_STATUS_VALUES:
+            if refreshed_status == "terminal_observed" or refreshed_status in _TERMINAL_STATUS_VALUES:
                 divergences.append(DivergenceInfo(
                     domain_pair="exchange/execution",
                     field="broker_terminal_local_pending_requires_status_proof",
@@ -491,7 +500,12 @@ class TruthReconciler:
                     venue=_optional_str(getattr(exchange, "venue", None)),
                     broker=_optional_str(getattr(exchange, "venue", None)),
                 ))
-            elif refreshed_status in _UNKNOWN_STATUS_VALUES:
+            elif refreshed_status in {
+                "unknown_or_failed",
+                "mapping_missing_or_unsafe",
+                "broker_orphan_no_mapping",
+                *_UNKNOWN_STATUS_VALUES,
+            }:
                 divergences.append(DivergenceInfo(
                     domain_pair="exchange/execution",
                     field="status_refresh_failed",

@@ -356,6 +356,260 @@ def test_terminal_mapping_prevents_cancel_and_survives_reload(tmp_path):
     assert calls == []
 
 
+def _mutation_snapshot(router: OrderRouter, state_store: StateStore, order_id: str, broker: str):
+    return {
+        "cache": dict(router._order_status_cache),
+        "pending": dict(router._pending_orders),
+        "mapping": state_store.get_order_id_mapping(order_id, broker),
+    }
+
+
+def _assert_mutation_snapshot_unchanged(router: OrderRouter, state_store: StateStore, order_id: str, broker: str, snapshot):
+    assert dict(router._order_status_cache) == snapshot["cache"]
+    assert dict(router._pending_orders) == snapshot["pending"]
+    assert state_store.get_order_id_mapping(order_id, broker) == snapshot["mapping"]
+
+
+def test_kraken_status_evidence_open_is_read_only_and_namespace_guarded(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    order = _order("kraken-evidence-open")
+    assert router._register_active_order_id_mapping(
+        order,
+        broker="kraken",
+        venue_order_id="KRAKEN-EVIDENCE-OPEN",
+        broker_order_id=None,
+        exchange_txid="KRAKEN-EVIDENCE-OPEN",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router._pending_orders[order.id] = order
+    calls = []
+    cancel_calls = []
+    submit_calls = []
+    router.cancel_order = lambda *args, **kwargs: cancel_calls.append((args, kwargs))
+    router.submit_order = lambda *args, **kwargs: submit_calls.append((args, kwargs))
+
+    def post(url, data=None, headers=None, timeout=None):
+        calls.append({"url": url, "data": data})
+        return _MockResponse(200, {"error": [], "result": {"KRAKEN-EVIDENCE-OPEN": {"status": "open"}}})
+
+    router._session.post = post
+    snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+    evidence = router.get_order_status_evidence(order.id)
+
+    assert evidence["status_classification"] == "open_or_pending"
+    assert evidence["terminal_observed"] is False
+    assert evidence["status_refresh_succeeded"] is True
+    assert evidence["command_id_namespace"] == "exchange_txid"
+    assert evidence["command_order_id"] == "KRAKEN-EVIDENCE-OPEN"
+    assert evidence["mutation_performed"] is False
+    assert evidence["command_performed"] is False
+    assert calls[0]["data"]["txid"] == "KRAKEN-EVIDENCE-OPEN"
+    assert cancel_calls == []
+    assert submit_calls == []
+    _assert_mutation_snapshot_unchanged(router, state_store, order.id, "kraken", snapshot)
+
+
+def test_kraken_status_evidence_terminal_is_not_terminal_mutation(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    order = _order("kraken-evidence-terminal")
+    assert router._register_active_order_id_mapping(
+        order,
+        broker="kraken",
+        venue_order_id="KRAKEN-EVIDENCE-CLOSED",
+        broker_order_id=None,
+        exchange_txid="KRAKEN-EVIDENCE-CLOSED",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router._pending_orders[order.id] = order
+    router._session.post = lambda *args, **kwargs: _MockResponse(
+        200,
+        {"error": [], "result": {"KRAKEN-EVIDENCE-CLOSED": {"status": "closed"}}},
+    )
+    snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+    evidence = router.get_order_status_evidence(order.id)
+
+    assert evidence["status_classification"] == "terminal_observed"
+    assert evidence["terminal_observed"] is True
+    assert evidence["status_raw"] == "closed"
+    _assert_mutation_snapshot_unchanged(router, state_store, order.id, "kraken", snapshot)
+    assert state_store.get_order_id_mapping(order.id, "kraken")["is_terminal"] is False
+
+
+def test_alpaca_status_evidence_open_and_terminal_are_read_only(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    open_order = _order("alpaca-evidence-open")
+    terminal_order = _order("alpaca-evidence-terminal")
+    for order, venue_id in (
+        (open_order, "ALPACA-EVIDENCE-OPEN"),
+        (terminal_order, "ALPACA-EVIDENCE-FILLED"),
+    ):
+        assert router._register_active_order_id_mapping(
+            order,
+            broker="alpaca",
+            venue_order_id=venue_id,
+            broker_order_id=venue_id,
+            exchange_txid=None,
+            id_mapping_source="test",
+            ack_ts_ns=now_ns(),
+        )
+        router._pending_orders[order.id] = order
+
+    calls = []
+
+    def get(url, timeout=None):
+        calls.append(url)
+        if url.endswith("ALPACA-EVIDENCE-FILLED"):
+            return _MockResponse(200, {"status": "filled"})
+        return _MockResponse(200, {"status": "accepted"})
+
+    router._session.get = get
+    open_snapshot = _mutation_snapshot(router, state_store, open_order.id, "alpaca")
+    terminal_snapshot = _mutation_snapshot(router, state_store, terminal_order.id, "alpaca")
+
+    open_evidence = router.get_order_status_evidence(open_order.id)
+    terminal_evidence = router.get_order_status_evidence(terminal_order.id)
+
+    assert open_evidence["status_classification"] == "open_or_pending"
+    assert open_evidence["command_id_namespace"] == "venue_order_id"
+    assert terminal_evidence["status_classification"] == "terminal_observed"
+    assert terminal_evidence["terminal_observed"] is True
+    assert calls == [
+        "https://paper-api.alpaca.markets/v2/orders/ALPACA-EVIDENCE-OPEN",
+        "https://paper-api.alpaca.markets/v2/orders/ALPACA-EVIDENCE-FILLED",
+    ]
+    _assert_mutation_snapshot_unchanged(router, state_store, open_order.id, "alpaca", open_snapshot)
+    _assert_mutation_snapshot_unchanged(router, state_store, terminal_order.id, "alpaca", terminal_snapshot)
+
+
+def test_status_evidence_missing_terminal_and_failed_mapping_no_request_no_mutation(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    calls = []
+    router._session.post = lambda *args, **kwargs: calls.append((args, kwargs))
+
+    missing = router.get_order_status_evidence("missing-evidence-client")
+
+    assert missing["status_classification"] == "mapping_missing_or_unsafe"
+    assert missing["failure_reason"] == "missing_mapping"
+    assert calls == []
+
+    terminal_order = _order("terminal-evidence-client")
+    assert router._register_active_order_id_mapping(
+        terminal_order,
+        broker="kraken",
+        venue_order_id="TERMINAL-EVIDENCE-TXID",
+        broker_order_id=None,
+        exchange_txid="TERMINAL-EVIDENCE-TXID",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+        status="filled",
+        is_terminal=True,
+        terminal_reason="test_terminal",
+    )
+    terminal_snapshot = _mutation_snapshot(router, state_store, terminal_order.id, "kraken")
+
+    terminal = router.get_order_status_evidence(terminal_order.id)
+
+    assert terminal["status_classification"] == "mapping_missing_or_unsafe"
+    assert terminal["failure_reason"] == "terminal_mapping"
+    assert calls == []
+    _assert_mutation_snapshot_unchanged(router, state_store, terminal_order.id, "kraken", terminal_snapshot)
+
+
+def test_status_evidence_timeout_and_broker_orphan_are_fail_closed(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    order = _order("timeout-evidence-client")
+    assert router._register_active_order_id_mapping(
+        order,
+        broker="kraken",
+        venue_order_id="TIMEOUT-EVIDENCE-TXID",
+        broker_order_id=None,
+        exchange_txid="TIMEOUT-EVIDENCE-TXID",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+
+    def timeout(*args, **kwargs):
+        raise TimeoutError("status timeout")
+
+    router._session.post = timeout
+    snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+    failed = router.get_order_status_evidence(order.id)
+    orphan = router.get_order_status_evidence("")
+
+    assert failed["status_classification"] == "unknown_or_failed"
+    assert failed["failure_reason"] == "malformed_or_unavailable_response"
+    assert orphan["status_classification"] == "broker_orphan_no_mapping"
+    assert orphan["failure_reason"] == "missing_client_order_id"
+    _assert_mutation_snapshot_unchanged(router, state_store, order.id, "kraken", snapshot)
+
+    router._session.post = lambda *args, **kwargs: _MockResponse(429, {})
+    assert router.get_order_status_evidence(order.id)["failure_reason"] == "rate_limited"
+    router._session.post = lambda *args, **kwargs: _MockResponse(401, {})
+    assert router.get_order_status_evidence(order.id)["failure_reason"] == "auth_failed"
+    _assert_mutation_snapshot_unchanged(router, state_store, order.id, "kraken", snapshot)
+
+
+def test_paper_status_evidence_absence_is_not_terminal_proof(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(paper_mode=True, state_store=state_store)
+    order = _order("paper-absence-evidence")
+    assert router._register_active_order_id_mapping(
+        order,
+        broker="paper",
+        venue_order_id="PAPER-INTERNAL-PROOF",
+        broker_order_id="PAPER-INTERNAL-PROOF",
+        exchange_txid=None,
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router._pending_orders[order.id] = order
+    snapshot = _mutation_snapshot(router, state_store, order.id, "paper")
+
+    evidence = router.get_order_status_evidence(order.id)
+
+    assert evidence["command_id_namespace"] == "client_order_id"
+    assert evidence["command_order_id"] == order.id
+    assert evidence["status_classification"] == "unknown_or_failed"
+    assert evidence["terminal_observed"] is False
+    assert evidence["failure_reason"] == "paper_order_absent_not_terminal_proof"
+    _assert_mutation_snapshot_unchanged(router, state_store, order.id, "paper", snapshot)
+
+
 def test_main_bootstrap_injects_state_store_into_order_router():
     source = Path("main.py").read_text(encoding="utf-8")
 
