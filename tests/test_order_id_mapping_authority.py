@@ -1,5 +1,6 @@
 import json
 from decimal import Decimal
+from pathlib import Path
 
 from app.execution.order_router import OrderRouter
 from app.models import OrderRequest
@@ -177,6 +178,94 @@ def test_alpaca_cancel_and_status_resolve_to_venue_order_id(tmp_path):
     assert calls[1] == ("delete", "https://paper-api.alpaca.markets/v2/orders/ALPACA-CMD-ID")
 
 
+def test_kraken_cancel_and_status_resolve_from_state_store_after_memory_loss(tmp_path):
+    state_store = _store(tmp_path)
+    submit_router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    submit_router._websocket_connected = True
+    order = _order("kraken-reload-client")
+    submit_router._session.post = lambda *args, **kwargs: _MockResponse(
+        200, {"error": [], "result": {"txid": ["KRAKEN-RELOAD-TXID"]}}
+    )
+
+    assert submit_router.submit_order(order) is None
+
+    reloaded = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    reloaded._websocket_connected = True
+    calls = []
+
+    def post(url, data=None, headers=None, timeout=None):
+        calls.append({"url": url, "data": data})
+        if "QueryOrders" in url:
+            return _MockResponse(
+                200,
+                {"error": [], "result": {"KRAKEN-RELOAD-TXID": {"status": "open"}}},
+            )
+        return _MockResponse(200, {"error": [], "result": {"count": 1}})
+
+    reloaded._session.post = post
+
+    assert reloaded.get_order_status(order.id) == "pending"
+    assert reloaded.cancel_order(order.id) is True
+    assert calls[0]["data"]["txid"] == "KRAKEN-RELOAD-TXID"
+    assert calls[1]["data"]["txid"] == "KRAKEN-RELOAD-TXID"
+    assert calls[0]["data"]["txid"] != order.id
+    assert calls[1]["data"]["txid"] != order.id
+
+
+def test_alpaca_cancel_and_status_resolve_from_state_store_after_memory_loss(tmp_path):
+    state_store = _store(tmp_path)
+    submit_router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    submit_router._websocket_connected = True
+    order = _order("alpaca-reload-client")
+    submit_router._session.post = lambda *args, **kwargs: _MockResponse(
+        200, {"id": "ALPACA-RELOAD-ID"}
+    )
+
+    assert submit_router.submit_order(order) is None
+
+    reloaded = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    reloaded._websocket_connected = True
+    calls = []
+
+    def get(url, timeout=None):
+        calls.append(("get", url))
+        return _MockResponse(200, {"status": "open"})
+
+    def delete(url, timeout=None):
+        calls.append(("delete", url))
+        return _MockResponse(204, {})
+
+    reloaded._session.get = get
+    reloaded._session.delete = delete
+
+    assert reloaded.get_order_status(order.id) == "open"
+    assert reloaded.cancel_order(order.id) is True
+    assert calls[0] == ("get", "https://paper-api.alpaca.markets/v2/orders/ALPACA-RELOAD-ID")
+    assert calls[1] == ("delete", "https://paper-api.alpaca.markets/v2/orders/ALPACA-RELOAD-ID")
+    assert order.id not in calls[0][1]
+    assert order.id not in calls[1][1]
+
+
 def test_missing_mapping_fails_closed_without_live_command(tmp_path):
     router = OrderRouter(
         primary_exchange="kraken",
@@ -265,3 +354,11 @@ def test_terminal_mapping_prevents_cancel_and_survives_reload(tmp_path):
     assert reloaded.get_order_status(order.id) == "filled"
     assert reloaded.cancel_order(order.id) is False
     assert calls == []
+
+
+def test_main_bootstrap_injects_state_store_into_order_router():
+    source = Path("main.py").read_text(encoding="utf-8")
+
+    assert "from app.state.state_store import StateStore" in source
+    assert 'self.state_store = StateStore(db_path="data/state.db")' in source
+    assert "state_store=self.state_store" in source
