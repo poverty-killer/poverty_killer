@@ -110,6 +110,18 @@ def _ensure_positive(value: Decimal, field_name: str) -> Decimal:
     return value
 
 
+def _enum_from_ledger(enum_cls: Any, value: Any, *, field_name: str) -> Any:
+    if value is None:
+        raise ValueError(f"{field_name} is required")
+    if isinstance(value, enum_cls):
+        return value
+    raw = str(value)
+    for member in enum_cls:
+        if raw == member.value or raw == member.name:
+            return member
+    raise ValueError(f"unsupported {field_name}: {value!r}")
+
+
 def _safe_div(n: Decimal, d: Decimal) -> Decimal:
     return ZERO if d == ZERO else (n / d)
 
@@ -1623,6 +1635,151 @@ class ExposureManager:
                     out.append(reservation)
             return out
 
+    def export_reservation_ledger_rows(self, *, active_only: bool = True) -> List[Dict[str, Any]]:
+        """
+        Export in-memory reservations into the passive StateStore ledger shape.
+
+        This helper does not persist, reserve, release, or authorize exposure.
+        Missing fields that are not carried by PendingReservation are emitted as
+        None so future wiring cannot mistake them for source-proven facts.
+        """
+        with self._lock:
+            rows: List[Dict[str, Any]] = []
+            for reservation in self._reservations.values():
+                is_terminal = self._is_terminal_reservation(reservation)
+                is_active = not is_terminal and reservation.open_qty > ZERO
+                if active_only and not is_active:
+                    continue
+                rows.append(self._reservation_to_ledger_row(reservation, is_active=is_active, is_terminal=is_terminal))
+            return rows
+
+    def hydrate_reservations_from_ledger(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        *,
+        release_tombstones: Optional[Iterable[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Restore active PendingReservation state from passive ledger rows.
+
+        The helper is intentionally local to ExposureManager. It does not call
+        reserve_intent, release_reservation, apply_fill_to_reservation, StateStore,
+        execution, router, or broker paths.
+        """
+        released_ids, released_dedupe_keys = self._released_reservation_keys(release_tombstones)
+        hydrated: List[str] = []
+        skipped: List[Dict[str, str]] = []
+
+        with self._lock:
+            for row in rows:
+                reservation_id = str(row.get("reservation_id") or "")
+                dedupe_key = str(row.get("reservation_dedupe_key") or row.get("client_order_id") or "")
+
+                if not reservation_id:
+                    skipped.append({"reservation_id": "", "reason": "missing_reservation_id"})
+                    continue
+                if row.get("is_terminal") is True or row.get("terminal_status"):
+                    skipped.append({"reservation_id": reservation_id, "reason": "terminal_ledger_row"})
+                    continue
+                if row.get("is_active") is False:
+                    skipped.append({"reservation_id": reservation_id, "reason": "inactive_ledger_row"})
+                    continue
+                if reservation_id in released_ids or (dedupe_key and dedupe_key in released_dedupe_keys):
+                    skipped.append({"reservation_id": reservation_id, "reason": "release_tombstone_present"})
+                    continue
+
+                try:
+                    status = _enum_from_ledger(ReservationStatus, row.get("status"), field_name="status")
+                except ValueError:
+                    skipped.append({"reservation_id": reservation_id, "reason": "invalid_status"})
+                    continue
+                if status in self._terminal_reservation_statuses():
+                    skipped.append({"reservation_id": reservation_id, "reason": "terminal_status"})
+                    continue
+
+                price_basis = row.get("price_basis")
+                if price_basis is None:
+                    skipped.append({"reservation_id": reservation_id, "reason": "missing_price_basis"})
+                    continue
+
+                try:
+                    price = _ensure_positive(_d(price_basis, field_name="price_basis"), "price_basis")
+                    qty = _ensure_positive(_d(row.get("original_qty"), field_name="original_qty"), "original_qty")
+                    filled_qty = _ensure_non_negative(_d(row.get("filled_qty", ZERO), field_name="filled_qty"), "filled_qty")
+                    cancelled_qty = _ensure_non_negative(_d(row.get("cancelled_qty", ZERO), field_name="cancelled_qty"), "cancelled_qty")
+                    sleeve = _enum_from_ledger(SleeveType, row.get("sleeve"), field_name="sleeve")
+                    side = _enum_from_ledger(OrderSide, row.get("side"), field_name="side")
+                except ValueError as exc:
+                    skipped.append({"reservation_id": reservation_id, "reason": str(exc)})
+                    continue
+
+                if filled_qty + cancelled_qty >= qty:
+                    skipped.append({"reservation_id": reservation_id, "reason": "no_open_quantity"})
+                    continue
+
+                existing_for_dedupe = self._reservation_dedupe.get(dedupe_key) if dedupe_key else None
+                if existing_for_dedupe is not None and existing_for_dedupe != reservation_id:
+                    skipped.append({"reservation_id": reservation_id, "reason": "duplicate_dedupe_conflict"})
+                    continue
+
+                existing = self._reservations.get(reservation_id)
+                if existing is not None and existing.dedupe_key and dedupe_key and existing.dedupe_key != dedupe_key:
+                    skipped.append({"reservation_id": reservation_id, "reason": "reservation_id_dedupe_conflict"})
+                    continue
+
+                confidence_weight = row.get("confidence_weight")
+                if confidence_weight is None:
+                    confidence = self._default_confidence_weight(status)
+                else:
+                    try:
+                        confidence = _ensure_non_negative(_d(confidence_weight, field_name="confidence_weight"), "confidence_weight")
+                    except ValueError as exc:
+                        skipped.append({"reservation_id": reservation_id, "reason": str(exc)})
+                        continue
+
+                created_at_ns = int(row.get("created_at_ns") or _now_ns())
+                updated_at_ns = int(row.get("updated_at_ns") or created_at_ns)
+
+                reservation = PendingReservation(
+                    reservation_id=reservation_id,
+                    sleeve=sleeve,
+                    symbol=str(row.get("symbol") or ""),
+                    side=side,
+                    qty=qty,
+                    price=price,
+                    trade_intent=TradeIntent.UNKNOWN,
+                    reduce_only=False,
+                    is_hedge=False,
+                    status=status,
+                    confidence_weight=confidence,
+                    replay_mode=ReplayMode.RECOVERY,
+                    created_at_ns=created_at_ns,
+                    last_update_ns=updated_at_ns,
+                    filled_qty=filled_qty,
+                    cancelled_qty=cancelled_qty,
+                    client_order_id=row.get("client_order_id"),
+                    dedupe_key=dedupe_key or None,
+                    source=EventSource.HYDRATION,
+                )
+
+                self._reservations[reservation_id] = reservation
+                if dedupe_key:
+                    self._reservation_dedupe[dedupe_key] = reservation_id
+                hydrated.append(reservation_id)
+
+            if hydrated:
+                self._bump_version()
+            self.recompute_aggregates()
+            invariant_report = self.validate_invariants()
+
+        return {
+            "hydrated": tuple(hydrated),
+            "skipped": tuple(skipped),
+            "valid": invariant_report.valid,
+            "violations": invariant_report.violations,
+            "warnings": invariant_report.warnings,
+        }
+
     def iter_positions(self) -> Iterable[PositionState]:
         with self._lock:
             for sleeve_positions in self._inventory.values():
@@ -1719,6 +1876,84 @@ class ExposureManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _reservation_to_ledger_row(
+        self,
+        reservation: PendingReservation,
+        *,
+        is_active: bool,
+        is_terminal: bool,
+    ) -> Dict[str, Any]:
+        dedupe_key = reservation.dedupe_key or reservation.client_order_id or reservation.reservation_id
+        terminal_status = reservation.status.value if is_terminal else None
+        return {
+            "reservation_id": reservation.reservation_id,
+            "client_order_id": reservation.client_order_id,
+            "decision_uuid": self._decision_uuid_from_dedupe_key(dedupe_key, reservation.client_order_id),
+            "reservation_dedupe_key": dedupe_key,
+            "symbol": reservation.symbol,
+            "side": reservation.side.value,
+            "sleeve": reservation.sleeve.value,
+            "order_type": None,
+            "original_qty": str(reservation.qty),
+            "open_qty": str(reservation.open_qty),
+            "filled_qty": str(reservation.filled_qty),
+            "cancelled_qty": str(reservation.cancelled_qty),
+            "price_basis": str(reservation.price),
+            "notional_basis": str(reservation.qty * reservation.price),
+            "status": reservation.status.value,
+            "confidence_weight": str(reservation.confidence_weight),
+            "created_at_ns": reservation.created_at_ns,
+            "updated_at_ns": reservation.last_update_ns,
+            "terminal_status": terminal_status,
+            "terminal_reason": terminal_status,
+            "terminal_source": "exposure_manager_export" if is_terminal else None,
+            "source_lifecycle_phase": "exposure_manager_export",
+            "source_idempotency_key": dedupe_key,
+            "is_active": is_active,
+            "is_terminal": is_terminal,
+        }
+
+    @staticmethod
+    def _decision_uuid_from_dedupe_key(dedupe_key: Optional[str], client_order_id: Optional[str]) -> Optional[str]:
+        if not dedupe_key or not client_order_id:
+            return None
+        suffix = f":{client_order_id}"
+        if dedupe_key.endswith(suffix):
+            decision_uuid = dedupe_key[: -len(suffix)]
+            return decision_uuid or None
+        return None
+
+    @staticmethod
+    def _terminal_reservation_statuses() -> set[ReservationStatus]:
+        return {
+            ReservationStatus.CANCELLED,
+            ReservationStatus.FILLED,
+            ReservationStatus.REJECTED,
+            ReservationStatus.EXPIRED,
+        }
+
+    def _is_terminal_reservation(self, reservation: PendingReservation) -> bool:
+        return reservation.status in self._terminal_reservation_statuses() or reservation.open_qty <= ZERO
+
+    @staticmethod
+    def _released_reservation_keys(
+        release_tombstones: Optional[Iterable[Dict[str, Any]]],
+    ) -> Tuple[set[str], set[str]]:
+        released_ids: set[str] = set()
+        released_dedupe_keys: set[str] = set()
+        if release_tombstones is None:
+            return released_ids, released_dedupe_keys
+        for tombstone in release_tombstones:
+            if tombstone.get("release_applied", True) is False:
+                continue
+            reservation_id = tombstone.get("reservation_id")
+            dedupe_key = tombstone.get("reservation_dedupe_key")
+            if reservation_id:
+                released_ids.add(str(reservation_id))
+            if dedupe_key:
+                released_dedupe_keys.add(str(dedupe_key))
+        return released_ids, released_dedupe_keys
 
     def _default_confidence_weight(self, status: ReservationStatus) -> Decimal:
         mapping = {
