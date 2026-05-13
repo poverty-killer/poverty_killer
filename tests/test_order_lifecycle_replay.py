@@ -12,6 +12,16 @@ from app.utils.enums import TimeInForce
 from app.utils.time_utils import now_ns
 
 
+class _MockResponse:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+
 def _order(
     *,
     order_id: str,
@@ -51,19 +61,118 @@ def _assert_passive_lifecycle(payload: dict, phase: str) -> None:
     assert context["event_family"] == "order_lifecycle"
     assert context["lifecycle_phase"] == phase
     assert payload["mapping_authoritative"] is False
+    assert payload["active_cancel_status_mapping_ready"] is False
     assert payload["router_cache_authoritative"] is False
     assert payload["exposure_reservation_authority"] is False
     assert payload["exposure_reservation_mutated"] is False
+    assert payload["reservation_mapping_ready"] is False
     assert payload["reservation_delta_authoritative"] is False
     assert payload["reservation_candidate_delta"] is None
     assert payload["reservation_candidate_authoritative"] is False
     assert context["mapping_authoritative"] is False
+    assert context["active_cancel_status_mapping_ready"] is False
     assert context["router_cache_authoritative"] is False
     assert context["exposure_reservation_authority"] is False
     assert context["exposure_reservation_mutated"] is False
+    assert context["reservation_mapping_ready"] is False
     assert context["reservation_delta_authoritative"] is False
     assert context["reservation_candidate_delta"] is None
     assert context["reservation_candidate_authoritative"] is False
+    assert context["order_id_namespace"] == "client_order_id"
+    assert context["passive_mapping_namespace"] in {"client_order_id", "mixed/passive"}
+    assert context["passive_mapping_id_namespaces"][0] == "client_order_id"
+
+
+def test_live_kraken_submit_ack_mapping_is_passive_and_client_cache_keyed(tmp_path):
+    store = TelemetryEventStore(str(tmp_path / "kraken_ack.db"))
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        telemetry_store=store,
+        rest_fallback_enabled=False,
+    )
+    router._websocket_connected = True
+    posts = []
+
+    def post(url, data=None, headers=None, timeout=None):
+        posts.append({"url": url, "data": data, "headers": headers, "timeout": timeout})
+        return _MockResponse(200, {"error": [], "result": {"txid": ["KRAKEN-TXID-001"]}})
+
+    router._session.post = post
+    order = _order(order_id="kraken-client-order-001", decision_uuid="kraken-decision-001")
+
+    assert router.submit_order(order) is None
+
+    payloads = _payloads(store, order.decision_uuid, "order_acknowledged")
+    assert len(payloads) == 1
+    payload = payloads[0]
+    context = payload["order_lifecycle_replay_context"]
+    _assert_passive_lifecycle(payload, "order_acknowledged")
+    assert payload["client_order_id"] == order.id
+    assert payload["venue_order_id"] == "KRAKEN-TXID-001"
+    assert payload["broker_order_id"] is None
+    assert payload["exchange_txid"] == "KRAKEN-TXID-001"
+    assert payload["id_mapping_source"] == "order_router.kraken_submit_response"
+    assert context["client_order_id"] == order.id
+    assert context["venue_order_id"] == "KRAKEN-TXID-001"
+    assert context["broker_order_id"] is None
+    assert context["exchange_txid"] == "KRAKEN-TXID-001"
+    assert context["id_mapping_source"] == "order_router.kraken_submit_response"
+    assert context["passive_mapping_namespace"] == "mixed/passive"
+    assert context["passive_mapping_id_namespaces"] == [
+        "client_order_id",
+        "venue_order_id",
+        "exchange_txid",
+    ]
+    assert router._pending_orders == {order.id: order}
+    assert "KRAKEN-TXID-001" not in router._pending_orders
+    assert len(posts) == 1
+
+
+def test_live_alpaca_submit_ack_mapping_is_passive_and_client_cache_keyed(tmp_path):
+    store = TelemetryEventStore(str(tmp_path / "alpaca_ack.db"))
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=False,
+        telemetry_store=store,
+        rest_fallback_enabled=False,
+    )
+    router._websocket_connected = True
+    posts = []
+
+    def post(url, json=None, timeout=None):
+        posts.append({"url": url, "json": json, "timeout": timeout})
+        return _MockResponse(200, {"id": "ALPACA-ID-001"})
+
+    router._session.post = post
+    order = _order(order_id="alpaca-client-order-001", decision_uuid="alpaca-decision-001")
+
+    assert router.submit_order(order) is None
+
+    payloads = _payloads(store, order.decision_uuid, "order_acknowledged")
+    assert len(payloads) == 1
+    payload = payloads[0]
+    context = payload["order_lifecycle_replay_context"]
+    _assert_passive_lifecycle(payload, "order_acknowledged")
+    assert payload["client_order_id"] == order.id
+    assert payload["venue_order_id"] == "ALPACA-ID-001"
+    assert payload["broker_order_id"] == "ALPACA-ID-001"
+    assert payload["exchange_txid"] is None
+    assert payload["id_mapping_source"] == "order_router.alpaca_submit_response"
+    assert context["client_order_id"] == order.id
+    assert context["venue_order_id"] == "ALPACA-ID-001"
+    assert context["broker_order_id"] == "ALPACA-ID-001"
+    assert context["exchange_txid"] is None
+    assert context["id_mapping_source"] == "order_router.alpaca_submit_response"
+    assert context["passive_mapping_namespace"] == "mixed/passive"
+    assert context["passive_mapping_id_namespaces"] == [
+        "client_order_id",
+        "venue_order_id",
+        "broker_order_id",
+    ]
+    assert router._pending_orders == {order.id: order}
+    assert "ALPACA-ID-001" not in router._pending_orders
+    assert len(posts) == 1
 
 
 def test_paper_ack_observation_is_passive_non_terminal(tmp_path):
@@ -80,8 +189,18 @@ def test_paper_ack_observation_is_passive_non_terminal(tmp_path):
     _assert_passive_lifecycle(payload, "order_acknowledged")
     assert payload["client_order_id"] == order.id
     assert payload["order_id_namespace"] == "client_order_id"
+    assert payload["passive_mapping_namespace"] == "mixed/passive"
+    assert payload["passive_mapping_id_namespaces"] == [
+        "client_order_id",
+        "venue_order_id",
+        "broker_order_id",
+    ]
     assert payload["broker_order_id"] is not None
+    assert payload["broker_order_id"] != order.id
     assert payload["venue_order_id"] == payload["broker_order_id"]
+    assert payload["id_mapping_source"] == "paper_broker.execution_report"
+    assert payload["broker_order_id"] not in router._pending_orders
+    assert order.id in router._pending_orders
     assert payload["is_terminal"] is False
     assert payload["terminal_state"] is None
     assert payload["order_lifecycle_replay_context"]["ack_seen"] is True

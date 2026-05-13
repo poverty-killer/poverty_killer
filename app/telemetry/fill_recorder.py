@@ -85,6 +85,19 @@ def _passive_order_lifecycle_context(
     idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build passive lifecycle replay metadata without claiming authority."""
+    passive_mapping_id_namespaces = ["client_order_id"]
+    if venue_order_id is not None:
+        passive_mapping_id_namespaces.append("venue_order_id")
+    if broker_order_id is not None:
+        passive_mapping_id_namespaces.append("broker_order_id")
+    if exchange_txid is not None:
+        passive_mapping_id_namespaces.append("exchange_txid")
+    passive_mapping_namespace = (
+        "client_order_id"
+        if passive_mapping_id_namespaces == ["client_order_id"]
+        else "mixed/passive"
+    )
+
     return {
         "lifecycle_context_version": 1,
         "lifecycle_source": lifecycle_source,
@@ -94,6 +107,8 @@ def _passive_order_lifecycle_context(
         "event_family": "order_lifecycle",
         "lifecycle_phase": lifecycle_phase,
         "order_id_namespace": "client_order_id",
+        "passive_mapping_namespace": passive_mapping_namespace,
+        "passive_mapping_id_namespaces": passive_mapping_id_namespaces,
         "submit_seen": bool(submit_seen),
         "ack_seen": ack_seen,
         "reject_seen": reject_seen,
@@ -118,9 +133,11 @@ def _passive_order_lifecycle_context(
         "id_mapping_source": id_mapping_source,
         "idempotency_key": idempotency_key or f"{decision_uuid}:{client_order_id}:{lifecycle_phase}",
         "mapping_authoritative": False,
+        "active_cancel_status_mapping_ready": False,
         "router_cache_authoritative": False,
         "exposure_reservation_authority": False,
         "exposure_reservation_mutated": False,
+        "reservation_mapping_ready": False,
         "reservation_delta_authoritative": False,
         "reservation_candidate_delta": None,
         "reservation_candidate_authoritative": False,
@@ -399,14 +416,18 @@ class FillRecorder:
             "status_source": status_source,
             "id_mapping_source": id_mapping_source,
             "order_id_namespace": "client_order_id",
+            "passive_mapping_namespace": lifecycle_context["passive_mapping_namespace"],
+            "passive_mapping_id_namespaces": lifecycle_context["passive_mapping_id_namespaces"],
             "is_terminal": is_terminal,
             "terminal_state": terminal_state,
             "terminal_reason": terminal_reason,
             "idempotency_key": lifecycle_context["idempotency_key"],
             "mapping_authoritative": False,
+            "active_cancel_status_mapping_ready": False,
             "router_cache_authoritative": False,
             "exposure_reservation_authority": False,
             "exposure_reservation_mutated": False,
+            "reservation_mapping_ready": False,
             "reservation_delta_authoritative": False,
             "reservation_candidate_delta": None,
             "reservation_candidate_authoritative": False,

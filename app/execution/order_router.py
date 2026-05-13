@@ -367,6 +367,19 @@ class OrderRouter:
         refuses execution, cache, or exposure authority. It does not mutate
         router, broker, risk, or reservation state.
         """
+        passive_mapping_id_namespaces = ["client_order_id"]
+        if venue_order_id is not None:
+            passive_mapping_id_namespaces.append("venue_order_id")
+        if broker_order_id is not None:
+            passive_mapping_id_namespaces.append("broker_order_id")
+        if exchange_txid is not None:
+            passive_mapping_id_namespaces.append("exchange_txid")
+        passive_mapping_namespace = (
+            "client_order_id"
+            if passive_mapping_id_namespaces == ["client_order_id"]
+            else "mixed/passive"
+        )
+
         return {
             "lifecycle_context_version": 1,
             "lifecycle_source": lifecycle_source,
@@ -376,6 +389,8 @@ class OrderRouter:
             "event_family": "order_lifecycle",
             "lifecycle_phase": lifecycle_phase,
             "order_id_namespace": "client_order_id",
+            "passive_mapping_namespace": passive_mapping_namespace,
+            "passive_mapping_id_namespaces": passive_mapping_id_namespaces,
             "submit_seen": bool(submit_seen),
             "ack_seen": ack_seen,
             "reject_seen": reject_seen,
@@ -400,9 +415,11 @@ class OrderRouter:
             "id_mapping_source": id_mapping_source,
             "idempotency_key": idempotency_key or f"{order.decision_uuid}:{order.id}:{lifecycle_phase}",
             "mapping_authoritative": False,
+            "active_cancel_status_mapping_ready": False,
             "router_cache_authoritative": False,
             "exposure_reservation_authority": False,
             "exposure_reservation_mutated": False,
+            "reservation_mapping_ready": False,
             "reservation_delta_authoritative": False,
             "reservation_candidate_delta": None,
             "reservation_candidate_authoritative": False,
@@ -1335,7 +1352,7 @@ class OrderRouter:
                         event_ts_ns=ack_ts_ns,
                         ack_seen=True,
                         venue_order_id=order_id,
-                        broker_order_id=order_id,
+                        broker_order_id=None,
                         exchange_txid=order_id,
                         original_qty=order.quantity,
                         cumulative_filled_qty=_Decimal("0"),
@@ -1343,7 +1360,7 @@ class OrderRouter:
                         cumulative_fee=_Decimal("0"),
                         is_terminal=False,
                         status_source="kraken.add_order_response",
-                        id_mapping_source="kraken.add_order_response",
+                        id_mapping_source="order_router.kraken_submit_response",
                         idempotency_key=(
                             f"{order.decision_uuid}:{order.id}:order_acknowledged:"
                             f"{order_id}:{ack_ts_ns}:kraken_add_order"
@@ -1403,7 +1420,7 @@ class OrderRouter:
                     cumulative_fee=_Decimal("0"),
                     is_terminal=False,
                     status_source="alpaca.submit_order_response",
-                    id_mapping_source="alpaca.submit_order_response",
+                    id_mapping_source="order_router.alpaca_submit_response",
                     idempotency_key=(
                         f"{order.decision_uuid}:{order.id}:order_acknowledged:"
                         f"{order_id}:{ack_ts_ns}:alpaca_submit_order"

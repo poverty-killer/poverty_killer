@@ -311,12 +311,16 @@ def _assert_passive_order_lifecycle_replay_payload(
     )
 
     assert context["mapping_authoritative"] is False
+    assert context["active_cancel_status_mapping_ready"] is False
     assert context["router_cache_authoritative"] is False
     assert context["exposure_reservation_authority"] is False
     assert context["exposure_reservation_mutated"] is False
+    assert context["reservation_mapping_ready"] is False
     assert context["reservation_delta_authoritative"] is False
     assert context["reservation_candidate_delta"] is None
     assert context["reservation_candidate_authoritative"] is False
+    assert context["passive_mapping_namespace"] in {"client_order_id", "mixed/passive"}
+    assert context["passive_mapping_id_namespaces"][0] == "client_order_id"
 
     order_metadata = payload["order_metadata"]
     assert order_metadata["order_lifecycle_replay_context"] == context
@@ -587,9 +591,11 @@ def test_execution_sr_fill_telemetry_decimal_stringification_regression(tmp_path
     assert context["avg_fill_price"] == str(fill_event.price)
     assert context["cumulative_fee"] == str(fill_event.fee)
     assert context["mapping_authoritative"] is False
+    assert context["active_cancel_status_mapping_ready"] is False
     assert context["router_cache_authoritative"] is False
     assert context["exposure_reservation_authority"] is False
     assert context["exposure_reservation_mutated"] is False
+    assert context["reservation_mapping_ready"] is False
     assert context["reservation_delta_authoritative"] is False
     assert context["reservation_candidate_authoritative"] is False
 
