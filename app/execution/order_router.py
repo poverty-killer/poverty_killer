@@ -60,7 +60,7 @@ from app.models.enums import (
 from app.state.state_store import StateStore
 from app.utils.time_utils import now_ns
 from app.telemetry.event_store import TelemetryEventStore
-from app.telemetry.fill_recorder import FillRecorder
+from app.telemetry.fill_recorder import FillRecorder, build_passive_reservation_candidate_delta
 import app.utils.enums as _pb_enums
 
 logger = logging.getLogger(__name__)
@@ -428,6 +428,24 @@ class OrderRouter:
             else "mixed/passive"
         )
 
+        resolved_idempotency_key = idempotency_key or f"{order.decision_uuid}:{order.id}:{lifecycle_phase}"
+        reservation_candidate_delta = build_passive_reservation_candidate_delta(
+            lifecycle_phase=lifecycle_phase,
+            client_order_id=order.id,
+            decision_uuid=order.decision_uuid,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=original_qty,
+            price_basis=order.limit_price if avg_fill_price is None else avg_fill_price,
+            fill_delta_qty=fill_delta_qty,
+            cumulative_filled_qty=cumulative_filled_qty,
+            remaining_qty=remaining_qty,
+            terminal_state=terminal_state,
+            terminal_reason=terminal_reason,
+            status_source=status_source,
+            idempotency_key=resolved_idempotency_key,
+        )
+
         return {
             "lifecycle_context_version": 1,
             "lifecycle_source": lifecycle_source,
@@ -461,7 +479,7 @@ class OrderRouter:
             "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
             "status_source": status_source,
             "id_mapping_source": id_mapping_source,
-            "idempotency_key": idempotency_key or f"{order.decision_uuid}:{order.id}:{lifecycle_phase}",
+            "idempotency_key": resolved_idempotency_key,
             "mapping_authoritative": False,
             "active_cancel_status_mapping_ready": False,
             "router_cache_authoritative": False,
@@ -469,7 +487,7 @@ class OrderRouter:
             "exposure_reservation_mutated": False,
             "reservation_mapping_ready": False,
             "reservation_delta_authoritative": False,
-            "reservation_candidate_delta": None,
+            "reservation_candidate_delta": reservation_candidate_delta,
             "reservation_candidate_authoritative": False,
         }
 
@@ -480,6 +498,18 @@ class OrderRouter:
     ) -> Dict[str, Any]:
         metadata = dict(order.metadata) if isinstance(order.metadata, dict) else {}
         metadata["order_lifecycle_replay_context"] = lifecycle_context
+        metadata["order_id_namespace"] = lifecycle_context.get("order_id_namespace")
+        metadata["passive_mapping_namespace"] = lifecycle_context.get("passive_mapping_namespace")
+        metadata["passive_mapping_id_namespaces"] = lifecycle_context.get("passive_mapping_id_namespaces")
+        metadata["mapping_authoritative"] = False
+        metadata["active_cancel_status_mapping_ready"] = False
+        metadata["router_cache_authoritative"] = False
+        metadata["reservation_mapping_ready"] = False
+        metadata["reservation_delta_authoritative"] = False
+        metadata["reservation_candidate_delta"] = lifecycle_context.get("reservation_candidate_delta")
+        metadata["reservation_candidate_authoritative"] = False
+        metadata["exposure_reservation_authority"] = False
+        metadata["exposure_reservation_mutated"] = False
         return metadata
 
     def _mapping_broker(self) -> str:
@@ -1043,6 +1073,18 @@ class OrderRouter:
             "pending_cleanup_performed": False,
             "exposure_release_performed": False,
             "reservation_release_performed": False,
+            "reservation_candidate_delta": build_passive_reservation_candidate_delta(
+                lifecycle_phase="terminal_mapping_proof",
+                client_order_id=mapping.client_order_id,
+                decision_uuid=None,
+                symbol=mapping.symbol,
+                side=mapping.side,
+                terminal_state=result.get("terminal_status"),
+                terminal_reason=result.get("terminal_reason"),
+                status_source="mark_terminal_from_status_evidence",
+                idempotency_key=f"{mapping.client_order_id}:terminal_mapping_proof:{result.get('terminal_status')}",
+            ),
+            "reservation_candidate_authoritative": False,
             "orphan_repair_performed": False,
             "cancel_command_performed": False,
             "submit_command_performed": False,

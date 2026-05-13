@@ -5,6 +5,7 @@ from app.execution.order_router import OrderRouter
 from app.execution.paper_broker import PaperBrokerConfig, PaperMarketContext, PriceLevel
 from app.models import OrderRequest
 from app.models.enums import OrderSide, OrderType, SleeveType
+from app.state.state_store import StateStore
 from app.telemetry.event_store import TelemetryEventStore
 from app.utils.enums import OrderSide as PbOrderSide
 from app.utils.enums import OrderType as PbOrderType
@@ -56,6 +57,7 @@ def _payloads(store: TelemetryEventStore, decision_uuid: str, phase: str) -> lis
 
 def _assert_passive_lifecycle(payload: dict, phase: str) -> None:
     context = payload["order_lifecycle_replay_context"]
+    candidate = context["reservation_candidate_delta"]
     assert payload["event_family"] == "order_lifecycle"
     assert payload["lifecycle_phase"] == phase
     assert context["event_family"] == "order_lifecycle"
@@ -67,7 +69,7 @@ def _assert_passive_lifecycle(payload: dict, phase: str) -> None:
     assert payload["exposure_reservation_mutated"] is False
     assert payload["reservation_mapping_ready"] is False
     assert payload["reservation_delta_authoritative"] is False
-    assert payload["reservation_candidate_delta"] is None
+    assert payload["reservation_candidate_delta"] == candidate
     assert payload["reservation_candidate_authoritative"] is False
     assert context["mapping_authoritative"] is False
     assert context["active_cancel_status_mapping_ready"] is False
@@ -76,11 +78,58 @@ def _assert_passive_lifecycle(payload: dict, phase: str) -> None:
     assert context["exposure_reservation_mutated"] is False
     assert context["reservation_mapping_ready"] is False
     assert context["reservation_delta_authoritative"] is False
-    assert context["reservation_candidate_delta"] is None
     assert context["reservation_candidate_authoritative"] is False
     assert context["order_id_namespace"] == "client_order_id"
     assert context["passive_mapping_namespace"] in {"client_order_id", "mixed/passive"}
     assert context["passive_mapping_id_namespaces"][0] == "client_order_id"
+    if candidate is not None:
+        assert candidate["reservation_authority"] is False
+        assert candidate["exposure_reservation_mutated"] is False
+        assert candidate["reservation_mutation_performed"] is False
+        assert candidate["exposure_release_performed"] is False
+        assert candidate["reservation_release_performed"] is False
+        assert candidate["active_reservation_ledger_created"] is False
+        assert candidate["client_order_id"] == payload["client_order_id"]
+
+
+def _assert_candidate_flags(
+    candidate: dict,
+    *,
+    open_candidate: bool = False,
+    adjust_candidate: bool = False,
+    release_candidate: bool = False,
+) -> None:
+    assert candidate["open_candidate_only"] is open_candidate
+    assert candidate["adjust_candidate_only"] is adjust_candidate
+    assert candidate["release_candidate_only"] is release_candidate
+    assert [open_candidate, adjust_candidate, release_candidate].count(True) == 1
+
+
+def test_passive_open_reservation_candidate_emitted_at_submit_boundary(tmp_path):
+    store = TelemetryEventStore(str(tmp_path / "open_candidate.db"))
+    router = OrderRouter(paper_mode=True, telemetry_store=store)
+    order = _order(order_id="open-candidate-client-001", decision_uuid="open-candidate-decision-001")
+
+    assert router.submit_order(order) is None
+    router._record_order_submission_telemetry(order)
+
+    submitted = _payloads(store, order.decision_uuid, "order_submitted")
+    assert len(submitted) == 2
+    dedupe_keys = set()
+    for payload in submitted:
+        _assert_passive_lifecycle(payload, "order_submitted")
+        candidate = payload["reservation_candidate_delta"]
+        assert candidate is not None
+        _assert_candidate_flags(candidate, open_candidate=True)
+        assert candidate["symbol"] == order.symbol
+        assert candidate["side"] == "buy"
+        assert candidate["quantity"] == str(order.quantity)
+        assert candidate["price_basis"] == str(order.limit_price)
+        assert candidate["notional"] == str(order.quantity * order.limit_price)
+        assert candidate["decision_uuid"] == order.decision_uuid
+        assert candidate["reservation_dedupe_key"] == f"{order.decision_uuid}:{order.id}"
+        dedupe_keys.add(candidate["reservation_dedupe_key"])
+    assert dedupe_keys == {f"{order.decision_uuid}:{order.id}"}
 
 
 def test_live_kraken_submit_ack_mapping_is_passive_and_client_cache_keyed(tmp_path):
@@ -254,6 +303,13 @@ def test_paper_partial_fill_observation_is_decimal_safe_and_idempotent(tmp_path)
 
     for payload in partials:
         _assert_passive_lifecycle(payload, "order_partially_filled")
+        candidate = payload["reservation_candidate_delta"]
+        assert candidate is not None
+        _assert_candidate_flags(candidate, adjust_candidate=True)
+        assert candidate["fill_delta_qty"] == payload["fill_delta_qty"]
+        assert candidate["cumulative_filled_qty"] == payload["cumulative_filled_qty"]
+        assert candidate["remaining_qty"] == payload["remaining_qty"]
+        assert candidate["reservation_dedupe_key"] == f"{order.decision_uuid}:{order.id}"
         assert payload["is_terminal"] is False
         assert payload["terminal_state"] is None
         assert payload["fill_delta_qty"] == str(Decimal(payload["fill_delta_qty"]))
@@ -278,6 +334,7 @@ def test_paper_cancel_observation_is_passive_and_terminal_only_when_report_prove
 
     request_payload = requested[0]
     _assert_passive_lifecycle(request_payload, "cancel_requested")
+    assert request_payload["reservation_candidate_delta"] is None
     assert request_payload["client_order_id"] == order.id
     assert request_payload["broker_order_id"] is not None
     assert request_payload["is_terminal"] is False
@@ -285,6 +342,7 @@ def test_paper_cancel_observation_is_passive_and_terminal_only_when_report_prove
 
     canceled_payload = canceled[0]
     _assert_passive_lifecycle(canceled_payload, "order_canceled")
+    assert canceled_payload["reservation_candidate_delta"] is None
     assert canceled_payload["client_order_id"] == order.id
     assert canceled_payload["broker_order_id"] == request_payload["broker_order_id"]
     assert canceled_payload["venue_order_id"] == request_payload["broker_order_id"]
@@ -329,8 +387,55 @@ def test_paper_expiry_observation_is_passive_terminal_when_broker_reports_it(tmp
     assert len(expired) == 1
     payload = expired[0]
     _assert_passive_lifecycle(payload, "order_expired")
+    assert payload["reservation_candidate_delta"] is None
     assert payload["client_order_id"] == order.id
     assert payload["broker_order_id"] is not None
     assert payload["is_terminal"] is True
     assert payload["terminal_state"] == "expired"
     assert payload["terminal_reason"] == "paper_broker_expired"
+
+
+def test_terminal_mapping_proof_emits_passive_release_candidate_only(tmp_path):
+    store = TelemetryEventStore(str(tmp_path / "terminal_candidate_events.db"))
+    state_store = StateStore(str(tmp_path / "terminal_candidate_state.db"))
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        telemetry_store=store,
+        state_store=state_store,
+        rest_fallback_enabled=False,
+    )
+    router._websocket_connected = True
+
+    def post(url, data=None, headers=None, timeout=None):
+        return _MockResponse(200, {"error": [], "result": {"txid": ["KRAKEN-TXID-TERM-001"]}})
+
+    router._session.post = post
+    order = _order(order_id="terminal-candidate-client-001", decision_uuid="terminal-candidate-decision-001")
+    assert router.submit_order(order) is None
+
+    result = router.mark_terminal_from_status_evidence(
+        {
+            "client_order_id": order.id,
+            "broker": "kraken",
+            "venue": "kraken",
+            "command_id_namespace": "exchange_txid",
+            "command_order_id": "KRAKEN-TXID-TERM-001",
+            "status_classification": "terminal_observed",
+            "terminal_observed": True,
+            "status_raw": "filled",
+        }
+    )
+    assert result["applied"] is True
+    proof = router.get_terminal_mapping_proofs()[-1]
+    candidate = proof["reservation_candidate_delta"]
+    assert candidate is not None
+    _assert_candidate_flags(candidate, release_candidate=True)
+    assert candidate["reservation_authority"] is False
+    assert candidate["exposure_reservation_mutated"] is False
+    assert candidate["reservation_release_performed"] is False
+    assert candidate["exposure_release_performed"] is False
+    assert candidate["active_reservation_ledger_created"] is False
+    assert candidate["client_order_id"] == order.id
+    assert candidate["terminal_state"] == "filled"
+    assert candidate["terminal_reason"] == "status_evidence_filled"

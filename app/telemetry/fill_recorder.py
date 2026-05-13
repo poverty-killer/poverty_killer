@@ -30,6 +30,77 @@ def _supports_order_rejected_event_type() -> bool:
     return hasattr(EventType, "ORDER_REJECTED")
 
 
+def _safe_decimal_product(left: Optional[Any], right: Optional[Any]) -> Optional[str]:
+    if left is None or right is None:
+        return None
+    try:
+        from decimal import Decimal
+
+        return str(Decimal(str(left)) * Decimal(str(right)))
+    except Exception:
+        return None
+
+
+def build_passive_reservation_candidate_delta(
+    *,
+    lifecycle_phase: str,
+    client_order_id: str,
+    decision_uuid: Optional[str] = None,
+    symbol: Optional[str] = None,
+    side: Optional[Any] = None,
+    quantity: Optional[Any] = None,
+    price_basis: Optional[Any] = None,
+    fill_delta_qty: Optional[Any] = None,
+    cumulative_filled_qty: Optional[Any] = None,
+    remaining_qty: Optional[Any] = None,
+    terminal_state: Optional[str] = None,
+    terminal_reason: Optional[str] = None,
+    status_source: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build passive reservation evidence without creating reservation authority."""
+    phase = str(lifecycle_phase)
+    open_candidate = phase == "order_submitted"
+    adjust_candidate = phase == "order_partially_filled"
+    release_candidate = phase in {"full_fill", "fill", "terminal_mapping_proof"}
+    if not (open_candidate or adjust_candidate or release_candidate):
+        return None
+
+    dedupe_key = f"{decision_uuid}:{client_order_id}" if decision_uuid else str(client_order_id)
+    candidate_quantity = quantity
+    if candidate_quantity is None:
+        candidate_quantity = fill_delta_qty if fill_delta_qty is not None else remaining_qty
+
+    return {
+        "candidate_type": "open" if open_candidate else ("adjust" if adjust_candidate else "release"),
+        "open_candidate_only": open_candidate,
+        "adjust_candidate_only": adjust_candidate,
+        "release_candidate_only": release_candidate,
+        "reservation_authority": False,
+        "exposure_reservation_mutated": False,
+        "reservation_mutation_performed": False,
+        "exposure_release_performed": False,
+        "reservation_release_performed": False,
+        "active_reservation_ledger_created": False,
+        "client_order_id": str(client_order_id),
+        "decision_uuid": str(decision_uuid) if decision_uuid is not None else None,
+        "symbol": str(symbol) if symbol is not None else None,
+        "side": _safe_side_value(side) if side is not None else None,
+        "quantity": str(candidate_quantity) if candidate_quantity is not None else None,
+        "price_basis": str(price_basis) if price_basis is not None else None,
+        "notional": _safe_decimal_product(candidate_quantity, price_basis),
+        "fill_delta_qty": str(fill_delta_qty) if fill_delta_qty is not None else None,
+        "cumulative_filled_qty": str(cumulative_filled_qty) if cumulative_filled_qty is not None else None,
+        "remaining_qty": str(remaining_qty) if remaining_qty is not None else None,
+        "terminal_state": terminal_state,
+        "terminal_reason": terminal_reason,
+        "status_source": status_source,
+        "reservation_dedupe_key": dedupe_key,
+        "idempotency_key": idempotency_key,
+        "source": "passive_order_lifecycle_telemetry",
+    }
+
+
 _REPLAY_METADATA_KEYS = (
     "canonical_aggression_contract",
     "aggression_replay_proof",
@@ -39,6 +110,18 @@ _REPLAY_METADATA_KEYS = (
     "portfolio_replay_context",
     "exposure_snapshot_replay_context",
     "order_lifecycle_replay_context",
+    "order_id_namespace",
+    "passive_mapping_namespace",
+    "passive_mapping_id_namespaces",
+    "mapping_authoritative",
+    "active_cancel_status_mapping_ready",
+    "router_cache_authoritative",
+    "reservation_mapping_ready",
+    "reservation_delta_authoritative",
+    "reservation_candidate_delta",
+    "reservation_candidate_authoritative",
+    "exposure_reservation_authority",
+    "exposure_reservation_mutated",
     "advisory_aggression_metadata_present",
     "advisory_aggression_snapshot_id",
 )
@@ -62,6 +145,8 @@ def _passive_order_lifecycle_context(
     decision_uuid: str,
     lifecycle_phase: str,
     submit_seen: bool,
+    symbol: Optional[str] = None,
+    side: Optional[Any] = None,
     ack_seen: Optional[bool] = None,
     reject_seen: Optional[bool] = None,
     partial_fill_seen: Optional[bool] = None,
@@ -78,6 +163,7 @@ def _passive_order_lifecycle_context(
     cumulative_filled_qty: Optional[Any] = None,
     remaining_qty: Optional[Any] = None,
     avg_fill_price: Optional[Any] = None,
+    price_basis: Optional[Any] = None,
     cumulative_fee: Optional[Any] = None,
     is_terminal: Optional[bool] = None,
     status_source: Optional[str] = None,
@@ -96,6 +182,24 @@ def _passive_order_lifecycle_context(
         "client_order_id"
         if passive_mapping_id_namespaces == ["client_order_id"]
         else "mixed/passive"
+    )
+
+    resolved_idempotency_key = idempotency_key or f"{decision_uuid}:{client_order_id}:{lifecycle_phase}"
+    reservation_candidate_delta = build_passive_reservation_candidate_delta(
+        lifecycle_phase=lifecycle_phase,
+        client_order_id=client_order_id,
+        decision_uuid=decision_uuid,
+        symbol=symbol,
+        side=side,
+        quantity=original_qty,
+        price_basis=price_basis if price_basis is not None else avg_fill_price,
+        fill_delta_qty=fill_delta_qty,
+        cumulative_filled_qty=cumulative_filled_qty,
+        remaining_qty=remaining_qty,
+        terminal_state=terminal_state,
+        terminal_reason=terminal_reason,
+        status_source=status_source,
+        idempotency_key=resolved_idempotency_key,
     )
 
     return {
@@ -131,7 +235,7 @@ def _passive_order_lifecycle_context(
         "cumulative_fee": str(cumulative_fee) if cumulative_fee is not None else None,
         "status_source": status_source,
         "id_mapping_source": id_mapping_source,
-        "idempotency_key": idempotency_key or f"{decision_uuid}:{client_order_id}:{lifecycle_phase}",
+        "idempotency_key": resolved_idempotency_key,
         "mapping_authoritative": False,
         "active_cancel_status_mapping_ready": False,
         "router_cache_authoritative": False,
@@ -139,7 +243,7 @@ def _passive_order_lifecycle_context(
         "exposure_reservation_mutated": False,
         "reservation_mapping_ready": False,
         "reservation_delta_authoritative": False,
-        "reservation_candidate_delta": None,
+        "reservation_candidate_delta": reservation_candidate_delta,
         "reservation_candidate_authoritative": False,
     }
 
@@ -151,6 +255,18 @@ def _metadata_with_lifecycle_context(
     """Attach fallback passive lifecycle metadata without mutating caller input."""
     result = dict(metadata) if isinstance(metadata, dict) else {}
     result.setdefault("order_lifecycle_replay_context", lifecycle_context)
+    result.setdefault("order_id_namespace", lifecycle_context.get("order_id_namespace"))
+    result.setdefault("passive_mapping_namespace", lifecycle_context.get("passive_mapping_namespace"))
+    result.setdefault("passive_mapping_id_namespaces", lifecycle_context.get("passive_mapping_id_namespaces"))
+    result.setdefault("mapping_authoritative", False)
+    result.setdefault("active_cancel_status_mapping_ready", False)
+    result.setdefault("router_cache_authoritative", False)
+    result.setdefault("reservation_mapping_ready", False)
+    result.setdefault("reservation_delta_authoritative", False)
+    result.setdefault("reservation_candidate_delta", lifecycle_context.get("reservation_candidate_delta"))
+    result.setdefault("reservation_candidate_authoritative", False)
+    result.setdefault("exposure_reservation_authority", False)
+    result.setdefault("exposure_reservation_mutated", False)
     return result
 
 
@@ -204,10 +320,13 @@ class FillRecorder:
                 decision_uuid=fill_event.decision_uuid,
                 lifecycle_phase="fill",
                 submit_seen=True,
+                symbol=fill_event.symbol,
+                side=fill_event.side,
                 venue_fill_id=fill_event.venue_fill_id,
                 original_qty=fill_event.quantity,
                 cumulative_filled_qty=fill_event.quantity,
                 avg_fill_price=fill_event.price,
+                price_basis=fill_event.price,
                 cumulative_fee=fill_event.fee,
                 status_source="fill_recorder.fill_event",
                 id_mapping_source="fill_event.order_intent_id",
@@ -274,6 +393,8 @@ class FillRecorder:
                 decision_uuid=decision_uuid,
                 lifecycle_phase="order_submitted",
                 submit_seen=True,
+                symbol=symbol,
+                side=side,
                 venue_order_id=venue_order_id,
                 broker_order_id=broker_order_id,
                 exchange_txid=exchange_txid,
@@ -282,6 +403,7 @@ class FillRecorder:
                 remaining_qty=quantity,
                 cumulative_fee="0",
                 is_terminal=False,
+                price_basis=limit_price,
                 status_source="fill_recorder.order_submitted",
                 id_mapping_source="fill_recorder.client_order_id",
             ),
@@ -289,6 +411,8 @@ class FillRecorder:
 
         payload = {
             "telemetry_event": "order_submitted",
+            "event_family": "order_lifecycle",
+            "lifecycle_phase": "order_submitted",
             "client_order_id": client_order_id,
             "decision_uuid": decision_uuid,
             "symbol": str(symbol),
@@ -371,6 +495,8 @@ class FillRecorder:
             decision_uuid=decision_uuid,
             lifecycle_phase=lifecycle_phase,
             submit_seen=submit_seen,
+            symbol=symbol,
+            side=side,
             ack_seen=ack_seen,
             reject_seen=reject_seen,
             partial_fill_seen=partial_fill_seen,
@@ -387,6 +513,7 @@ class FillRecorder:
             cumulative_filled_qty=cumulative_filled_qty,
             remaining_qty=remaining_qty,
             avg_fill_price=avg_fill_price,
+            price_basis=limit_price if limit_price is not None else avg_fill_price,
             cumulative_fee=cumulative_fee,
             is_terminal=is_terminal,
             status_source=status_source,
@@ -523,6 +650,8 @@ class FillRecorder:
                 decision_uuid=decision_uuid,
                 lifecycle_phase="rejected",
                 submit_seen=True,
+                symbol=symbol,
+                side=side,
                 reject_seen=True,
                 terminal_state="rejected",
                 terminal_reason=reason,
@@ -534,6 +663,7 @@ class FillRecorder:
                 remaining_qty=quantity,
                 cumulative_fee="0",
                 is_terminal=True,
+                price_basis=limit_price,
                 status_source="fill_recorder.rejection",
                 id_mapping_source="fill_recorder.client_order_id",
             ),

@@ -317,8 +317,16 @@ def _assert_passive_order_lifecycle_replay_payload(
     assert context["exposure_reservation_mutated"] is False
     assert context["reservation_mapping_ready"] is False
     assert context["reservation_delta_authoritative"] is False
-    assert context["reservation_candidate_delta"] is None
+    candidate = context["reservation_candidate_delta"]
     assert context["reservation_candidate_authoritative"] is False
+    if candidate is not None:
+        assert candidate["reservation_authority"] is False
+        assert candidate["exposure_reservation_mutated"] is False
+        assert candidate["reservation_mutation_performed"] is False
+        assert candidate["exposure_release_performed"] is False
+        assert candidate["reservation_release_performed"] is False
+        assert candidate["active_reservation_ledger_created"] is False
+        assert candidate["client_order_id"] == expected_client_order_id
     assert context["passive_mapping_namespace"] in {"client_order_id", "mixed/passive"}
     assert context["passive_mapping_id_namespaces"][0] == "client_order_id"
 
@@ -597,6 +605,15 @@ def test_execution_sr_fill_telemetry_decimal_stringification_regression(tmp_path
     assert context["exposure_reservation_mutated"] is False
     assert context["reservation_mapping_ready"] is False
     assert context["reservation_delta_authoritative"] is False
+    candidate = context["reservation_candidate_delta"]
+    assert candidate is not None
+    assert candidate["release_candidate_only"] is True
+    assert candidate["open_candidate_only"] is False
+    assert candidate["adjust_candidate_only"] is False
+    assert candidate["reservation_authority"] is False
+    assert candidate["exposure_reservation_mutated"] is False
+    assert candidate["reservation_release_performed"] is False
+    assert candidate["active_reservation_ledger_created"] is False
     assert context["reservation_candidate_authoritative"] is False
 
     assert "e" not in payload["quantity"].lower()
@@ -722,6 +739,10 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     assert payload["order_lifecycle_replay_context"]["remaining_qty"] == "0"
     assert payload["order_lifecycle_replay_context"]["avg_fill_price"] == payload["price"]
     assert payload["order_lifecycle_replay_context"]["cumulative_fee"] == payload["fee"]
+    release_candidate = payload["reservation_candidate_delta"]
+    assert release_candidate == payload["order_lifecycle_replay_context"]["reservation_candidate_delta"]
+    assert release_candidate["release_candidate_only"] is True
+    assert release_candidate["reservation_dedupe_key"] == f"{decision_uuid}:{expected_client_order_id}"
 
     assert isinstance(payload["quantity"], str)
     assert isinstance(payload["price"], str)
@@ -786,6 +807,14 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
     assert order_payload["order_lifecycle_replay_context"]["cumulative_filled_qty"] == "0"
     assert Decimal(order_payload["order_lifecycle_replay_context"]["remaining_qty"]) == Decimal("0.05")
     assert order_payload["order_lifecycle_replay_context"]["cumulative_fee"] == "0"
+    open_candidate = order_payload["reservation_candidate_delta"]
+    assert open_candidate == order_payload["order_lifecycle_replay_context"]["reservation_candidate_delta"]
+    assert open_candidate["open_candidate_only"] is True
+    assert open_candidate["adjust_candidate_only"] is False
+    assert open_candidate["release_candidate_only"] is False
+    assert open_candidate["reservation_authority"] is False
+    assert open_candidate["exposure_reservation_mutated"] is False
+    assert open_candidate["reservation_dedupe_key"] == f"{decision_uuid}:{expected_client_order_id}"
     assert order_payload["symbol"] == "ETH/USD"
     assert order_payload["side"] == "buy"
     assert isinstance(order_payload["quantity"], str)
