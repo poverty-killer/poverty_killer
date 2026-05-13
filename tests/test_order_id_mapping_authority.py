@@ -2,11 +2,13 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from app.execution.paper_broker import ExecutionReport
 from app.execution.order_router import OrderRouter
 from app.models import OrderRequest
 from app.models.enums import OrderSide, OrderType, SleeveType
 from app.state.state_store import StateStore
 from app.utils.time_utils import now_ns
+from app.utils.enums import OrderStatus as PaperOrderStatus
 
 
 class _MockResponse:
@@ -370,6 +372,30 @@ def _assert_mutation_snapshot_unchanged(router: OrderRouter, state_store: StateS
     assert state_store.get_order_id_mapping(order_id, broker) == snapshot["mapping"]
 
 
+def _assert_cache_pending_unchanged(router: OrderRouter, snapshot):
+    assert dict(router._order_status_cache) == snapshot["cache"]
+    assert dict(router._pending_orders) == snapshot["pending"]
+
+
+def _terminal_evidence(order_id: str, broker: str, namespace: str, command_id: str, status: str) -> dict:
+    return {
+        "client_order_id": order_id,
+        "broker": broker,
+        "venue": broker,
+        "command_id_namespace": namespace,
+        "command_order_id": command_id,
+        "status_raw": status,
+        "status_classification": "terminal_observed",
+        "terminal_observed": True,
+        "status_refresh_succeeded": True,
+        "failure_reason": None,
+        "mutation_performed": False,
+        "command_performed": False,
+        "recommended_action": "record_terminal_proof_for_board_policy_review",
+        "prohibited_actions": ["pending_cleanup", "exposure_release", "reservation_mutation"],
+    }
+
+
 def test_kraken_status_evidence_open_is_read_only_and_namespace_guarded(tmp_path):
     state_store = _store(tmp_path)
     router = OrderRouter(
@@ -608,6 +634,306 @@ def test_paper_status_evidence_absence_is_not_terminal_proof(tmp_path):
     assert evidence["terminal_observed"] is False
     assert evidence["failure_reason"] == "paper_order_absent_not_terminal_proof"
     _assert_mutation_snapshot_unchanged(router, state_store, order.id, "paper", snapshot)
+
+
+def test_kraken_terminal_status_evidence_marks_mapping_only(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    order = _order("kraken-terminal-apply")
+    assert router._register_active_order_id_mapping(
+        order,
+        broker="kraken",
+        venue_order_id="KRAKEN-TERMINAL-APPLY",
+        broker_order_id=None,
+        exchange_txid="KRAKEN-TERMINAL-APPLY",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router._pending_orders[order.id] = order
+    router._order_status_cache["other-order"] = router._order_status_cache.get("other-order")
+    router._order_status_cache.pop("other-order", None)
+    router._session.post = lambda *args, **kwargs: _MockResponse(
+        200,
+        {"error": [], "result": {"KRAKEN-TERMINAL-APPLY": {"status": "closed"}}},
+    )
+    evidence = router.get_order_status_evidence(order.id)
+    broker_calls = []
+    cancel_calls = []
+    submit_calls = []
+    close_calls = []
+    router._session.post = lambda *args, **kwargs: broker_calls.append((args, kwargs))
+    router.cancel_order = lambda *args, **kwargs: cancel_calls.append((args, kwargs))
+    router.submit_order = lambda *args, **kwargs: submit_calls.append((args, kwargs))
+    router.close_all_positions = lambda *args, **kwargs: close_calls.append((args, kwargs))
+    snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+    result = router.mark_terminal_from_status_evidence(evidence)
+
+    assert result["applied"] is True
+    assert result["terminal_status"] == "closed"
+    assert result["terminal_reason"] == "status_evidence_closed"
+    assert result["mutation_scope"] == ["state_store_order_id_mapping", "active_order_id_mapping"]
+    mapping = state_store.get_order_id_mapping(order.id, "kraken")
+    assert mapping["status"] == "closed"
+    assert mapping["is_terminal"] is True
+    assert mapping["terminal_reason"] == "status_evidence_closed"
+    active_mapping = router._active_order_id_mappings[("kraken", order.id)]
+    assert active_mapping.status == "closed"
+    assert active_mapping.is_terminal is True
+    _assert_cache_pending_unchanged(router, snapshot)
+    assert broker_calls == []
+    assert cancel_calls == []
+    assert submit_calls == []
+    assert close_calls == []
+
+
+def test_kraken_terminal_statuses_mark_mapping_with_exact_status(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+
+    for status in ("canceled", "cancelled", "rejected", "expired"):
+        order = _order(f"kraken-terminal-{status}")
+        txid = f"KRAKEN-{status.upper()}-TXID"
+        assert router._register_active_order_id_mapping(
+            order,
+            broker="kraken",
+            venue_order_id=txid,
+            broker_order_id=None,
+            exchange_txid=txid,
+            id_mapping_source="test",
+            ack_ts_ns=now_ns(),
+        )
+        router._pending_orders[order.id] = order
+        evidence = _terminal_evidence(order.id, "kraken", "exchange_txid", txid, status)
+        snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+        result = router.mark_terminal_from_status_evidence(evidence)
+
+        assert result["applied"] is True
+        assert result["terminal_status"] == status
+        mapping = state_store.get_order_id_mapping(order.id, "kraken")
+        assert mapping["status"] == status
+        assert mapping["terminal_reason"] == f"status_evidence_{status}"
+        _assert_cache_pending_unchanged(router, snapshot)
+
+
+def test_alpaca_terminal_status_evidence_marks_mapping_only(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+
+    for status in ("filled", "canceled", "rejected", "expired"):
+        order = _order(f"alpaca-terminal-{status}")
+        venue_id = f"ALPACA-{status.upper()}-ID"
+        assert router._register_active_order_id_mapping(
+            order,
+            broker="alpaca",
+            venue_order_id=venue_id,
+            broker_order_id=venue_id,
+            exchange_txid=None,
+            id_mapping_source="test",
+            ack_ts_ns=now_ns(),
+        )
+        router._pending_orders[order.id] = order
+        evidence = _terminal_evidence(order.id, "alpaca", "venue_order_id", venue_id, status)
+        snapshot = _mutation_snapshot(router, state_store, order.id, "alpaca")
+
+        result = router.mark_terminal_from_status_evidence(evidence)
+
+        assert result["applied"] is True
+        assert result["mutation_scope"] == ["state_store_order_id_mapping", "active_order_id_mapping"]
+        mapping = state_store.get_order_id_mapping(order.id, "alpaca")
+        assert mapping["status"] == status
+        assert mapping["is_terminal"] is True
+        _assert_cache_pending_unchanged(router, snapshot)
+
+
+def test_terminal_update_rejects_open_unknown_missing_or_orphan_evidence(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    order = _order("kraken-terminal-reject")
+    assert router._register_active_order_id_mapping(
+        order,
+        broker="kraken",
+        venue_order_id="KRAKEN-REJECT-NONTERM",
+        broker_order_id=None,
+        exchange_txid="KRAKEN-REJECT-NONTERM",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router._pending_orders[order.id] = order
+    open_evidence = {
+        **_terminal_evidence(order.id, "kraken", "exchange_txid", "KRAKEN-REJECT-NONTERM", "open"),
+        "status_classification": "open_or_pending",
+        "terminal_observed": False,
+    }
+    unknown_evidence = {
+        **_terminal_evidence(order.id, "kraken", "exchange_txid", "KRAKEN-REJECT-NONTERM", "unknown"),
+        "status_classification": "unknown_or_failed",
+        "terminal_observed": False,
+    }
+    missing_evidence = {
+        **_terminal_evidence("missing-terminal-client", "kraken", "exchange_txid", "MISSING", "filled"),
+        "status_classification": "mapping_missing_or_unsafe",
+        "terminal_observed": False,
+    }
+    orphan_evidence = {
+        **_terminal_evidence("", "kraken", "exchange_txid", "ORPHAN", "filled"),
+        "status_classification": "broker_orphan_no_mapping",
+        "terminal_observed": False,
+    }
+    snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+    for evidence in (open_evidence, unknown_evidence, missing_evidence, orphan_evidence):
+        result = router.mark_terminal_from_status_evidence(evidence)
+        assert result["applied"] is False
+
+    _assert_mutation_snapshot_unchanged(router, state_store, order.id, "kraken", snapshot)
+
+
+def test_terminal_update_is_idempotent_and_rejects_conflict(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    order = _order("kraken-terminal-idempotent")
+    assert router._register_active_order_id_mapping(
+        order,
+        broker="kraken",
+        venue_order_id="KRAKEN-IDEMPOTENT",
+        broker_order_id=None,
+        exchange_txid="KRAKEN-IDEMPOTENT",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    filled_evidence = _terminal_evidence(order.id, "kraken", "exchange_txid", "KRAKEN-IDEMPOTENT", "filled")
+    assert router.mark_terminal_from_status_evidence(filled_evidence)["applied"] is True
+    snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+    same = router.mark_terminal_from_status_evidence(filled_evidence)
+    conflict = router.mark_terminal_from_status_evidence(
+        _terminal_evidence(order.id, "kraken", "exchange_txid", "KRAKEN-IDEMPOTENT", "rejected")
+    )
+
+    assert same["applied"] is False
+    assert same["reason"] == "already_terminal"
+    assert conflict["applied"] is False
+    assert conflict["reason"] == "terminal_status_conflict"
+    _assert_mutation_snapshot_unchanged(router, state_store, order.id, "kraken", snapshot)
+
+
+def test_terminal_update_can_apply_to_durable_mapping_without_rebuilding_active_mapping(tmp_path):
+    state_store = _store(tmp_path)
+    writer = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    order = _order("kraken-terminal-durable-only")
+    assert writer._register_active_order_id_mapping(
+        order,
+        broker="kraken",
+        venue_order_id="KRAKEN-DURABLE-ONLY",
+        broker_order_id=None,
+        exchange_txid="KRAKEN-DURABLE-ONLY",
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router = OrderRouter(
+        primary_exchange="kraken",
+        paper_mode=False,
+        rest_fallback_enabled=False,
+        state_store=state_store,
+    )
+    evidence = _terminal_evidence(order.id, "kraken", "exchange_txid", "KRAKEN-DURABLE-ONLY", "filled")
+    snapshot = _mutation_snapshot(router, state_store, order.id, "kraken")
+
+    result = router.mark_terminal_from_status_evidence(evidence)
+
+    assert result["applied"] is True
+    assert result["mutation_scope"] == ["state_store_order_id_mapping"]
+    assert ("kraken", order.id) not in router._active_order_id_mappings
+    assert state_store.get_order_id_mapping(order.id, "kraken")["is_terminal"] is True
+    _assert_cache_pending_unchanged(router, snapshot)
+
+
+def test_paper_explicit_terminal_report_can_mark_mapping_but_absence_cannot(tmp_path):
+    state_store = _store(tmp_path)
+    router = OrderRouter(paper_mode=True, state_store=state_store)
+    filled_order = _order("paper-terminal-report")
+    assert router._register_active_order_id_mapping(
+        filled_order,
+        broker="paper",
+        venue_order_id="PAPER-TERMINAL-PROOF",
+        broker_order_id="PAPER-TERMINAL-PROOF",
+        exchange_txid=None,
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router._pending_orders[filled_order.id] = filled_order
+    router._paper_broker.execution_reports.append(
+        ExecutionReport(
+            order_id=1,
+            client_id=filled_order.id,
+            symbol=filled_order.symbol,
+            status=PaperOrderStatus.FULLY_FILLED,
+            timestamp_ns=now_ns(),
+            filled_quantity=Decimal("1.0"),
+            fill_price=Decimal("2900"),
+        )
+    )
+    explicit_evidence = router.get_order_status_evidence(filled_order.id)
+    snapshot = _mutation_snapshot(router, state_store, filled_order.id, "paper")
+
+    result = router.mark_terminal_from_status_evidence(explicit_evidence)
+
+    assert explicit_evidence["status_classification"] == "terminal_observed"
+    assert result["applied"] is True
+    assert state_store.get_order_id_mapping(filled_order.id, "paper")["is_terminal"] is True
+    _assert_cache_pending_unchanged(router, snapshot)
+
+    absent_order = _order("paper-absence-no-terminal")
+    assert router._register_active_order_id_mapping(
+        absent_order,
+        broker="paper",
+        venue_order_id="PAPER-ABSENCE-PROOF",
+        broker_order_id="PAPER-ABSENCE-PROOF",
+        exchange_txid=None,
+        id_mapping_source="test",
+        ack_ts_ns=now_ns(),
+    )
+    router._pending_orders[absent_order.id] = absent_order
+    absent_snapshot = _mutation_snapshot(router, state_store, absent_order.id, "paper")
+    absent_evidence = router.get_order_status_evidence(absent_order.id)
+    absent_result = router.mark_terminal_from_status_evidence(absent_evidence)
+
+    assert absent_evidence["terminal_observed"] is False
+    assert absent_result["applied"] is False
+    assert absent_result["reason"] == "non_terminal_evidence"
+    _assert_mutation_snapshot_unchanged(router, state_store, absent_order.id, "paper", absent_snapshot)
 
 
 def test_main_bootstrap_injects_state_store_into_order_router():

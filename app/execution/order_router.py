@@ -929,6 +929,92 @@ class OrderRouter:
             failure_reason="unsupported_broker",
         )
 
+    def mark_terminal_from_status_evidence(self, evidence: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply explicit terminal status evidence to mapping state only."""
+        if not isinstance(evidence, dict):
+            return {
+                "applied": False,
+                "reason": "invalid_evidence",
+                "client_order_id": "",
+                "terminal_status": None,
+                "terminal_reason": None,
+                "mutation_scope": [],
+            }
+
+        client_id = str(evidence.get("client_order_id") or "").strip()
+        broker_name = str(evidence.get("broker") or self._mapping_broker()).lower()
+        terminal_status = str(evidence.get("status_raw") or "").strip().lower()
+        result = {
+            "applied": False,
+            "reason": "not_applied",
+            "client_order_id": client_id,
+            "terminal_status": terminal_status or None,
+            "terminal_reason": None,
+            "mutation_scope": [],
+        }
+
+        if evidence.get("status_classification") != "terminal_observed" or evidence.get("terminal_observed") is not True:
+            result["reason"] = "non_terminal_evidence"
+            return result
+        if not client_id:
+            result["reason"] = "missing_client_order_id"
+            return result
+        if terminal_status not in _STATUS_EVIDENCE_TERMINAL:
+            result["reason"] = "unsupported_terminal_status"
+            return result
+
+        mapping = self._get_order_id_mapping_read_only(client_id, broker_name)
+        if mapping is None:
+            result["reason"] = "missing_mapping"
+            return result
+        if not mapping.durable or self._state_store is None:
+            result["reason"] = "non_durable_mapping"
+            return result
+
+        expected_namespace = self._command_namespace_for_broker(broker_name)
+        evidence_namespace = str(evidence.get("command_id_namespace") or "")
+        evidence_command_id = str(evidence.get("command_order_id") or "")
+        if (
+            not expected_namespace
+            or mapping.command_id_namespace != expected_namespace
+            or evidence_namespace != mapping.command_id_namespace
+            or evidence_command_id != mapping.command_order_id
+        ):
+            result["reason"] = "unsafe_command_namespace"
+            return result
+
+        terminal_reason = f"status_evidence_{terminal_status}"
+        result["terminal_reason"] = terminal_reason
+        if mapping.is_terminal:
+            if mapping.status == terminal_status:
+                result["reason"] = "already_terminal"
+                return result
+            result["reason"] = "terminal_status_conflict"
+            return result
+
+        if not self._state_store.mark_order_id_mapping_terminal(
+            client_id,
+            broker_name,
+            status=terminal_status,
+            terminal_reason=terminal_reason,
+        ):
+            result["reason"] = "state_store_update_failed"
+            return result
+
+        active_mapping = self._active_order_id_mappings.get((broker_name, client_id))
+        mutation_scope = ["state_store_order_id_mapping"]
+        if active_mapping is not None:
+            active_mapping.status = terminal_status
+            active_mapping.is_terminal = True
+            active_mapping.terminal_reason = terminal_reason
+            active_mapping.durable = True
+            mutation_scope.append("active_order_id_mapping")
+
+        result["applied"] = True
+        result["reason"] = "terminal_mapping_updated"
+        result["mutation_scope"] = mutation_scope
+        return result
+
     def get_order_id_mapping_fact(self, client_order_id: str) -> Optional[Dict[str, Any]]:
         """Return the durable mapping fact for truth/reconcile hydration."""
         mapping = self._get_active_order_id_mapping(client_order_id, self._mapping_broker())
