@@ -72,6 +72,7 @@ from app.models.enums import ExchangeType
 from app.monitoring.logger import setup_logger
 from app.risk.guard import HybridRiskGuard
 from app.risk.safety import SafetyGate
+from app.state.state_store import StateStore
 from app.telemetry.event_store import TelemetryEventStore
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,8 @@ class SovereignHeartbeat:
         # BUNDLE F1: Initialize telemetry store
         self.telemetry_store = TelemetryEventStore(db_path="data/telemetry.db")
         logger.info("TelemetryEventStore initialized at data/telemetry.db")
+        self.state_store = StateStore(db_path="data/state.db")
+        logger.info("StateStore initialized at data/state.db")
 
         self.commander = Commander(
             initial_equity=config.initial_capital,
@@ -214,6 +217,7 @@ class SovereignHeartbeat:
             rest_fallback_enabled=True,
             paper_mode=config.broker_mode == "paper",
             telemetry_store=self.telemetry_store,
+            state_store=self.state_store,
         )
 
         self.masking_layer = MaskingLayer(
@@ -444,6 +448,11 @@ class SovereignHeartbeat:
             self.execution_engine.stop()
         except Exception as exc:
             logger.exception("Error stopping execution engine: %s", exc)
+
+        try:
+            self.state_store.close()
+        except Exception as exc:
+            logger.exception("Error closing state store: %s", exc)
 
         self._join_background_threads()
         logger.info("Sovereign heartbeat stopped")
