@@ -38,6 +38,7 @@ from app.execution.engine import ExecutionEngine
 from app.strategies.strategy_router import StrategyRouter
 from app.strategies.shadow_front import ShadowFrontStrategy
 from app.core.decision_compiler import DecisionCompiler
+from app.core.truth_reconciler import TruthReconciler
 from app.models import (
     OrderBookSnapshot,
     Candle,
@@ -1955,6 +1956,14 @@ class MainLoop:
         )
         risk_truth = RiskTruth(mode=risk_mode)
 
+        reconcile_alerts = TruthReconciler().build_alert_evidence(
+            exchange_truth=exchange_truth,
+            execution_truth=execution_truth,
+            portfolio_truth=portfolio_truth,
+            strategy_truth=strategy_truth,
+            risk_truth=risk_truth,
+        )
+
         return TruthFrame(
             exchange_truth=exchange_truth,
             execution_truth=execution_truth,
@@ -1962,6 +1971,7 @@ class MainLoop:
             strategy_truth=strategy_truth,
             risk_truth=risk_truth,
             status=TruthStatus.DRIFTING,
+            reconcile_alerts=reconcile_alerts,
         )
 
     def _compute_volatility(self, candle: Candle) -> float:
