@@ -10,12 +10,14 @@ import json
 import threading
 import logging
 import shutil
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import contextmanager
 from pathlib import Path
 
 from app.constants import DB_WAL_AUTOCHECKPOINT, DB_TIMEOUT_SECONDS, DB_JOURNAL_MODE, DB_SYNC_MODE
+from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +147,70 @@ class StateStore:
                 )
             """)
 
+            # Passive reservation ledger persistence. This is durable fact
+            # storage only; StateStore does not own exposure authority.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS reservation_ledger (
+                    reservation_id TEXT PRIMARY KEY,
+                    client_order_id TEXT NOT NULL,
+                    decision_uuid TEXT,
+                    reservation_dedupe_key TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    sleeve TEXT,
+                    order_type TEXT,
+                    original_qty TEXT NOT NULL,
+                    open_qty TEXT NOT NULL,
+                    filled_qty TEXT NOT NULL,
+                    cancelled_qty TEXT NOT NULL,
+                    price_basis TEXT,
+                    notional_basis TEXT,
+                    status TEXT NOT NULL,
+                    confidence_weight TEXT,
+                    created_at_ns INTEGER NOT NULL,
+                    updated_at_ns INTEGER NOT NULL,
+                    terminal_status TEXT,
+                    terminal_reason TEXT,
+                    terminal_source TEXT,
+                    source_lifecycle_phase TEXT,
+                    source_idempotency_key TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    is_terminal INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS reservation_release_tombstones (
+                    release_idempotency_key TEXT PRIMARY KEY,
+                    reservation_id TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    decision_uuid TEXT,
+                    reservation_dedupe_key TEXT NOT NULL,
+                    release_reason TEXT NOT NULL,
+                    terminal_status TEXT,
+                    terminal_source TEXT NOT NULL,
+                    released_qty TEXT NOT NULL,
+                    released_notional TEXT,
+                    released_at_ns INTEGER NOT NULL,
+                    source_event_id TEXT,
+                    release_applied INTEGER NOT NULL DEFAULT 1,
+                    exposure_release_scope TEXT NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS reservation_fill_progress (
+                    fill_idempotency_key TEXT PRIMARY KEY,
+                    reservation_id TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    cumulative_filled_qty TEXT NOT NULL,
+                    fill_delta_qty TEXT,
+                    status_source TEXT NOT NULL,
+                    source_event_id TEXT,
+                    applied_at_ns INTEGER NOT NULL
+                )
+            """)
+
             # Fills table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS fills (
@@ -257,6 +323,12 @@ class StateStore:
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_venue ON order_id_mappings(broker, venue_order_id) WHERE venue_order_id IS NOT NULL")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_broker ON order_id_mappings(broker, broker_order_id) WHERE broker_order_id IS NOT NULL")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_txid ON order_id_mappings(broker, exchange_txid) WHERE exchange_txid IS NOT NULL")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_ledger_active_dedupe ON reservation_ledger(reservation_dedupe_key) WHERE is_active = 1")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_client ON reservation_ledger(client_order_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_active ON reservation_ledger(is_active)")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_release_once ON reservation_release_tombstones(reservation_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_release_dedupe ON reservation_release_tombstones(reservation_dedupe_key)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_fill_progress_reservation ON reservation_fill_progress(reservation_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_state_strategy ON strategy_state(strategy)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_physical_verification_timestamp ON physical_verification(timestamp)")
@@ -766,6 +838,420 @@ class StateStore:
         updated["is_terminal"] = True
         updated["terminal_reason"] = terminal_reason
         return self.upsert_order_id_mapping(updated)
+
+    @staticmethod
+    def _reservation_bool(value: Any) -> int:
+        return 1 if bool(value) else 0
+
+    @staticmethod
+    def _reservation_row(row: sqlite3.Row) -> Dict[str, Any]:
+        result = dict(row)
+        result["is_active"] = bool(result.get("is_active"))
+        result["is_terminal"] = bool(result.get("is_terminal"))
+        return result
+
+    @staticmethod
+    def _release_tombstone_row(row: sqlite3.Row) -> Dict[str, Any]:
+        result = dict(row)
+        result["release_applied"] = bool(result.get("release_applied"))
+        return result
+
+    @staticmethod
+    def _decimal_or_none(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+
+    def upsert_reservation_ledger(self, reservation: Dict[str, Any]) -> bool:
+        """
+        Persist a reservation ledger fact without creating reservation authority.
+
+        The active reservation dedupe key is unique while open, and release
+        tombstones prevent accidental reopen after terminal release.
+        """
+        required = (
+            "reservation_id",
+            "client_order_id",
+            "reservation_dedupe_key",
+            "symbol",
+            "side",
+            "original_qty",
+            "open_qty",
+            "filled_qty",
+            "cancelled_qty",
+            "status",
+        )
+        if any(not str(reservation.get(field) or "").strip() for field in required):
+            logger.error("Reservation ledger row missing required field")
+            return False
+
+        reservation_id = str(reservation["reservation_id"])
+        dedupe_key = str(reservation["reservation_dedupe_key"])
+        is_active = self._reservation_bool(reservation.get("is_active"))
+        is_terminal = self._reservation_bool(reservation.get("is_terminal"))
+        now = now_ns()
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+
+                cursor.execute(
+                    "SELECT * FROM reservation_ledger WHERE reservation_id = ?",
+                    (reservation_id,),
+                )
+                existing = cursor.fetchone()
+                if existing and existing["is_terminal"] and not is_terminal:
+                    logger.error("Refusing to reopen terminal reservation: %s", reservation_id)
+                    conn.rollback()
+                    return False
+
+                if is_active and not is_terminal:
+                    cursor.execute(
+                        """
+                        SELECT reservation_id FROM reservation_release_tombstones
+                        WHERE reservation_id = ? OR reservation_dedupe_key = ?
+                        LIMIT 1
+                        """,
+                        (reservation_id, dedupe_key),
+                    )
+                    if cursor.fetchone() is not None:
+                        logger.error("Refusing to reopen released reservation: %s", reservation_id)
+                        conn.rollback()
+                        return False
+
+                    cursor.execute(
+                        """
+                        SELECT reservation_id FROM reservation_ledger
+                        WHERE reservation_dedupe_key = ? AND is_active = 1 AND reservation_id != ?
+                        LIMIT 1
+                        """,
+                        (dedupe_key, reservation_id),
+                    )
+                    duplicate = cursor.fetchone()
+                    if duplicate is not None:
+                        logger.error(
+                            "Duplicate active reservation dedupe key %s existing=%s new=%s",
+                            dedupe_key,
+                            duplicate["reservation_id"],
+                            reservation_id,
+                        )
+                        conn.rollback()
+                        return False
+
+                created_at_ns = (
+                    int(existing["created_at_ns"])
+                    if existing is not None
+                    else int(reservation.get("created_at_ns") or now)
+                )
+                updated_at_ns = int(reservation.get("updated_at_ns") or now)
+                record = {
+                    "reservation_id": reservation_id,
+                    "client_order_id": str(reservation["client_order_id"]),
+                    "decision_uuid": reservation.get("decision_uuid"),
+                    "reservation_dedupe_key": dedupe_key,
+                    "symbol": str(reservation["symbol"]),
+                    "side": str(reservation["side"]),
+                    "sleeve": reservation.get("sleeve"),
+                    "order_type": reservation.get("order_type"),
+                    "original_qty": str(reservation["original_qty"]),
+                    "open_qty": str(reservation["open_qty"]),
+                    "filled_qty": str(reservation["filled_qty"]),
+                    "cancelled_qty": str(reservation["cancelled_qty"]),
+                    "price_basis": None if reservation.get("price_basis") is None else str(reservation.get("price_basis")),
+                    "notional_basis": None if reservation.get("notional_basis") is None else str(reservation.get("notional_basis")),
+                    "status": str(reservation["status"]),
+                    "confidence_weight": None if reservation.get("confidence_weight") is None else str(reservation.get("confidence_weight")),
+                    "created_at_ns": created_at_ns,
+                    "updated_at_ns": updated_at_ns,
+                    "terminal_status": reservation.get("terminal_status"),
+                    "terminal_reason": reservation.get("terminal_reason"),
+                    "terminal_source": reservation.get("terminal_source"),
+                    "source_lifecycle_phase": reservation.get("source_lifecycle_phase"),
+                    "source_idempotency_key": reservation.get("source_idempotency_key"),
+                    "is_active": is_active,
+                    "is_terminal": is_terminal,
+                }
+                columns = list(record.keys())
+                placeholders = ", ".join(["?" for _ in columns])
+                update_clause = ", ".join([
+                    f"{column}=excluded.{column}"
+                    for column in columns
+                    if column not in {"reservation_id", "created_at_ns"}
+                ])
+                cursor.execute(
+                    f"""
+                    INSERT INTO reservation_ledger ({", ".join(columns)})
+                    VALUES ({placeholders})
+                    ON CONFLICT(reservation_id) DO UPDATE SET {update_clause}
+                    """,
+                    [record[column] for column in columns],
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error("Failed to upsert reservation ledger %s: %s", reservation_id, e)
+            return False
+
+    def get_reservation_ledger(self, reservation_id: str) -> Optional[Dict[str, Any]]:
+        """Read a persisted reservation ledger fact by reservation ID."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM reservation_ledger WHERE reservation_id = ?",
+                    (str(reservation_id),),
+                )
+                row = cursor.fetchone()
+                return None if row is None else self._reservation_row(row)
+        except Exception as e:
+            logger.error("Failed to get reservation ledger %s: %s", reservation_id, e)
+            return None
+
+    def list_reservation_ledger(
+        self,
+        *,
+        active_only: bool = False,
+        include_terminal: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """List persisted reservation ledger facts for future recovery."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                clauses = []
+                if active_only:
+                    clauses.append("is_active = 1")
+                if not include_terminal:
+                    clauses.append("is_terminal = 0")
+                where_clause = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                cursor.execute(
+                    f"""
+                    SELECT * FROM reservation_ledger
+                    {where_clause}
+                    ORDER BY updated_at_ns DESC
+                    """
+                )
+                return [self._reservation_row(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error("Failed to list reservation ledger: %s", e)
+            return []
+
+    def record_reservation_fill_progress(self, progress: Dict[str, Any]) -> bool:
+        """Persist fill idempotency/progress without applying exposure mutation."""
+        required = (
+            "fill_idempotency_key",
+            "reservation_id",
+            "client_order_id",
+            "cumulative_filled_qty",
+            "status_source",
+        )
+        if any(not str(progress.get(field) or "").strip() for field in required):
+            logger.error("Reservation fill progress missing required field")
+            return False
+
+        fill_key = str(progress["fill_idempotency_key"])
+        reservation_id = str(progress["reservation_id"])
+        cumulative = self._decimal_or_none(progress.get("cumulative_filled_qty"))
+        if cumulative is None:
+            logger.error("Reservation fill progress has invalid cumulative quantity")
+            return False
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute(
+                    "SELECT fill_idempotency_key FROM reservation_fill_progress WHERE fill_idempotency_key = ?",
+                    (fill_key,),
+                )
+                if cursor.fetchone() is not None:
+                    conn.commit()
+                    return True
+
+                cursor.execute(
+                    """
+                    SELECT cumulative_filled_qty FROM reservation_fill_progress
+                    WHERE reservation_id = ?
+                    """,
+                    (reservation_id,),
+                )
+                max_seen: Optional[Decimal] = None
+                for row in cursor.fetchall():
+                    seen = self._decimal_or_none(row["cumulative_filled_qty"])
+                    if seen is not None and (max_seen is None or seen > max_seen):
+                        max_seen = seen
+                if max_seen is not None and cumulative <= max_seen:
+                    logger.error(
+                        "Refusing non-advancing reservation fill progress: %s cumulative=%s max_seen=%s",
+                        reservation_id,
+                        cumulative,
+                        max_seen,
+                    )
+                    conn.rollback()
+                    return False
+
+                cursor.execute(
+                    """
+                    INSERT INTO reservation_fill_progress (
+                        fill_idempotency_key,
+                        reservation_id,
+                        client_order_id,
+                        cumulative_filled_qty,
+                        fill_delta_qty,
+                        status_source,
+                        source_event_id,
+                        applied_at_ns
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        fill_key,
+                        reservation_id,
+                        str(progress["client_order_id"]),
+                        str(progress["cumulative_filled_qty"]),
+                        None if progress.get("fill_delta_qty") is None else str(progress.get("fill_delta_qty")),
+                        str(progress["status_source"]),
+                        progress.get("source_event_id"),
+                        int(progress.get("applied_at_ns") or now_ns()),
+                    ),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error("Failed to record reservation fill progress %s: %s", fill_key, e)
+            return False
+
+    def list_reservation_fill_progress(self, reservation_id: str) -> List[Dict[str, Any]]:
+        """List persisted fill progress facts for one reservation."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT * FROM reservation_fill_progress
+                    WHERE reservation_id = ?
+                    ORDER BY applied_at_ns ASC
+                    """,
+                    (str(reservation_id),),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error("Failed to list reservation fill progress %s: %s", reservation_id, e)
+            return []
+
+    def record_reservation_release_tombstone(self, tombstone: Dict[str, Any]) -> bool:
+        """Persist a release-once tombstone without releasing exposure."""
+        required = (
+            "release_idempotency_key",
+            "reservation_id",
+            "client_order_id",
+            "reservation_dedupe_key",
+            "release_reason",
+            "terminal_source",
+            "released_qty",
+        )
+        if any(not str(tombstone.get(field) or "").strip() for field in required):
+            logger.error("Reservation release tombstone missing required field")
+            return False
+        if tombstone.get("exposure_release_scope", "reservation_only") != "reservation_only":
+            logger.error("Reservation release tombstone has unsupported exposure release scope")
+            return False
+
+        release_key = str(tombstone["release_idempotency_key"])
+        reservation_id = str(tombstone["reservation_id"])
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute(
+                    "SELECT reservation_id FROM reservation_release_tombstones WHERE release_idempotency_key = ?",
+                    (release_key,),
+                )
+                existing_key = cursor.fetchone()
+                if existing_key is not None:
+                    conn.commit()
+                    return existing_key["reservation_id"] == reservation_id
+
+                cursor.execute(
+                    "SELECT release_idempotency_key FROM reservation_release_tombstones WHERE reservation_id = ?",
+                    (reservation_id,),
+                )
+                if cursor.fetchone() is not None:
+                    logger.error("Refusing duplicate reservation release tombstone: %s", reservation_id)
+                    conn.rollback()
+                    return False
+
+                cursor.execute(
+                    """
+                    INSERT INTO reservation_release_tombstones (
+                        release_idempotency_key,
+                        reservation_id,
+                        client_order_id,
+                        decision_uuid,
+                        reservation_dedupe_key,
+                        release_reason,
+                        terminal_status,
+                        terminal_source,
+                        released_qty,
+                        released_notional,
+                        released_at_ns,
+                        source_event_id,
+                        release_applied,
+                        exposure_release_scope
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        release_key,
+                        reservation_id,
+                        str(tombstone["client_order_id"]),
+                        tombstone.get("decision_uuid"),
+                        str(tombstone["reservation_dedupe_key"]),
+                        str(tombstone["release_reason"]),
+                        tombstone.get("terminal_status"),
+                        str(tombstone["terminal_source"]),
+                        str(tombstone["released_qty"]),
+                        None if tombstone.get("released_notional") is None else str(tombstone.get("released_notional")),
+                        int(tombstone.get("released_at_ns") or now_ns()),
+                        tombstone.get("source_event_id"),
+                        1,
+                        "reservation_only",
+                    ),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error("Failed to record reservation release tombstone %s: %s", release_key, e)
+            return False
+
+    def get_reservation_release_tombstone(
+        self,
+        *,
+        reservation_id: Optional[str] = None,
+        release_idempotency_key: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Read a release-once tombstone by reservation ID or release key."""
+        if not reservation_id and not release_idempotency_key:
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if release_idempotency_key:
+                    cursor.execute(
+                        "SELECT * FROM reservation_release_tombstones WHERE release_idempotency_key = ?",
+                        (str(release_idempotency_key),),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT * FROM reservation_release_tombstones WHERE reservation_id = ?",
+                        (str(reservation_id),),
+                    )
+                row = cursor.fetchone()
+                return None if row is None else self._release_tombstone_row(row)
+        except Exception as e:
+            logger.error("Failed to get reservation release tombstone: %s", e)
+            return None
 
     def insert_fill(self, fill: Dict[str, Any]) -> bool:
         """Insert a fill record."""
