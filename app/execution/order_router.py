@@ -169,6 +169,7 @@ class OrderRouter:
         self._reservation_lifecycle_coordinator = reservation_lifecycle_coordinator
         self._reservation_lifecycle_enabled = bool(reservation_lifecycle_enabled)
         self._reservation_lifecycle_ack_open_results: List[Dict[str, Any]] = []
+        self._reservation_lifecycle_partial_fill_results: List[Dict[str, Any]] = []
 
         self._paper_broker: Optional[_SovereignPaperBroker] = None
         if paper_mode:
@@ -621,6 +622,87 @@ class OrderRouter:
         result.update(dict(coordinator_result))
         result["ack_source"] = ack_source
         self._reservation_lifecycle_ack_open_results.append(result)
+        return result
+
+    def _record_reservation_partial_fill(
+        self,
+        order: OrderRequest,
+        *,
+        fill_idempotency_key: str,
+        cumulative_filled_qty: Any,
+        fill_delta_qty: Any,
+        status_source: str,
+        source_event_id: str,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "action": "partial_fill",
+            "applied": False,
+            "idempotent": False,
+            "skipped": True,
+            "failed_reason": None,
+            "client_order_id": getattr(order, "id", None),
+            "reservation_id": None,
+            "mutation_attempted": False,
+            "broker_command_performed": False,
+            "telemetry_authority_used": False,
+            "exposure_manager_called": False,
+            "status_source": status_source,
+        }
+
+        if not self._reservation_lifecycle_enabled:
+            result["failed_reason"] = "reservation_lifecycle_disabled"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
+        if self._reservation_lifecycle_coordinator is None:
+            result["failed_reason"] = "reservation_lifecycle_coordinator_missing"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
+
+        client_order_id = str(getattr(order, "id", "") or "").strip()
+        if not client_order_id:
+            result["failed_reason"] = "missing_client_order_id"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
+
+        dedupe_key = self._reservation_open_dedupe_key(order)
+        if not dedupe_key:
+            result["failed_reason"] = "missing_stable_reservation_dedupe_key"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
+        if not str(fill_idempotency_key or "").strip():
+            result["failed_reason"] = "missing_stable_fill_idempotency_key"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
+        if cumulative_filled_qty is None:
+            result["failed_reason"] = "missing_cumulative_filled_qty"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
+        if fill_delta_qty is None:
+            result["failed_reason"] = "missing_fill_delta_qty"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
+
+        try:
+            coordinator_result = self._reservation_lifecycle_coordinator.on_partial_fill(
+                client_order_id=client_order_id,
+                reservation_id=client_order_id,
+                reservation_dedupe_key=dedupe_key,
+                fill_idempotency_key=fill_idempotency_key,
+                cumulative_filled_qty=cumulative_filled_qty,
+                fill_delta_qty=fill_delta_qty,
+                status_source=status_source,
+                source_event_id=source_event_id,
+                mutation_authority_source="direct_lifecycle",
+            )
+        except Exception as exc:
+            result["failed_reason"] = f"reservation_lifecycle_partial_fill_call_failed:{exc}"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            logger.exception("Reservation lifecycle partial-fill call failed for %s", client_order_id)
+            return result
+
+        result.update(dict(coordinator_result))
+        result["status_source"] = status_source
+        self._reservation_lifecycle_partial_fill_results.append(result)
         return result
 
     def _mapping_broker(self) -> str:
@@ -2061,6 +2143,13 @@ class OrderRouter:
             )
             avg_fill_price = paper_order.average_fill_price if paper_order is not None else fill_price
             cumulative_fee = paper_order.fee_paid if paper_order is not None else report_fee
+            idempotency_key = self._paper_lifecycle_idempotency_key(
+                order,
+                lifecycle_phase="order_partially_filled",
+                broker_order_id=broker_order_id,
+                event_ts_ns=event_ts_ns,
+                source_event_id=source_event_id,
+            )
             self._record_order_lifecycle_telemetry(
                 order,
                 lifecycle_source="order_router.paper_report",
@@ -2079,13 +2168,15 @@ class OrderRouter:
                 is_terminal=False,
                 status_source="paper_broker.execution_report",
                 id_mapping_source="paper_broker.execution_report",
-                idempotency_key=self._paper_lifecycle_idempotency_key(
-                    order,
-                    lifecycle_phase="order_partially_filled",
-                    broker_order_id=broker_order_id,
-                    event_ts_ns=event_ts_ns,
-                    source_event_id=source_event_id,
-                ),
+                idempotency_key=idempotency_key,
+            )
+            self._record_reservation_partial_fill(
+                order,
+                fill_idempotency_key=idempotency_key,
+                cumulative_filled_qty=cumulative_filled,
+                fill_delta_qty=fill_delta_qty,
+                status_source="paper_broker.execution_report",
+                source_event_id=source_event_id,
             )
             return
 

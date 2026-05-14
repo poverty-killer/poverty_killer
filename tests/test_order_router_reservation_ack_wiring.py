@@ -48,6 +48,19 @@ class _SpyCoordinator:
 
     def on_partial_fill(self, **kwargs):
         self.partial_calls.append(kwargs)
+        return {
+            "action": "partial_fill",
+            "applied": True,
+            "idempotent": False,
+            "skipped": False,
+            "failed_reason": None,
+            "reservation_id": kwargs.get("reservation_id"),
+            "client_order_id": kwargs.get("client_order_id"),
+            "mutation_attempted": True,
+            "broker_command_performed": False,
+            "telemetry_authority_used": False,
+            "exposure_manager_called": True,
+        }
 
     def on_full_fill(self, **kwargs):
         self.full_calls.append(kwargs)
@@ -117,6 +130,24 @@ def _assert_ack_call(call, order):
     assert call["source_lifecycle_phase"] == "order_acknowledged"
     assert call["price_basis_source_proven"] is True
     assert call["mutation_authority_source"] == "direct_lifecycle"
+
+
+def _drive_paper_partial(router, order, *, quantity=Decimal("0.25"), offset=2):
+    paper_order = router._paper_broker.open_orders[order.id]
+    ctx = PaperMarketContext(
+        symbol=order.symbol,
+        timestamp_ns=paper_order.eligible_at_ns + offset,
+        mid_price=Decimal("2899.00"),
+        best_bid=Decimal("2898.50"),
+        best_ask=Decimal("2899.00"),
+        ask_levels=(PriceLevel(price=Decimal("2899.00"), quantity=quantity),),
+    )
+    router._paper_broker.process_matching_detailed(
+        current_ts_ns=paper_order.eligible_at_ns + offset,
+        market_by_symbol={order.symbol: ctx},
+    )
+    router._sync_paper_reports()
+    return router._paper_broker.execution_reports[-1]
 
 
 def test_default_order_router_reservation_lifecycle_disabled():
@@ -261,45 +292,143 @@ def test_market_order_missing_price_basis_fails_closed_without_coordinator_call(
     assert router._reservation_lifecycle_ack_open_results[-1]["failed_reason"] == "unsupported_order_type_for_reservation_open"
 
 
-def test_partial_and_full_fill_paths_do_not_call_coordinator_in_23l():
+def test_default_disabled_paper_partial_fill_makes_zero_coordinator_calls_and_zero_progress(tmp_path):
+    coordinator = _SpyCoordinator()
+    store = StateStore(str(tmp_path / "disabled-partial.db"))
+    router = OrderRouter(
+        paper_mode=True,
+        state_store=store,
+        reservation_lifecycle_coordinator=coordinator,
+    )
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    _drive_paper_partial(router, order)
+
+    assert coordinator.ack_calls == []
+    assert coordinator.partial_calls == []
+    assert store.list_reservation_fill_progress(order.id) == []
+    assert router._reservation_lifecycle_partial_fill_results[-1]["failed_reason"] == "reservation_lifecycle_disabled"
+
+
+def test_enabled_paper_partial_fill_calls_coordinator_once_after_ack_open():
     coordinator = _SpyCoordinator()
     router = _enabled_router(coordinator, paper_mode=True)
     order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
 
     assert router.submit_order(order) is None
-    paper_order = router._paper_broker.open_orders[order.id]
     assert len(coordinator.ack_calls) == 1
 
-    first_ctx = PaperMarketContext(
-        symbol=order.symbol,
-        timestamp_ns=paper_order.eligible_at_ns + 2,
-        mid_price=Decimal("2899.00"),
-        best_bid=Decimal("2898.50"),
-        best_ask=Decimal("2899.00"),
-        ask_levels=(PriceLevel(price=Decimal("2899.00"), quantity=Decimal("0.25")),),
+    report = _drive_paper_partial(router, order)
+    call = coordinator.partial_calls[0]
+    expected_key = router._paper_lifecycle_idempotency_key(
+        order,
+        lifecycle_phase="order_partially_filled",
+        broker_order_id=str(report.order_id),
+        event_ts_ns=int(report.timestamp_ns),
+        source_event_id="paper_report_1",
     )
-    router._paper_broker.process_matching_detailed(
-        current_ts_ns=paper_order.eligible_at_ns + 2,
-        market_by_symbol={order.symbol: first_ctx},
-    )
-    router._sync_paper_reports()
 
-    second_ctx = PaperMarketContext(
-        symbol=order.symbol,
-        timestamp_ns=paper_order.eligible_at_ns + 4,
-        mid_price=Decimal("2898.00"),
-        best_bid=Decimal("2897.50"),
-        best_ask=Decimal("2898.00"),
-        ask_levels=(PriceLevel(price=Decimal("2898.00"), quantity=Decimal("0.75")),),
-    )
-    router._paper_broker.process_matching_detailed(
-        current_ts_ns=paper_order.eligible_at_ns + 4,
-        market_by_symbol={order.symbol: second_ctx},
-    )
-    router._sync_paper_reports()
+    assert len(coordinator.partial_calls) == 1
+    assert call["client_order_id"] == order.id
+    assert call["reservation_id"] == order.id
+    assert call["reservation_dedupe_key"] == f"{order.decision_uuid}:{order.id}"
+    assert call["fill_idempotency_key"] == expected_key
+    assert call["cumulative_filled_qty"] == Decimal("0.25")
+    assert call["fill_delta_qty"] == Decimal("0.25")
+    assert call["status_source"] == "paper_broker.execution_report"
+    assert call["source_event_id"] == "paper_report_1"
+    assert call["mutation_authority_source"] == "direct_lifecycle"
 
-    assert coordinator.partial_calls == []
+
+def test_enabled_paper_partial_fill_duplicate_and_advancing_progress(tmp_path):
+    store = StateStore(str(tmp_path / "partial-progress.db"))
+    manager = ExposureManager(initial_equity=Decimal("20000"))
+    coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+    router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    first_report = _drive_paper_partial(router, order, quantity=Decimal("0.25"), offset=2)
+    first_key = router._paper_lifecycle_idempotency_key(
+        order,
+        lifecycle_phase="order_partially_filled",
+        broker_order_id=str(first_report.order_id),
+        event_ts_ns=int(first_report.timestamp_ns),
+        source_event_id="paper_report_1",
+    )
+
+    first_result = router._reservation_lifecycle_partial_fill_results[-1]
+    assert first_result["applied"] is True
+    assert store.get_reservation_ledger(order.id)["filled_qty"] == "0.25"
+    assert len(store.list_reservation_fill_progress(order.id)) == 1
+
+    duplicate = router._record_reservation_partial_fill(
+        order,
+        fill_idempotency_key=first_key,
+        cumulative_filled_qty=Decimal("0.25"),
+        fill_delta_qty=Decimal("0.25"),
+        status_source="paper_broker.execution_report",
+        source_event_id="paper_report_1",
+    )
+    assert duplicate["idempotent"] is True
+    assert len(store.list_reservation_fill_progress(order.id)) == 1
+
+    second_report = _drive_paper_partial(router, order, quantity=Decimal("0.25"), offset=4)
+    assert second_report.filled_quantity == Decimal("0.25")
+    second_result = router._reservation_lifecycle_partial_fill_results[-1]
+    assert second_result["applied"] is True
+    assert store.get_reservation_ledger(order.id)["filled_qty"] == "0.50"
+    assert len(store.list_reservation_fill_progress(order.id)) == 2
+
+    non_advancing = router._record_reservation_partial_fill(
+        order,
+        fill_idempotency_key=f"{first_key}:non_advancing",
+        cumulative_filled_qty=Decimal("0.50"),
+        fill_delta_qty=Decimal("0.25"),
+        status_source="paper_broker.execution_report",
+        source_event_id="paper_report_non_advancing",
+    )
+    assert non_advancing["applied"] is False
+    assert non_advancing["failed_reason"] == "non_advancing_cumulative_fill"
+    assert len(store.list_reservation_fill_progress(order.id)) == 2
+
+
+def test_partial_fill_without_active_reservation_fails_closed(tmp_path):
+    store = StateStore(str(tmp_path / "missing-active.db"))
+    manager = ExposureManager(initial_equity=Decimal("20000"))
+    coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+    router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    result = router._record_reservation_partial_fill(
+        order,
+        fill_idempotency_key="missing-active-partial-key",
+        cumulative_filled_qty=Decimal("0.25"),
+        fill_delta_qty=Decimal("0.25"),
+        status_source="paper_broker.execution_report",
+        source_event_id="paper_report_missing_active",
+    )
+
+    assert result["applied"] is False
+    assert result["failed_reason"] == "active_reservation_not_found"
+    assert store.list_reservation_ledger(active_only=True) == []
+    assert store.list_reservation_fill_progress(order.id) == []
+    assert manager.reservations_for() == []
+
+
+def test_full_fill_path_still_does_not_call_full_fill_or_release():
+    coordinator = _SpyCoordinator()
+    router = _enabled_router(coordinator, paper_mode=True)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    _drive_paper_partial(router, order, quantity=Decimal("0.25"), offset=2)
+    _drive_paper_partial(router, order, quantity=Decimal("0.75"), offset=4)
+
     assert coordinator.full_calls == []
+    assert coordinator.terminal_calls == []
+    assert coordinator.release_calls == []
     assert len(coordinator.ack_calls) == 1
 
 
@@ -351,4 +480,18 @@ def test_no_telemetry_authority_or_broker_adapter_use_in_order_router_wiring():
 
     assert "mutation_authority_source=\"direct_lifecycle\"" in source
     assert "mutation_authority_source=\"telemetry\"" not in source
+    assert "guarded_release_reservation(" not in source
+    assert "on_full_fill(" not in source
+    assert "on_terminal_mapping_proof(" not in source
+    assert "on_cancel_requested(" not in source
+    assert "on_cancel_rejected(" not in source
+    assert "on_orphan_or_drift(" not in source
+    assert "on_status_failure(" not in source
+    assert "on_open_order_absence(" not in source
+    assert "on_partial_fill(" not in inspect.getsource(OrderRouter._submit_order_kraken)
+    assert "on_partial_fill(" not in inspect.getsource(OrderRouter._submit_order_alpaca)
+    assert "on_partial_fill(" not in inspect.getsource(OrderRouter._get_kraken_order_fill)
+    assert "on_partial_fill(" not in inspect.getsource(OrderRouter._get_alpaca_order_fill)
+    assert "on_partial_fill(" not in inspect.getsource(OrderRouter._query_kraken_order_status)
+    assert "on_partial_fill(" not in inspect.getsource(OrderRouter._query_alpaca_order_status)
     assert "broker_adapter" not in source
