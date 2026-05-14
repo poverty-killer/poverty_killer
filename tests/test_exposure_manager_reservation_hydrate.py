@@ -108,6 +108,27 @@ def _tombstone(reservation_id="reservation-001", dedupe_key="decision-001:client
     }
 
 
+def _fill_progress(
+    reservation_id="reservation-001",
+    client_order_id="client-order-001",
+    *,
+    fill_key="fill-progress-001",
+    cumulative="0.25",
+    delta="0.25",
+    applied_at_ns=1_700_000_000_000_000_150,
+):
+    return {
+        "fill_idempotency_key": fill_key,
+        "reservation_id": reservation_id,
+        "client_order_id": client_order_id,
+        "cumulative_filled_qty": cumulative,
+        "fill_delta_qty": delta,
+        "status_source": "paper_broker.execution_report",
+        "source_event_id": fill_key,
+        "applied_at_ns": applied_at_ns,
+    }
+
+
 def test_export_pending_reservation_to_ledger_compatible_dict():
     manager = _manager()
     reservation = _reservation()
@@ -225,6 +246,65 @@ def test_filled_and_cancelled_progress_survive_hydrate():
     assert restored.cancelled_qty == Decimal("0.10")
     assert restored.open_qty == Decimal("0.65")
     assert manager.validate_invariants().valid is True
+
+
+def test_hydrate_catches_up_fill_progress_ahead_of_ledger():
+    manager = _manager()
+
+    result = manager.hydrate_reservations_from_ledger(
+        [_ledger_row(filled_qty="0", open_qty="1.0")],
+        fill_progress=[
+            _fill_progress(fill_key="fill-progress-001", cumulative="0.25"),
+            _fill_progress(fill_key="fill-progress-002", cumulative="0.50", delta="0.25"),
+        ],
+    )
+
+    assert result["hydrated"] == ("reservation-001",)
+    assert result["valid"] is True
+    restored = manager.reservations_for()[0]
+    assert restored.filled_qty == Decimal("0.50")
+    assert restored.open_qty == Decimal("0.50")
+    assert restored.status == ReservationStatus.PARTIALLY_FILLED
+
+
+def test_hydrate_does_not_reduce_ledger_ahead_of_fill_progress():
+    manager = _manager()
+
+    result = manager.hydrate_reservations_from_ledger(
+        [_ledger_row(status="PARTIALLY_FILLED", filled_qty="0.60", open_qty="0.40")],
+        fill_progress=[_fill_progress(cumulative="0.25")],
+    )
+
+    assert result["hydrated"] == ("reservation-001",)
+    restored = manager.reservations_for()[0]
+    assert restored.filled_qty == Decimal("0.60")
+    assert restored.open_qty == Decimal("0.40")
+
+
+def test_hydrate_ignores_fill_progress_for_unknown_reservation():
+    manager = _manager()
+
+    result = manager.hydrate_reservations_from_ledger(
+        [_ledger_row()],
+        fill_progress=[_fill_progress(reservation_id="unknown-reservation", cumulative="0.75")],
+    )
+
+    assert result["hydrated"] == ("reservation-001",)
+    assert [item.reservation_id for item in manager.reservations_for()] == ["reservation-001"]
+    assert manager.reservations_for()[0].filled_qty == Decimal("0")
+
+
+def test_hydrate_rejects_over_original_fill_progress_fail_closed():
+    manager = _manager()
+
+    result = manager.hydrate_reservations_from_ledger(
+        [_ledger_row()],
+        fill_progress=[_fill_progress(cumulative="1.25")],
+    )
+
+    assert result["hydrated"] == ()
+    assert result["skipped"][0]["reason"] == "fill_progress_exceeds_original_qty"
+    assert manager.reservations_for() == []
 
 
 def test_exposure_manager_remains_not_live_wired_and_broker_adapter_inactive():

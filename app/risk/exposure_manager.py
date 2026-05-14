@@ -1903,6 +1903,7 @@ class ExposureManager:
         rows: Iterable[Dict[str, Any]],
         *,
         release_tombstones: Optional[Iterable[Dict[str, Any]]] = None,
+        fill_progress: Optional[Iterable[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Restore active PendingReservation state from passive ledger rows.
@@ -1912,6 +1913,7 @@ class ExposureManager:
         execution, router, or broker paths.
         """
         released_ids, released_dedupe_keys = self._released_reservation_keys(release_tombstones)
+        fill_progress_by_reservation = self._fill_progress_by_reservation(fill_progress)
         hydrated: List[str] = []
         skipped: List[Dict[str, str]] = []
 
@@ -1957,6 +1959,26 @@ class ExposureManager:
                 except ValueError as exc:
                     skipped.append({"reservation_id": reservation_id, "reason": str(exc)})
                     continue
+
+                try:
+                    recovered_filled_qty = self._recovered_filled_qty(
+                        reservation_id=reservation_id,
+                        original_qty=qty,
+                        ledger_filled_qty=filled_qty,
+                        progress_rows=fill_progress_by_reservation.get(reservation_id, ()),
+                    )
+                except ValueError as exc:
+                    skipped.append({"reservation_id": reservation_id, "reason": str(exc)})
+                    continue
+                filled_qty = recovered_filled_qty
+                if filled_qty > ZERO and status in {
+                    ReservationStatus.CREATED,
+                    ReservationStatus.ROUTING,
+                    ReservationStatus.ACKNOWLEDGED,
+                    ReservationStatus.STALE,
+                    ReservationStatus.UNKNOWN,
+                }:
+                    status = ReservationStatus.PARTIALLY_FILLED
 
                 if filled_qty + cancelled_qty >= qty:
                     skipped.append({"reservation_id": reservation_id, "reason": "no_open_quantity"})
@@ -2024,6 +2046,51 @@ class ExposureManager:
             "violations": invariant_report.violations,
             "warnings": invariant_report.warnings,
         }
+
+    @staticmethod
+    def _fill_progress_by_reservation(
+        fill_progress: Optional[Iterable[Dict[str, Any]]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        if fill_progress is None:
+            return grouped
+        for progress in fill_progress:
+            reservation_id = str(progress.get("reservation_id") or "")
+            if not reservation_id:
+                continue
+            grouped.setdefault(reservation_id, []).append(progress)
+        return grouped
+
+    @staticmethod
+    def _recovered_filled_qty(
+        *,
+        reservation_id: str,
+        original_qty: Decimal,
+        ledger_filled_qty: Decimal,
+        progress_rows: Iterable[Dict[str, Any]],
+    ) -> Decimal:
+        max_progress: Optional[Decimal] = None
+        for progress in progress_rows:
+            try:
+                cumulative = _ensure_non_negative(
+                    _d(progress.get("cumulative_filled_qty"), field_name="cumulative_filled_qty"),
+                    "cumulative_filled_qty",
+                )
+            except ValueError as exc:
+                raise ValueError(f"invalid_fill_progress:{exc}") from exc
+            if cumulative > original_qty:
+                raise ValueError("fill_progress_exceeds_original_qty")
+            if max_progress is None or cumulative > max_progress:
+                max_progress = cumulative
+        if max_progress is None or max_progress <= ledger_filled_qty:
+            return ledger_filled_qty
+        logger.info(
+            "Recovered reservation fill progress during hydrate: %s ledger=%s recovered=%s",
+            reservation_id,
+            ledger_filled_qty,
+            max_progress,
+        )
+        return max_progress
 
     def iter_positions(self) -> Iterable[PositionState]:
         with self._lock:

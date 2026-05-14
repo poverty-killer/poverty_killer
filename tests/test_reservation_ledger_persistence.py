@@ -196,6 +196,28 @@ def test_restart_readback_restores_open_reservations_and_tombstones(tmp_path):
     assert tombstone["release_idempotency_key"] == "closed-release-key"
 
 
+def test_restart_readback_restores_fill_progress(tmp_path):
+    db_path = tmp_path / "state.db"
+    first = StateStore(str(db_path))
+    assert first.upsert_reservation_ledger(_reservation_row()) is True
+    assert first.record_reservation_fill_progress({
+        "fill_idempotency_key": "venue-fill-001",
+        "reservation_id": "reservation-001",
+        "client_order_id": "client-order-001",
+        "cumulative_filled_qty": "0.25",
+        "fill_delta_qty": "0.25",
+        "status_source": "paper_broker.execution_report",
+        "source_event_id": "paper_report_1",
+        "applied_at_ns": 1_700_000_000_000_000_010,
+    }) is True
+    first.close()
+
+    restarted = StateStore(str(db_path))
+    progress = restarted.list_reservation_fill_progress("reservation-001")
+    assert [row["fill_idempotency_key"] for row in progress] == ["venue-fill-001"]
+    assert progress[0]["cumulative_filled_qty"] == "0.25"
+
+
 def test_terminal_release_key_cannot_release_twice(tmp_path):
     store = _store(tmp_path)
     assert store.upsert_reservation_ledger(_reservation_row()) is True

@@ -85,6 +85,19 @@ def _release_tombstone():
     }
 
 
+def _fill_progress():
+    return {
+        "fill_idempotency_key": "paper-fill-001",
+        "reservation_id": "reservation-001",
+        "client_order_id": "client-order-001",
+        "cumulative_filled_qty": "0.25",
+        "fill_delta_qty": "0.25",
+        "status_source": "paper_broker.execution_report",
+        "source_event_id": "paper-report-001",
+        "applied_at_ns": 1_700_000_000_000_000_150,
+    }
+
+
 def test_root_bootstrap_creates_exposure_manager_and_disabled_coordinator(tmp_path):
     store = _store(tmp_path)
     root = _root_with_store(store)
@@ -121,6 +134,22 @@ def test_tombstoned_rows_do_not_hydrate_active_reservations(tmp_path):
     assert root.reservation_lifecycle_bootstrap_status["release_tombstone_count"] == 1
     assert root.reservation_lifecycle_bootstrap_status["skipped_reservation_count"] == 1
     assert root.exposure_manager.reservations_for() == []
+
+
+def test_bootstrap_recovers_fill_progress_ahead_of_active_ledger(tmp_path):
+    store = _store(tmp_path)
+    assert store.upsert_reservation_ledger(_reservation_row()) is True
+    assert store.record_reservation_fill_progress(_fill_progress()) is True
+    root = _root_with_store(store)
+
+    root._bootstrap_reservation_lifecycle_disabled(_config())
+
+    assert root.reservation_lifecycle_enabled is False
+    assert root.reservation_lifecycle_bootstrap_status["fill_progress_row_count"] == 1
+    assert root.reservation_lifecycle_bootstrap_status["hydrated_reservation_count"] == 1
+    restored = root.exposure_manager.reservations_for()[0]
+    assert str(restored.filled_qty) == "0.25"
+    assert str(restored.open_qty) == "0.75"
 
 
 def test_terminal_rows_do_not_hydrate_active_reservations(tmp_path):
@@ -173,7 +202,7 @@ def test_hydrate_failure_keeps_coordinator_disabled_and_fail_closed(monkeypatch)
         def __init__(self, initial_equity):
             self.initial_equity = initial_equity
 
-        def hydrate_reservations_from_ledger(self, rows, *, release_tombstones=None):
+        def hydrate_reservations_from_ledger(self, rows, *, release_tombstones=None, fill_progress=None):
             raise RuntimeError("forced hydrate failure")
 
         def guarded_open_reservation(self, *args, **kwargs):

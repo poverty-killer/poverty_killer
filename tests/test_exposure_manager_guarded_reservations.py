@@ -293,6 +293,49 @@ def test_exposure_manager_succeeds_then_store_upsert_fails_reports_recovery_need
     assert manager.reservations_for()[0].filled_qty == Decimal("0.25")
 
 
+def test_restart_fill_progress_ahead_of_ledger_prevents_duplicate_and_allows_advancing_fill(tmp_path):
+    store = _store(tmp_path)
+    manager = _manager()
+    assert _open(manager, store)["applied"] is True
+    assert store.record_reservation_fill_progress({
+        "fill_idempotency_key": "venue-fill-001",
+        "reservation_id": "reservation-001",
+        "client_order_id": "client-order-001",
+        "cumulative_filled_qty": "0.25",
+        "fill_delta_qty": "0.25",
+        "status_source": "paper_broker.execution_report",
+        "source_event_id": "paper-report-001",
+        "applied_at_ns": 1_700_000_000_000_000_010,
+    }) is True
+    assert store.get_reservation_ledger("reservation-001")["filled_qty"] == "0"
+
+    restarted = _manager()
+    hydrate = restarted.hydrate_reservations_from_ledger(
+        store.list_reservation_ledger(active_only=True, include_terminal=False),
+        fill_progress=store.list_reservation_fill_progress("reservation-001"),
+    )
+    assert hydrate["hydrated"] == ("reservation-001",)
+    assert restarted.reservations_for()[0].filled_qty == Decimal("0.25")
+
+    duplicate = restarted.guarded_apply_fill_to_reservation(state_store=store, **_fill_kwargs())
+    assert duplicate["idempotent"] is True
+    assert duplicate["failed_reason"] == "fill_key_already_recorded"
+    assert restarted.reservations_for()[0].filled_qty == Decimal("0.25")
+
+    advancing = restarted.guarded_apply_fill_to_reservation(
+        state_store=store,
+        **_fill_kwargs(
+            fill_idempotency_key="venue-fill-002",
+            cumulative_filled_qty=Decimal("0.50"),
+            fill_delta_qty=Decimal("0.25"),
+            source_event_id="paper-report-002",
+        ),
+    )
+    assert advancing["applied"] is True
+    assert restarted.reservations_for()[0].filled_qty == Decimal("0.50")
+    assert store.get_reservation_ledger("reservation-001")["filled_qty"] == "0.50"
+
+
 def test_open_ledger_upsert_failure_rolls_back_memory(tmp_path):
     inner = _store(tmp_path)
     manager = _manager()

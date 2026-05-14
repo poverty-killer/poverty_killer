@@ -360,6 +360,7 @@ class SovereignHeartbeat:
 
         active_rows = []
         release_tombstones = []
+        fill_progress = []
         hydrate_result: Dict[str, Any] = {
             "hydrated": (),
             "skipped": (),
@@ -384,10 +385,14 @@ class SovereignHeartbeat:
                 )
                 if tombstone is not None:
                     release_tombstones.append(tombstone)
+                fill_progress.extend(
+                    self.state_store.list_reservation_fill_progress(reservation_id)
+                )
 
             hydrate_result = self.exposure_manager.hydrate_reservations_from_ledger(
                 active_rows,
                 release_tombstones=release_tombstones,
+                fill_progress=fill_progress,
             )
             if not hydrate_result.get("valid", False):
                 hydrate_failed = True
@@ -407,6 +412,7 @@ class SovereignHeartbeat:
             "reservation_lifecycle_enabled": False,
             "active_ledger_row_count": len(active_rows),
             "release_tombstone_count": len(release_tombstones),
+            "fill_progress_row_count": len(fill_progress),
             "hydrated_reservation_count": len(hydrate_result.get("hydrated") or ()),
             "skipped_reservation_count": len(hydrate_result.get("skipped") or ()),
             "hydrate_failed": hydrate_failed,
