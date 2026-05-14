@@ -986,6 +986,251 @@ class ExposureManager:
             )
             return updated
 
+    def guarded_open_reservation(
+        self,
+        *,
+        state_store: Any,
+        reservation_id: str,
+        client_order_id: str,
+        decision_uuid: Optional[str],
+        reservation_dedupe_key: str,
+        symbol: str,
+        side: Any,
+        sleeve: Any,
+        qty: Decimal,
+        price_basis: Any,
+        order_type: Optional[str] = None,
+        source_lifecycle_phase: Optional[str] = None,
+        source_idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        result = self._guard_result(reservation_id=reservation_id, client_order_id=client_order_id)
+        if state_store is None:
+            return self._guard_failed(result, "missing_state_store")
+
+        try:
+            price = _ensure_positive(_d(price_basis, field_name="price_basis"), "price_basis")
+            qty_dec = _ensure_positive(_d(qty, field_name="qty"), "qty")
+            side_enum = _enum_from_ledger(OrderSide, side, field_name="side")
+            sleeve_enum = _enum_from_ledger(SleeveType, sleeve, field_name="sleeve")
+        except ValueError as exc:
+            return self._guard_failed(result, str(exc))
+
+        if state_store.get_reservation_release_tombstone(reservation_id=reservation_id) is not None:
+            return self._guard_failed(result, "release_tombstone_present")
+
+        existing_active = self._active_ledger_row_for_dedupe(state_store, reservation_dedupe_key)
+        if existing_active is not None:
+            if existing_active.get("reservation_id") == reservation_id:
+                return self._guard_idempotent(result, "active_reservation_already_persisted")
+            return self._guard_failed(result, "duplicate_active_dedupe_conflict")
+
+        with self._lock:
+            existing_memory = self._reservations.get(reservation_id)
+            if existing_memory is not None:
+                if existing_memory.dedupe_key == reservation_dedupe_key:
+                    return self._guard_idempotent(result, "reservation_already_open")
+                return self._guard_failed(result, "reservation_id_dedupe_conflict")
+
+        mutation_applied = False
+        try:
+            reservation = self.reserve_intent(
+                reservation_id=reservation_id,
+                sleeve=sleeve_enum,
+                symbol=symbol,
+                side=side_enum,
+                qty=qty_dec,
+                price=price,
+                client_order_id=client_order_id,
+                dedupe_key=reservation_dedupe_key,
+            )
+            mutation_applied = True
+        except Exception as exc:
+            return self._guard_failed(result, f"reserve_intent_failed:{exc}")
+
+        row = self._reservation_to_ledger_row(reservation, is_active=True, is_terminal=False)
+        row.update({
+            "decision_uuid": decision_uuid,
+            "order_type": order_type,
+            "source_lifecycle_phase": source_lifecycle_phase,
+            "source_idempotency_key": source_idempotency_key or reservation_dedupe_key,
+        })
+        if state_store.upsert_reservation_ledger(row):
+            result.update({
+                "applied": True,
+                "persistence_applied": True,
+                "mutation_applied": mutation_applied,
+            })
+            return result
+
+        rollback_applied = self._rollback_open_reservation(reservation_id, reservation_dedupe_key)
+        result.update({
+            "failed_reason": "ledger_upsert_failed_rollback_applied" if rollback_applied else "ledger_upsert_failed_recovery_needed",
+            "mutation_applied": mutation_applied,
+            "rollback_applied": rollback_applied,
+        })
+        return result
+
+    def guarded_apply_fill_to_reservation(
+        self,
+        *,
+        state_store: Any,
+        reservation_id: str,
+        client_order_id: str,
+        fill_idempotency_key: str,
+        cumulative_filled_qty: Any,
+        fill_delta_qty: Optional[Any] = None,
+        status_source: str,
+        source_event_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        result = self._guard_result(reservation_id=reservation_id, client_order_id=client_order_id)
+        if state_store is None:
+            return self._guard_failed(result, "missing_state_store")
+
+        with self._lock:
+            reservation = self._reservations.get(reservation_id)
+        if reservation is None:
+            return self._guard_failed(result, "reservation_missing")
+
+        ledger = state_store.get_reservation_ledger(reservation_id)
+        if ledger is None:
+            return self._guard_failed(result, "reservation_ledger_missing")
+
+        existing_progress = state_store.list_reservation_fill_progress(reservation_id)
+        if any(item.get("fill_idempotency_key") == fill_idempotency_key for item in existing_progress):
+            return self._guard_idempotent(result, "fill_key_already_recorded")
+
+        try:
+            cumulative = _ensure_non_negative(_d(cumulative_filled_qty, field_name="cumulative_filled_qty"), "cumulative_filled_qty")
+        except ValueError as exc:
+            return self._guard_failed(result, str(exc))
+
+        max_seen = self._max_recorded_cumulative_fill(existing_progress)
+        if cumulative <= reservation.filled_qty or (max_seen is not None and cumulative <= max_seen):
+            return self._guard_failed(result, "non_advancing_cumulative_fill")
+
+        delta = cumulative - reservation.filled_qty
+        if fill_delta_qty is not None:
+            try:
+                requested_delta = _ensure_non_negative(_d(fill_delta_qty, field_name="fill_delta_qty"), "fill_delta_qty")
+            except ValueError as exc:
+                return self._guard_failed(result, str(exc))
+            delta = min(delta, requested_delta)
+        if delta <= ZERO:
+            return self._guard_failed(result, "non_advancing_fill_delta")
+
+        progress = {
+            "fill_idempotency_key": fill_idempotency_key,
+            "reservation_id": reservation_id,
+            "client_order_id": client_order_id,
+            "cumulative_filled_qty": str(cumulative),
+            "fill_delta_qty": str(delta),
+            "status_source": status_source,
+            "source_event_id": source_event_id,
+            "applied_at_ns": _now_ns(),
+        }
+        if not state_store.record_reservation_fill_progress(progress):
+            return self._guard_failed(result, "fill_progress_persist_failed")
+        result["persistence_applied"] = True
+
+        try:
+            updated = self.apply_fill_to_reservation(reservation_id, fill_qty=delta)
+            result["mutation_applied"] = True
+        except Exception as exc:
+            return self._guard_failed(result, f"fill_mutation_failed_recovery_needed:{exc}")
+
+        row = self._terminal_or_active_row_after_fill(reservation, updated, cumulative)
+        if state_store.upsert_reservation_ledger(row):
+            result["applied"] = True
+            return result
+
+        result["failed_reason"] = "ledger_upsert_failed_recovery_needed"
+        return result
+
+    def guarded_release_reservation(
+        self,
+        *,
+        state_store: Any,
+        reservation_id: str,
+        client_order_id: str,
+        reservation_dedupe_key: str,
+        release_idempotency_key: str,
+        release_reason: str,
+        terminal_status: str,
+        terminal_source: str,
+        released_qty: Any,
+        released_notional: Optional[Any] = None,
+        source_event_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        result = self._guard_result(reservation_id=reservation_id, client_order_id=client_order_id)
+        if state_store is None:
+            return self._guard_failed(result, "missing_state_store")
+
+        terminal_reservation_status = self._reservation_status_from_terminal_proof(terminal_status)
+        if terminal_reservation_status is None:
+            return self._guard_failed(result, "unsupported_terminal_status")
+
+        existing_by_key = state_store.get_reservation_release_tombstone(
+            release_idempotency_key=release_idempotency_key,
+        )
+        if existing_by_key is not None:
+            if existing_by_key.get("reservation_id") == reservation_id:
+                return self._guard_idempotent(result, "release_key_already_recorded")
+            return self._guard_failed(result, "release_key_conflict")
+
+        existing_by_reservation = state_store.get_reservation_release_tombstone(reservation_id=reservation_id)
+        if existing_by_reservation is not None:
+            return self._guard_failed(result, "reservation_already_released")
+
+        with self._lock:
+            reservation = self._reservations.get(reservation_id)
+        if reservation is None:
+            return self._guard_failed(result, "reservation_missing")
+
+        try:
+            released_qty_dec = _ensure_non_negative(_d(released_qty, field_name="released_qty"), "released_qty")
+        except ValueError as exc:
+            return self._guard_failed(result, str(exc))
+
+        tombstone = {
+            "release_idempotency_key": release_idempotency_key,
+            "reservation_id": reservation_id,
+            "client_order_id": client_order_id,
+            "decision_uuid": self._decision_uuid_from_dedupe_key(reservation_dedupe_key, client_order_id),
+            "reservation_dedupe_key": reservation_dedupe_key,
+            "release_reason": release_reason,
+            "terminal_status": terminal_status,
+            "terminal_source": terminal_source,
+            "released_qty": str(released_qty_dec),
+            "released_notional": None if released_notional is None else str(released_notional),
+            "released_at_ns": _now_ns(),
+            "source_event_id": source_event_id,
+            "release_applied": True,
+            "exposure_release_scope": "reservation_only",
+        }
+        if not state_store.record_reservation_release_tombstone(tombstone):
+            return self._guard_failed(result, "release_tombstone_persist_failed")
+        result["persistence_applied"] = True
+
+        terminal_row = self._terminal_ledger_row_for_release(
+            reservation,
+            terminal_status=terminal_reservation_status,
+            terminal_reason=release_reason,
+            terminal_source=terminal_source,
+            source_idempotency_key=release_idempotency_key,
+        )
+        try:
+            self._remove_reservation(reservation_id, terminal_status=terminal_reservation_status)
+            result["mutation_applied"] = True
+        except Exception as exc:
+            return self._guard_failed(result, f"release_mutation_failed_recovery_needed:{exc}")
+
+        if state_store.upsert_reservation_ledger(terminal_row):
+            result["applied"] = True
+            return result
+
+        result["failed_reason"] = "terminal_ledger_upsert_failed_recovery_needed"
+        return result
+
     def age_stale_reservations(self, now_ns: Optional[int] = None) -> List[str]:
         with self._lock:
             now_ns = _now_ns() if now_ns is None else now_ns
@@ -1876,6 +2121,125 @@ class ExposureManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _guard_result(*, reservation_id: str, client_order_id: Optional[str]) -> Dict[str, Any]:
+        return {
+            "applied": False,
+            "idempotent": False,
+            "failed_reason": None,
+            "persistence_applied": False,
+            "mutation_applied": False,
+            "rollback_applied": False,
+            "reservation_id": reservation_id,
+            "client_order_id": client_order_id,
+        }
+
+    @staticmethod
+    def _guard_failed(result: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        result["failed_reason"] = reason
+        return result
+
+    @staticmethod
+    def _guard_idempotent(result: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        result["idempotent"] = True
+        result["failed_reason"] = reason
+        return result
+
+    @staticmethod
+    def _active_ledger_row_for_dedupe(state_store: Any, dedupe_key: str) -> Optional[Dict[str, Any]]:
+        for row in state_store.list_reservation_ledger(active_only=True, include_terminal=False):
+            if row.get("reservation_dedupe_key") == dedupe_key:
+                return row
+        return None
+
+    @staticmethod
+    def _max_recorded_cumulative_fill(progress_rows: Iterable[Dict[str, Any]]) -> Optional[Decimal]:
+        max_seen: Optional[Decimal] = None
+        for row in progress_rows:
+            try:
+                seen = _d(row.get("cumulative_filled_qty"), field_name="cumulative_filled_qty")
+            except ValueError:
+                continue
+            if max_seen is None or seen > max_seen:
+                max_seen = seen
+        return max_seen
+
+    def _rollback_open_reservation(self, reservation_id: str, dedupe_key: Optional[str]) -> bool:
+        with self._lock:
+            if reservation_id not in self._reservations:
+                return False
+            reservation = self._reservations[reservation_id]
+            if dedupe_key and reservation.dedupe_key != dedupe_key:
+                return False
+            self._remove_reservation(reservation_id, silent=True)
+            return True
+
+    def _terminal_or_active_row_after_fill(
+        self,
+        previous: PendingReservation,
+        updated: Optional[PendingReservation],
+        cumulative_filled_qty: Decimal,
+    ) -> Dict[str, Any]:
+        if updated is not None:
+            return self._reservation_to_ledger_row(updated, is_active=True, is_terminal=False)
+        terminal = replace(
+            previous,
+            status=ReservationStatus.FILLED,
+            confidence_weight=self._default_confidence_weight(ReservationStatus.FILLED),
+            filled_qty=min(previous.qty, cumulative_filled_qty),
+            cancelled_qty=ZERO,
+            last_update_ns=_now_ns(),
+        )
+        return self._reservation_to_ledger_row(terminal, is_active=False, is_terminal=True)
+
+    @staticmethod
+    def _reservation_status_from_terminal_proof(terminal_status: str) -> Optional[ReservationStatus]:
+        normalized = str(terminal_status or "").strip().lower()
+        mapping = {
+            "filled": ReservationStatus.FILLED,
+            "closed": ReservationStatus.FILLED,
+            "canceled": ReservationStatus.CANCELLED,
+            "cancelled": ReservationStatus.CANCELLED,
+            "rejected": ReservationStatus.REJECTED,
+            "expired": ReservationStatus.EXPIRED,
+        }
+        return mapping.get(normalized)
+
+    def _terminal_ledger_row_for_release(
+        self,
+        reservation: PendingReservation,
+        *,
+        terminal_status: ReservationStatus,
+        terminal_reason: str,
+        terminal_source: str,
+        source_idempotency_key: str,
+    ) -> Dict[str, Any]:
+        if terminal_status == ReservationStatus.FILLED:
+            final_reservation = replace(
+                reservation,
+                status=terminal_status,
+                confidence_weight=self._default_confidence_weight(terminal_status),
+                filled_qty=reservation.qty,
+                cancelled_qty=ZERO,
+                last_update_ns=_now_ns(),
+            )
+        else:
+            final_reservation = replace(
+                reservation,
+                status=terminal_status,
+                confidence_weight=self._default_confidence_weight(terminal_status),
+                cancelled_qty=reservation.qty - reservation.filled_qty,
+                last_update_ns=_now_ns(),
+            )
+        row = self._reservation_to_ledger_row(final_reservation, is_active=False, is_terminal=True)
+        row.update({
+            "terminal_reason": terminal_reason,
+            "terminal_source": terminal_source,
+            "source_lifecycle_phase": "guarded_release_reservation",
+            "source_idempotency_key": source_idempotency_key,
+        })
+        return row
 
     def _reservation_to_ledger_row(
         self,
