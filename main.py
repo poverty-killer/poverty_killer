@@ -70,7 +70,9 @@ from app.main_loop import create_main_loop
 from app.models import Candle
 from app.models.enums import ExchangeType
 from app.monitoring.logger import setup_logger
+from app.risk.exposure_manager import ExposureManager
 from app.risk.guard import HybridRiskGuard
+from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
 from app.risk.safety import SafetyGate
 from app.state.state_store import StateStore
 from app.telemetry.event_store import TelemetryEventStore
@@ -176,6 +178,7 @@ class SovereignHeartbeat:
         logger.info("TelemetryEventStore initialized at data/telemetry.db")
         self.state_store = StateStore(db_path="data/state.db")
         logger.info("StateStore initialized at data/state.db")
+        self._bootstrap_reservation_lifecycle_disabled(config)
 
         self.commander = Commander(
             initial_equity=config.initial_capital,
@@ -340,6 +343,77 @@ class SovereignHeartbeat:
         logger.info("Initial Capital: $%0.2f", config.initial_capital)
         logger.info("Primary symbol: %s", self._primary_symbol)
         logger.info("Active symbols: %s", self._active_symbols)
+
+    def _bootstrap_reservation_lifecycle_disabled(self, config: Config) -> None:
+        """
+        Root-owned reservation runtime bootstrap.
+
+        This creates and hydrates objects only. It does not wire lifecycle call
+        sites, does not issue broker commands, and keeps activation disabled.
+        """
+        self.reservation_lifecycle_enabled = False
+        self.exposure_manager = ExposureManager(
+            initial_equity=Decimal(str(config.initial_capital)),
+        )
+
+        active_rows = []
+        release_tombstones = []
+        hydrate_result: Dict[str, Any] = {
+            "hydrated": (),
+            "skipped": (),
+            "valid": True,
+            "violations": (),
+            "warnings": (),
+        }
+        hydrate_failed = False
+        failed_reason = None
+
+        try:
+            active_rows = self.state_store.list_reservation_ledger(
+                active_only=True,
+                include_terminal=False,
+            )
+            for row in active_rows:
+                reservation_id = row.get("reservation_id")
+                if not reservation_id:
+                    continue
+                tombstone = self.state_store.get_reservation_release_tombstone(
+                    reservation_id=reservation_id,
+                )
+                if tombstone is not None:
+                    release_tombstones.append(tombstone)
+
+            hydrate_result = self.exposure_manager.hydrate_reservations_from_ledger(
+                active_rows,
+                release_tombstones=release_tombstones,
+            )
+            if not hydrate_result.get("valid", False):
+                hydrate_failed = True
+                failed_reason = "exposure_manager_hydrate_invariant_failed"
+        except Exception as exc:
+            hydrate_failed = True
+            failed_reason = f"exposure_manager_hydrate_failed:{exc}"
+            logger.exception("Reservation lifecycle disabled after hydrate failure: %s", exc)
+
+        self.reservation_lifecycle_coordinator = ReservationLifecycleCoordinator(
+            exposure_manager=self.exposure_manager,
+            state_store=self.state_store,
+        )
+        self.reservation_lifecycle_bootstrap_status = {
+            "exposure_manager_created": self.exposure_manager is not None,
+            "coordinator_created": self.reservation_lifecycle_coordinator is not None,
+            "reservation_lifecycle_enabled": False,
+            "active_ledger_row_count": len(active_rows),
+            "release_tombstone_count": len(release_tombstones),
+            "hydrated_reservation_count": len(hydrate_result.get("hydrated") or ()),
+            "skipped_reservation_count": len(hydrate_result.get("skipped") or ()),
+            "hydrate_failed": hydrate_failed,
+            "failed_reason": failed_reason,
+            "hydrate_result": hydrate_result,
+            "runtime_lifecycle_wired": False,
+            "telemetry_authority_used": False,
+            "broker_command_performed": False,
+        }
 
     # ============================================
     # GRACEFUL SHUTDOWN

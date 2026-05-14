@@ -288,5 +288,5 @@ def test_no_runtime_wiring_and_broker_adapter_inactive():
     assert "ReservationLifecycleCoordinator" not in inspect.getsource(order_router_module)
     assert "ReservationLifecycleCoordinator" not in inspect.getsource(fill_recorder_module)
     assert "ReservationLifecycleCoordinator" not in inspect.getsource(main_loop_module)
-    assert "ReservationLifecycleCoordinator" not in inspect.getsource(app_main)
+    assert "reservation_lifecycle_coordinator=" not in inspect.getsource(app_main.SovereignHeartbeat.__init__)
     assert "broker_adapter" not in inspect.getsource(ReservationLifecycleCoordinator)
