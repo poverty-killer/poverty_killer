@@ -221,6 +221,8 @@ class SovereignHeartbeat:
             paper_mode=config.broker_mode == "paper",
             telemetry_store=self.telemetry_store,
             state_store=self.state_store,
+            reservation_lifecycle_coordinator=self.reservation_lifecycle_coordinator,
+            reservation_lifecycle_enabled=self.reservation_lifecycle_enabled,
         )
 
         self.masking_layer = MaskingLayer(

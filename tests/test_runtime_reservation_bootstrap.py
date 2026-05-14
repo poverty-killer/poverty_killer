@@ -206,7 +206,7 @@ def test_hydrate_failure_keeps_coordinator_disabled_and_fail_closed(monkeypatch)
     assert root.exposure_manager.guarded_release_called is False
 
 
-def test_bootstrap_does_not_pass_coordinator_to_runtime_components():
+def test_bootstrap_passes_disabled_coordinator_only_to_order_router():
     heartbeat_init = inspect.getsource(runtime_main.SovereignHeartbeat.__init__)
     order_router_init = inspect.signature(OrderRouter.__init__)
     execution_engine_init = inspect.signature(ExecutionEngine.__init__)
@@ -214,9 +214,10 @@ def test_bootstrap_does_not_pass_coordinator_to_runtime_components():
     fill_recorder_init = inspect.signature(FillRecorder.__init__)
 
     assert "self._bootstrap_reservation_lifecycle_disabled(config)" in heartbeat_init
-    assert "reservation_lifecycle_coordinator=" not in heartbeat_init
-    assert "coordinator=" not in heartbeat_init
-    assert "reservation_lifecycle_coordinator" not in order_router_init.parameters
+    assert "reservation_lifecycle_coordinator=self.reservation_lifecycle_coordinator" in heartbeat_init
+    assert "reservation_lifecycle_enabled=self.reservation_lifecycle_enabled" in heartbeat_init
+    assert "reservation_lifecycle_coordinator" in order_router_init.parameters
+    assert "reservation_lifecycle_enabled" in order_router_init.parameters
     assert "reservation_lifecycle_coordinator" not in execution_engine_init.parameters
     assert "reservation_lifecycle_coordinator" not in main_loop_init.parameters
     assert "reservation_lifecycle_coordinator" not in fill_recorder_init.parameters

@@ -148,7 +148,9 @@ class OrderRouter:
         rest_fallback_enabled: bool = True,
         paper_mode: bool = True,
         telemetry_store: Optional[TelemetryEventStore] = None,
-        state_store: Optional[StateStore] = None
+        state_store: Optional[StateStore] = None,
+        reservation_lifecycle_coordinator: Optional[Any] = None,
+        reservation_lifecycle_enabled: bool = False,
     ):
         self.primary_exchange = primary_exchange
         self.secondary_exchange = secondary_exchange
@@ -164,6 +166,9 @@ class OrderRouter:
         self.paper_mode = paper_mode
         self._telemetry_store = telemetry_store
         self._state_store = state_store
+        self._reservation_lifecycle_coordinator = reservation_lifecycle_coordinator
+        self._reservation_lifecycle_enabled = bool(reservation_lifecycle_enabled)
+        self._reservation_lifecycle_ack_open_results: List[Dict[str, Any]] = []
 
         self._paper_broker: Optional[_SovereignPaperBroker] = None
         if paper_mode:
@@ -511,6 +516,112 @@ class OrderRouter:
         metadata["exposure_reservation_authority"] = False
         metadata["exposure_reservation_mutated"] = False
         return metadata
+
+    def _order_value(self, value: Any) -> str:
+        if hasattr(value, "value"):
+            return str(value.value)
+        return str(value)
+
+    def _reservation_open_dedupe_key(self, order: OrderRequest) -> Optional[str]:
+        metadata = order.metadata if isinstance(order.metadata, dict) else {}
+        explicit_key = metadata.get("reservation_dedupe_key")
+        if explicit_key:
+            return str(explicit_key)
+        if order.decision_uuid:
+            return f"{order.decision_uuid}:{order.id}"
+        return None
+
+    def _record_reservation_ack_open(
+        self,
+        order: OrderRequest,
+        *,
+        ack_source: str,
+        source_event_id: str,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "action": "order_acknowledged",
+            "applied": False,
+            "idempotent": False,
+            "skipped": True,
+            "failed_reason": None,
+            "client_order_id": getattr(order, "id", None),
+            "reservation_id": None,
+            "mutation_attempted": False,
+            "broker_command_performed": False,
+            "telemetry_authority_used": False,
+            "exposure_manager_called": False,
+            "ack_source": ack_source,
+        }
+
+        if not self._reservation_lifecycle_enabled:
+            result["failed_reason"] = "reservation_lifecycle_disabled"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+        if self._reservation_lifecycle_coordinator is None:
+            result["failed_reason"] = "reservation_lifecycle_coordinator_missing"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+
+        client_order_id = str(getattr(order, "id", "") or "").strip()
+        if not client_order_id:
+            result["failed_reason"] = "missing_client_order_id"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+
+        dedupe_key = self._reservation_open_dedupe_key(order)
+        if not dedupe_key:
+            result["failed_reason"] = "missing_stable_reservation_dedupe_key"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+
+        order_type = self._order_value(order.order_type).lower()
+        if order_type != "limit":
+            result["failed_reason"] = "unsupported_order_type_for_reservation_open"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+
+        price_basis = order.limit_price
+        if price_basis is None:
+            result["failed_reason"] = "missing_price_basis"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+        try:
+            if _Decimal(str(price_basis)) <= _Decimal("0"):
+                result["failed_reason"] = "non_positive_price_basis"
+                self._reservation_lifecycle_ack_open_results.append(result)
+                return result
+        except Exception:
+            result["failed_reason"] = "invalid_price_basis"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+
+        try:
+            coordinator_result = self._reservation_lifecycle_coordinator.on_order_acknowledged(
+                client_order_id=client_order_id,
+                reservation_id=client_order_id,
+                decision_uuid=order.decision_uuid,
+                reservation_dedupe_key=dedupe_key,
+                symbol=order.symbol,
+                side=order.side,
+                sleeve=order.strategy,
+                qty=order.quantity,
+                price_basis=price_basis,
+                order_type=order_type,
+                source_lifecycle_phase="order_acknowledged",
+                source_idempotency_key=f"{dedupe_key}:order_acknowledged:{source_event_id}",
+                price_basis_source_proven=True,
+                mutation_authority_source="direct_lifecycle",
+            )
+        except Exception as exc:
+            result["failed_reason"] = f"reservation_lifecycle_call_failed:{exc}"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            logger.exception("Reservation lifecycle ack/open call failed for %s", client_order_id)
+            return result
+
+        result.update(dict(coordinator_result))
+        result["ack_source"] = ack_source
+        self._reservation_lifecycle_ack_open_results.append(result)
+        return result
 
     def _mapping_broker(self) -> str:
         return "paper" if self.paper_mode else str(self.primary_exchange).lower()
@@ -1906,6 +2017,13 @@ class OrderRouter:
 
         if report_status == _pb_enums.OrderStatus.ACKNOWLEDGED:
             remaining_qty = paper_order.remaining_quantity if paper_order is not None else original_qty
+            idempotency_key = self._paper_lifecycle_idempotency_key(
+                order,
+                lifecycle_phase="order_acknowledged",
+                broker_order_id=broker_order_id,
+                event_ts_ns=event_ts_ns,
+                source_event_id=source_event_id,
+            )
             self._record_order_lifecycle_telemetry(
                 order,
                 lifecycle_source="order_router.paper_report",
@@ -1921,13 +2039,12 @@ class OrderRouter:
                 is_terminal=False,
                 status_source="paper_broker.execution_report",
                 id_mapping_source="paper_broker.execution_report",
-                idempotency_key=self._paper_lifecycle_idempotency_key(
-                    order,
-                    lifecycle_phase="order_acknowledged",
-                    broker_order_id=broker_order_id,
-                    event_ts_ns=event_ts_ns,
-                    source_event_id=source_event_id,
-                ),
+                idempotency_key=idempotency_key,
+            )
+            self._record_reservation_ack_open(
+                order,
+                ack_source="paper_broker.execution_report",
+                source_event_id=idempotency_key,
             )
             return
 
@@ -2305,6 +2422,11 @@ class OrderRouter:
                             f"{order_id}:{ack_ts_ns}:kraken_add_order"
                         ),
                     )
+                    self._record_reservation_ack_open(
+                        order,
+                        ack_source="order_router.kraken_submit_response",
+                        source_event_id=f"{order_id}:{ack_ts_ns}:kraken_add_order",
+                    )
                     if order.order_type == "market":
                         return self._get_order_fill(order_id, order)
                     self._pending_orders[order.id] = order
@@ -2373,6 +2495,11 @@ class OrderRouter:
                         f"{order.decision_uuid}:{order.id}:order_acknowledged:"
                         f"{order_id}:{ack_ts_ns}:alpaca_submit_order"
                     ),
+                )
+                self._record_reservation_ack_open(
+                    order,
+                    ack_source="order_router.alpaca_submit_response",
+                    source_event_id=f"{order_id}:{ack_ts_ns}:alpaca_submit_order",
                 )
                 if order.order_type == "market":
                     return self._get_order_fill(order_id, order)
