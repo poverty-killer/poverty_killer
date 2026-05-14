@@ -171,6 +171,7 @@ class OrderRouter:
         self._reservation_lifecycle_ack_open_results: List[Dict[str, Any]] = []
         self._reservation_lifecycle_partial_fill_results: List[Dict[str, Any]] = []
         self._reservation_lifecycle_full_fill_results: List[Dict[str, Any]] = []
+        self._reservation_lifecycle_terminal_non_fill_results: List[Dict[str, Any]] = []
 
         self._paper_broker: Optional[_SovereignPaperBroker] = None
         if paper_mode:
@@ -788,6 +789,84 @@ class OrderRouter:
         result["terminal_status"] = "filled"
         result["terminal_source"] = terminal_source
         self._reservation_lifecycle_full_fill_results.append(result)
+        return result
+
+    def _record_reservation_terminal_non_fill(
+        self,
+        order: OrderRequest,
+        *,
+        release_idempotency_key: str,
+        terminal_status: str,
+        terminal_source: str,
+        terminal_reason: str,
+        source_event_id: str,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "action": "terminal_non_fill",
+            "applied": False,
+            "idempotent": False,
+            "skipped": True,
+            "failed_reason": None,
+            "client_order_id": getattr(order, "id", None),
+            "reservation_id": None,
+            "mutation_attempted": False,
+            "broker_command_performed": False,
+            "telemetry_authority_used": False,
+            "exposure_manager_called": False,
+            "terminal_status": terminal_status,
+            "terminal_source": terminal_source,
+            "terminal_reason": terminal_reason,
+        }
+
+        if not self._reservation_lifecycle_enabled:
+            result["failed_reason"] = "reservation_lifecycle_disabled"
+            self._reservation_lifecycle_terminal_non_fill_results.append(result)
+            return result
+        if self._reservation_lifecycle_coordinator is None:
+            result["failed_reason"] = "reservation_lifecycle_coordinator_missing"
+            self._reservation_lifecycle_terminal_non_fill_results.append(result)
+            return result
+
+        client_order_id = str(getattr(order, "id", "") or "").strip()
+        if not client_order_id:
+            result["failed_reason"] = "missing_client_order_id"
+            self._reservation_lifecycle_terminal_non_fill_results.append(result)
+            return result
+
+        dedupe_key = self._reservation_open_dedupe_key(order)
+        if not dedupe_key:
+            result["failed_reason"] = "missing_stable_reservation_dedupe_key"
+            self._reservation_lifecycle_terminal_non_fill_results.append(result)
+            return result
+        if not str(release_idempotency_key or "").strip():
+            result["failed_reason"] = "missing_stable_release_idempotency_key"
+            self._reservation_lifecycle_terminal_non_fill_results.append(result)
+            return result
+
+        try:
+            coordinator_result = self._reservation_lifecycle_coordinator.on_terminal_non_fill(
+                client_order_id=client_order_id,
+                reservation_id=client_order_id,
+                decision_uuid=order.decision_uuid,
+                reservation_dedupe_key=dedupe_key,
+                release_idempotency_key=release_idempotency_key,
+                terminal_status=terminal_status,
+                terminal_source=terminal_source,
+                terminal_reason=terminal_reason,
+                source_event_id=source_event_id,
+                mutation_authority_source="direct_lifecycle",
+            )
+        except Exception as exc:
+            result["failed_reason"] = f"reservation_lifecycle_terminal_non_fill_call_failed:{exc}"
+            self._reservation_lifecycle_terminal_non_fill_results.append(result)
+            logger.exception("Reservation lifecycle terminal non-fill call failed for %s", client_order_id)
+            return result
+
+        result.update(dict(coordinator_result))
+        result["terminal_status"] = terminal_status
+        result["terminal_source"] = terminal_source
+        result["terminal_reason"] = terminal_reason
+        self._reservation_lifecycle_terminal_non_fill_results.append(result)
         return result
 
     def _mapping_broker(self) -> str:
@@ -2286,6 +2365,13 @@ class OrderRouter:
 
         if report_status == _pb_enums.OrderStatus.CANCELLED:
             remaining_qty = paper_order.remaining_quantity if paper_order is not None else None
+            idempotency_key = self._paper_lifecycle_idempotency_key(
+                order,
+                lifecycle_phase="order_canceled",
+                broker_order_id=broker_order_id,
+                event_ts_ns=event_ts_ns,
+                source_event_id=source_event_id,
+            )
             self._record_order_lifecycle_telemetry(
                 order,
                 lifecycle_source="order_router.paper_report",
@@ -2301,17 +2387,61 @@ class OrderRouter:
                 is_terminal=True,
                 status_source="paper_broker.execution_report",
                 id_mapping_source="paper_broker.execution_report",
-                idempotency_key=self._paper_lifecycle_idempotency_key(
-                    order,
-                    lifecycle_phase="order_canceled",
-                    broker_order_id=broker_order_id,
-                    event_ts_ns=event_ts_ns,
-                    source_event_id=source_event_id,
-                ),
+                idempotency_key=idempotency_key,
+            )
+            self._record_reservation_terminal_non_fill(
+                order,
+                release_idempotency_key=f"{idempotency_key}:release",
+                terminal_status="cancelled",
+                terminal_source="paper_broker.execution_report",
+                terminal_reason="paper_broker_cancelled",
+                source_event_id=source_event_id,
+            )
+            return
+
+        if report_status == _pb_enums.OrderStatus.REJECTED:
+            idempotency_key = self._paper_lifecycle_idempotency_key(
+                order,
+                lifecycle_phase="order_rejected",
+                broker_order_id=broker_order_id,
+                event_ts_ns=event_ts_ns,
+                source_event_id=source_event_id,
+            )
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source="order_router.paper_report",
+                lifecycle_phase="order_rejected",
+                event_ts_ns=event_ts_ns,
+                reject_seen=True,
+                terminal_state="rejected",
+                terminal_reason="paper_broker_rejected",
+                venue_order_id=broker_order_id,
+                broker_order_id=broker_order_id,
+                original_qty=original_qty,
+                remaining_qty=_Decimal("0"),
+                is_terminal=True,
+                status_source="paper_broker.execution_report",
+                id_mapping_source="paper_broker.execution_report",
+                idempotency_key=idempotency_key,
+            )
+            self._record_reservation_terminal_non_fill(
+                order,
+                release_idempotency_key=f"{idempotency_key}:release",
+                terminal_status="rejected",
+                terminal_source="paper_broker.execution_report",
+                terminal_reason="paper_broker_rejected",
+                source_event_id=source_event_id,
             )
             return
 
         if report_status == _pb_enums.OrderStatus.EXPIRED:
+            idempotency_key = self._paper_lifecycle_idempotency_key(
+                order,
+                lifecycle_phase="order_expired",
+                broker_order_id=broker_order_id,
+                event_ts_ns=event_ts_ns,
+                source_event_id=source_event_id,
+            )
             self._record_order_lifecycle_telemetry(
                 order,
                 lifecycle_source="order_router.paper_report",
@@ -2325,13 +2455,15 @@ class OrderRouter:
                 is_terminal=True,
                 status_source="paper_broker.execution_report",
                 id_mapping_source="paper_broker.execution_report",
-                idempotency_key=self._paper_lifecycle_idempotency_key(
-                    order,
-                    lifecycle_phase="order_expired",
-                    broker_order_id=broker_order_id,
-                    event_ts_ns=event_ts_ns,
-                    source_event_id=source_event_id,
-                ),
+                idempotency_key=idempotency_key,
+            )
+            self._record_reservation_terminal_non_fill(
+                order,
+                release_idempotency_key=f"{idempotency_key}:release",
+                terminal_status="expired",
+                terminal_source="paper_broker.execution_report",
+                terminal_reason="paper_broker_expired",
+                source_event_id=source_event_id,
             )
 
     def _sync_paper_reports(self) -> None:
@@ -2913,6 +3045,13 @@ class OrderRouter:
                     report_ts_ns = int(getattr(report, "timestamp_ns", 0) or now_ns())
                     report_broker_id = str(getattr(report, "order_id", "")) or broker_order_id
                     if report_status == _pb_enums.OrderStatus.CANCELLED:
+                        idempotency_key = self._paper_lifecycle_idempotency_key(
+                            order,
+                            lifecycle_phase="order_canceled",
+                            broker_order_id=report_broker_id,
+                            event_ts_ns=report_ts_ns,
+                            source_event_id="cancel_report",
+                        )
                         self._record_order_lifecycle_telemetry(
                             order,
                             lifecycle_source="order_router.paper_cancel_report",
@@ -2928,13 +3067,15 @@ class OrderRouter:
                             is_terminal=True,
                             status_source="paper_broker.cancel_order",
                             id_mapping_source="paper_broker.execution_report",
-                            idempotency_key=self._paper_lifecycle_idempotency_key(
-                                order,
-                                lifecycle_phase="order_canceled",
-                                broker_order_id=report_broker_id,
-                                event_ts_ns=report_ts_ns,
-                                source_event_id="cancel_report",
-                            ),
+                            idempotency_key=idempotency_key,
+                        )
+                        self._record_reservation_terminal_non_fill(
+                            order,
+                            release_idempotency_key=f"{idempotency_key}:release",
+                            terminal_status="cancelled",
+                            terminal_source="paper_broker.cancel_order",
+                            terminal_reason="paper_broker_cancelled",
+                            source_event_id="cancel_report",
                         )
                     elif report_status == _pb_enums.OrderStatus.REJECTED:
                         self._record_order_lifecycle_telemetry(

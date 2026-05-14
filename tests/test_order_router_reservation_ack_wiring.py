@@ -5,7 +5,7 @@ from decimal import Decimal
 from app.execution.order_router import OrderRouter
 from app.execution.paper_broker import PaperMarketContext, PriceLevel
 from app.models import OrderRequest
-from app.models.enums import OrderSide, OrderType, SleeveType
+from app.models.enums import OrderSide, OrderStatus, OrderType, SleeveType
 from app.risk.exposure_manager import ExposureManager
 from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
 from app.state.state_store import StateStore
@@ -27,6 +27,7 @@ class _SpyCoordinator:
         self.ack_calls = []
         self.partial_calls = []
         self.full_calls = []
+        self.terminal_non_fill_calls = []
         self.terminal_calls = []
         self.release_calls = []
 
@@ -80,6 +81,22 @@ class _SpyCoordinator:
 
     def on_terminal_mapping_proof(self, **kwargs):
         self.terminal_calls.append(kwargs)
+
+    def on_terminal_non_fill(self, **kwargs):
+        self.terminal_non_fill_calls.append(kwargs)
+        return {
+            "action": "terminal_non_fill",
+            "applied": True,
+            "idempotent": False,
+            "skipped": False,
+            "failed_reason": None,
+            "reservation_id": kwargs.get("reservation_id"),
+            "client_order_id": kwargs.get("client_order_id"),
+            "mutation_attempted": True,
+            "broker_command_performed": False,
+            "telemetry_authority_used": False,
+            "exposure_manager_called": True,
+        }
 
     def on_cancel_requested(self, **kwargs):
         self.release_calls.append(("cancel_requested", kwargs))
@@ -161,6 +178,36 @@ def _drive_paper_partial(router, order, *, quantity=Decimal("0.25"), offset=2):
     )
     router._sync_paper_reports()
     return router._paper_broker.execution_reports[-1]
+
+
+class _PaperReport:
+    def __init__(
+        self,
+        *,
+        client_id: str,
+        order_id: str,
+        status,
+        timestamp_ns: int,
+        filled_quantity=Decimal("0"),
+        fill_price=None,
+        fee=Decimal("0"),
+    ):
+        self.client_id = client_id
+        self.order_id = order_id
+        self.status = status
+        self.timestamp_ns = timestamp_ns
+        self.filled_quantity = filled_quantity
+        self.fill_price = fill_price
+        self.fee = fee
+
+
+def _paper_terminal_report(order, status, *, source_event_id="paper_report_terminal", offset=10):
+    return _PaperReport(
+        client_id=order.id,
+        order_id=f"paper-{order.id}",
+        status=status,
+        timestamp_ns=order.exchange_ts_ns + offset,
+    ), source_event_id
 
 
 def test_default_order_router_reservation_lifecycle_disabled():
@@ -291,6 +338,7 @@ def test_reject_before_ack_does_not_call_coordinator():
 
     assert router.submit_order(_order()) is None
     assert coordinator.ack_calls == []
+    assert coordinator.terminal_non_fill_calls == []
     assert router._reservation_lifecycle_ack_open_results == []
 
 
@@ -578,6 +626,158 @@ def test_full_fill_path_still_does_not_call_terminal_or_cancel_release():
     assert len(coordinator.ack_calls) == 1
 
 
+def test_default_disabled_paper_terminal_non_fill_makes_zero_coordinator_calls_and_zero_release(tmp_path):
+    coordinator = _SpyCoordinator()
+    store = StateStore(str(tmp_path / "disabled-terminal-non-fill.db"))
+    router = OrderRouter(
+        paper_mode=True,
+        state_store=store,
+        reservation_lifecycle_coordinator=coordinator,
+    )
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    for status in (OrderStatus.CANCELLED, OrderStatus.EXPIRED, OrderStatus.REJECTED):
+        report, source_event_id = _paper_terminal_report(order, status, source_event_id=f"paper_report_{status.value}")
+        router._record_paper_report_lifecycle(order, report, source_event_id=source_event_id)
+
+    assert coordinator.ack_calls == []
+    assert coordinator.terminal_non_fill_calls == []
+    assert store.get_reservation_release_tombstone(reservation_id=order.id) is None
+    assert all(
+        result["failed_reason"] == "reservation_lifecycle_disabled"
+        for result in router._reservation_lifecycle_terminal_non_fill_results
+    )
+
+
+def test_enabled_paper_canceled_releases_once_with_stable_key(tmp_path):
+    store = StateStore(str(tmp_path / "paper-cancel-release.db"))
+    manager = ExposureManager(initial_equity=Decimal("20000"))
+    coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+    router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    report, source_event_id = _paper_terminal_report(order, OrderStatus.CANCELLED, source_event_id="paper_report_cancelled")
+    router._record_paper_report_lifecycle(order, report, source_event_id=source_event_id)
+    expected_key = router._paper_lifecycle_idempotency_key(
+        order,
+        lifecycle_phase="order_canceled",
+        broker_order_id=str(report.order_id),
+        event_ts_ns=int(report.timestamp_ns),
+        source_event_id=source_event_id,
+    ) + ":release"
+
+    result = router._reservation_lifecycle_terminal_non_fill_results[-1]
+    assert result["applied"] is True
+    assert manager.reservations_for() == []
+    tombstone = store.get_reservation_release_tombstone(reservation_id=order.id)
+    assert tombstone["release_idempotency_key"] == expected_key
+    assert tombstone["terminal_status"] == "cancelled"
+
+    duplicate = router._record_reservation_terminal_non_fill(
+        order,
+        release_idempotency_key=expected_key,
+        terminal_status="cancelled",
+        terminal_source="paper_broker.execution_report",
+        terminal_reason="paper_broker_cancelled",
+        source_event_id=source_event_id,
+    )
+    assert duplicate["idempotent"] is True
+
+
+def test_enabled_paper_expired_and_rejected_release_once(tmp_path):
+    for idx, (status, phase, terminal_status, reason) in enumerate(
+        (
+            (OrderStatus.EXPIRED, "order_expired", "expired", "paper_broker_expired"),
+            (OrderStatus.REJECTED, "order_rejected", "rejected", "paper_broker_rejected"),
+        )
+    ):
+        store = StateStore(str(tmp_path / f"paper-{terminal_status}-release.db"))
+        manager = ExposureManager(initial_equity=Decimal("20000"))
+        coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+        router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+        order = _order(
+            order_id=f"terminal-non-fill-{idx}",
+            decision_uuid=f"terminal-non-fill-decision-{idx}",
+            quantity=Decimal("1.0"),
+            limit_price=Decimal("2900.00"),
+        )
+
+        assert router.submit_order(order) is None
+        report, source_event_id = _paper_terminal_report(order, status, source_event_id=f"paper_report_{terminal_status}")
+        router._record_paper_report_lifecycle(order, report, source_event_id=source_event_id)
+        expected_key = router._paper_lifecycle_idempotency_key(
+            order,
+            lifecycle_phase=phase,
+            broker_order_id=str(report.order_id),
+            event_ts_ns=int(report.timestamp_ns),
+            source_event_id=source_event_id,
+        ) + ":release"
+
+        result = router._reservation_lifecycle_terminal_non_fill_results[-1]
+        assert result["applied"] is True
+        assert manager.reservations_for() == []
+        tombstone = store.get_reservation_release_tombstone(reservation_id=order.id)
+        assert tombstone["release_idempotency_key"] == expected_key
+        assert tombstone["terminal_status"] == terminal_status
+        assert tombstone["release_reason"] == reason
+
+
+def test_partial_fill_then_terminal_non_fill_releases_remaining_once(tmp_path):
+    for idx, (status, terminal_status) in enumerate(
+        ((OrderStatus.CANCELLED, "cancelled"), (OrderStatus.EXPIRED, "expired"))
+    ):
+        store = StateStore(str(tmp_path / f"partial-then-{terminal_status}.db"))
+        manager = ExposureManager(initial_equity=Decimal("20000"))
+        coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+        router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+        order = _order(
+            order_id=f"partial-terminal-{idx}",
+            decision_uuid=f"partial-terminal-decision-{idx}",
+            quantity=Decimal("1.0"),
+            limit_price=Decimal("2900.00"),
+        )
+
+        assert router.submit_order(order) is None
+        _drive_paper_partial(router, order, quantity=Decimal("0.25"), offset=2)
+        assert store.get_reservation_ledger(order.id)["filled_qty"] == "0.25"
+
+        report, source_event_id = _paper_terminal_report(order, status, source_event_id=f"paper_report_{terminal_status}")
+        router._record_paper_report_lifecycle(order, report, source_event_id=source_event_id)
+
+        result = router._reservation_lifecycle_terminal_non_fill_results[-1]
+        assert result["applied"] is True
+        assert manager.reservations_for() == []
+        row = store.get_reservation_ledger(order.id)
+        assert row["is_active"] is False
+        assert row["is_terminal"] is True
+        assert str(row["terminal_status"]).lower() == terminal_status
+        assert store.get_reservation_release_tombstone(reservation_id=order.id) is not None
+
+
+def test_cancel_request_and_cancel_rejected_still_do_not_release():
+    coordinator = _SpyCoordinator()
+    router = _enabled_router(coordinator, paper_mode=True)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+
+    def reject_cancel(order_id, ts_ns):
+        return _PaperReport(
+            client_id=order_id,
+            order_id=f"paper-{order_id}",
+            status=OrderStatus.REJECTED,
+            timestamp_ns=ts_ns,
+        )
+
+    router._paper_broker.cancel_order = reject_cancel
+
+    assert router.cancel_order(order.id) is True
+    assert coordinator.terminal_non_fill_calls == []
+    assert coordinator.release_calls == []
+
+
 def test_terminal_mapping_proof_and_cancel_paths_do_not_call_release(tmp_path):
     coordinator = _SpyCoordinator()
     state_store = StateStore(str(tmp_path / "terminal.db"))
@@ -645,4 +845,10 @@ def test_no_telemetry_authority_or_broker_adapter_use_in_order_router_wiring():
     assert "on_full_fill(" not in inspect.getsource(OrderRouter._get_alpaca_order_fill)
     assert "on_full_fill(" not in inspect.getsource(OrderRouter._query_kraken_order_status)
     assert "on_full_fill(" not in inspect.getsource(OrderRouter._query_alpaca_order_status)
+    assert "on_terminal_non_fill(" not in inspect.getsource(OrderRouter._submit_order_kraken)
+    assert "on_terminal_non_fill(" not in inspect.getsource(OrderRouter._submit_order_alpaca)
+    assert "on_terminal_non_fill(" not in inspect.getsource(OrderRouter._get_kraken_order_fill)
+    assert "on_terminal_non_fill(" not in inspect.getsource(OrderRouter._get_alpaca_order_fill)
+    assert "on_terminal_non_fill(" not in inspect.getsource(OrderRouter._query_kraken_order_status)
+    assert "on_terminal_non_fill(" not in inspect.getsource(OrderRouter._query_alpaca_order_status)
     assert "broker_adapter" not in source

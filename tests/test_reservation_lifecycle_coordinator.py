@@ -67,6 +67,21 @@ def _full_kwargs(**overrides):
     return data
 
 
+def _terminal_non_fill_kwargs(**overrides):
+    data = {
+        "client_order_id": "client-order-001",
+        "reservation_id": "reservation-001",
+        "reservation_dedupe_key": "decision-001:client-order-001",
+        "release_idempotency_key": "reservation-001:terminal_non_fill:cancelled:proof-001",
+        "terminal_status": "cancelled",
+        "terminal_source": "paper_broker.execution_report",
+        "terminal_reason": "paper_broker_cancelled",
+        "source_event_id": "terminal-non-fill-001",
+    }
+    data.update(overrides)
+    return data
+
+
 def test_coordinator_has_no_broker_or_command_surface():
     source = inspect.getsource(ReservationLifecycleCoordinator)
 
@@ -181,6 +196,124 @@ def test_full_fill_releases_once(tmp_path):
     assert tombstone["release_idempotency_key"] == "reservation-001:full_fill:proof-001"
 
 
+def test_terminal_non_fill_accepts_cancelled_statuses(tmp_path):
+    for idx, status in enumerate(("cancelled", "canceled")):
+        coordinator, manager, store = _coordinator(tmp_path)
+        client_order_id = f"client-order-{idx}"
+        dedupe_key = f"decision-001:{client_order_id}"
+        reservation_id = f"reservation-{status}"
+        assert _open(
+            coordinator,
+            reservation_id=reservation_id,
+            client_order_id=client_order_id,
+            reservation_dedupe_key=dedupe_key,
+        )["applied"] is True
+
+        result = coordinator.on_terminal_non_fill(
+            **_terminal_non_fill_kwargs(
+                client_order_id=client_order_id,
+                reservation_id=reservation_id,
+                reservation_dedupe_key=dedupe_key,
+                release_idempotency_key=f"{reservation_id}:terminal_non_fill:{status}:proof-001",
+                terminal_status=status,
+            )
+        )
+
+        assert result["applied"] is True
+        assert manager.reservations_for() == []
+        tombstone = store.get_reservation_release_tombstone(reservation_id=reservation_id)
+        assert tombstone["terminal_status"] == "cancelled"
+
+
+def test_terminal_non_fill_accepts_expired_and_rejected_statuses(tmp_path):
+    for idx, (status, reason) in enumerate((("expired", "paper_broker_expired"), ("rejected", "paper_broker_rejected"))):
+        coordinator, manager, store = _coordinator(tmp_path)
+        client_order_id = f"client-order-terminal-{idx}"
+        dedupe_key = f"decision-001:{client_order_id}"
+        reservation_id = f"reservation-{status}"
+        assert _open(
+            coordinator,
+            reservation_id=reservation_id,
+            client_order_id=client_order_id,
+            reservation_dedupe_key=dedupe_key,
+        )["applied"] is True
+
+        result = coordinator.on_terminal_non_fill(
+            **_terminal_non_fill_kwargs(
+                client_order_id=client_order_id,
+                reservation_id=reservation_id,
+                reservation_dedupe_key=dedupe_key,
+                release_idempotency_key=f"{reservation_id}:terminal_non_fill:{status}:proof-001",
+                terminal_status=status,
+                terminal_reason=reason,
+            )
+        )
+
+        assert result["applied"] is True
+        assert manager.reservations_for() == []
+        assert store.get_reservation_release_tombstone(reservation_id=reservation_id)["terminal_status"] == status
+
+
+def test_terminal_non_fill_duplicate_release_key_is_idempotent(tmp_path):
+    coordinator, manager, store = _coordinator(tmp_path)
+    assert _open(coordinator, reservation_id="reservation-001")["applied"] is True
+
+    first = coordinator.on_terminal_non_fill(**_terminal_non_fill_kwargs())
+    duplicate = coordinator.on_terminal_non_fill(**_terminal_non_fill_kwargs())
+
+    assert first["applied"] is True
+    assert duplicate["idempotent"] is True
+    assert manager.reservations_for() == []
+    assert store.get_reservation_release_tombstone(reservation_id="reservation-001") is not None
+
+
+def test_terminal_non_fill_rejects_forbidden_statuses_sources_and_reasons(tmp_path):
+    coordinator, manager, store = _coordinator(tmp_path)
+    assert _open(coordinator, reservation_id="reservation-001")["applied"] is True
+
+    unsupported = coordinator.on_terminal_non_fill(
+        **_terminal_non_fill_kwargs(
+            release_idempotency_key="reservation-001:bad-status",
+            terminal_status="cancel_requested",
+            terminal_reason="paper_broker_cancelled",
+        )
+    )
+    cancel_rejected = coordinator.on_terminal_non_fill(
+        **_terminal_non_fill_kwargs(
+            release_idempotency_key="reservation-001:cancel-rejected",
+            terminal_status="cancelled",
+            terminal_reason="cancel_rejected",
+        )
+    )
+    rejected_before_ack = coordinator.on_terminal_non_fill(
+        **_terminal_non_fill_kwargs(
+            release_idempotency_key="reservation-001:rejected-before-ack",
+            terminal_status="rejected",
+            terminal_reason="rejected_before_ack",
+        )
+    )
+    submit_failure = coordinator.on_terminal_non_fill(
+        **_terminal_non_fill_kwargs(
+            release_idempotency_key="reservation-001:submit-failure",
+            terminal_status="rejected",
+            terminal_reason="submit_failure",
+        )
+    )
+    terminal_mapping = coordinator.on_terminal_non_fill(
+        **_terminal_non_fill_kwargs(
+            release_idempotency_key="reservation-001:terminal-mapping",
+            terminal_status="cancelled",
+            terminal_source="terminal_mapping_proof",
+        )
+    )
+
+    assert unsupported["failed_reason"] == "unsupported_terminal_non_fill_status"
+    for result in (cancel_rejected, rejected_before_ack, submit_failure, terminal_mapping):
+        assert result["failed_reason"] == "forbidden_terminal_non_fill_event"
+    assert len(manager.reservations_for()) == 1
+    assert store.get_reservation_release_tombstone(reservation_id="reservation-001") is None
+
+
 def test_terminal_mapping_proof_releases_only_after_unique_active_ledger_lookup(tmp_path):
     coordinator, manager, store = _coordinator(tmp_path)
     assert _open(coordinator, reservation_id="reservation-001")["applied"] is True
@@ -288,5 +421,7 @@ def test_no_runtime_wiring_and_broker_adapter_inactive():
     assert "ReservationLifecycleCoordinator" not in inspect.getsource(order_router_module)
     assert "ReservationLifecycleCoordinator" not in inspect.getsource(fill_recorder_module)
     assert "ReservationLifecycleCoordinator" not in inspect.getsource(main_loop_module)
-    assert "reservation_lifecycle_coordinator=" not in inspect.getsource(app_main.SovereignHeartbeat.__init__)
+    heartbeat_init = inspect.getsource(app_main.SovereignHeartbeat.__init__)
+    assert "reservation_lifecycle_coordinator=self.reservation_lifecycle_coordinator" in heartbeat_init
+    assert "reservation_lifecycle_enabled=self.reservation_lifecycle_enabled" in heartbeat_init
     assert "broker_adapter" not in inspect.getsource(ReservationLifecycleCoordinator)

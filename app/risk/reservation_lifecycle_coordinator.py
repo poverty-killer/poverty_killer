@@ -223,6 +223,81 @@ class ReservationLifecycleCoordinator:
             source_event_id=source_event_id,
         )
 
+    def on_terminal_non_fill(
+        self,
+        *,
+        client_order_id: str,
+        release_idempotency_key: str,
+        terminal_status: str,
+        terminal_source: str,
+        terminal_reason: str,
+        decision_uuid: Optional[str] = None,
+        reservation_id: Optional[str] = None,
+        reservation_dedupe_key: Optional[str] = None,
+        source_event_id: Optional[str] = None,
+        released_qty: Optional[Any] = None,
+        released_notional: Optional[Any] = None,
+        mutation_authority_source: str = "direct_lifecycle",
+    ) -> Dict[str, Any]:
+        result = self._result(action="terminal_non_fill", client_order_id=client_order_id)
+        if self._telemetry_authority_used(mutation_authority_source):
+            return self._failed(result, "telemetry_not_mutation_authority")
+
+        normalized_status = str(terminal_status or "").strip().lower()
+        if normalized_status == "canceled":
+            normalized_status = "cancelled"
+        allowed_statuses = {"cancelled", "expired", "rejected"}
+        if normalized_status not in allowed_statuses:
+            return self._failed(result, "unsupported_terminal_non_fill_status")
+
+        source = str(terminal_source or "").strip().lower()
+        reason = str(terminal_reason or "").strip().lower()
+        forbidden = {
+            "cancel_requested",
+            "cancel_rejected",
+            "rejected_before_ack",
+            "submit_failure",
+            "terminal_mapping_proof",
+            "orphan_or_drift",
+            "status_failure",
+            "open_order_absence",
+        }
+        if source in forbidden or reason in forbidden or source == "mark_terminal_from_status_evidence":
+            return self._failed(result, "forbidden_terminal_non_fill_event")
+
+        existing_release = self.state_store.get_reservation_release_tombstone(
+            release_idempotency_key=release_idempotency_key,
+        )
+        if existing_release is not None:
+            if existing_release.get("client_order_id") == client_order_id:
+                result["idempotent"] = True
+                result["skipped"] = False
+                result["failed_reason"] = "release_key_already_recorded"
+                result["reservation_id"] = existing_release.get("reservation_id")
+                return result
+            return self._failed(result, "release_key_conflict")
+
+        dedupe_key = reservation_dedupe_key or self._dedupe_key(decision_uuid, client_order_id)
+        row, failed_reason = self._resolve_active_reservation(
+            reservation_id=reservation_id,
+            client_order_id=client_order_id,
+            reservation_dedupe_key=dedupe_key,
+        )
+        if row is None:
+            return self._failed(result, failed_reason or "active_reservation_not_found")
+
+        return self._release_from_row(
+            result,
+            row,
+            release_idempotency_key=release_idempotency_key,
+            release_reason=terminal_reason,
+            terminal_status=normalized_status,
+            terminal_source=terminal_source,
+            source_event_id=source_event_id,
+            released_qty=released_qty,
+            released_notional=released_notional,
+        )
+
     def on_cancel_requested(self, *, client_order_id: str, reason: str = "cancel_requested") -> Dict[str, Any]:
         return self._no_release(action="cancel_requested", client_order_id=client_order_id, reason=reason)
 
@@ -251,6 +326,8 @@ class ReservationLifecycleCoordinator:
         terminal_status: str,
         terminal_source: str,
         source_event_id: Optional[str],
+        released_qty: Optional[Any] = None,
+        released_notional: Optional[Any] = None,
     ) -> Dict[str, Any]:
         guard = self.exposure_manager.guarded_release_reservation(
             state_store=self.state_store,
@@ -261,8 +338,8 @@ class ReservationLifecycleCoordinator:
             release_reason=release_reason,
             terminal_status=terminal_status,
             terminal_source=terminal_source,
-            released_qty=row.get("open_qty") or row.get("original_qty"),
-            released_notional=row.get("notional_basis"),
+            released_qty=released_qty if released_qty is not None else (row.get("open_qty") or row.get("original_qty")),
+            released_notional=released_notional if released_notional is not None else row.get("notional_basis"),
             source_event_id=source_event_id,
         )
         return self._from_guard(result, guard)
