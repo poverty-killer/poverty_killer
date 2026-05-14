@@ -534,6 +534,9 @@ class OrderRouter:
             return f"{order.decision_uuid}:{order.id}"
         return None
 
+    def _reservation_lifecycle_paper_enabled(self) -> bool:
+        return bool(self._reservation_lifecycle_enabled and self.paper_mode)
+
     def _record_reservation_ack_open(
         self,
         order: OrderRequest,
@@ -558,6 +561,10 @@ class OrderRouter:
 
         if not self._reservation_lifecycle_enabled:
             result["failed_reason"] = "reservation_lifecycle_disabled"
+            self._reservation_lifecycle_ack_open_results.append(result)
+            return result
+        if not self._reservation_lifecycle_paper_enabled():
+            result["failed_reason"] = "reservation_lifecycle_non_paper_blocked"
             self._reservation_lifecycle_ack_open_results.append(result)
             return result
         if self._reservation_lifecycle_coordinator is None:
@@ -655,6 +662,10 @@ class OrderRouter:
             result["failed_reason"] = "reservation_lifecycle_disabled"
             self._reservation_lifecycle_partial_fill_results.append(result)
             return result
+        if not self._reservation_lifecycle_paper_enabled():
+            result["failed_reason"] = "reservation_lifecycle_non_paper_blocked"
+            self._reservation_lifecycle_partial_fill_results.append(result)
+            return result
         if self._reservation_lifecycle_coordinator is None:
             result["failed_reason"] = "reservation_lifecycle_coordinator_missing"
             self._reservation_lifecycle_partial_fill_results.append(result)
@@ -739,6 +750,10 @@ class OrderRouter:
             result["failed_reason"] = "reservation_lifecycle_disabled"
             self._reservation_lifecycle_full_fill_results.append(result)
             return result
+        if not self._reservation_lifecycle_paper_enabled():
+            result["failed_reason"] = "reservation_lifecycle_non_paper_blocked"
+            self._reservation_lifecycle_full_fill_results.append(result)
+            return result
         if self._reservation_lifecycle_coordinator is None:
             result["failed_reason"] = "reservation_lifecycle_coordinator_missing"
             self._reservation_lifecycle_full_fill_results.append(result)
@@ -820,6 +835,10 @@ class OrderRouter:
 
         if not self._reservation_lifecycle_enabled:
             result["failed_reason"] = "reservation_lifecycle_disabled"
+            self._reservation_lifecycle_terminal_non_fill_results.append(result)
+            return result
+        if not self._reservation_lifecycle_paper_enabled():
+            result["failed_reason"] = "reservation_lifecycle_non_paper_blocked"
             self._reservation_lifecycle_terminal_non_fill_results.append(result)
             return result
         if self._reservation_lifecycle_coordinator is None:

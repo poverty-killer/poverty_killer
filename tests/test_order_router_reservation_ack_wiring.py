@@ -242,7 +242,7 @@ def test_enabled_paper_limit_ack_calls_coordinator_once():
     _assert_ack_call(coordinator.ack_calls[0], order)
 
 
-def test_enabled_mocked_kraken_limit_ack_calls_coordinator_once():
+def test_enabled_mocked_kraken_limit_ack_is_hard_blocked_from_coordinator():
     coordinator = _SpyCoordinator()
     router = _enabled_router(
         coordinator,
@@ -260,11 +260,13 @@ def test_enabled_mocked_kraken_limit_ack_calls_coordinator_once():
 
     assert router.submit_order(order) is None
 
-    assert len(coordinator.ack_calls) == 1
-    _assert_ack_call(coordinator.ack_calls[0], order)
+    assert coordinator.ack_calls == []
+    assert router._reservation_lifecycle_ack_open_results[-1]["failed_reason"] == (
+        "reservation_lifecycle_non_paper_blocked"
+    )
 
 
-def test_enabled_mocked_alpaca_limit_ack_calls_coordinator_once():
+def test_enabled_mocked_alpaca_limit_ack_is_hard_blocked_from_coordinator():
     coordinator = _SpyCoordinator()
     router = _enabled_router(
         coordinator,
@@ -282,8 +284,10 @@ def test_enabled_mocked_alpaca_limit_ack_calls_coordinator_once():
 
     assert router.submit_order(order) is None
 
-    assert len(coordinator.ack_calls) == 1
-    _assert_ack_call(coordinator.ack_calls[0], order)
+    assert coordinator.ack_calls == []
+    assert router._reservation_lifecycle_ack_open_results[-1]["failed_reason"] == (
+        "reservation_lifecycle_non_paper_blocked"
+    )
 
 
 def test_duplicate_ack_dedupe_is_idempotent_without_double_reserve(tmp_path):
