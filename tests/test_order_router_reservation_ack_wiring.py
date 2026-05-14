@@ -64,6 +64,19 @@ class _SpyCoordinator:
 
     def on_full_fill(self, **kwargs):
         self.full_calls.append(kwargs)
+        return {
+            "action": "full_fill",
+            "applied": True,
+            "idempotent": False,
+            "skipped": False,
+            "failed_reason": None,
+            "reservation_id": kwargs.get("reservation_id"),
+            "client_order_id": kwargs.get("client_order_id"),
+            "mutation_attempted": True,
+            "broker_command_performed": False,
+            "telemetry_authority_used": False,
+            "exposure_manager_called": True,
+        }
 
     def on_terminal_mapping_proof(self, **kwargs):
         self.terminal_calls.append(kwargs)
@@ -417,16 +430,149 @@ def test_partial_fill_without_active_reservation_fails_closed(tmp_path):
     assert manager.reservations_for() == []
 
 
-def test_full_fill_path_still_does_not_call_full_fill_or_release():
+def test_default_disabled_paper_full_fill_makes_zero_coordinator_calls_and_zero_release(tmp_path):
+    coordinator = _SpyCoordinator()
+    store = StateStore(str(tmp_path / "disabled-full.db"))
+    router = OrderRouter(
+        paper_mode=True,
+        state_store=store,
+        reservation_lifecycle_coordinator=coordinator,
+    )
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    _drive_paper_partial(router, order, quantity=Decimal("1.0"), offset=2)
+
+    assert coordinator.ack_calls == []
+    assert coordinator.full_calls == []
+    assert store.get_reservation_release_tombstone(reservation_id=order.id) is None
+    assert router._reservation_lifecycle_full_fill_results[-1]["failed_reason"] == "reservation_lifecycle_disabled"
+
+
+def test_enabled_paper_full_fill_calls_coordinator_once_after_ack_open():
     coordinator = _SpyCoordinator()
     router = _enabled_router(coordinator, paper_mode=True)
     order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
 
     assert router.submit_order(order) is None
-    _drive_paper_partial(router, order, quantity=Decimal("0.25"), offset=2)
-    _drive_paper_partial(router, order, quantity=Decimal("0.75"), offset=4)
+    assert len(coordinator.ack_calls) == 1
+    report = _drive_paper_partial(router, order, quantity=Decimal("1.0"), offset=2)
+    call = coordinator.full_calls[0]
+    expected_key = router._paper_lifecycle_idempotency_key(
+        order,
+        lifecycle_phase="order_fully_filled",
+        broker_order_id=str(report.order_id),
+        event_ts_ns=int(report.timestamp_ns),
+        source_event_id="paper_report_1",
+    )
 
-    assert coordinator.full_calls == []
+    assert len(coordinator.full_calls) == 1
+    assert call["client_order_id"] == order.id
+    assert call["reservation_id"] == order.id
+    assert call["reservation_dedupe_key"] == f"{order.decision_uuid}:{order.id}"
+    assert call["release_idempotency_key"] == f"{expected_key}:release"
+    assert call["cumulative_filled_qty"] == order.quantity
+    assert call["fill_delta_qty"] == Decimal("1.0")
+    assert call["status_source"] == "paper_broker.execution_report"
+    assert call["terminal_source"] == "paper_broker.execution_report"
+    assert call["source_event_id"] == "paper_report_1"
+    assert call["mutation_authority_source"] == "direct_lifecycle"
+    assert coordinator.terminal_calls == []
+    assert coordinator.release_calls == []
+
+
+def test_enabled_paper_full_fill_duplicate_release_is_idempotent(tmp_path):
+    store = StateStore(str(tmp_path / "full-release.db"))
+    manager = ExposureManager(initial_equity=Decimal("20000"))
+    coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+    router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    report = _drive_paper_partial(router, order, quantity=Decimal("1.0"), offset=2)
+    release_key = router._paper_lifecycle_idempotency_key(
+        order,
+        lifecycle_phase="order_fully_filled",
+        broker_order_id=str(report.order_id),
+        event_ts_ns=int(report.timestamp_ns),
+        source_event_id="paper_report_1",
+    ) + ":release"
+    first_result = router._reservation_lifecycle_full_fill_results[-1]
+
+    assert first_result["applied"] is True
+    assert manager.reservations_for() == []
+    tombstone = store.get_reservation_release_tombstone(reservation_id=order.id)
+    assert tombstone["release_idempotency_key"] == release_key
+
+    duplicate = router._record_reservation_full_fill(
+        order,
+        release_idempotency_key=release_key,
+        cumulative_filled_qty=order.quantity,
+        fill_delta_qty=Decimal("1.0"),
+        status_source="paper_broker.execution_report",
+        terminal_source="paper_broker.execution_report",
+        source_event_id="paper_report_1",
+    )
+    assert duplicate["idempotent"] is True
+    assert store.get_reservation_release_tombstone(reservation_id=order.id)["release_idempotency_key"] == release_key
+
+
+def test_enabled_paper_full_fill_after_prior_partials_releases_remaining_once(tmp_path):
+    store = StateStore(str(tmp_path / "partial-then-full.db"))
+    manager = ExposureManager(initial_equity=Decimal("20000"))
+    coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+    router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    _drive_paper_partial(router, order, quantity=Decimal("0.25"), offset=2)
+    assert store.get_reservation_ledger(order.id)["filled_qty"] == "0.25"
+
+    _drive_paper_partial(router, order, quantity=Decimal("0.75"), offset=4)
+    result = router._reservation_lifecycle_full_fill_results[-1]
+
+    assert result["applied"] is True
+    assert manager.reservations_for() == []
+    row = store.get_reservation_ledger(order.id)
+    assert row["is_active"] is False
+    assert row["is_terminal"] is True
+    assert str(row["terminal_status"]).lower() == "filled"
+    assert store.get_reservation_release_tombstone(reservation_id=order.id) is not None
+
+
+def test_full_fill_without_active_reservation_fails_closed(tmp_path):
+    store = StateStore(str(tmp_path / "missing-full-active.db"))
+    manager = ExposureManager(initial_equity=Decimal("20000"))
+    coordinator = ReservationLifecycleCoordinator(exposure_manager=manager, state_store=store)
+    router = _enabled_router(coordinator, paper_mode=True, state_store=store)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    result = router._record_reservation_full_fill(
+        order,
+        release_idempotency_key="missing-active-full-release-key",
+        cumulative_filled_qty=order.quantity,
+        fill_delta_qty=Decimal("1.0"),
+        status_source="paper_broker.execution_report",
+        terminal_source="paper_broker.execution_report",
+        source_event_id="paper_report_missing_full_active",
+    )
+
+    assert result["applied"] is False
+    assert result["failed_reason"] == "active_reservation_not_found"
+    assert store.list_reservation_ledger(active_only=True) == []
+    assert store.get_reservation_release_tombstone(reservation_id=order.id) is None
+    assert manager.reservations_for() == []
+
+
+def test_full_fill_path_still_does_not_call_terminal_or_cancel_release():
+    coordinator = _SpyCoordinator()
+    router = _enabled_router(coordinator, paper_mode=True)
+    order = _order(quantity=Decimal("1.0"), limit_price=Decimal("2900.00"))
+
+    assert router.submit_order(order) is None
+    _drive_paper_partial(router, order, quantity=Decimal("1.0"), offset=2)
+
+    assert len(coordinator.full_calls) == 1
     assert coordinator.terminal_calls == []
     assert coordinator.release_calls == []
     assert len(coordinator.ack_calls) == 1
@@ -481,7 +627,6 @@ def test_no_telemetry_authority_or_broker_adapter_use_in_order_router_wiring():
     assert "mutation_authority_source=\"direct_lifecycle\"" in source
     assert "mutation_authority_source=\"telemetry\"" not in source
     assert "guarded_release_reservation(" not in source
-    assert "on_full_fill(" not in source
     assert "on_terminal_mapping_proof(" not in source
     assert "on_cancel_requested(" not in source
     assert "on_cancel_rejected(" not in source
@@ -494,4 +639,10 @@ def test_no_telemetry_authority_or_broker_adapter_use_in_order_router_wiring():
     assert "on_partial_fill(" not in inspect.getsource(OrderRouter._get_alpaca_order_fill)
     assert "on_partial_fill(" not in inspect.getsource(OrderRouter._query_kraken_order_status)
     assert "on_partial_fill(" not in inspect.getsource(OrderRouter._query_alpaca_order_status)
+    assert "on_full_fill(" not in inspect.getsource(OrderRouter._submit_order_kraken)
+    assert "on_full_fill(" not in inspect.getsource(OrderRouter._submit_order_alpaca)
+    assert "on_full_fill(" not in inspect.getsource(OrderRouter._get_kraken_order_fill)
+    assert "on_full_fill(" not in inspect.getsource(OrderRouter._get_alpaca_order_fill)
+    assert "on_full_fill(" not in inspect.getsource(OrderRouter._query_kraken_order_status)
+    assert "on_full_fill(" not in inspect.getsource(OrderRouter._query_alpaca_order_status)
     assert "broker_adapter" not in source
