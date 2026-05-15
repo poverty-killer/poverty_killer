@@ -93,6 +93,20 @@ def _ns_to_datetime(ns: int) -> datetime:
     return datetime.utcfromtimestamp(ns / 1_000_000_000.0)
 
 
+def _log_dispatch_diag(reason_code: str, **fields: Any) -> None:
+    """Emit compact dispatch-admission evidence without changing decisions."""
+    clean_fields = {
+        key: value
+        for key, value in fields.items()
+        if value is not None
+    }
+    logger.info(
+        "[DISPATCH_DIAG] reason_code=%s fields=%s",
+        reason_code,
+        clean_fields,
+    )
+
+
 # =========================================================================
 # BUNDLE 2A — FACTORY FUNCTION FOR MAINLOOP ASSEMBLY
 # =========================================================================
@@ -783,6 +797,15 @@ class MainLoop:
                     "[LIVE_GATE] BLOCK_FUSION symbol=%s reason=SHANS_NOT_READY buffer=%d required=%d",
                     symbol, _buf_len, _buf_req,
                 )
+                _log_dispatch_diag(
+                    "shans_not_ready",
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    shans_ready=False,
+                    shans_buffer=_buf_len,
+                    shans_required=_buf_req,
+                    submit_signal_called=False,
+                )
                 self._shans_gate_last_log_ts[symbol] = _gate_now
         else:
             # Fuse signals (global — LIMIT: single cache, called per-symbol)
@@ -937,6 +960,13 @@ class MainLoop:
         """
         if fusion is None:
             logger.info("[DISPATCH] %s: fusion is None → returning", symbol)
+            _log_dispatch_diag(
+                "fusion_not_actionable",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                fusion_present=False,
+                submit_signal_called=False,
+            )
             return
 
         self.strategy_router.update_macro_state()
@@ -946,6 +976,14 @@ class MainLoop:
 
         if preferred is None:
             logger.info("[DISPATCH] %s: no preferred strategy -> returning", symbol)
+            _log_dispatch_diag(
+                "preferred_sleeve_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                fusion_present=True,
+                preferred_sleeve=None,
+                submit_signal_called=False,
+            )
             return
 
         sleeve_registry = {
@@ -979,6 +1017,15 @@ class MainLoop:
             logger.info(
                 "[DISPATCH] %s: no_registered_candidates eligible=%s → returning",
                 symbol, eligible_repr,
+            )
+            _log_dispatch_diag(
+                "sleeve_blocked",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                preferred_sleeve=repr(preferred),
+                eligible_sleeves=eligible_repr,
+                candidates=[],
+                submit_signal_called=False,
             )
             return
 
@@ -1054,9 +1101,26 @@ class MainLoop:
                 "[DISPATCH] %s: all_sleeves_declined candidates=%s",
                 symbol, [repr(s) for s in candidates],
             )
+            _log_dispatch_diag(
+                "strategy_signal_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                preferred_sleeve=repr(preferred),
+                eligible_sleeves=eligible_repr,
+                candidates=[repr(s) for s in candidates],
+                submit_signal_called=False,
+            )
             return
         if strategy_vote is None:
             logger.info("[DISPATCH] %s: strategy_vote=None signal_present sleeve=%s", symbol, repr(winning_sleeve))
+            _log_dispatch_diag(
+                "strategy_vote_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                winning_sleeve=repr(winning_sleeve),
+                signal_present=True,
+                submit_signal_called=False,
+            )
             return
 
         logger.info("[DISPATCH] strategy_vote_ready sleeve=%s", repr(winning_sleeve))
@@ -1116,6 +1180,13 @@ class MainLoop:
 
         truth_frame = self._build_truth_frame(exchange_ts_ns)
 
+        _log_dispatch_diag(
+            "decision_compile_attempted",
+            symbol=symbol,
+            exchange_ts_ns=exchange_ts_ns,
+            winning_sleeve=repr(winning_sleeve),
+            strategy_vote_present=True,
+        )
         decision_record = self.decision_compiler.compile(
             truth_frame,
             strategy_votes=[strategy_vote],
@@ -1141,6 +1212,15 @@ class MainLoop:
             signal=signal,
             current_price=runtime.last_price,
             is_attack=aggression_contract.execution_is_attack,
+        )
+        _log_dispatch_diag(
+            "submit_signal_called",
+            symbol=symbol,
+            exchange_ts_ns=exchange_ts_ns,
+            winning_sleeve=repr(winning_sleeve),
+            decision_uuid=getattr(decision_record, "decision_uuid", None),
+            submitted=submitted,
+            submit_signal_called=True,
         )
         if submitted:
             self._metrics.orders_submitted += 1
@@ -1381,6 +1461,15 @@ class MainLoop:
                 "(paper-only gate)",
                 symbol, self.config.broker_mode,
             )
+            _log_dispatch_diag(
+                "sleeve_blocked",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.SECTOR_ROTATION),
+                broker_mode=self.config.broker_mode,
+                block_reason="non_paper_broker_mode",
+                submit_signal_called=False,
+            )
             return None, None
 
         observed_signal = runtime.last_sector_rotation_observed_signal
@@ -1394,6 +1483,15 @@ class MainLoop:
                 "present" if observed_signal is not None else "None",
                 "present" if observed_vote is not None else "None",
             )
+            _log_dispatch_diag(
+                "observed_pair_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.SECTOR_ROTATION),
+                observed_signal_present=observed_signal is not None,
+                observed_vote_present=observed_vote is not None,
+                submit_signal_called=False,
+            )
             return None, None
 
         vote_ts = getattr(observed_vote, "timestamp_ns", None)
@@ -1405,6 +1503,15 @@ class MainLoop:
                 "[PAPER_DISPATCH_SECTOR_ROTATION] %s: blocked — freshness fail "
                 "(vote_ts=%s signal_ts=%s exchange_ts_ns=%s)",
                 symbol, vote_ts, signal_ts, exchange_ts_ns,
+            )
+            _log_dispatch_diag(
+                "observed_pair_stale",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.SECTOR_ROTATION),
+                vote_ts=vote_ts,
+                signal_ts=signal_ts,
+                submit_signal_called=False,
             )
             return None, None
 
@@ -1456,6 +1563,15 @@ class MainLoop:
                 "(paper-only gate)",
                 symbol, self.config.broker_mode,
             )
+            _log_dispatch_diag(
+                "sleeve_blocked",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.FLV),
+                broker_mode=self.config.broker_mode,
+                block_reason="non_paper_broker_mode",
+                submit_signal_called=False,
+            )
             return None, None
 
         observed_signal = runtime.last_liquidity_void_observed_signal
@@ -1469,6 +1585,15 @@ class MainLoop:
                 "present" if observed_signal is not None else "None",
                 "present" if observed_vote is not None else "None",
             )
+            _log_dispatch_diag(
+                "observed_pair_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.FLV),
+                observed_signal_present=observed_signal is not None,
+                observed_vote_present=observed_vote is not None,
+                submit_signal_called=False,
+            )
             return None, None
 
         signal_symbol = getattr(observed_signal, "symbol", None)
@@ -1477,6 +1602,15 @@ class MainLoop:
                 "[PAPER_DISPATCH_LIQUIDITY_VOID] %s: blocked — symbol mismatch "
                 "(candidate symbol=%s)",
                 symbol, signal_symbol,
+            )
+            _log_dispatch_diag(
+                "observed_pair_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.FLV),
+                candidate_symbol=signal_symbol,
+                block_reason="symbol_mismatch",
+                submit_signal_called=False,
             )
             return None, None
 
@@ -1487,6 +1621,14 @@ class MainLoop:
                 "(candidate_ts=%s > candle_ts=%s)",
                 symbol, candidate_ts, exchange_ts_ns,
             )
+            _log_dispatch_diag(
+                "observed_pair_stale",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.FLV),
+                candidate_ts=candidate_ts,
+                submit_signal_called=False,
+            )
             return None, None
 
         candidate_uuid = getattr(observed_vote, "decision_uuid", None)
@@ -1495,6 +1637,14 @@ class MainLoop:
                 "[PAPER_DISPATCH_LIQUIDITY_VOID] %s: blocked — missing decision_uuid",
                 symbol,
             )
+            _log_dispatch_diag(
+                "strategy_vote_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.FLV),
+                block_reason="missing_decision_uuid",
+                submit_signal_called=False,
+            )
             return None, None
 
         if candidate_uuid == runtime.last_liquidity_void_consumed_decision_uuid:
@@ -1502,6 +1652,15 @@ class MainLoop:
                 "[PAPER_DISPATCH_LIQUIDITY_VOID] %s: blocked — already consumed "
                 "(decision_uuid=%s)",
                 symbol, candidate_uuid,
+            )
+            _log_dispatch_diag(
+                "strategy_signal_missing",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                sleeve=repr(SleeveType.FLV),
+                decision_uuid=candidate_uuid,
+                block_reason="already_consumed",
+                submit_signal_called=False,
             )
             return None, None
 
