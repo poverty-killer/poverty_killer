@@ -284,6 +284,10 @@ class Config(BaseSettings):
     # Broker Configuration
     # ============================================
     broker_mode: Literal["paper", "live"] = Field(default="paper", description="paper = simulation, live = real trading")
+    reservation_lifecycle_paper_enabled: bool = Field(
+        default=False,
+        description="Enable paper-only reservation lifecycle mutation. Ignored unless broker_mode is paper.",
+    )
 
     # Primary market data venue.
     # Literal enforces only currently-supported venues.

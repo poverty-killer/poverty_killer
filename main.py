@@ -353,7 +353,13 @@ class SovereignHeartbeat:
         This creates and hydrates objects only. It does not wire lifecycle call
         sites, does not issue broker commands, and keeps activation disabled.
         """
-        self.reservation_lifecycle_enabled = False
+        reservation_lifecycle_paper_requested = bool(
+            getattr(config, "reservation_lifecycle_paper_enabled", False)
+        )
+        reservation_lifecycle_is_paper = str(getattr(config, "broker_mode", "")).lower() == "paper"
+        self.reservation_lifecycle_enabled = bool(
+            reservation_lifecycle_paper_requested and reservation_lifecycle_is_paper
+        )
         self.exposure_manager = ExposureManager(
             initial_equity=Decimal(str(config.initial_capital)),
         )
@@ -409,7 +415,12 @@ class SovereignHeartbeat:
         self.reservation_lifecycle_bootstrap_status = {
             "exposure_manager_created": self.exposure_manager is not None,
             "coordinator_created": self.reservation_lifecycle_coordinator is not None,
-            "reservation_lifecycle_enabled": False,
+            "reservation_lifecycle_paper_requested": reservation_lifecycle_paper_requested,
+            "reservation_lifecycle_enabled": self.reservation_lifecycle_enabled,
+            "reservation_lifecycle_scope": "paper" if self.reservation_lifecycle_enabled else "disabled",
+            "reservation_lifecycle_live_blocked": bool(
+                reservation_lifecycle_paper_requested and not reservation_lifecycle_is_paper
+            ),
             "active_ledger_row_count": len(active_rows),
             "release_tombstone_count": len(release_tombstones),
             "fill_progress_row_count": len(fill_progress),

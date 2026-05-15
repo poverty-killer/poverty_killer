@@ -2,6 +2,7 @@ import inspect
 from types import SimpleNamespace
 
 import main as runtime_main
+from app.config import Config
 from app.execution.engine import ExecutionEngine
 from app.execution.order_router import OrderRouter
 from app.main_loop import MainLoop
@@ -15,8 +16,14 @@ def _store(tmp_path):
     return StateStore(str(tmp_path / "state.db"))
 
 
-def _config():
-    return SimpleNamespace(initial_capital=20_000.0)
+def _config(**overrides):
+    data = {
+        "initial_capital": 20_000.0,
+        "broker_mode": "paper",
+        "reservation_lifecycle_paper_enabled": False,
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
 
 
 def _root_with_store(store):
@@ -109,7 +116,46 @@ def test_root_bootstrap_creates_exposure_manager_and_disabled_coordinator(tmp_pa
     assert root.reservation_lifecycle_enabled is False
     assert root.reservation_lifecycle_bootstrap_status["exposure_manager_created"] is True
     assert root.reservation_lifecycle_bootstrap_status["coordinator_created"] is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_paper_requested"] is False
     assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_enabled"] is False
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_scope"] == "disabled"
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_live_blocked"] is False
+
+
+def test_config_default_reservation_lifecycle_paper_enabled_false():
+    config = Config()
+
+    assert config.reservation_lifecycle_paper_enabled is False
+
+
+def test_paper_requested_enables_effective_reservation_lifecycle(tmp_path):
+    store = _store(tmp_path)
+    root = _root_with_store(store)
+
+    root._bootstrap_reservation_lifecycle_disabled(
+        _config(reservation_lifecycle_paper_enabled=True)
+    )
+
+    assert root.reservation_lifecycle_enabled is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_paper_requested"] is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_enabled"] is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_scope"] == "paper"
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_live_blocked"] is False
+
+
+def test_live_requested_keeps_effective_reservation_lifecycle_disabled(tmp_path):
+    store = _store(tmp_path)
+    root = _root_with_store(store)
+
+    root._bootstrap_reservation_lifecycle_disabled(
+        _config(broker_mode="live", reservation_lifecycle_paper_enabled=True)
+    )
+
+    assert root.reservation_lifecycle_enabled is False
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_paper_requested"] is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_enabled"] is False
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_scope"] == "disabled"
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_live_blocked"] is True
 
 
 def test_open_active_ledger_rows_hydrate_into_exposure_manager(tmp_path):
