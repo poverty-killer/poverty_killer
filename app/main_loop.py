@@ -107,6 +107,37 @@ def _log_dispatch_diag(reason_code: str, **fields: Any) -> None:
     )
 
 
+def _format_sector_rotation_diag_detail(detail: Optional[Dict[str, Any]]) -> str:
+    if not detail:
+        return "-"
+    parts: List[str] = []
+    for key in sorted(detail):
+        value = detail[key]
+        if value is None:
+            continue
+        text = str(value)
+        if len(text) > 80:
+            text = f"{text[:77]}..."
+        parts.append(f"{key}={text}")
+    return ",".join(parts) if parts else "-"
+
+
+def _log_sector_rotation_diag(
+    symbol: str,
+    reason_code: str,
+    candle_ts_ns: int,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Emit observe-only SectorRotation producer evidence."""
+    logger.info(
+        "[SECTOR_ROTATION_DIAG] symbol=%s reason_code=%s candle_ts_ns=%s detail=%s",
+        symbol,
+        reason_code,
+        candle_ts_ns,
+        _format_sector_rotation_diag_detail(detail),
+    )
+
+
 # =========================================================================
 # BUNDLE 2A — FACTORY FUNCTION FOR MAINLOOP ASSEMBLY
 # =========================================================================
@@ -2029,16 +2060,56 @@ class MainLoop:
                 volume=candle.volume,
                 timestamp_ns=candle.exchange_ts_ns,
             )
+            entry_decline_reason = (
+                sleeve.get_last_decline_reason()
+                if hasattr(sleeve, "get_last_decline_reason")
+                else None
+            )
+            entry_decline_detail = (
+                sleeve.get_last_decline_detail()
+                if hasattr(sleeve, "get_last_decline_detail")
+                else {}
+            )
             exit_signal = sleeve.update_price(
                 price=candle.close,
                 timestamp_ns=candle.exchange_ts_ns,
             )
+            price_decline_reason = (
+                sleeve.get_last_decline_reason()
+                if hasattr(sleeve, "get_last_decline_reason")
+                else None
+            )
+            price_decline_detail = (
+                sleeve.get_last_decline_detail()
+                if hasattr(sleeve, "get_last_decline_detail")
+                else {}
+            )
         except Exception as exc:
+            _log_sector_rotation_diag(
+                symbol,
+                "unknown_no_signal",
+                candle.exchange_ts_ns,
+                {"stage": "feed_observe", "error": exc.__class__.__name__},
+            )
             logger.warning(
                 "[OBSERVE_ONLY] symbol=%s sleeve=sector_rotation feed/observe raised: %s",
                 symbol, exc,
             )
             return
+
+        if entry_signal is None and exit_signal is None:
+            reason_code = (
+                entry_decline_reason
+                or price_decline_reason
+                or "update_candle_no_signal"
+            )
+            detail = entry_decline_detail or price_decline_detail
+            _log_sector_rotation_diag(
+                symbol,
+                reason_code,
+                candle.exchange_ts_ns,
+                detail,
+            )
 
         for signal in (entry_signal, exit_signal):
             if signal is None:
@@ -2057,6 +2128,12 @@ class MainLoop:
                     exchange_ts_ns=candle.exchange_ts_ns,
                 )
             except Exception as exc:
+                _log_sector_rotation_diag(
+                    symbol,
+                    "vote_adaptation_failed",
+                    candle.exchange_ts_ns,
+                    {"error": exc.__class__.__name__},
+                )
                 logger.warning(
                     "[OBSERVE_ONLY_VOTE] symbol=%s sleeve=sector_rotation adapter raised: %s",
                     symbol, exc,
@@ -2065,6 +2142,12 @@ class MainLoop:
 
             runtime.record_observed_vote("sector_rotation", vote)
             self._log_observed_vote(symbol, "sector_rotation", vote)
+            _log_sector_rotation_diag(
+                symbol,
+                "observed_pair_stored",
+                candle.exchange_ts_ns,
+                {"signal_ts_ns": getattr(signal, "exchange_ts_ns", None)},
+            )
 
     # =========================================================================
     # BUNDLE 3B/3C/3D/3E: TRUTHFRAME CONSTRUCTION WITH HYDRATION

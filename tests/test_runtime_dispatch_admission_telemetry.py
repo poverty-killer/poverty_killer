@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import app.main_loop as main_loop_module
 from app.commander import Commander
 from app.main_loop import MainLoop, _log_dispatch_diag
+from app.models import Candle
 from app.models.enums import SleeveType
 
 
@@ -59,6 +60,25 @@ def _fusion() -> types.SimpleNamespace:
     )
 
 
+def _candle(
+    *,
+    exchange_ts_ns: int = T0_NS,
+    symbol: str = "ETH/USD",
+    close: float = 2500.0,
+    volume: float = 100.0,
+) -> Candle:
+    return Candle(
+        symbol=symbol,
+        exchange_ts_ns=exchange_ts_ns,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=volume,
+        timeframe="1m",
+    )
+
+
 def _runtime(
     *,
     sector_signal: types.SimpleNamespace | None = None,
@@ -79,6 +99,38 @@ def _runtime(
         sentiment_velocity_engine=MagicMock(),
         last_tpe_signal=None,
     )
+
+
+def _observe_loop() -> types.SimpleNamespace:
+    loop = types.SimpleNamespace()
+    loop._observe_sector_rotation = MainLoop._observe_sector_rotation.__get__(
+        loop, MainLoop
+    )
+    loop._log_observed_signal = MainLoop._log_observed_signal.__get__(
+        loop, MainLoop
+    )
+    loop._log_observed_vote = MainLoop._log_observed_vote.__get__(loop, MainLoop)
+    loop.execution_engine = MagicMock()
+    return loop
+
+
+def _observe_runtime(sector_strategy) -> types.SimpleNamespace:
+    runtime = _runtime()
+    runtime.sector_rotation_strategy = sector_strategy
+    runtime.sentiment_velocity_engine = None
+    runtime.toxicity_engine = None
+
+    def record_observed_signal(sleeve_name: str, signal) -> None:
+        assert sleeve_name == "sector_rotation"
+        runtime.last_sector_rotation_observed_signal = signal
+
+    def record_observed_vote(sleeve_name: str, vote) -> None:
+        assert sleeve_name == "sector_rotation"
+        runtime.last_sector_rotation_observed_vote = vote
+
+    runtime.record_observed_signal = record_observed_signal
+    runtime.record_observed_vote = record_observed_vote
+    return runtime
 
 
 def _loop(
@@ -147,6 +199,79 @@ def _dispatch(loop: types.SimpleNamespace, runtime: types.SimpleNamespace) -> No
         fusion=_fusion(),
         exchange_ts_ns=T0_NS,
     )
+
+
+class _NoSignalSectorRotation:
+    def update_macro_state(self, macro_signal) -> None:
+        return None
+
+    def update_toxicity(self, toxicity_alert) -> None:
+        return None
+
+    def update_candle(self, *, price: float, volume: float, timestamp_ns: int):
+        return None
+
+    def update_price(self, *, price: float, timestamp_ns: int):
+        return None
+
+    def get_last_decline_reason(self) -> str:
+        return "volume_zscore_below_threshold"
+
+    def get_last_decline_detail(self) -> dict:
+        return {"volume_zscore": 0.25, "threshold": 1.5}
+
+
+class _SignalSectorRotation:
+    def __init__(self, signal) -> None:
+        self.signal = signal
+
+    def update_macro_state(self, macro_signal) -> None:
+        return None
+
+    def update_toxicity(self, toxicity_alert) -> None:
+        return None
+
+    def update_candle(self, *, price: float, volume: float, timestamp_ns: int):
+        return self.signal
+
+    def update_price(self, *, price: float, timestamp_ns: int):
+        return None
+
+    def get_last_decline_reason(self):
+        return None
+
+    def get_last_decline_detail(self) -> dict:
+        return {}
+
+
+def test_sector_rotation_no_signal_diag_does_not_submit(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _observe_loop()
+    runtime = _observe_runtime(_NoSignalSectorRotation())
+
+    loop._observe_sector_rotation("ETH/USD", runtime, _candle())
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    assert runtime.last_sector_rotation_observed_signal is None
+    assert runtime.last_sector_rotation_observed_vote is None
+    assert "[SECTOR_ROTATION_DIAG]" in caplog.text
+    assert "reason_code=volume_zscore_below_threshold" in caplog.text
+    assert "candle_ts_ns=1777948800000000000" in caplog.text
+
+
+def test_sector_rotation_observed_pair_storage_remains_unchanged(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    signal = _signal(exchange_ts_ns=T0_NS)
+    loop = _observe_loop()
+    runtime = _observe_runtime(_SignalSectorRotation(signal))
+
+    loop._observe_sector_rotation("ETH/USD", runtime, _candle())
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    assert runtime.last_sector_rotation_observed_signal is signal
+    assert runtime.last_sector_rotation_observed_vote is not None
+    assert runtime.last_sector_rotation_observed_vote.timestamp_ns == T0_NS
+    assert "reason_code=observed_pair_stored" in caplog.text
 
 
 def test_dispatch_diag_helper_emits_shans_not_ready_reason(caplog):

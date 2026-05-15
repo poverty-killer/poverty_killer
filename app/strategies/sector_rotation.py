@@ -120,6 +120,11 @@ class SectorRotationStrategy:
         self._win_count: int    = 0
         self._total_pnl: float  = 0.0
 
+        # Diagnostic-only no-signal state. This is observational evidence for
+        # callers; it is not consulted by signal construction or trade logic.
+        self._last_decline_reason: Optional[str] = None
+        self._last_decline_detail: Dict[str, Any] = {}
+
         # PAPER_PROOF_WINDOW_OVERRIDE: paper proof / testing only.
         # Production default (_MIN_BASELINE_CANDLES=10) is preserved when env var is absent.
         # Set PAPER_PROOF_WINDOW_OVERRIDE=<int> to admit earlier in short proof windows.
@@ -187,6 +192,7 @@ class SectorRotationStrategy:
             StrategySignal for entry if all conditions met, else None.
         """
         # Always update baseline regardless of guards
+        self._clear_decline_reason()
         self._volume_stats.update(volume)
         self._candle_count += 1
 
@@ -194,16 +200,29 @@ class SectorRotationStrategy:
         self._prev_close = price   # advance before any early return
 
         if not self._sector_rotation_enabled:
+            self._set_decline_reason("disabled")
             return None
         if self._in_position:
+            self._set_decline_reason("in_position")
             return None
         if timestamp_ns < self._cooldown_until_ns:
+            self._set_decline_reason(
+                "cooldown_active",
+                cooldown_until_ns=self._cooldown_until_ns,
+            )
             return None
         if self._macro_kill_active:
+            self._set_decline_reason("macro_toxicity_block", blocker="macro_kill")
             return None
         if self._toxicity_high:
+            self._set_decline_reason("macro_toxicity_block", blocker="toxicity")
             return None
         if self._candle_count < self._effective_min_candles:
+            self._set_decline_reason(
+                "insufficient_candles",
+                candle_count=self._candle_count,
+                min_candles=self._effective_min_candles,
+            )
             logger.debug(
                 "[SR_WINDOW_TOO_SHORT] %s: candle_count=%d < min=%d — freshness fail",
                 self.symbol, self._candle_count, self._effective_min_candles,
@@ -213,15 +232,23 @@ class SectorRotationStrategy:
         # Direction requires a known previous close
         if prev_close is None or abs(prev_close) < _EPS:
             if prev_close is None:
+                self._set_decline_reason("prev_close_missing")
                 logger.debug(
                     "[SR_OBSERVED_PAIR_MISSING] %s: prev_close not yet observed — observed pair missing",
                     self.symbol,
                 )
+            else:
+                self._set_decline_reason("prev_close_missing", prev_close=prev_close)
             return None
 
         # Volume Z-score gate
         volume_zscore = self._volume_stats.zscore(volume)
         if volume_zscore < self._inflow_threshold:
+            self._set_decline_reason(
+                "volume_zscore_below_threshold",
+                volume_zscore=round(volume_zscore, 6),
+                threshold=self._inflow_threshold,
+            )
             return None
 
         # Direction from price relative to previous close
@@ -231,6 +258,7 @@ class SectorRotationStrategy:
             side = "sell"
         else:
             # Price unchanged — no directional signal
+            self._set_decline_reason("no_directional_move", prev_close=prev_close)
             return None
 
         return self._generate_entry_signal(price, volume, volume_zscore, side, timestamp_ns)
@@ -250,6 +278,11 @@ class SectorRotationStrategy:
             confidence *= 0.75
 
         if confidence < self._min_confidence:
+            self._set_decline_reason(
+                "confidence_below_min",
+                confidence=round(confidence, 6),
+                min_confidence=self._min_confidence,
+            )
             logger.debug(
                 "SECTOR-ROTATION [%s]: confidence %.3f below min %.3f — suppressed",
                 self.symbol, confidence, self._min_confidence,
@@ -308,6 +341,7 @@ class SectorRotationStrategy:
             StrategySignal for exit if triggered, else None.
         """
         if not self._in_position:
+            self._set_decline_reason("update_price_no_signal", blocker="not_in_position")
             return None
 
         entry_price = self._entry_price
@@ -321,6 +355,7 @@ class SectorRotationStrategy:
                 self.symbol, entry_price, entry_ts_ns,
             )
             self._in_position = False
+            self._set_decline_reason("unknown_no_signal", blocker="inconsistent_position_state")
             return None
 
         # Signed PnL relative to entry direction
@@ -342,8 +377,14 @@ class SectorRotationStrategy:
             exit_reason = "macro_kill"
 
         if exit_reason is None:
+            self._set_decline_reason(
+                "update_price_no_signal",
+                elapsed_ns=elapsed_ns,
+                pnl_pct=round(pnl_pct, 6),
+            )
             return None
 
+        self._clear_decline_reason()
         return self._generate_exit_signal(price, timestamp_ns, pnl_pct, exit_reason)
 
     def _generate_exit_signal(
@@ -454,6 +495,14 @@ class SectorRotationStrategy:
             "volume_std":      self._volume_stats.std(),
         }
 
+    def get_last_decline_reason(self) -> Optional[str]:
+        """Return the most recent diagnostic no-signal reason, if any."""
+        return self._last_decline_reason
+
+    def get_last_decline_detail(self) -> Dict[str, Any]:
+        """Return compact diagnostic context for the most recent decline."""
+        return dict(self._last_decline_detail)
+
     def reset(self) -> None:
         """Reset all strategy state to initial conditions."""
         self._in_position        = False
@@ -471,4 +520,15 @@ class SectorRotationStrategy:
         self._trade_count        = 0
         self._win_count          = 0
         self._total_pnl          = 0.0
+        self._clear_decline_reason()
         logger.info("SectorRotationStrategy reset for %s", self.symbol)
+
+    def _set_decline_reason(self, reason_code: str, **detail: Any) -> None:
+        self._last_decline_reason = reason_code
+        self._last_decline_detail = {
+            key: value for key, value in detail.items() if value is not None
+        }
+
+    def _clear_decline_reason(self) -> None:
+        self._last_decline_reason = None
+        self._last_decline_detail = {}

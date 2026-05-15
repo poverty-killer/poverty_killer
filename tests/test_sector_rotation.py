@@ -184,6 +184,7 @@ class TestEntryThreshold:
         _warm_baseline(s, n=9)
         result = s.update_candle(101.0, 100.0, 10_000_000_000)
         assert result is None
+        assert s.get_last_decline_reason() == "volume_zscore_below_threshold"
 
     def test_above_threshold_buy_signal(self):
         s = _make_strategy()
@@ -192,6 +193,7 @@ class TestEntryThreshold:
         signal = s.update_candle(price, volume, ts_ns)
         assert signal is not None
         assert signal.side == "buy"
+        assert s.get_last_decline_reason() is None
 
     def test_above_threshold_sell_signal(self):
         s = _make_strategy()
