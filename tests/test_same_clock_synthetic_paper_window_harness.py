@@ -72,11 +72,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.commander import Commander
+from app.execution.paper_broker import PaperMarketContext, PriceLevel
 from app.main_loop import MainLoop
 from app.models import OrderFill, OrderRequest, StrategySignal
 from app.models.enums import OrderSide, OrderType, SleeveType
 from app.models.market_data import Candle, OrderBookSnapshot
 from app.execution.order_router import OrderRouter
+from app.risk.exposure_manager import ExposureManager
+from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
+from app.state.state_store import StateStore
 from app.strategies.strategy_vote_adapters import adapt_sector_rotation_to_vote
 from app.symbol_runtime import SymbolRuntime
 from app.utils.time_utils import (
@@ -282,6 +286,51 @@ def _strategy_signal_to_order_request(
         exchange_ts_ns=signal.exchange_ts_ns,
         receive_ts_ns=receive_ts_ns,
         metadata={"harness": "same_clock_synthetic_paper_window"},
+    )
+
+
+def _strategy_signal_to_limit_order_request(
+    signal: StrategySignal,
+    *,
+    receive_ts_ns: int,
+    limit_price: Decimal,
+) -> OrderRequest:
+    """
+    Build a lawful LIMIT OrderRequest from the captured StrategySignal.
+
+    This mirrors the existing same-clock harness adapter, but keeps the
+    reservation lifecycle proof on the only currently supported active
+    reservation path: paper limit ACK/open with a source-proven price basis.
+    """
+    side_map = {"buy": OrderSide.BUY, "sell": OrderSide.SELL}
+    if signal.side not in side_map:
+        raise AssertionError(
+            f"harness only routes actionable signals; got side={signal.side!r}"
+        )
+    sleeve_map = {
+        "sector_rotation": SleeveType.SECTOR_ROTATION,
+        "shadow_front": SleeveType.SHADOW_FRONT,
+    }
+    if signal.strategy not in sleeve_map:
+        raise AssertionError(
+            f"harness only routes registered sleeves; got strategy={signal.strategy!r}"
+        )
+    decision_uuid = None
+    if isinstance(signal.metadata, dict):
+        decision_uuid = signal.metadata.get("decision_uuid")
+    return OrderRequest(
+        id=f"{signal.strategy}_{signal.symbol}_{signal.exchange_ts_ns}_limit",
+        symbol=signal.symbol,
+        side=side_map[signal.side],
+        quantity=Decimal(str(signal.quantity)),
+        order_type=OrderType.LIMIT,
+        limit_price=limit_price,
+        strategy=sleeve_map[signal.strategy],
+        confidence=signal.confidence,
+        decision_uuid=decision_uuid,
+        exchange_ts_ns=signal.exchange_ts_ns,
+        receive_ts_ns=receive_ts_ns,
+        metadata={"harness": "same_clock_limit_reservation_lifecycle"},
     )
 
 
@@ -524,6 +573,183 @@ class TestSameClockRealSpinePaperFill:
             fill_side = fill.side.value if hasattr(fill.side, "value") else fill.side
             assert fill_side == OrderSide.SELL.value
             assert fill.quantity == Decimal("0.25")
+
+    def test_same_clock_limit_order_exercises_reservation_ack_fill_release(
+        self, tmp_path
+    ):
+        """
+        Reservation lifecycle proof variant.
+
+        The dispatch candidate is still captured at the same submit_signal
+        seam, but the routed order is a LIMIT order with a source-proven price
+        basis. Real OrderRouter/PaperBroker execution reports then drive the
+        real ReservationLifecycleCoordinator, ExposureManager, and StateStore:
+        ACK/open -> partial fill progress -> full-fill release tombstone.
+        """
+        with ReplayTimeContext(T0_NS):
+            signal = _build_strategy_signal(T0_NS, side="buy", quantity=0.5)
+            vote = _build_vote_via_real_adapter(signal, T0_NS)
+
+            runtime = _build_runtime("ETH/USD")
+            runtime.update_candle(_build_candle(T0_NS, close=2500.0))
+            runtime.update_order_book(_build_book(T0_NS, mid=2500.0))
+            runtime.record_observed_signal("sector_rotation", signal)
+            runtime.record_observed_vote("sector_rotation", vote)
+
+            captured: List[dict] = []
+            loop = _build_test_loop(broker_mode="paper")
+            loop.execution_engine.submit_signal = MagicMock(
+                side_effect=lambda signal, current_price, is_attack:
+                    captured.append(
+                        {
+                            "signal": signal,
+                            "current_price": current_price,
+                            "is_attack": is_attack,
+                        }
+                    ) or True
+            )
+
+            dispatch = _bind(loop, "_dispatch_fusion")
+            dispatch(
+                "ETH/USD",
+                runtime,
+                fusion=_build_fusion_decision(T0_NS),
+                exchange_ts_ns=T0_NS,
+            )
+
+            assert loop.execution_engine.submit_signal.call_count == 1
+            captured_signal = captured[0]["signal"]
+            assert captured[0]["is_attack"] is False
+
+            state_store = StateStore(str(tmp_path / "same-clock-reservations.db"))
+            exposure_manager = ExposureManager(initial_equity=Decimal("20000"))
+            coordinator = ReservationLifecycleCoordinator(
+                exposure_manager=exposure_manager,
+                state_store=state_store,
+            )
+            router = OrderRouter(
+                paper_mode=True,
+                state_store=state_store,
+                reservation_lifecycle_coordinator=coordinator,
+                reservation_lifecycle_enabled=True,
+            )
+            assert router.paper_mode is True
+            assert router._reservation_lifecycle_enabled is True
+            assert router._reservation_lifecycle_paper_enabled() is True
+
+            order = _strategy_signal_to_limit_order_request(
+                captured_signal,
+                receive_ts_ns=T0_NS,
+                limit_price=Decimal("2501.00"),
+            )
+            assert order.order_type == OrderType.LIMIT
+            assert order.limit_price == Decimal("2501.00")
+            assert order.decision_uuid == "same-clock-harness-uuid"
+
+            assert router.submit_order(order) is None
+            ack_result = router._reservation_lifecycle_ack_open_results[-1]
+            assert ack_result["applied"] is True
+            assert ack_result["broker_command_performed"] is False
+            assert ack_result["telemetry_authority_used"] is False
+
+            ledger_after_ack = state_store.get_reservation_ledger(order.id)
+            assert ledger_after_ack is not None
+            assert ledger_after_ack["is_active"] is True
+            assert ledger_after_ack["is_terminal"] is False
+            assert ledger_after_ack["order_type"] == "limit"
+            assert Decimal(ledger_after_ack["price_basis"]) == Decimal("2501.00")
+            assert len(state_store.list_reservation_ledger(active_only=True)) == 1
+
+            duplicate_ack = router._record_reservation_ack_open(
+                order,
+                ack_source="same_clock_harness.duplicate_ack",
+                source_event_id="same-clock-duplicate-ack",
+            )
+            assert duplicate_ack["idempotent"] is True
+            assert len(state_store.list_reservation_ledger(active_only=True)) == 1
+
+            paper_order = router._paper_broker.open_orders[order.id]
+            first_ts_ns = paper_order.eligible_at_ns + 2
+            first_ctx = PaperMarketContext(
+                symbol=order.symbol,
+                timestamp_ns=first_ts_ns,
+                mid_price=Decimal("2500.50"),
+                best_bid=Decimal("2500.00"),
+                best_ask=Decimal("2500.50"),
+                ask_levels=(
+                    PriceLevel(price=Decimal("2500.50"), quantity=Decimal("0.25")),
+                ),
+            )
+            first_reports = router._paper_broker.process_matching_detailed(
+                current_ts_ns=first_ts_ns,
+                market_by_symbol={order.symbol: first_ctx},
+            )
+            assert any(report.status.value == "PARTIAL_FILL" for report in first_reports)
+            router._sync_paper_reports()
+
+            partial_result = router._reservation_lifecycle_partial_fill_results[-1]
+            assert partial_result["applied"] is True
+            assert partial_result["broker_command_performed"] is False
+            assert partial_result["telemetry_authority_used"] is False
+            fill_progress = state_store.list_reservation_fill_progress(order.id)
+            assert len(fill_progress) == 1
+            assert fill_progress[0]["cumulative_filled_qty"] == "0.25"
+            ledger_after_partial = state_store.get_reservation_ledger(order.id)
+            assert ledger_after_partial["filled_qty"] == "0.25"
+            assert ledger_after_partial["is_active"] is True
+
+            paper_order = router._paper_broker.open_orders[order.id]
+            second_ts_ns = paper_order.eligible_at_ns + 4
+            second_ctx = PaperMarketContext(
+                symbol=order.symbol,
+                timestamp_ns=second_ts_ns,
+                mid_price=Decimal("2500.50"),
+                best_bid=Decimal("2500.00"),
+                best_ask=Decimal("2500.50"),
+                ask_levels=(
+                    PriceLevel(price=Decimal("2500.50"), quantity=Decimal("0.25")),
+                ),
+            )
+            second_reports = router._paper_broker.process_matching_detailed(
+                current_ts_ns=second_ts_ns,
+                market_by_symbol={order.symbol: second_ctx},
+            )
+            assert any(report.status.value == "FULLY_FILLED" for report in second_reports)
+            router._sync_paper_reports()
+
+            full_result = router._reservation_lifecycle_full_fill_results[-1]
+            assert full_result["applied"] is True
+            assert full_result["broker_command_performed"] is False
+            assert full_result["telemetry_authority_used"] is False
+            assert exposure_manager.reservations_for() == []
+
+            tombstone = state_store.get_reservation_release_tombstone(
+                reservation_id=order.id
+            )
+            assert tombstone is not None
+            assert tombstone["terminal_status"] == "filled"
+            assert tombstone["terminal_source"] == "paper_broker.execution_report"
+            assert tombstone["release_applied"] is True
+            assert len(state_store.list_reservation_fill_progress(order.id)) == 1
+
+            duplicate_release = router._record_reservation_full_fill(
+                order,
+                release_idempotency_key=tombstone["release_idempotency_key"],
+                cumulative_filled_qty=order.quantity,
+                fill_delta_qty=Decimal("0.25"),
+                status_source="paper_broker.execution_report",
+                terminal_source="paper_broker.execution_report",
+                source_event_id=tombstone["source_event_id"],
+            )
+            assert duplicate_release["idempotent"] is True
+            assert state_store.get_reservation_release_tombstone(
+                reservation_id=order.id
+            )["release_idempotency_key"] == tombstone["release_idempotency_key"]
+            assert len(state_store.list_reservation_fill_progress(order.id)) == 1
+
+            assert router._reservation_lifecycle_terminal_non_fill_results == []
+            assert router.get_terminal_mapping_proofs() == []
+            assert OrderRouter(paper_mode=True)._reservation_lifecycle_enabled is False
 
 
 # =============================================================================
