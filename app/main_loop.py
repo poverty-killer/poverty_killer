@@ -419,6 +419,37 @@ class MainLoop:
             self._current_volatility = runtime.current_volatility
             self._primary_runtime = runtime
 
+    def _update_physical_freshness(self, symbol: str, exchange_ts_ns: int) -> None:
+        """
+        Refresh Fusion's critical physical signal from an admitted market-data event.
+
+        SignalFusion intentionally hard-vetoes stale physical evidence. The
+        timestamp supplied here must therefore match the market event that is
+        about to drive Fusion, not an unrelated wall-clock fallback.
+        """
+        receive_ns = time.time_ns()
+        latency_ms = max(0.0, (receive_ns - exchange_ts_ns) / 1_000_000)
+        self.physical_validator.record_latency(
+            symbol=symbol,
+            exchange=self.exchange,
+            latency_ms=latency_ms,
+            order_size=0.0,
+            price_impact_bps=0.0,
+            timestamp_ns=exchange_ts_ns,
+        )
+        phys_dict = self.physical_validator.to_fusion_dict(self.exchange)
+        self.signal_fusion.update_physical(phys_dict, exchange_ts_ns)
+
+    def _get_dispatch_regime(self, runtime: SymbolRuntime) -> RegimeType:
+        """Return the symbol-owned regime when available, else legacy global."""
+        detector = getattr(runtime, "regime_detector", None)
+        get_current_regime = getattr(detector, "get_current_regime", None)
+        if callable(get_current_regime):
+            regime = get_current_regime()
+            if isinstance(regime, RegimeType):
+                return regime
+        return self._current_regime
+
     # =========================================================================
     # LIFECYCLE
     # =========================================================================
@@ -622,18 +653,8 @@ class MainLoop:
             # Update sentiment proxy with regime multiplier
             runtime.update_regime_multiplier(regime_tuple[0])
 
-        # Physical validator uses per-symbol data
-        latency_ms = (receive_ns - exchange_ts_ns) / 1_000_000
-        self.physical_validator.record_latency(
-            symbol=symbol,
-            exchange=self.exchange,
-            latency_ms=max(0.0, latency_ms),
-            order_size=0.0,
-            price_impact_bps=0.0,
-            timestamp_ns=exchange_ts_ns,
-        )
-        phys_dict = self.physical_validator.to_fusion_dict(self.exchange)
-        self.signal_fusion.update_physical(phys_dict, exchange_ts_ns)
+        # Physical validator uses per-symbol admitted market-data events.
+        self._update_physical_freshness(symbol, exchange_ts_ns)
 
         # Update sentiment engine with current proxy value
         runtime.update_sentiment_engine(exchange_ts_ns)
@@ -808,6 +829,13 @@ class MainLoop:
                 )
                 self._shans_gate_last_log_ts[symbol] = _gate_now
         else:
+            # Refresh critical physical evidence on the admitted candle clock
+            # before Fusion evaluates physical freshness against this same
+            # dispatch timestamp. This preserves hard stale-physical vetoes
+            # while preventing active admitted candles from comparing against
+            # an older order-book event timestamp.
+            self._update_physical_freshness(symbol, exchange_ts_ns)
+
             # Fuse signals (global — LIMIT: single cache, called per-symbol)
             fusion = self.signal_fusion.fuse(exchange_ts_ns)
             self._last_fusion = fusion
@@ -1293,7 +1321,7 @@ class MainLoop:
 
         capital_usd = Decimal(str(self._last_equity))
         kelly_multiplier = Decimal(str(self.commander.get_kelly_multiplier()))
-        regime = self._current_regime
+        regime = self._get_dispatch_regime(runtime)
         volatility = Decimal(str(runtime.current_volatility))
 
         if not runtime.shadow_front_strategy:
