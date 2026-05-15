@@ -450,6 +450,150 @@ class MainLoop:
                 return regime
         return self._current_regime
 
+    def _classify_shadow_front_decline(
+        self,
+        strategy: object,
+        exchange_ts_ns: int,
+    ) -> Tuple[str, Dict[str, object]]:
+        """
+        Explain a ShadowFront no-signal result from existing strategy state.
+
+        This mirrors ShadowFront's entry gate order for diagnostics only. It
+        does not call mutating update methods, mutate state, or relax any
+        threshold.
+        """
+        if strategy is None:
+            return "shadowfront_declined_strategy_missing", {}
+
+        def _float_attr(name: str, default: float = 0.0) -> float:
+            try:
+                return float(getattr(strategy, name, default))
+            except (TypeError, ValueError):
+                return default
+
+        cooldown_until = getattr(strategy, "_cooldown_until_ns", 0)
+        if not isinstance(cooldown_until, int):
+            cooldown_until = 0
+        if exchange_ts_ns < cooldown_until:
+            return (
+                "shadowfront_declined_cooldown",
+                {"cooldown_until_ns": cooldown_until},
+            )
+
+        is_eligible = getattr(strategy, "_is_eligible", True)
+        if not isinstance(is_eligible, bool):
+            is_eligible = True
+        if not is_eligible:
+            return "shadowfront_declined_not_eligible", {}
+
+        toxicity_high = getattr(strategy, "_toxicity_high", False)
+        if not isinstance(toxicity_high, bool):
+            toxicity_high = False
+        if toxicity_high:
+            return "shadowfront_declined_toxicity_high", {}
+
+        whale_score = _float_attr("_last_whale_score")
+        whale_threshold = _float_attr("whale_threshold")
+        whale_accumulating = getattr(strategy, "_last_whale_accumulating", False)
+        if not isinstance(whale_accumulating, bool):
+            whale_accumulating = False
+        whale_condition = whale_score >= whale_threshold or whale_accumulating
+        if not whale_condition:
+            return (
+                "shadowfront_declined_whale_condition",
+                {
+                    "whale_score": whale_score,
+                    "whale_threshold": whale_threshold,
+                    "whale_accumulating": whale_accumulating,
+                },
+            )
+
+        sentiment_velocity = _float_attr("_last_sentiment_velocity")
+        sentiment_threshold = _float_attr("sentiment_threshold")
+        if sentiment_velocity < sentiment_threshold:
+            return (
+                "shadowfront_declined_sentiment_condition",
+                {
+                    "sentiment_velocity": sentiment_velocity,
+                    "sentiment_threshold": sentiment_threshold,
+                },
+            )
+
+        calculate_confidence = getattr(strategy, "_calculate_base_confidence", None)
+        confidence = None
+        if callable(calculate_confidence):
+            try:
+                confidence = float(calculate_confidence())
+            except Exception:
+                confidence = None
+        min_confidence = _float_attr("min_confidence")
+        if confidence is not None and confidence < min_confidence:
+            return (
+                "shadowfront_declined_confidence",
+                {"confidence": confidence, "min_confidence": min_confidence},
+            )
+
+        return "shadowfront_declined_entry_conditions", {}
+
+    def _classify_sector_rotation_observed_pair(
+        self,
+        runtime: SymbolRuntime,
+        exchange_ts_ns: int,
+    ) -> Tuple[str, Dict[str, object]]:
+        """Classify SectorRotation observed-pair readiness without mutation."""
+        observed_signal = runtime.last_sector_rotation_observed_signal
+        observed_vote = runtime.last_sector_rotation_observed_vote
+        if observed_signal is None or observed_vote is None:
+            return (
+                "observed_pair_missing",
+                {
+                    "observed_signal_present": observed_signal is not None,
+                    "observed_vote_present": observed_vote is not None,
+                },
+            )
+
+        vote_ts = getattr(observed_vote, "timestamp_ns", None)
+        signal_ts = getattr(observed_signal, "exchange_ts_ns", None)
+        fresh = (vote_ts == exchange_ts_ns) or (signal_ts == exchange_ts_ns)
+        if not fresh:
+            return (
+                "observed_pair_stale",
+                {"vote_ts": vote_ts, "signal_ts": signal_ts},
+            )
+
+        return "observed_pair_fresh", {"vote_ts": vote_ts, "signal_ts": signal_ts}
+
+    def _clear_stale_sector_rotation_observed_pair(
+        self,
+        runtime: SymbolRuntime,
+        exchange_ts_ns: int,
+    ) -> bool:
+        """
+        Drop a provably older SectorRotation observed pair after strict rejection.
+
+        Same-candle doctrine means an older pair can never become valid for a
+        later candle. Future/out-of-order pairs are left untouched.
+        """
+        observed_signal = runtime.last_sector_rotation_observed_signal
+        observed_vote = runtime.last_sector_rotation_observed_vote
+        if observed_signal is None or observed_vote is None:
+            return False
+
+        timestamps = [
+            ts
+            for ts in (
+                getattr(observed_vote, "timestamp_ns", None),
+                getattr(observed_signal, "exchange_ts_ns", None),
+            )
+            if isinstance(ts, int)
+        ]
+        if not timestamps or max(timestamps) >= exchange_ts_ns:
+            return False
+
+        runtime.last_sector_rotation_observed_signal = None
+        runtime.last_sector_rotation_observed_vote = None
+        return True
+
     # =========================================================================
     # LIFECYCLE
     # =========================================================================
@@ -1068,6 +1212,9 @@ class MainLoop:
         signal = None
         strategy_vote = None
         winning_sleeve = None
+        terminal_reason_code = None
+        terminal_reason_fields: Dict[str, object] = {}
+        terminal_reason_logged = False
 
         for sleeve in candidates:
             logger.info("[DISPATCH] %s: evaluating sleeve=%s", symbol, repr(sleeve))
@@ -1081,6 +1228,13 @@ class MainLoop:
                     logger.info("[DISPATCH] %s: update_from_fusion(%s) called", symbol, is_eligible)
                 logger.info("[DISPATCH] %s: calling _generate_signal_and_vote()", symbol)
                 sig, vote = self._generate_signal_and_vote(symbol, runtime, exchange_ts_ns)
+                if sig is None:
+                    reason_code, reason_fields = self._classify_shadow_front_decline(
+                        runtime.shadow_front_strategy,
+                        exchange_ts_ns,
+                    )
+                    terminal_reason_code = reason_code
+                    terminal_reason_fields = dict(reason_fields)
 
             elif sleeve == SleeveType.GAMMA_FRONT:
                 logger.info("[DISPATCH] %s: GAMMA_FRONT branch entered", symbol)
@@ -1094,9 +1248,17 @@ class MainLoop:
                 # freshness; SectorRotation observation runs on candle ingress
                 # so this equality holds when a fresh signal exists.
                 logger.info("[DISPATCH] %s: SECTOR_ROTATION branch entered (paper-only)", symbol)
+                reason_code, reason_fields = self._classify_sector_rotation_observed_pair(
+                    runtime,
+                    exchange_ts_ns,
+                )
                 sig, vote = self._consume_observed_pair_sector_rotation(
                     symbol, runtime, exchange_ts_ns,
                 )
+                if sig is None and reason_code != "observed_pair_fresh":
+                    terminal_reason_code = reason_code
+                    terminal_reason_fields = dict(reason_fields)
+                    terminal_reason_logged = True
 
             elif sleeve == SleeveType.FLV:
                 # STAGE 2-D3 (Option C): Paper-only active vote admission for
@@ -1129,15 +1291,34 @@ class MainLoop:
                 "[DISPATCH] %s: all_sleeves_declined candidates=%s",
                 symbol, [repr(s) for s in candidates],
             )
-            _log_dispatch_diag(
-                "strategy_signal_missing",
-                symbol=symbol,
-                exchange_ts_ns=exchange_ts_ns,
-                preferred_sleeve=repr(preferred),
-                eligible_sleeves=eligible_repr,
-                candidates=[repr(s) for s in candidates],
-                submit_signal_called=False,
-            )
+            if terminal_reason_code is None:
+                _log_dispatch_diag(
+                    "strategy_signal_missing",
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    preferred_sleeve=repr(preferred),
+                    eligible_sleeves=eligible_repr,
+                    candidates=[repr(s) for s in candidates],
+                    eligibility_only=True,
+                    executable_signal_present=False,
+                    submit_signal_called=False,
+                )
+            elif terminal_reason_logged:
+                pass
+            else:
+                _log_dispatch_diag(
+                    terminal_reason_code,
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    preferred_sleeve=repr(preferred),
+                    eligible_sleeves=eligible_repr,
+                    candidates=[repr(s) for s in candidates],
+                    eligibility_only=True,
+                    executable_signal_present=False,
+                    terminal_dispatch_reason=True,
+                    submit_signal_called=False,
+                    **terminal_reason_fields,
+                )
             return
         if strategy_vote is None:
             logger.info("[DISPATCH] %s: strategy_vote=None signal_present sleeve=%s", symbol, repr(winning_sleeve))
@@ -1527,10 +1708,14 @@ class MainLoop:
         fresh = (vote_ts == exchange_ts_ns) or (signal_ts == exchange_ts_ns)
 
         if not fresh:
+            stale_cleared = self._clear_stale_sector_rotation_observed_pair(
+                runtime,
+                exchange_ts_ns,
+            )
             logger.info(
                 "[PAPER_DISPATCH_SECTOR_ROTATION] %s: blocked — freshness fail "
-                "(vote_ts=%s signal_ts=%s exchange_ts_ns=%s)",
-                symbol, vote_ts, signal_ts, exchange_ts_ns,
+                "(vote_ts=%s signal_ts=%s exchange_ts_ns=%s stale_cleared=%s)",
+                symbol, vote_ts, signal_ts, exchange_ts_ns, stale_cleared,
             )
             _log_dispatch_diag(
                 "observed_pair_stale",
@@ -1539,6 +1724,7 @@ class MainLoop:
                 sleeve=repr(SleeveType.SECTOR_ROTATION),
                 vote_ts=vote_ts,
                 signal_ts=signal_ts,
+                stale_cleared=stale_cleared,
                 submit_signal_called=False,
             )
             return None, None

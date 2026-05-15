@@ -128,6 +128,15 @@ def _loop(
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
     )
+    loop._classify_shadow_front_decline = (
+        MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
+    )
+    loop._classify_sector_rotation_observed_pair = (
+        MainLoop._classify_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._clear_stale_sector_rotation_observed_pair = (
+        MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
     return loop
 
 
@@ -168,19 +177,25 @@ def test_preferred_sleeve_missing_diag_does_not_submit(caplog):
 
 def test_observed_pair_missing_diag_does_not_submit(caplog):
     caplog.set_level(logging.INFO, logger=LOGGER_NAME)
-    loop = _loop()
+    loop = _loop(
+        preferred=SleeveType.SECTOR_ROTATION,
+        eligible=[SleeveType.SECTOR_ROTATION],
+    )
 
     _dispatch(loop, _runtime())
 
     loop.execution_engine.submit_signal.assert_not_called()
     loop.decision_compiler.compile.assert_not_called()
     assert "reason_code=observed_pair_missing" in caplog.text
-    assert "reason_code=strategy_signal_missing" in caplog.text
+    assert "reason_code=strategy_signal_missing" not in caplog.text
 
 
 def test_observed_pair_stale_diag_does_not_submit(caplog):
     caplog.set_level(logging.INFO, logger=LOGGER_NAME)
-    loop = _loop()
+    loop = _loop(
+        preferred=SleeveType.SECTOR_ROTATION,
+        eligible=[SleeveType.SECTOR_ROTATION],
+    )
     runtime = _runtime(
         sector_signal=_signal(exchange_ts_ns=T0_NS - 60_000_000_000),
         sector_vote=_vote(timestamp_ns=T0_NS - 60_000_000_000),
@@ -191,7 +206,60 @@ def test_observed_pair_stale_diag_does_not_submit(caplog):
     loop.execution_engine.submit_signal.assert_not_called()
     loop.decision_compiler.compile.assert_not_called()
     assert "reason_code=observed_pair_stale" in caplog.text
-    assert "reason_code=strategy_signal_missing" in caplog.text
+    assert "stale_cleared': True" in caplog.text
+    assert runtime.last_sector_rotation_observed_signal is None
+    assert runtime.last_sector_rotation_observed_vote is None
+    assert "reason_code=strategy_signal_missing" not in caplog.text
+
+
+def test_shadowfront_whale_decline_diag_does_not_submit(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop(
+        preferred=SleeveType.SHADOW_FRONT,
+        eligible=[SleeveType.SHADOW_FRONT],
+    )
+    runtime = _runtime()
+    runtime.shadow_front_strategy._cooldown_until_ns = 0
+    runtime.shadow_front_strategy._is_eligible = True
+    runtime.shadow_front_strategy._toxicity_high = False
+    runtime.shadow_front_strategy._last_whale_score = 0.10
+    runtime.shadow_front_strategy.whale_threshold = 0.20
+    runtime.shadow_front_strategy._last_whale_accumulating = False
+    runtime.shadow_front_strategy._last_sentiment_velocity = 1.0
+    runtime.shadow_front_strategy.sentiment_threshold = 0.1
+
+    _dispatch(loop, runtime)
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    loop.decision_compiler.compile.assert_not_called()
+    assert "reason_code=shadowfront_declined_whale_condition" in caplog.text
+    assert "eligibility_only': True" in caplog.text
+    assert "reason_code=strategy_signal_missing" not in caplog.text
+
+
+def test_shadowfront_sentiment_decline_diag_does_not_submit(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop(
+        preferred=SleeveType.SHADOW_FRONT,
+        eligible=[SleeveType.SHADOW_FRONT],
+    )
+    runtime = _runtime()
+    runtime.shadow_front_strategy._cooldown_until_ns = 0
+    runtime.shadow_front_strategy._is_eligible = True
+    runtime.shadow_front_strategy._toxicity_high = False
+    runtime.shadow_front_strategy._last_whale_score = 0.30
+    runtime.shadow_front_strategy.whale_threshold = 0.20
+    runtime.shadow_front_strategy._last_whale_accumulating = False
+    runtime.shadow_front_strategy._last_sentiment_velocity = 0.05
+    runtime.shadow_front_strategy.sentiment_threshold = 0.10
+
+    _dispatch(loop, runtime)
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    loop.decision_compiler.compile.assert_not_called()
+    assert "reason_code=shadowfront_declined_sentiment_condition" in caplog.text
+    assert "executable_signal_present': False" in caplog.text
+    assert "reason_code=strategy_signal_missing" not in caplog.text
 
 
 def test_submit_signal_called_diag_preserves_success_behavior(caplog):

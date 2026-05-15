@@ -242,6 +242,15 @@ def _build_test_loop(*, broker_mode: str = "paper") -> types.SimpleNamespace:
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
     )
+    loop._classify_shadow_front_decline = MainLoop._classify_shadow_front_decline.__get__(
+        loop, MainLoop
+    )
+    loop._classify_sector_rotation_observed_pair = (
+        MainLoop._classify_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._clear_stale_sector_rotation_observed_pair = (
+        MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
     return loop
 
 
