@@ -246,8 +246,13 @@ class SectorRotationStrategy:
         if volume_zscore < self._inflow_threshold:
             self._set_decline_reason(
                 "volume_zscore_below_threshold",
-                volume_zscore=round(volume_zscore, 6),
-                threshold=self._inflow_threshold,
+                volume=round(float(volume), 6),
+                volume_mean=round(float(self._volume_stats.mean()), 6),
+                volume_std=round(float(self._volume_stats.std()), 6),
+                volume_zscore=round(float(volume_zscore), 6),
+                threshold=round(float(self._inflow_threshold), 6),
+                candle_count=self._candle_count,
+                min_candles=self._effective_min_candles,
             )
             return None
 

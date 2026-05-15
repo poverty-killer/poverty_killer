@@ -185,6 +185,14 @@ class TestEntryThreshold:
         result = s.update_candle(101.0, 100.0, 10_000_000_000)
         assert result is None
         assert s.get_last_decline_reason() == "volume_zscore_below_threshold"
+        detail = s.get_last_decline_detail()
+        assert detail["volume"] == 100.0
+        assert detail["volume_mean"] == 100.0
+        assert detail["volume_std"] == 0.0
+        assert detail["volume_zscore"] == 0.0
+        assert detail["threshold"] == 1.5
+        assert detail["candle_count"] == 10
+        assert detail["min_candles"] == 10
 
     def test_above_threshold_buy_signal(self):
         s = _make_strategy()
