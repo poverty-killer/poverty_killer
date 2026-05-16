@@ -17,24 +17,32 @@ No metadata dictionaries are hand-constructed.
 """
 
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from uuid import uuid4
 
 from app.models.contracts import StrategyVote
-from app.models.enums import SignalType, StrategyID
+from app.models.enums import SignalDirection, SignalType, StrategyID
 from app.models.signals import StrategySignal
 from app.strategies.council_metadata import (
     BIAS_LONG,
+    BIAS_NEUTRAL,
     BIAS_SHORT,
     BIAS_UNKNOWN,
     FEED_MISSING,
+    FEED_REAL,
     MODULE_LIQUIDITY_VOID,
+    MODULE_MOVING_FLOOR,
     MODULE_SECTOR_ROTATION,
     ROLE_ENTRY,
     ROLE_EXIT,
+    ROLE_PROTECTIVE_EXIT,
+    SOURCE_FLOOR_SIGNAL_RECOMMENDATION,
     SOURCE_STRATEGY_SIGNAL,
     build_council_metadata,
 )
+
+if TYPE_CHECKING:
+    from app.strategies.moving_floor import FloorSignalRecommendation
 
 
 # ── Preserved metadata key sets ───────────────────────────────────────────────
@@ -123,7 +131,83 @@ def _is_exit_signal(signal: StrategySignal) -> bool:
     return ("exit_price" in meta) or ("pnl_pct" in meta)
 
 
+def _floor_direction_to_signal_type(direction: SignalDirection) -> SignalType:
+    """
+    Map MovingFloor recommendation direction to StrategyVote signal syntax.
+
+    SHORT means protective sell/exit in MovingFloor's own contract, not fresh
+    short-entry authority. That semantic guard lives in council metadata.
+    """
+    if direction == SignalDirection.SHORT:
+        return SignalType.SELL
+    if direction == SignalDirection.LONG:
+        return SignalType.BUY
+    return SignalType.FLAT
+
+
+def _floor_direction_to_bias(direction: SignalDirection) -> str:
+    if direction == SignalDirection.SHORT:
+        return BIAS_SHORT
+    if direction == SignalDirection.LONG:
+        return BIAS_LONG
+    if direction == SignalDirection.NEUTRAL:
+        return BIAS_NEUTRAL
+    return BIAS_UNKNOWN
+
+
 # ── Adapters ──────────────────────────────────────────────────────────────────
+
+def adapt_moving_floor_to_vote(
+    recommendation: "FloorSignalRecommendation",
+    exchange_ts_ns: int,
+    decision_uuid: Optional[str] = None,
+) -> StrategyVote:
+    """
+    Convert a MovingFloor protective recommendation into a StrategyVote.
+
+    Pure transform. No runtime activation, no registry, no dispatch, no
+    routing, no execution, and no state mutation. The returned vote is
+    protective metadata only: it requires an existing position and is not a
+    fresh-entry or execution candidate.
+    """
+    decision_uuid = decision_uuid or str(uuid4())
+    confidence = Decimal(str(recommendation.confidence))
+    rationale = tuple(getattr(recommendation, "rationale", ()) or ())
+    reason = "|".join(str(item) for item in rationale) or "moving_floor_protective_recommendation"
+
+    metadata = build_council_metadata(
+        source_module=MODULE_MOVING_FLOOR,
+        source_strategy_id=StrategyID.MOVING_FLOOR.value,
+        source_output_type=SOURCE_FLOOR_SIGNAL_RECOMMENDATION,
+        adapter_name="adapt_moving_floor_to_vote",
+        contribution_role=ROLE_PROTECTIVE_EXIT,
+        fresh_entry_authorized=False,
+        protective_only=True,
+        requires_existing_position=True,
+        execution_candidate=False,
+        directional_bias=_floor_direction_to_bias(recommendation.signal_direction),
+        feed_status=FEED_REAL,
+        raw_confidence=float(confidence),
+        normalized_confidence=float(confidence),
+        reason=reason,
+        symbol=recommendation.symbol,
+        authority_tier=getattr(recommendation.authority_tier, "value", recommendation.authority_tier),
+        event_type=getattr(recommendation.event_type, "value", recommendation.event_type),
+        worst_case_fill_price=str(recommendation.worst_case_fill_price),
+        protective_semantics="exit_existing_position_only",
+    )
+
+    return StrategyVote(
+        decision_uuid=decision_uuid,
+        strategy_id=StrategyID.MOVING_FLOOR,
+        timestamp_ns=exchange_ts_ns,
+        signal=_floor_direction_to_signal_type(recommendation.signal_direction),
+        confidence=confidence,
+        expected_move_bps=Decimal("0"),
+        expected_duration_ns=1,
+        risk_appetite=Decimal("0"),
+        metadata=metadata,
+    )
 
 def adapt_liquidity_void_to_vote(
     signal: StrategySignal,
@@ -235,5 +319,6 @@ def adapt_sector_rotation_to_vote(
 
 __all__ = [
     "adapt_liquidity_void_to_vote",
+    "adapt_moving_floor_to_vote",
     "adapt_sector_rotation_to_vote",
 ]

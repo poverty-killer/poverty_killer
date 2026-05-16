@@ -289,6 +289,11 @@ class OrderRouter:
                 id_mapping_source=id_mapping_source,
             ),
         )
+        strategy_value = self._order_value(order.strategy)
+        metadata["strategy"] = strategy_value
+        metadata["sleeve"] = strategy_value
+        metadata["paper_mode"] = bool(self.paper_mode)
+        metadata["requested_qty"] = str(order.quantity)
 
         fill_event = FillEvent(
             fill_event_id=f"fill_{order.id}_{fill.exchange_ts_ns}",

@@ -124,6 +124,10 @@ _REPLAY_METADATA_KEYS = (
     "exposure_reservation_mutated",
     "advisory_aggression_metadata_present",
     "advisory_aggression_snapshot_id",
+    "strategy",
+    "sleeve",
+    "paper_mode",
+    "requested_qty",
 )
 
 

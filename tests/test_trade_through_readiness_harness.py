@@ -286,6 +286,10 @@ def test_known_good_candidate_reaches_real_paper_fill_and_fill_telemetry(tmp_pat
     assert payload["venue_fill_id"] == fill.order_id
     assert int(payload["exchange_ts_ns"]) == fill.exchange_ts_ns
     assert int(fill_event["receive_ts_ns"]) == fill.receive_ts_ns
+    assert payload["strategy"] == "sector_rotation"
+    assert payload["sleeve"] == "sector_rotation"
+    assert payload["paper_mode"] is True
+    assert Decimal(payload["requested_qty"]) == Decimal("0.5")
 
     context = payload["order_lifecycle_replay_context"]
     assert context["client_order_id"] == fill.order_id
