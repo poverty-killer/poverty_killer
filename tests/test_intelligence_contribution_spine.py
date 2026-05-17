@@ -24,7 +24,8 @@ from app.brain.whale_zone_engine import WhalePresenceZone, WhaleZoneEngine
 from app.config import Config
 from app.models import Candle, OrderBookSnapshot, StrategySignal
 from app.models.enums import RegimeType, SleeveType
-from app.models.instrument_profile import InstrumentProfile
+from app.models.instrument_profile import AssetClass, InstrumentProfile, InstrumentType
+from app.portfolio.opportunity_ranking import OpportunityRanker
 from app.risk.cross_asset_risk_model import CrossAssetRiskCalculator
 from app.strategies.adaptive_dc import (
     AdaptiveDC,
@@ -321,8 +322,8 @@ def test_under_contributing_intelligence_modules_have_pure_harness_or_classifica
         venue_symbol="XBT/USD",
         display_symbol="BTC/USD",
         root_symbol="BTC",
-        asset_class=__import__("app.models.instrument_profile", fromlist=["AssetClass"]).AssetClass.CRYPTO,
-        instrument_type=__import__("app.models.instrument_profile", fromlist=["InstrumentType"]).InstrumentType.SPOT,
+        asset_class=AssetClass.CRYPTO,
+        instrument_type=InstrumentType.SPOT,
         venue="KRAKEN",
         primary_exchange="KRAKEN",
         currency="USD",
@@ -342,11 +343,25 @@ def test_under_contributing_intelligence_modules_have_pure_harness_or_classifica
     assert risk_report.timestamp_ns == T0_NS
     assert risk_report.total_gross_exposure_usd == Decimal("5000.0")
 
+    ranking_report = OpportunityRanker().rank(
+        candidates=[
+            ("BTC/USD", "sector_rotation", Decimal("40.0"), Decimal("0.80"), Decimal("3000")),
+        ],
+        instruments={"BTC/USD": profile},
+        existing_exposures={},
+        total_equity=Decimal("20000"),
+        available_capital=Decimal("10000"),
+        timestamp_ns=T0_NS,
+    )
+    assert ranking_report.total_ranked == 1
+    assert ranking_report.top_opportunity == "BTC/USD"
+    assert ranking_report.opportunities[0].skip is False
+
     ranker_source = Path("app/portfolio/opportunity_ranking.py").read_text()
     assert "non-default argument 'net_edge_after_all' follows default argument" not in ranker_source
     assert "submit_order" not in ranker_source
     assert "ExecutionEngine" not in ranker_source
-    assert "spread_bps = inst.constraints.max_spread_bps" in ranker_source
+    assert "spread_bps = instrument.constraints.max_spread_bps" in ranker_source
 
 
 def test_contributor_role_boundaries_remain_metadata_only_and_non_executing():

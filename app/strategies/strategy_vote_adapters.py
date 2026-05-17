@@ -30,18 +30,22 @@ from app.strategies.council_metadata import (
     BIAS_UNKNOWN,
     FEED_MISSING,
     FEED_REAL,
+    MODULE_ADAPTIVE_DC,
+    MODULE_GAMMA_FRONT,
     MODULE_LIQUIDITY_VOID,
     MODULE_MOVING_FLOOR,
     MODULE_SECTOR_ROTATION,
     ROLE_ENTRY,
     ROLE_EXIT,
     ROLE_PROTECTIVE_EXIT,
+    SOURCE_DC_SIGNAL_RECOMMENDATION,
     SOURCE_FLOOR_SIGNAL_RECOMMENDATION,
     SOURCE_STRATEGY_SIGNAL,
     build_council_metadata,
 )
 
 if TYPE_CHECKING:
+    from app.strategies.adaptive_dc import DCSignalRecommendation
     from app.strategies.moving_floor import FloorSignalRecommendation
 
 
@@ -77,6 +81,16 @@ _LIQUIDITY_VOID_PRESERVED_KEYS = (
     "pnl_usd",
     "hold_bars",
     "position_side",
+)
+
+_GAMMA_FRONT_PRESERVED_KEYS = (
+    "print_ratio",
+    "print_usd",
+    "print_size",
+    "print_venue",
+    "macro_pause_active",
+    "options_confirmed",
+    "quantity_semantics",
 )
 
 
@@ -263,6 +277,115 @@ def adapt_liquidity_void_to_vote(
     )
 
 
+def adapt_gamma_front_to_vote(
+    signal: StrategySignal,
+    exchange_ts_ns: int,
+    decision_uuid: Optional[str] = None,
+) -> StrategyVote:
+    """
+    Convert a GammaFront StrategySignal into a StrategyVote.
+
+    Pure transform only. GammaFront quantity remains its declared provisional
+    risk fraction metadata; this adapter does not translate it into physical
+    inventory, route orders, or mutate runtime state.
+    """
+    is_exit = _is_exit_signal(signal)
+    sig_type = _side_to_signal_type(signal.side)
+    bias = _side_to_bias(signal.side)
+    decision_uuid = decision_uuid or str(uuid4())
+    source_metadata = signal.metadata or {}
+
+    preserved_meta: Dict[str, Any] = {}
+    for key in _GAMMA_FRONT_PRESERVED_KEYS:
+        if key in source_metadata:
+            preserved_meta[key] = source_metadata[key]
+
+    metadata = build_council_metadata(
+        source_module=MODULE_GAMMA_FRONT,
+        source_strategy_id=StrategyID.GAMMA_FRONT.value,
+        source_output_type=SOURCE_STRATEGY_SIGNAL,
+        adapter_name="adapt_gamma_front_to_vote",
+        contribution_role=ROLE_EXIT if is_exit else ROLE_ENTRY,
+        fresh_entry_authorized=not is_exit,
+        protective_only=False,
+        requires_existing_position=is_exit,
+        execution_candidate=True,
+        directional_bias=bias,
+        feed_status=FEED_REAL,
+        raw_confidence=signal.confidence,
+        normalized_confidence=signal.confidence,
+        reason=signal.reason or "gamma_front_strategy_vote",
+        symbol=signal.symbol,
+        sizing_semantics="provisional_risk_fraction_not_physical_quantity",
+        **preserved_meta,
+    )
+
+    return StrategyVote(
+        decision_uuid=decision_uuid,
+        strategy_id=StrategyID.GAMMA_FRONT,
+        timestamp_ns=exchange_ts_ns,
+        signal=sig_type,
+        confidence=Decimal(str(signal.confidence)),
+        expected_move_bps=Decimal("200"),
+        expected_duration_ns=300_000_000_000,
+        risk_appetite=Decimal(str(signal.quantity)),
+        metadata=metadata,
+    )
+
+
+def adapt_adaptive_dc_to_vote(
+    recommendation: "DCSignalRecommendation",
+    exchange_ts_ns: int,
+    decision_uuid: Optional[str] = None,
+) -> StrategyVote:
+    """
+    Convert an AdaptiveDC recommendation into a StrategyVote.
+
+    Pure transform only. It marks the recommendation as a governed entry
+    candidate and does not bypass the governed decision, risk, or order
+    routing path.
+    """
+    decision_uuid = decision_uuid or str(uuid4())
+    confidence = Decimal(str(recommendation.confidence))
+    rationale = tuple(getattr(recommendation, "rationale", ()) or ())
+    reason = "|".join(str(item) for item in rationale) or "adaptive_dc_entry_candidate"
+
+    metadata = build_council_metadata(
+        source_module=MODULE_ADAPTIVE_DC,
+        source_strategy_id=StrategyID.ADAPTIVE_DC.value,
+        source_output_type=SOURCE_DC_SIGNAL_RECOMMENDATION,
+        adapter_name="adapt_adaptive_dc_to_vote",
+        contribution_role=ROLE_ENTRY,
+        fresh_entry_authorized=True,
+        protective_only=False,
+        requires_existing_position=False,
+        execution_candidate=True,
+        directional_bias=_floor_direction_to_bias(recommendation.signal_direction),
+        feed_status=FEED_REAL,
+        raw_confidence=float(confidence),
+        normalized_confidence=float(confidence),
+        reason=reason,
+        symbol=recommendation.symbol,
+        event_type=getattr(recommendation.event_type, "value", recommendation.event_type),
+        event_direction=getattr(recommendation.event_direction, "value", recommendation.event_direction),
+        theta=str(recommendation.theta),
+        authority_tier=getattr(recommendation.authority_tier, "value", recommendation.authority_tier),
+        recommendation_semantics="entry_candidate_only_governed_path_required",
+    )
+
+    return StrategyVote(
+        decision_uuid=decision_uuid,
+        strategy_id=StrategyID.ADAPTIVE_DC,
+        timestamp_ns=exchange_ts_ns,
+        signal=_floor_direction_to_signal_type(recommendation.signal_direction),
+        confidence=confidence,
+        expected_move_bps=Decimal("200"),
+        expected_duration_ns=300_000_000_000,
+        risk_appetite=confidence,
+        metadata=metadata,
+    )
+
+
 def adapt_sector_rotation_to_vote(
     signal: StrategySignal,
     exchange_ts_ns: int,
@@ -318,6 +441,8 @@ def adapt_sector_rotation_to_vote(
 
 
 __all__ = [
+    "adapt_adaptive_dc_to_vote",
+    "adapt_gamma_front_to_vote",
     "adapt_liquidity_void_to_vote",
     "adapt_moving_floor_to_vote",
     "adapt_sector_rotation_to_vote",
