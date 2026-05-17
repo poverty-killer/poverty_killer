@@ -160,6 +160,7 @@ class SymbolRuntime:
     # Internal state
     initialized: bool = False
     last_update_timestamp_ns: int = 0
+    recovery_status: str = "new"
     
     def __post_init__(self):
         self.initialized = False
@@ -169,6 +170,93 @@ class SymbolRuntime:
             self._last_sent_timestamp_ns = 0
         if not hasattr(self, '_sentiment_lock') or self._sentiment_lock is None:
             self._sentiment_lock = threading.Lock()
+
+    def export_recovery_state(self) -> Dict[str, Any]:
+        """
+        Export symbol-local runtime facts for restart recovery.
+
+        This snapshot intentionally excludes strategy engines, observed votes,
+        execution/router objects, and alpha claims. Missing engines after import
+        remain neutral/not-ready until normal runtime initialization rebuilds them.
+        """
+        return {
+            "schema_version": 1,
+            "authority": "symbol_runtime_recovery_fact",
+            "symbol": self.symbol,
+            "last_price": self.last_price,
+            "current_volatility": self.current_volatility,
+            "last_update_timestamp_ns": self.last_update_timestamp_ns,
+            "last_order_book": self.last_order_book.model_dump() if self.last_order_book else None,
+            "last_candle": self.last_candle.model_dump() if self.last_candle else None,
+            "engines_restored": False,
+            "observed_votes_restored": False,
+            "execution_authority": False,
+            "routing_authority": False,
+        }
+
+    @classmethod
+    def import_recovery_state(
+        cls,
+        state: Dict[str, Any],
+        *,
+        expected_symbol: Optional[str] = None,
+        current_ts_ns: Optional[int] = None,
+        max_state_age_ns: Optional[int] = None,
+    ) -> "SymbolRuntime":
+        """
+        Import symbol-local recovery facts.
+
+        Invalid, stale, or incomplete state fails closed by returning a neutral
+        runtime for the same symbol. Symbol mismatch is a hard error because it
+        would represent cross-symbol contamination.
+        """
+        if not isinstance(state, dict):
+            raise TypeError("runtime recovery state must be a dict")
+        if state.get("schema_version") != 1:
+            raise ValueError("unsupported SymbolRuntime recovery schema")
+        symbol = state.get("symbol")
+        if not symbol:
+            raise ValueError("missing SymbolRuntime recovery symbol")
+        if expected_symbol is not None and symbol != expected_symbol:
+            raise ValueError(f"runtime recovery symbol mismatch: {symbol} != {expected_symbol}")
+
+        runtime = cls(str(symbol))
+        runtime.recovery_status = "neutral_fail_closed"
+
+        last_update = int(state.get("last_update_timestamp_ns") or 0)
+        if current_ts_ns is not None and max_state_age_ns is not None:
+            if last_update <= 0 or current_ts_ns - last_update > max_state_age_ns:
+                runtime.recovery_status = "stale_fail_closed"
+                return runtime
+
+        order_book_payload = state.get("last_order_book")
+        if not order_book_payload:
+            runtime.recovery_status = "incomplete_fail_closed"
+            return runtime
+
+        try:
+            runtime.last_order_book = OrderBookSnapshot(**order_book_payload)
+            candle_payload = state.get("last_candle")
+            if candle_payload:
+                runtime.last_candle = Candle(**candle_payload)
+            runtime.last_price = float(state.get("last_price") or runtime.last_order_book.mid_price)
+            runtime.current_volatility = float(state.get("current_volatility", runtime.current_volatility))
+            runtime.last_update_timestamp_ns = last_update
+        except Exception:
+            runtime.last_order_book = None
+            runtime.last_candle = None
+            runtime.last_price = 0.0
+            runtime.last_update_timestamp_ns = 0
+            runtime.recovery_status = "invalid_fail_closed"
+            return runtime
+
+        if runtime.last_price <= 0.0:
+            runtime.last_order_book = None
+            runtime.recovery_status = "invalid_price_fail_closed"
+            return runtime
+
+        runtime.recovery_status = "hydrated_market_state_only"
+        return runtime
     
     def initialize_engines(self, config: Any, safety_gate: Any) -> None:
         """Initialize per-symbol engines with configuration."""

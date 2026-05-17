@@ -58,10 +58,12 @@ Does NOT own:
 from __future__ import annotations
 
 import heapq
+import json
 import logging
 from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal, InvalidOperation, getcontext
 from enum import Enum, unique
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.utils.enums import (
@@ -182,10 +184,14 @@ class PaperBrokerConfig:
 
     default_market_context_fallback_symbol: str = "UNKNOWN"
     journal_capacity: int = 100000
+    durable_state_path: Optional[str] = None
+    auto_persist_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.journal_capacity < 100:
             raise ValueError("journal_capacity must be >= 100")
+        if self.auto_persist_enabled and not self.durable_state_path:
+            raise ValueError("durable_state_path is required when auto_persist_enabled=True")
 
 
 # ============================================================================
@@ -353,6 +359,9 @@ class PaperBroker:
 
         self._journal: List[BrokerJournalRecord] = []
         self._journal_seq = 0
+        self._durable_state_path = Path(self.config.durable_state_path) if self.config.durable_state_path else None
+        self._auto_persist_enabled = bool(self.config.auto_persist_enabled and self._durable_state_path)
+        self._last_mark_prices: Dict[str, Decimal] = {}
 
     # ------------------------------------------------------------------
     # Legacy compatibility API
@@ -479,6 +488,7 @@ class PaperBroker:
             symbol=symbol,
             payload={"order_type": order_type.value, "tif": time_in_force.value, "quantity": str(quantity)},
         )
+        self._auto_persist(ts_ns)
         return order
 
     def replace_order(
@@ -549,6 +559,7 @@ class PaperBroker:
             },
         )
 
+        self._auto_persist(ts_ns)
         return updated, report
 
     def cancel_order(self, client_id: str, ts_ns: int) -> Optional[ExecutionReport]:
@@ -583,6 +594,7 @@ class PaperBroker:
         )
 
         del self.open_orders[client_id]
+        self._auto_persist(ts_ns)
         return report
 
     # ------------------------------------------------------------------
@@ -598,6 +610,9 @@ class PaperBroker:
     ) -> List[ExecutionReport]:
         if current_ts_ns <= 0:
             raise ValueError("current_ts_ns must be positive")
+
+        for symbol, market in market_by_symbol.items():
+            self._last_mark_prices[symbol] = market.mid_price
 
         reports: List[ExecutionReport] = []
 
@@ -658,6 +673,8 @@ class PaperBroker:
         if self.config.enable_day_gtd_expiry:
             reports.extend(self._expire_orders_if_needed(current_ts_ns))
 
+        if reports:
+            self._auto_persist(current_ts_ns)
         return reports
 
     def _attempt_match(
@@ -1201,11 +1218,11 @@ class PaperBroker:
         self.reserved_cash = snapshot.reserved_cash
 
         self.positions = {
-            sym: BrokerPosition(**payload)
+            sym: self._position_from_payload(payload)
             for sym, payload in snapshot.positions.items()
         }
         self.open_orders = {
-            cid: PaperOrder(**payload)
+            cid: self._order_from_payload(payload)
             for cid, payload in snapshot.open_orders.items()
         }
 
@@ -1221,6 +1238,82 @@ class PaperBroker:
             symbol=None,
             payload={"quality": snapshot.quality.value},
         )
+
+    def persist_durable_state(
+        self,
+        path: Optional[str | Path] = None,
+        *,
+        current_prices: Optional[Dict[str, Decimal]] = None,
+        ts_ns: Optional[int] = None,
+    ) -> Path:
+        """
+        Persist paper-broker facts for restart recovery.
+
+        This is paper-state persistence only. It does not submit, cancel, route,
+        reconcile live venue state, or become exchange truth authority.
+        """
+        target = Path(path) if path is not None else self._durable_state_path
+        if target is None:
+            raise ValueError("durable state path is required")
+
+        prices = current_prices or self._last_mark_prices
+        timestamp = ts_ns or self._last_journal_timestamp_ns()
+        snapshot = self.get_snapshot(current_prices=prices, ts_ns=timestamp)
+        payload = {
+            "schema_version": 1,
+            "authority": "paper_broker_recovery_fact",
+            "paper_only": True,
+            "live_authority": False,
+            "snapshot": self._snapshot_payload(snapshot),
+            "execution_reports": [
+                self._execution_report_payload(report)
+                for report in self.execution_reports
+            ],
+            "journal": [
+                self._journal_payload(record)
+                for record in self._journal
+            ],
+        }
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp.replace(target)
+        return target
+
+    def restore_from_durable_state(self, path: Optional[str | Path] = None) -> Dict[str, Any]:
+        """
+        Restore paper-broker facts from durable paper state.
+
+        The restore rebuilds broker-local paper facts and matching heap. It does
+        not contact live venues, submit orders, or replay broker commands.
+        """
+        target = Path(path) if path is not None else self._durable_state_path
+        if target is None:
+            raise ValueError("durable state path is required")
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        if payload.get("paper_only") is not True or payload.get("live_authority") is not False:
+            raise ValueError("durable state payload is not paper-only")
+
+        snapshot = self._snapshot_from_payload(payload["snapshot"])
+        self.restore_from_snapshot(snapshot)
+        self.execution_reports = [
+            self._execution_report_from_payload(item)
+            for item in payload.get("execution_reports", [])
+        ]
+        self._journal = [
+            self._journal_from_payload(item)
+            for item in payload.get("journal", [])
+        ]
+        self._journal_seq = max((record.sequence for record in self._journal), default=0)
+
+        return {
+            "restored": True,
+            "paper_only": True,
+            "open_orders": tuple(self.open_orders.keys()),
+            "execution_report_count": len(self.execution_reports),
+            "valid": self.validate_invariants()["valid"],
+        }
 
     def replay_from_journal(self, journal: List[BrokerJournalRecord]) -> None:
         """
@@ -1289,6 +1382,115 @@ class PaperBroker:
         )
         if len(self._journal) > self.config.journal_capacity:
             self._journal = self._journal[-self.config.journal_capacity:]
+
+    def _auto_persist(self, ts_ns: int) -> None:
+        if not self._auto_persist_enabled:
+            return
+        self.persist_durable_state(ts_ns=ts_ns)
+
+    def _last_journal_timestamp_ns(self) -> int:
+        if self._journal:
+            return self._journal[-1].timestamp_ns
+        return 1
+
+    @staticmethod
+    def _jsonable(value: Any) -> Any:
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, tuple):
+            return [PaperBroker._jsonable(item) for item in value]
+        if isinstance(value, list):
+            return [PaperBroker._jsonable(item) for item in value]
+        if isinstance(value, dict):
+            return {key: PaperBroker._jsonable(item) for key, item in value.items()}
+        return value
+
+    @classmethod
+    def _snapshot_payload(cls, snapshot: BrokerSnapshot) -> Dict[str, Any]:
+        return cls._jsonable(asdict(snapshot))
+
+    @classmethod
+    def _execution_report_payload(cls, report: ExecutionReport) -> Dict[str, Any]:
+        return cls._jsonable(asdict(report))
+
+    @classmethod
+    def _journal_payload(cls, record: BrokerJournalRecord) -> Dict[str, Any]:
+        return cls._jsonable(asdict(record))
+
+    @staticmethod
+    def _position_from_payload(payload: Dict[str, Any]) -> BrokerPosition:
+        return BrokerPosition(
+            symbol=payload["symbol"],
+            quantity=_d(payload.get("quantity", ZERO), field_name="quantity"),
+            average_price=_d(payload.get("average_price", ZERO), field_name="average_price"),
+            realized_pnl=_d(payload.get("realized_pnl", ZERO), field_name="realized_pnl"),
+            reserved_sell_qty=_d(payload.get("reserved_sell_qty", ZERO), field_name="reserved_sell_qty"),
+        )
+
+    @staticmethod
+    def _order_from_payload(payload: Dict[str, Any]) -> PaperOrder:
+        return PaperOrder(
+            order_id=int(payload["order_id"]),
+            client_id=payload["client_id"],
+            symbol=payload["symbol"],
+            side=OrderSide(payload["side"]),
+            order_type=OrderType(payload["order_type"]),
+            time_in_force=TimeInForce(payload["time_in_force"]),
+            quantity=_d(payload["quantity"], field_name="quantity"),
+            remaining_quantity=_d(payload["remaining_quantity"], field_name="remaining_quantity"),
+            limit_price=None if payload.get("limit_price") is None else _d(payload["limit_price"], field_name="limit_price"),
+            status=OrderStatus(payload["status"]),
+            created_at_ns=int(payload["created_at_ns"]),
+            eligible_at_ns=int(payload["eligible_at_ns"]),
+            acknowledged_at_ns=None if payload.get("acknowledged_at_ns") is None else int(payload["acknowledged_at_ns"]),
+            filled_quantity=_d(payload.get("filled_quantity", ZERO), field_name="filled_quantity"),
+            average_fill_price=None if payload.get("average_fill_price") is None else _d(payload["average_fill_price"], field_name="average_fill_price"),
+            fee_paid=_d(payload.get("fee_paid", ZERO), field_name="fee_paid"),
+            quality=PaperBrokerQuality(payload.get("quality", PaperBrokerQuality.COMPLETE.value)),
+            notes=tuple(payload.get("notes", ())),
+        )
+
+    @classmethod
+    def _snapshot_from_payload(cls, payload: Dict[str, Any]) -> BrokerSnapshot:
+        return BrokerSnapshot(
+            timestamp_ns=int(payload["timestamp_ns"]),
+            balance=_d(payload["balance"], field_name="balance"),
+            reserved_cash=_d(payload["reserved_cash"], field_name="reserved_cash"),
+            equity=_d(payload["equity"], field_name="equity"),
+            realized_pnl=_d(payload["realized_pnl"], field_name="realized_pnl"),
+            positions=payload.get("positions", {}),
+            open_orders=payload.get("open_orders", {}),
+            quality=PaperBrokerQuality(payload.get("quality", PaperBrokerQuality.COMPLETE.value)),
+        )
+
+    @staticmethod
+    def _execution_report_from_payload(payload: Dict[str, Any]) -> ExecutionReport:
+        return ExecutionReport(
+            order_id=int(payload["order_id"]),
+            client_id=payload["client_id"],
+            symbol=payload["symbol"],
+            status=OrderStatus(payload["status"]),
+            timestamp_ns=int(payload["timestamp_ns"]),
+            filled_quantity=_d(payload.get("filled_quantity", ZERO), field_name="filled_quantity"),
+            fill_price=None if payload.get("fill_price") is None else _d(payload["fill_price"], field_name="fill_price"),
+            fee=_d(payload.get("fee", ZERO), field_name="fee"),
+            liquidity=FillLiquidity(payload.get("liquidity", FillLiquidity.UNKNOWN.value)),
+            reject_reason=None if payload.get("reject_reason") is None else RejectReason(payload["reject_reason"]),
+            notes=tuple(payload.get("notes", ())),
+        )
+
+    @staticmethod
+    def _journal_from_payload(payload: Dict[str, Any]) -> BrokerJournalRecord:
+        return BrokerJournalRecord(
+            sequence=int(payload["sequence"]),
+            timestamp_ns=int(payload["timestamp_ns"]),
+            event_type=BrokerEventType(payload["event_type"]),
+            client_id=payload.get("client_id"),
+            symbol=payload.get("symbol"),
+            payload=payload.get("payload", {}),
+        )
 
 
 __all__ = [
