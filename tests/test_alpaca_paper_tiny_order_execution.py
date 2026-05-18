@@ -26,6 +26,8 @@ T0_NS = 1_777_948_800_000_000_000
 
 ALLOWED_TRADING_GET_PATHS = frozenset({"/v2/account", "/v2/positions", "/v2/orders", "/v2/clock"})
 ALLOWED_DATA_GET_PATHS = frozenset({"/v2/stocks/AAPL/quotes/latest", "/v2/stocks/AAPL/trades/latest"})
+ACTIVE_ORDER_STATUSES = frozenset({"accepted", "new", "pending_new", "open", "accepted_for_bidding"})
+TERMINAL_FILLED_ORDER_STATUSES = frozenset({"filled"})
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,10 @@ class AlpacaTradingHttpClient:
 
     def _validate_get(self, path: str, query: dict[str, str] | None) -> None:
         assert self.base_url == EXPECTED_PAPER_BASE_URL
+        if path.startswith("/v2/orders/"):
+            assert query is None
+            assert path.removeprefix("/v2/orders/")
+            return
         assert path in ALLOWED_TRADING_GET_PATHS
         assert path != "/v2/orders" or (query or {}).get("status") == "open"
 
@@ -384,6 +390,44 @@ def _ack_from_payload(payload: dict[str, Any], *, receive_ts_ns: int) -> OrderAc
     )
 
 
+def _order_identity_matches(order: dict[str, Any], ack: OrderAck, plan: TinyExecutionPlan) -> bool:
+    order_id = order.get("id") or order.get("broker_order_id")
+    client_order_id = order.get("client_order_id")
+    return (
+        order_id == ack.broker_order_id
+        and client_order_id == plan.client_order_id
+        and order.get("symbol") == plan.symbol
+        and order.get("side") == plan.side
+        and order.get("type") == plan.order_type
+        and order.get("time_in_force") == plan.time_in_force
+    )
+
+
+def _matching_open_order(open_orders: list[dict[str, Any]], ack: OrderAck, plan: TinyExecutionPlan) -> dict[str, Any] | None:
+    for order in open_orders:
+        identity_match = order.get("client_order_id") == plan.client_order_id or order.get("id") == ack.broker_order_id
+        if identity_match and order.get("symbol") == plan.symbol:
+            return order
+    return None
+
+
+def _reconciled_order_after_submit(
+    *,
+    open_orders: list[dict[str, Any]],
+    direct_order: dict[str, Any] | None,
+    ack: OrderAck,
+    plan: TinyExecutionPlan,
+) -> tuple[str, dict[str, Any]]:
+    open_match = _matching_open_order(open_orders, ack, plan)
+    if open_match:
+        return "open_orders", open_match
+    if direct_order and _order_identity_matches(direct_order, ack, plan):
+        status = str(direct_order.get("status") or "").lower()
+        if status in TERMINAL_FILLED_ORDER_STATUSES:
+            return "direct_order_lookup", direct_order
+    raise AssertionError("submitted_order_not_reconciled")
+
+
 def test_missing_board_approval_blocks_before_any_post():
     decision = evaluate_execution_gates(
         TinyExecutionPlan(),
@@ -419,6 +463,51 @@ def test_offline_clean_gates_build_single_limit_day_payload_without_submitting()
         "extended_hours": False,
         "client_order_id": "pk25z-paper-aapl-buy-limit-day-test",
     }
+
+
+def test_recorded_filled_order_reconciles_by_direct_lookup_when_open_orders_empty():
+    plan = TinyExecutionPlan(client_order_id="pk25z-paper-aapl-buy-limit-day-1777948800000000100")
+    ack = OrderAck(
+        broker_order_id="b47cdef4-a913-4517-9cac-5d96f319de91",
+        client_order_id=plan.client_order_id,
+        symbol="AAPL",
+        side="buy",
+        qty="0.016903",
+        notional=None,
+        order_type="limit",
+        limit_price="295.79",
+        time_in_force="day",
+        status="accepted",
+        submitted_at="2026-05-18T17:10:54.81619546Z",
+        created_at="2026-05-18T17:10:54.81619546Z",
+        receive_ts_ns=T0_NS + 100,
+    )
+    direct_order = {
+        "id": "b47cdef4-a913-4517-9cac-5d96f319de91",
+        "client_order_id": plan.client_order_id,
+        "symbol": "AAPL",
+        "side": "buy",
+        "type": "limit",
+        "time_in_force": "day",
+        "qty": "0.016903",
+        "limit_price": "295.79",
+        "status": "filled",
+        "filled_qty": "0.016903",
+        "created_at": "2026-05-18T17:10:54.81619546Z",
+        "submitted_at": "2026-05-18T17:10:54.81619546Z",
+        "updated_at": "2026-05-18T17:10:54.832884729Z",
+    }
+
+    source, order = _reconciled_order_after_submit(
+        open_orders=[],
+        direct_order=direct_order,
+        ack=ack,
+        plan=plan,
+    )
+
+    assert source == "direct_order_lookup"
+    assert order["status"] == "filled"
+    assert order["filled_qty"] == "0.016903"
 
 
 def test_adversarial_no_go_cases_block_before_post():
@@ -504,14 +593,23 @@ def test_real_alpaca_paper_tiny_order_execution_skips_without_explicit_approval(
     assert ack.side == "buy"
     assert ack.order_type == "limit"
     assert ack.time_in_force == "day"
-    assert ack.status in {"accepted", "new", "pending_new", "open", "accepted_for_bidding"}
+    assert ack.status in ACTIVE_ORDER_STATUSES | TERMINAL_FILLED_ORDER_STATUSES
     assert [call for call in trading.calls if call[0] == "POST"] == [("POST", "/v2/orders")]
 
     open_orders = trading.get_json("/v2/orders", {"status": "open", "limit": "50", "nested": "false"})
     trading.get_json("/v2/positions")
     trading.get_json("/v2/account")
-    matching = [item for item in open_orders if item.get("client_order_id") == plan.client_order_id or item.get("id") == ack.broker_order_id]
-    assert matching or ack.status not in {"accepted", "new", "pending_new", "open", "accepted_for_bidding"}
+    direct_order = None
+    if _matching_open_order(open_orders, ack, plan) is None:
+        direct_order = trading.get_json(f"/v2/orders/{ack.broker_order_id}")
+    source, reconciled_order = _reconciled_order_after_submit(
+        open_orders=open_orders,
+        direct_order=direct_order,
+        ack=ack,
+        plan=plan,
+    )
+    assert source in {"open_orders", "direct_order_lookup"}
+    assert reconciled_order.get("client_order_id") == plan.client_order_id
 
 
 def test_authority_files_remain_unactivated_and_no_execution_helper_uses_live_surfaces():
