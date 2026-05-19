@@ -42,6 +42,7 @@ from app.commander import Commander
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
 from app.models import OrderFill, OrderRequest, StrategySignal
+from app.models.contracts import DecisionRecord
 from app.risk.guard import HybridRiskGuard
 from app.utils.time_utils import now_ns
 from app.telemetry.event_store import TelemetryEventStore
@@ -78,6 +79,21 @@ class QueuedSignal:
     enqueue_price: Decimal
     enqueue_regime: str
     decision_uuid: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionSpineResult:
+    """Normalized result returned by the governed decision-to-router spine."""
+    decision_uuid: Optional[str]
+    client_order_id: Optional[str]
+    broker_order_id: Optional[str]
+    normalized_status: str
+    route: str
+    reason_code: Optional[str] = None
+    message: Optional[str] = None
+    fill: Optional[OrderFill] = None
+    gateway_response: Optional[Any] = None
+    decision_artifact: Optional[Dict[str, Any]] = None
 
 
 class ExecutionEngine:
@@ -267,6 +283,88 @@ class ExecutionEngine:
         )
         return True
 
+    def execute_compiled_decision(
+        self,
+        decision_record: DecisionRecord,
+        signal: StrategySignal,
+        current_price: Decimal,
+        is_attack: bool,
+    ) -> ExecutionSpineResult:
+        """
+        Synchronously execute a compiled decision through the governed spine.
+
+        This is a thin orchestration surface for tests and controlled callers:
+        DecisionRecord remains the immutable decision artifact, submit_signal()
+        still performs admission, and _execute_signal() still routes only
+        through OrderRouter.submit_order().
+        """
+        decision_uuid = getattr(decision_record, "decision_uuid", None)
+        decision_artifact = self._decision_artifact_summary(decision_record)
+        if not isinstance(decision_uuid, str) or not decision_uuid.strip():
+            return ExecutionSpineResult(
+                decision_uuid=None,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="blocked",
+                route="execution_engine",
+                reason_code="decision_uuid_missing",
+                message="DecisionRecord decision_uuid is required before routing",
+                decision_artifact=decision_artifact,
+            )
+
+        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        signal_for_execution = signal.model_copy(
+            update={
+                "metadata": {
+                    **signal_metadata,
+                    "decision_uuid": decision_uuid,
+                    "compiled_decision_artifact": decision_artifact,
+                }
+            }
+        )
+        admitted = self.submit_signal(
+            signal_for_execution,
+            current_price=current_price,
+            is_attack=is_attack,
+            decision_uuid=decision_uuid,
+        )
+        if not admitted:
+            return ExecutionSpineResult(
+                decision_uuid=decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="blocked",
+                route="execution_engine",
+                reason_code="execution_admission_blocked",
+                message="ExecutionEngine.submit_signal declined the compiled decision",
+                decision_artifact=decision_artifact,
+            )
+
+        queued = self._pop_matching_queued_signal(decision_uuid, signal_for_execution)
+        if queued is None:
+            return ExecutionSpineResult(
+                decision_uuid=decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="unknown",
+                route="execution_engine",
+                reason_code="queued_signal_missing",
+                message="Compiled decision was admitted but no matching queued signal was available",
+                decision_artifact=decision_artifact,
+            )
+        result = self._execute_signal(queued)
+        if result is None:
+            return ExecutionSpineResult(
+                decision_uuid=decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="unknown",
+                route="execution_engine",
+                reason_code="execution_result_missing",
+                decision_artifact=decision_artifact,
+            )
+        return result
+
     def get_status(self) -> Dict[str, Any]:
         """Get execution engine status."""
         with self._lock:
@@ -310,6 +408,42 @@ class ExecutionEngine:
         total_costs = Decimal("0.0036")
         return gross_ev - total_costs
 
+    def _decision_artifact_summary(self, decision_record: DecisionRecord) -> Dict[str, Any]:
+        return {
+            "decision_uuid": getattr(decision_record, "decision_uuid", None),
+            "timestamp_ns": getattr(decision_record, "timestamp_ns", None),
+            "decision_type": str(getattr(decision_record, "decision_type", "unknown")),
+            "inputs": dict(getattr(decision_record, "inputs", {}) or {}),
+            "outputs": dict(getattr(decision_record, "outputs", {}) or {}),
+            "metadata": dict(getattr(decision_record, "metadata", {}) or {}),
+            "schema_version": getattr(decision_record, "schema_version", None),
+        }
+
+    def _pop_matching_queued_signal(
+        self,
+        decision_uuid: str,
+        signal: StrategySignal,
+    ) -> Optional[QueuedSignal]:
+        buffered: List[QueuedSignal] = []
+        matched: Optional[QueuedSignal] = None
+        while True:
+            try:
+                queued = self._execution_queue.get_nowait()
+            except queue.Empty:
+                break
+            if (
+                matched is None
+                and queued.decision_uuid == decision_uuid
+                and queued.signal.symbol == signal.symbol
+                and queued.signal.exchange_ts_ns == signal.exchange_ts_ns
+            ):
+                matched = queued
+                continue
+            buffered.append(queued)
+        for item in buffered:
+            self._execution_queue.put(item)
+        return matched
+
     def _validate_signal_before_execution(self, queued: QueuedSignal, current_price: Decimal) -> Tuple[bool, str]:
         """Validate queued signal with TTL, price sanity, and regime checks."""
         current_ns = now_ns()
@@ -339,10 +473,14 @@ class ExecutionEngine:
 
         return True, "ok"
 
-    def _execute_signal(self, queued: QueuedSignal) -> None:
+    def _execute_signal(self, queued: QueuedSignal) -> Optional[ExecutionSpineResult]:
         """Execute a trading signal after sovereign validation."""
         signal = queued.signal
         is_attack = queued.is_attack
+        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        decision_artifact = signal_metadata.get("compiled_decision_artifact")
+        if not isinstance(decision_artifact, dict):
+            decision_artifact = None
         current_price = self.order_router.get_mid_price(signal.symbol)
 
         is_valid, reason = self._validate_signal_before_execution(queued, current_price)
@@ -354,7 +492,15 @@ class ExecutionEngine:
                 signal.symbol,
                 reason,
             )
-            return
+            return ExecutionSpineResult(
+                decision_uuid=queued.decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="blocked",
+                route="execution_engine",
+                reason_code=reason,
+                decision_artifact=decision_artifact,
+            )
 
         masked = self.masking_layer.mask_order(signal.quantity)
 
@@ -372,18 +518,42 @@ class ExecutionEngine:
                     signal.strategy,
                     signal.symbol,
                 )
-                return
+                return ExecutionSpineResult(
+                    decision_uuid=queued.decision_uuid,
+                    client_order_id=None,
+                    broker_order_id=None,
+                    normalized_status="blocked",
+                    route="execution_engine",
+                    reason_code="limit_order_no_price",
+                    decision_artifact=decision_artifact,
+                )
         else:
             limit_price_for_order = None
 
         current_ns = now_ns()
-        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         order_metadata = {
             "original_size": signal.quantity,
             "masked_size": masked.masked_size,
             "is_attack": is_attack,
             "execution_enqueue_time_ns": queued.enqueue_time_ns,
         }
+        for key in (
+            "asset_class",
+            "venue_id",
+            "portal_name",
+            "environment",
+            "execution_adapter",
+            "reconciliation_adapter",
+            "capability_key",
+            "time_in_force",
+            "order_constraint_verdict",
+            "source_signal_id",
+            "order_intent_id",
+            "requested_notional",
+            "compiled_decision_artifact",
+        ):
+            if key in signal_metadata:
+                order_metadata[key] = signal_metadata[key]
         aggression_contract_metadata = signal_metadata.get(
             "canonical_aggression_contract"
         )
@@ -438,6 +608,10 @@ class ExecutionEngine:
 
         try:
             fill = self.order_router.submit_order(order)
+            gateway_response = None
+            gateway_response_getter = getattr(self.order_router, "get_gateway_response", None)
+            if callable(gateway_response_getter):
+                gateway_response = gateway_response_getter(order.id)
             logger.info(
                 "[EXEC_DIAG] PAPERBROKER_REACH_COUNT: strategy=%s symbol=%s side=%s qty=%s",
                 signal.strategy,
@@ -464,11 +638,60 @@ class ExecutionEngine:
                 with self._lock:
                     self._state.filled_orders.append(fill)
                 self.risk_guard.record_fees(fill.fee)
+                return ExecutionSpineResult(
+                    decision_uuid=queued.decision_uuid,
+                    client_order_id=order.id,
+                    broker_order_id=getattr(fill, "venue_order_id", None),
+                    normalized_status="filled",
+                    route="paper_broker",
+                    fill=fill,
+                    gateway_response=None,
+                    decision_artifact=decision_artifact,
+                )
+
+            if gateway_response is not None:
+                normalized_status = str(getattr(gateway_response, "normalized_status", "unknown"))
+                if normalized_status in {"accepted", "open", "partially_filled", "unknown"}:
+                    with self._lock:
+                        self._state.pending_orders[order.id] = order
+                return ExecutionSpineResult(
+                    decision_uuid=queued.decision_uuid,
+                    client_order_id=order.id,
+                    broker_order_id=getattr(gateway_response, "broker_order_id", None),
+                    normalized_status=normalized_status,
+                    route=str(getattr(gateway_response, "adapter_id", "broker_gateway")),
+                    reason_code=getattr(gateway_response, "reason_code", None),
+                    message=getattr(gateway_response, "message", None),
+                    fill=None,
+                    gateway_response=gateway_response,
+                    decision_artifact=decision_artifact,
+                )
+
             else:
                 with self._lock:
                     self._state.pending_orders[order.id] = order
+                return ExecutionSpineResult(
+                    decision_uuid=queued.decision_uuid,
+                    client_order_id=order.id,
+                    broker_order_id=None,
+                    normalized_status="pending",
+                    route="paper_broker",
+                    fill=None,
+                    gateway_response=None,
+                    decision_artifact=decision_artifact,
+                )
         except Exception as e:
             logger.error("Order submission failed: %s", e)
+            return ExecutionSpineResult(
+                decision_uuid=queued.decision_uuid,
+                client_order_id=order.id if "order" in locals() else None,
+                broker_order_id=None,
+                normalized_status="unknown",
+                route="order_router",
+                reason_code="order_submission_exception",
+                message=str(e),
+                decision_artifact=decision_artifact,
+            )
 
     # ============================================
     # PCV FOR NORMAL OPERATIONS
