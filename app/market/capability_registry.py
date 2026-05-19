@@ -18,8 +18,32 @@ from app.market.venue_capabilities import (
 )
 
 
-ALPACA_PAPER_EQUITIES = ("AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "JPM", "JNJ", "WMT")
-ALPACA_PAPER_ETFS = ("SPY", "QQQ", "DIA")
+ALPACA_PAPER_EQUITIES = (
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "TSLA",
+    "AMD",
+    "JPM",
+    "V",
+    "MA",
+    "UNH",
+    "HD",
+    "COST",
+    "AVGO",
+    "CRM",
+    "NFLX",
+    "XOM",
+    "JNJ",
+    "PG",
+    "KO",
+    "PEP",
+    "WMT",
+)
+ALPACA_PAPER_ETFS = ("SPY", "QQQ", "DIA", "IWM", "XLK", "XLF", "XLE", "XLV", "XLY")
 ALPACA_PAPER_CRYPTO = ("BTC/USD", "ETH/USD", "SOL/USD")
 KRAKEN_CRYPTO = ("BTC/USD", "ETH/USD", "SOL/USD")
 

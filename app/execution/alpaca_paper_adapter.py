@@ -80,7 +80,8 @@ class AlpacaPaperCredentials:
 
 def load_alpaca_paper_credentials(path: Path | None = None) -> AlpacaPaperCredentials:
     values: dict[str, str] = {}
-    env_path = path or (Path.home() / ".poverty_killer_alpaca_paper_env")
+    configured_path = os.environ.get("POVERTY_KILLER_ALPACA_PAPER_ENV_PATH")
+    env_path = path or (Path(configured_path) if configured_path else Path.home() / ".poverty_killer_alpaca_paper_env")
     if env_path.exists():
         for raw in env_path.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
@@ -106,7 +107,7 @@ class AlpacaPaperBrokerAdapter:
     supported_methods = frozenset({"GET", "POST"})
 
     _allowed_get_paths = frozenset({"/v2/account", "/v2/positions", "/v2/orders", "/v2/clock"})
-    _allowed_get_prefixes = ("/v2/orders/",)
+    _allowed_get_prefixes = ("/v2/orders/", "/v2/assets/")
 
     def __init__(
         self,
@@ -151,6 +152,15 @@ class AlpacaPaperBrokerAdapter:
 
     def get_open_orders(self) -> BrokerGatewayResponse:
         return self._request("GET", "/v2/orders", query={"status": "open", "limit": "100", "nested": "false"})
+
+    def get_clock(self) -> BrokerGatewayResponse:
+        return self._request("GET", "/v2/clock")
+
+    def get_asset(self, symbol: str) -> BrokerGatewayResponse:
+        safe_symbol = str(symbol or "").strip().upper()
+        if not safe_symbol:
+            raise BrokerGatewayError("symbol_missing")
+        return self._request("GET", f"/v2/assets/{urllib.parse.quote(safe_symbol, safe='')}")
 
     def get_order_status(self, order_id: str) -> BrokerGatewayResponse:
         safe_order_id = str(order_id or "").strip()
