@@ -464,6 +464,8 @@ class TestDispatchFusionFallbackAndDecline:
         assert submit_kwargs.get("signal") is observed_sig
         assert submit_kwargs.get("current_price") == 2500.0
         assert submit_kwargs.get("is_attack") is False
+        decision_record = loop.decision_compiler.compile.return_value
+        assert submit_kwargs.get("decision_record") is decision_record
         aggression_contract = observed_sig.metadata["canonical_aggression_contract"]
         assert aggression_contract["authority_owner"] == "Commander"
         assert aggression_contract["execution_is_attack"] is False
@@ -700,6 +702,7 @@ class TestAdvisoryMetadataSpine:
         _, submit_kwargs = loop.execution_engine.submit_signal.call_args
         submitted_signal = submit_kwargs.get("signal")
         assert submitted_signal is observed_sig
+        assert submit_kwargs.get("decision_record") is loop.decision_compiler.compile.return_value
         assert submitted_signal.metadata["advisory_context"]["cross_asset_note"] == "passive_only"
         assert submitted_signal.metadata["advisory_snapshot_id"] == "bundle8a-advisory-1"
         assert submitted_signal.metadata["decision_uuid"] == "uuid-test"

@@ -235,6 +235,7 @@ def test_known_good_candidate_reaches_real_paper_fill_and_fill_telemetry(tmp_pat
         loop.decision_compiler.compile.assert_called_once()
         assert loop.decision_compiler.compile.call_args.kwargs["strategy_votes"] == [vote]
         assert signal.metadata["decision_uuid"] == DECISION_UUID
+        assert signal.metadata["compiled_decision_artifact"]["decision_uuid"] == DECISION_UUID
         assert loop._metrics.orders_submitted == 1
 
         queued = engine._execution_queue.get_nowait()

@@ -226,6 +226,7 @@ class ExecutionEngine:
         current_price: Decimal,
         is_attack: bool,
         decision_uuid: Optional[str] = None,
+        decision_record: Optional[DecisionRecord] = None,
     ) -> bool:
         """
         Submit a trading signal for execution.
@@ -264,6 +265,14 @@ class ExecutionEngine:
             if isinstance(candidate, str) and candidate.strip():
                 resolved_decision_uuid = candidate.strip()
 
+        if decision_record is not None and isinstance(signal.metadata, dict):
+            decision_artifact = self._decision_artifact_summary(decision_record)
+            artifact_uuid = decision_artifact.get("decision_uuid")
+            if resolved_decision_uuid is None and isinstance(artifact_uuid, str) and artifact_uuid.strip():
+                resolved_decision_uuid = artifact_uuid.strip()
+            signal.metadata.setdefault("decision_uuid", resolved_decision_uuid)
+            signal.metadata["compiled_decision_artifact"] = decision_artifact
+
         queued_signal = QueuedSignal(
             signal=signal,
             decision_uuid=resolved_decision_uuid,
@@ -293,10 +302,9 @@ class ExecutionEngine:
         """
         Synchronously execute a compiled decision through the governed spine.
 
-        This is a thin orchestration surface for tests and controlled callers:
         DecisionRecord remains the immutable decision artifact, submit_signal()
-        still performs admission, and _execute_signal() still routes only
-        through OrderRouter.submit_order().
+        performs the same admission used by the active dispatch route, and
+        _execute_signal() routes only through OrderRouter.submit_order().
         """
         decision_uuid = getattr(decision_record, "decision_uuid", None)
         decision_artifact = self._decision_artifact_summary(decision_record)
@@ -327,6 +335,7 @@ class ExecutionEngine:
             current_price=current_price,
             is_attack=is_attack,
             decision_uuid=decision_uuid,
+            decision_record=decision_record,
         )
         if not admitted:
             return ExecutionSpineResult(

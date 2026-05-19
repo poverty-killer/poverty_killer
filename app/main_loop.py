@@ -1452,6 +1452,7 @@ class MainLoop:
             signal=signal,
             current_price=runtime.last_price,
             is_attack=aggression_contract.execution_is_attack,
+            decision_record=decision_record,
         )
         _log_dispatch_diag(
             "submit_signal_called",
