@@ -1355,6 +1355,49 @@ class StateStore:
         }
         return self.atomic_insert("events", record)
 
+    def list_events(
+        self,
+        *,
+        event_type: Optional[str] = None,
+        source: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """List structured audit events without mutating state."""
+        safe_limit = max(1, min(int(limit), 1000))
+        clauses: List[str] = []
+        params: List[Any] = []
+        if event_type is not None:
+            clauses.append("event_type = ?")
+            params.append(str(event_type))
+        if source is not None:
+            clauses.append("source = ?")
+            params.append(str(source))
+        where_clause = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"""
+                    SELECT * FROM events
+                    {where_clause}
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    [*params, safe_limit],
+                )
+                rows = []
+                for row in cursor.fetchall():
+                    event = dict(row)
+                    try:
+                        event["data"] = json.loads(event.get("data") or "{}")
+                    except Exception:
+                        event["data_parse_error"] = True
+                    rows.append(event)
+                return rows
+        except Exception as e:
+            logger.error("Failed to list events: %s", e)
+            return []
+
     def get_control_state(self, key: str) -> Optional[str]:
         """Get control state value."""
         try:
