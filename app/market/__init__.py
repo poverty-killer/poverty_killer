@@ -6,16 +6,20 @@ from app.market.capability_registry import (
 )
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
+    QuoteSessionClassification,
     PortalSelectionRequest,
     PortalSelectionResult,
     VenueCapability,
+    classify_quote_session,
 )
 
 __all__ = [
     "CapabilityAwareCandidate",
+    "QuoteSessionClassification",
     "PortalSelectionRequest",
     "PortalSelectionResult",
     "VenueCapability",
     "VenueCapabilityRegistry",
     "build_default_capability_registry",
+    "classify_quote_session",
 ]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.config import Config
 from app.market.capability_registry import build_default_capability_registry
-from app.market.venue_capabilities import PortalSelectionRequest
+from app.market.venue_capabilities import PortalSelectionRequest, classify_quote_session
 from main import get_active_capability_candidates, get_active_symbols, resolve_runtime_portal
 
 
@@ -23,8 +23,46 @@ def test_kraken_crypto_preservation_for_current_runtime_symbols():
         broker_mode="paper",
         active_markets=["crypto"],
         symbol_universe=["BTC/USD", "ETH/USD", "SOL/USD"],
+        capability_discovery_mode="active_markets",
     )
     assert get_active_symbols(config) == {"BTC/USD", "ETH/USD", "SOL/USD"}
+
+
+def test_legacy_crypto_only_capability_discovery_mode_preserves_old_surface():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["BTC/USD", "ETH/USD", "SOL/USD", "AAPL", "SPY"],
+        capability_discovery_mode="active_markets",
+    )
+
+    candidates = get_active_capability_candidates(config)
+    identities = {(candidate.venue_id, candidate.asset_class, candidate.normalized_symbol) for candidate in candidates}
+
+    assert get_active_symbols(config) == {"BTC/USD", "ETH/USD", "SOL/USD"}
+    assert ("kraken", "crypto", "BTC/USD") in identities
+    assert ("alpaca", "crypto", "BTC/USD") in identities
+    assert ("alpaca", "equity", "AAPL") not in identities
+    assert ("alpaca", "etf", "SPY") not in identities
+
+
+def test_registry_discovery_exposes_mixed_capability_universe_despite_legacy_active_markets():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["BTC/USD", "AAPL", "SPY"],
+        capability_discovery_mode="registry",
+        capability_discovery_asset_classes=["crypto", "equity", "etf"],
+    )
+
+    candidates = get_active_capability_candidates(config)
+    identities = {(candidate.venue_id, candidate.asset_class, candidate.normalized_symbol) for candidate in candidates}
+
+    assert ("kraken", "crypto", "BTC/USD") in identities
+    assert ("alpaca", "crypto", "BTC/USD") in identities
+    assert ("alpaca", "equity", "AAPL") in identities
+    assert ("alpaca", "etf", "SPY") in identities
+    assert get_active_symbols(config) == {"BTC/USD"}
 
 
 def test_alpaca_paper_equity_capability_is_selectable_by_operator_preference():
@@ -62,6 +100,8 @@ def test_alpaca_paper_etf_capability_is_distinct_and_etf_capable():
     assert result.selected is not None
     assert result.selected.asset_class == "etf"
     assert result.selected.metadata["etf_capable"] is True
+    assert result.selected.default_order_type == "limit"
+    assert result.selected.default_time_in_force == "DAY"
 
 
 def test_alpaca_paper_crypto_capability_is_represented():
@@ -75,6 +115,124 @@ def test_alpaca_paper_crypto_capability_is_represented():
     assert len(alpaca_crypto) == 1
     assert alpaca_crypto[0].quote_source == "alpaca_data_crypto_latest_quote"
     assert alpaca_crypto[0].execution_adapter == "alpaca_paper_rest"
+    assert alpaca_crypto[0].supported_order_types == frozenset({"limit"})
+    assert alpaca_crypto[0].supported_time_in_force == frozenset({"GTC", "IOC"})
+    assert alpaca_crypto[0].default_order_type == "limit"
+    assert alpaca_crypto[0].default_time_in_force == "GTC"
+    assert alpaca_crypto[0].min_notional is not None
+    assert str(alpaca_crypto[0].min_notional) == "10.00"
+    assert alpaca_crypto[0].order_constraint_source == "alpaca_crypto_orders_support_gtc_ioc_not_day"
+
+
+def test_session_aware_classification_keeps_closed_equity_visible_but_blocked():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["AAPL"],
+        capability_discovery_mode="registry",
+        capability_discovery_asset_classes=["equity"],
+    )
+    candidates = get_active_capability_candidates(config)
+    equity = next(candidate for candidate in candidates if candidate.normalized_symbol == "AAPL")
+
+    classification = classify_quote_session(
+        equity,
+        market_session_open=False,
+        quote_present=True,
+        quote_fresh=False,
+    )
+
+    assert classification.raw_symbol == "AAPL"
+    assert classification.portal_name == "alpaca_paper"
+    assert classification.session_state == "closed"
+    assert "MARKET_CLOSED" in classification.reason_codes
+    assert "SESSION_CLOSED_STALE_QUOTE" in classification.reason_codes
+    assert "CAPABILITY_UNSUPPORTED" not in classification.reason_codes
+    assert classification.tradable_now is False
+
+
+def test_crypto_quote_classification_does_not_inherit_equity_market_close():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["BTC/USD"],
+        capability_discovery_mode="registry",
+        capability_discovery_asset_classes=["crypto"],
+    )
+    candidates = get_active_capability_candidates(config)
+    alpaca_crypto = next(candidate for candidate in candidates if candidate.venue_id == "alpaca")
+
+    classification = classify_quote_session(
+        alpaca_crypto,
+        market_session_open=False,
+        quote_present=True,
+        quote_fresh=True,
+        spread_bps=1,
+    )
+
+    assert classification.session_state == "continuous"
+    assert classification.reason_codes == ("FRESH_QUOTE_AVAILABLE",)
+    assert "MARKET_CLOSED" not in classification.reason_codes
+    assert classification.tradable_now is True
+
+
+def test_alpaca_paper_equity_and_etf_can_use_buy_limit_day_when_supported():
+    registry = build_default_capability_registry()
+
+    for symbol, asset_class in (("AAPL", "equity"), ("SPY", "etf")):
+        result = registry.resolve(
+            PortalSelectionRequest(
+                symbol=symbol,
+                asset_class=asset_class,
+                action="buy",
+                order_type="limit",
+                time_in_force="DAY",
+                policy_mode="explicit_preferred_venue",
+                preferred_venue="alpaca_paper",
+            )
+        )
+
+        assert result.ready is True
+        assert result.selected is not None
+        assert result.selected.portal_name == "alpaca_paper"
+        assert result.selected.default_time_in_force == "DAY"
+        assert result.selected.live_blocked is True
+
+
+def test_alpaca_paper_crypto_blocks_buy_limit_day_and_selects_allowed_default_tif():
+    registry = build_default_capability_registry()
+    day_result = registry.resolve(
+        PortalSelectionRequest(
+            symbol="SOL/USD",
+            asset_class="crypto",
+            action="buy",
+            order_type="limit",
+            time_in_force="DAY",
+            policy_mode="explicit_preferred_venue",
+            preferred_venue="alpaca_paper",
+        )
+    )
+
+    assert day_result.ready is False
+    assert "TIME_IN_FORCE_UNSUPPORTED" in day_result.reason_codes or any(
+        "TIME_IN_FORCE_UNSUPPORTED" in reasons for reasons in day_result.rejected.values()
+    )
+
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["SOL/USD"],
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+    )
+    runtime_result = resolve_runtime_portal(config, symbol="SOL/USD", asset_class="crypto")
+
+    assert runtime_result.ready is True
+    assert runtime_result.selected is not None
+    assert runtime_result.selected.default_order_type == "limit"
+    assert runtime_result.selected.default_time_in_force == "GTC"
+    assert runtime_result.selected.default_time_in_force in runtime_result.selected.supported_time_in_force
+    assert "DAY" not in runtime_result.selected.supported_time_in_force
 
 
 def test_multi_venue_crypto_identity_does_not_collapse_to_plain_symbol():
@@ -194,3 +352,12 @@ def test_runtime_candidate_surface_is_no_longer_kraken_only():
     assert ("alpaca", "equity", "AAPL") in identities
     assert ("alpaca", "etf", "SPY") in identities
     assert all(candidate.mutation_authorized is False for candidate in candidates)
+    alpaca_crypto = [
+        candidate
+        for candidate in candidates
+        if candidate.venue_id == "alpaca" and candidate.asset_class == "crypto" and candidate.normalized_symbol == "BTC/USD"
+    ]
+    assert len(alpaca_crypto) == 1
+    assert alpaca_crypto[0].default_order_type == "limit"
+    assert alpaca_crypto[0].default_time_in_force == "GTC"
+    assert "DAY" not in alpaca_crypto[0].supported_time_in_force

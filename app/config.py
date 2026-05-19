@@ -304,6 +304,17 @@ class Config(BaseSettings):
         default=["kraken_paper", "alpaca_paper"],
         description="Configured paper portals available to capability selection.",
     )
+    capability_discovery_mode: Literal["registry", "active_markets"] = Field(
+        default="registry",
+        description=(
+            "registry exposes configured capability metadata across supported asset classes; "
+            "active_markets preserves legacy market-filtered runtime discovery."
+        ),
+    )
+    capability_discovery_asset_classes: List[str] = Field(
+        default=["crypto", "equity", "etf"],
+        description="Asset classes exposed by registry-driven capability discovery.",
+    )
 
     # Primary market data venue.
     # Literal enforces only currently-supported venues.
@@ -342,6 +353,17 @@ class Config(BaseSettings):
         if isinstance(v, str):
             return json.loads(v) if v.startswith("[") else [v]
         return v
+
+    @field_validator("capability_discovery_asset_classes", mode="before")
+    @classmethod
+    def parse_capability_discovery_asset_classes(cls, v):
+        valid = {"crypto", "equity", "us_equity", "etf", "future"}
+        if isinstance(v, str):
+            v = json.loads(v) if v.startswith("[") else [v]
+        unknown = set(str(m).lower() for m in v) - valid
+        if unknown:
+            raise ValueError(f"Unknown capability discovery asset class(es): {unknown}. Valid: {valid}")
+        return [str(m).lower() for m in v]
 
     # Kraken (Crypto)
     kraken_api_key: Optional[str] = Field(default=None, description="Kraken API key")

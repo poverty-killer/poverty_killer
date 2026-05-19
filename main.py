@@ -165,10 +165,17 @@ def get_active_capability_candidates(
     """
     capability_registry = registry or build_default_capability_registry()
     environment = "paper" if config.broker_mode == "paper" else "live"
+    discovery_mode = getattr(config, "capability_discovery_mode", "active_markets")
+    discovery_markets = (
+        getattr(config, "capability_discovery_asset_classes", config.active_markets)
+        if discovery_mode == "registry"
+        else config.active_markets
+    )
     candidates = capability_registry.build_candidate_identities(
         symbols=config.symbol_universe,
-        active_markets=config.active_markets,
+        active_markets=discovery_markets,
         environment=environment,
+        discovery_mode=discovery_mode,
     )
     enabled_portals = {str(portal) for portal in getattr(config, "enabled_trading_portals", ())}
     if not enabled_portals:

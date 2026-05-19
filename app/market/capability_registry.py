@@ -6,6 +6,7 @@ from typing import Iterable
 
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
+    CredentialStatus,
     PortalAssetClass,
     PortalEnvironment,
     PortalPolicyMode,
@@ -93,23 +94,39 @@ class VenueCapabilityRegistry:
         symbols: Iterable[str],
         active_markets: Iterable[str],
         environment: str = PortalEnvironment.PAPER.value,
+        discovery_mode: str = "active_markets",
     ) -> tuple[CapabilityAwareCandidate, ...]:
         active = {normalize_asset_class(market) for market in active_markets}
+        requested_symbols = {normalize_symbol(symbol) for symbol in symbols}
         identities: list[CapabilityAwareCandidate] = []
-        for symbol in symbols:
-            for cap in self.capabilities_for_symbol(symbol, environment=environment):
-                if cap.asset_class not in active and not (
-                    cap.asset_class == PortalAssetClass.US_EQUITY.value and PortalAssetClass.EQUITY.value in active
-                ):
-                    continue
-                request = PortalSelectionRequest(
-                    symbol=symbol,
-                    asset_class=cap.asset_class,
-                    environment=environment,
-                    policy_mode=PortalPolicyMode.CAPABILITY_FIRST.value,
-                )
-                ok, reasons = cap.supports_request(request)
-                identities.append(CapabilityAwareCandidate.from_capability(cap, tradable=ok, reasons=reasons))
+        capability_source = (
+            self.capabilities
+            if discovery_mode == "registry"
+            else tuple(cap for symbol in symbols for cap in self.capabilities_for_symbol(symbol, environment=environment))
+        )
+        seen: set[str] = set()
+        for cap in capability_source:
+            if cap.environment != environment:
+                continue
+            if cap.normalized_symbol != "*" and cap.normalized_symbol not in requested_symbols:
+                continue
+            if cap.asset_class not in active and not (
+                cap.asset_class == PortalAssetClass.US_EQUITY.value and PortalAssetClass.EQUITY.value in active
+            ):
+                continue
+            if cap.capability_key in seen:
+                continue
+            seen.add(cap.capability_key)
+            request = PortalSelectionRequest(
+                symbol=cap.symbol,
+                asset_class=cap.asset_class,
+                environment=environment,
+                policy_mode=PortalPolicyMode.CAPABILITY_FIRST.value,
+                order_type=cap.default_order_type or "limit",
+                time_in_force=cap.default_time_in_force,
+            )
+            ok, reasons = cap.supports_request(request)
+            identities.append(CapabilityAwareCandidate.from_capability(cap, tradable=ok, reasons=reasons))
         return tuple(identities)
 
 
@@ -127,6 +144,8 @@ def _alpaca_equity_capability(symbol: str, *, asset_class: str, etf_capable: boo
         tradability_source="static_capability_fixture",
         supported_order_types=frozenset({"limit"}),
         supported_time_in_force=frozenset({"DAY"}),
+        default_order_type="limit",
+        default_time_in_force="DAY",
         fractional_support=True,
         min_notional=Decimal("1.00"),
         min_quantity=None,
@@ -139,6 +158,8 @@ def _alpaca_equity_capability(symbol: str, *, asset_class: str, etf_capable: boo
         sandbox_mutation=False,
         live_mutation=False,
         live_blocked=True,
+        credential_status=CredentialStatus.CONFIGURED.value,
+        order_constraint_source="alpaca_equity_order_constraints",
         metadata={"etf_capable": etf_capable},
     )
 
@@ -156,9 +177,11 @@ def _alpaca_crypto_capability(symbol: str) -> VenueCapability:
         market_data_available=True,
         tradability_source="static_capability_fixture",
         supported_order_types=frozenset({"limit"}),
-        supported_time_in_force=frozenset({"DAY", "GTC"}),
+        supported_time_in_force=frozenset({"GTC", "IOC"}),
+        default_order_type="limit",
+        default_time_in_force="GTC",
         fractional_support=True,
-        min_notional=None,
+        min_notional=Decimal("10.00"),
         min_quantity=None,
         quantity_step=None,
         market_session_status_source="alpaca_crypto_clock",
@@ -169,6 +192,8 @@ def _alpaca_crypto_capability(symbol: str) -> VenueCapability:
         sandbox_mutation=False,
         live_mutation=False,
         live_blocked=True,
+        credential_status=CredentialStatus.CONFIGURED.value,
+        order_constraint_source="alpaca_crypto_orders_support_gtc_ioc_not_day",
     )
 
 
@@ -189,6 +214,8 @@ def _kraken_crypto_capability(symbol: str) -> VenueCapability:
         tradability_source="instrument_registry",
         supported_order_types=frozenset({"limit", "market"}),
         supported_time_in_force=frozenset({"DAY", "GTC", "IOC"}),
+        default_order_type="limit",
+        default_time_in_force="GTC",
         fractional_support=True,
         min_notional=Decimal("10.00"),
         min_quantity=None,
@@ -201,6 +228,7 @@ def _kraken_crypto_capability(symbol: str) -> VenueCapability:
         sandbox_mutation=False,
         live_mutation=False,
         live_blocked=True,
+        credential_status=CredentialStatus.CONFIGURED.value,
     )
 
 
@@ -218,6 +246,8 @@ def _disabled_placeholder(venue_id: str, reason: str) -> VenueCapability:
         tradability_source="unconfigured",
         supported_order_types=frozenset(),
         supported_time_in_force=frozenset(),
+        default_order_type=None,
+        default_time_in_force=None,
         fractional_support=False,
         min_notional=None,
         min_quantity=None,
@@ -231,6 +261,9 @@ def _disabled_placeholder(venue_id: str, reason: str) -> VenueCapability:
         live_mutation=False,
         live_blocked=True,
         supported_actions=frozenset(),
+        credential_status=(
+            CredentialStatus.MISSING.value if reason == "CREDENTIALS_MISSING" else CredentialStatus.UNKNOWN.value
+        ),
         enabled=False,
         disabled_reason=reason,
         unavailable_reason=reason,
@@ -252,6 +285,8 @@ def _live_blocked_placeholder() -> VenueCapability:
         tradability_source="live_blocked",
         supported_order_types=frozenset(),
         supported_time_in_force=frozenset(),
+        default_order_type=None,
+        default_time_in_force=None,
         fractional_support=False,
         min_notional=None,
         min_quantity=None,
@@ -265,6 +300,7 @@ def _live_blocked_placeholder() -> VenueCapability:
         live_mutation=False,
         live_blocked=True,
         supported_actions=frozenset(),
+        credential_status=CredentialStatus.MISSING.value,
         enabled=False,
         disabled_reason="LIVE_BLOCKED",
         unavailable_reason="LIVE_BLOCKED",
