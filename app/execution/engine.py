@@ -94,6 +94,7 @@ class ExecutionSpineResult:
     fill: Optional[OrderFill] = None
     gateway_response: Optional[Any] = None
     decision_artifact: Optional[Dict[str, Any]] = None
+    pre_trade_guardrail_verdict: Optional[Dict[str, Any]] = None
 
 
 class ExecutionEngine:
@@ -272,6 +273,19 @@ class ExecutionEngine:
                 resolved_decision_uuid = artifact_uuid.strip()
             signal.metadata.setdefault("decision_uuid", resolved_decision_uuid)
             signal.metadata["compiled_decision_artifact"] = decision_artifact
+            guardrail_verdict = self._extract_pre_trade_guardrail_verdict(decision_artifact)
+            if guardrail_verdict is not None:
+                signal.metadata.setdefault("pre_trade_guardrail_verdict", guardrail_verdict)
+
+        guardrail_verdict = self._normalized_pre_trade_guardrail_verdict(signal)
+        if guardrail_verdict is not None and guardrail_verdict.get("route_permitted") is not True:
+            logger.info(
+                "[EXEC_DIAG] PRE_TRADE_GUARDRAIL_BLOCKED: symbol=%s verdict=%s reasons=%s",
+                signal.symbol,
+                guardrail_verdict.get("verdict"),
+                guardrail_verdict.get("reason_codes"),
+            )
+            return False
 
         queued_signal = QueuedSignal(
             signal=signal,
@@ -308,6 +322,7 @@ class ExecutionEngine:
         """
         decision_uuid = getattr(decision_record, "decision_uuid", None)
         decision_artifact = self._decision_artifact_summary(decision_record)
+        guardrail_verdict = self._extract_pre_trade_guardrail_verdict(decision_artifact)
         if not isinstance(decision_uuid, str) or not decision_uuid.strip():
             return ExecutionSpineResult(
                 decision_uuid=None,
@@ -318,6 +333,7 @@ class ExecutionEngine:
                 reason_code="decision_uuid_missing",
                 message="DecisionRecord decision_uuid is required before routing",
                 decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
             )
 
         signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
@@ -327,6 +343,7 @@ class ExecutionEngine:
                     **signal_metadata,
                     "decision_uuid": decision_uuid,
                     "compiled_decision_artifact": decision_artifact,
+                    **({"pre_trade_guardrail_verdict": guardrail_verdict} if guardrail_verdict is not None else {}),
                 }
             }
         )
@@ -347,6 +364,7 @@ class ExecutionEngine:
                 reason_code="execution_admission_blocked",
                 message="ExecutionEngine.submit_signal declined the compiled decision",
                 decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
             )
 
         queued = self._pop_matching_queued_signal(decision_uuid, signal_for_execution)
@@ -360,6 +378,7 @@ class ExecutionEngine:
                 reason_code="queued_signal_missing",
                 message="Compiled decision was admitted but no matching queued signal was available",
                 decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
             )
         result = self._execute_signal(queued)
         if result is None:
@@ -371,6 +390,7 @@ class ExecutionEngine:
                 route="execution_engine",
                 reason_code="execution_result_missing",
                 decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
             )
         return result
 
@@ -427,6 +447,34 @@ class ExecutionEngine:
             "metadata": dict(getattr(decision_record, "metadata", {}) or {}),
             "schema_version": getattr(decision_record, "schema_version", None),
         }
+
+    def _extract_pre_trade_guardrail_verdict(
+        self,
+        decision_artifact: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        outputs = decision_artifact.get("outputs")
+        if isinstance(outputs, dict):
+            additional = outputs.get("additional")
+            if isinstance(additional, dict):
+                verdict = additional.get("pre_trade_guardrail_verdict")
+                if isinstance(verdict, dict):
+                    return verdict
+        inputs = decision_artifact.get("inputs")
+        if isinstance(inputs, dict):
+            verdict = inputs.get("pre_trade_guardrail_verdict")
+            if isinstance(verdict, dict):
+                return verdict
+        return None
+
+    def _normalized_pre_trade_guardrail_verdict(
+        self,
+        signal: StrategySignal,
+    ) -> Optional[Dict[str, Any]]:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        verdict = metadata.get("pre_trade_guardrail_verdict")
+        if isinstance(verdict, dict):
+            return verdict
+        return None
 
     def _pop_matching_queued_signal(
         self,
@@ -490,6 +538,19 @@ class ExecutionEngine:
         decision_artifact = signal_metadata.get("compiled_decision_artifact")
         if not isinstance(decision_artifact, dict):
             decision_artifact = None
+        guardrail_verdict = self._normalized_pre_trade_guardrail_verdict(signal)
+        if guardrail_verdict is None and signal_metadata.get("execution_adapter") == "alpaca_paper_rest":
+            return ExecutionSpineResult(
+                decision_uuid=queued.decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="blocked",
+                route="execution_engine",
+                reason_code="PRE_TRADE_GUARDRAIL_MISSING",
+                message="External Alpaca PAPER route requires a pre-trade guardrail verdict before OrderRouter.",
+                decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=None,
+            )
         current_price = self.order_router.get_mid_price(signal.symbol)
 
         is_valid, reason = self._validate_signal_before_execution(queued, current_price)
@@ -509,6 +570,7 @@ class ExecutionEngine:
                 route="execution_engine",
                 reason_code=reason,
                 decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
             )
 
         masked = self.masking_layer.mask_order(signal.quantity)
@@ -535,6 +597,7 @@ class ExecutionEngine:
                     route="execution_engine",
                     reason_code="limit_order_no_price",
                     decision_artifact=decision_artifact,
+                    pre_trade_guardrail_verdict=guardrail_verdict,
                 )
         else:
             limit_price_for_order = None
@@ -560,6 +623,7 @@ class ExecutionEngine:
             "order_intent_id",
             "requested_notional",
             "compiled_decision_artifact",
+            "pre_trade_guardrail_verdict",
         ):
             if key in signal_metadata:
                 order_metadata[key] = signal_metadata[key]
@@ -656,6 +720,7 @@ class ExecutionEngine:
                     fill=fill,
                     gateway_response=None,
                     decision_artifact=decision_artifact,
+                    pre_trade_guardrail_verdict=guardrail_verdict,
                 )
 
             if gateway_response is not None:
@@ -674,6 +739,7 @@ class ExecutionEngine:
                     fill=None,
                     gateway_response=gateway_response,
                     decision_artifact=decision_artifact,
+                    pre_trade_guardrail_verdict=guardrail_verdict,
                 )
 
             else:
@@ -688,6 +754,7 @@ class ExecutionEngine:
                     fill=None,
                     gateway_response=None,
                     decision_artifact=decision_artifact,
+                    pre_trade_guardrail_verdict=guardrail_verdict,
                 )
         except Exception as e:
             logger.error("Order submission failed: %s", e)
@@ -700,6 +767,7 @@ class ExecutionEngine:
                 reason_code="order_submission_exception",
                 message=str(e),
                 decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
             )
 
     # ============================================

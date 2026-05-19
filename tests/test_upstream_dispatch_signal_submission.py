@@ -470,6 +470,9 @@ class TestDispatchFusionFallbackAndDecline:
         assert aggression_contract["authority_owner"] == "Commander"
         assert aggression_contract["execution_is_attack"] is False
         assert aggression_contract["stale_gate_final_veto_preserved"] is True
+        pre_trade_guardrail = observed_sig.metadata["pre_trade_guardrail_verdict"]
+        assert pre_trade_guardrail["route_permitted"] is True
+        assert pre_trade_guardrail["capability_identity"]["execution_adapter"] == "sovereign_paper_broker"
 
         # Metrics record the submission.
         assert loop._metrics.orders_submitted == 1
@@ -799,6 +802,7 @@ class TestAdvisoryMetadataSpine:
         additional_inputs = compile_kwargs["additional_inputs"]
         assert additional_inputs["canonical_aggression_contract"] == aggression_contract
         assert additional_inputs["aggression_replay_proof"] == replay_proof
+        assert additional_inputs["pre_trade_guardrail_verdict"]["route_permitted"] is True
         assert submit_kwargs.get("is_attack") is False
 
     def test_commander_attack_contract_controls_submit_is_attack_without_fusion_authority(self):

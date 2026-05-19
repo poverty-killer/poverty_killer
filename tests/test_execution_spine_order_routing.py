@@ -98,7 +98,40 @@ def _vote(decision_uuid: str = "seam3-decision-uuid") -> StrategyVote:
     )
 
 
+def _pre_trade_guardrail(
+    *,
+    symbol: str = "AAPL",
+    asset_class: str = "equity",
+    verdict: str = "ALLOW",
+    route_permitted: bool = True,
+    reason_codes: tuple[str, ...] = ("PRE_TRADE_GUARDRAILS_ALLOW",),
+):
+    return {
+        "verdict": verdict,
+        "route_permitted": route_permitted,
+        "mutation_permitted": route_permitted,
+        "reason_codes": reason_codes,
+        "symbol": symbol,
+        "side": "buy",
+        "order_type": "limit",
+        "time_in_force": "DAY" if asset_class == "equity" else "GTC",
+        "requested_notional": "15.00",
+        "internal_max_notional": "20.00",
+        "broker_min_notional": "1.00" if asset_class == "equity" else "10.00",
+        "capability_identity": {
+            "venue_id": "alpaca",
+            "portal_name": "alpaca_paper",
+            "environment": "paper",
+            "asset_class": asset_class,
+            "symbol": symbol,
+            "execution_adapter": "alpaca_paper_rest",
+        },
+        "module_evidence": [],
+    }
+
+
 def _compiled_decision(*, symbol: str = "AAPL", decision_uuid: str = "seam3-decision-uuid"):
+    asset_class = "crypto" if "/" in symbol else "equity"
     compiler = DecisionCompiler()
     return compiler.compile(
         truth_frame=_truth_frame(),
@@ -126,6 +159,7 @@ def _compiled_decision(*, symbol: str = "AAPL", decision_uuid: str = "seam3-deci
                 "execution_adapter": "alpaca_paper_rest",
             },
             "order_constraint_verdict": "allowed",
+            "pre_trade_guardrail_verdict": _pre_trade_guardrail(symbol=symbol, asset_class=asset_class),
         },
     )
 
@@ -241,7 +275,19 @@ def test_full_spine_preserves_min_notional_rejection_without_fake_fill_or_pendin
     router = OrderRouter(primary_exchange="alpaca", paper_mode=True, broker_gateway_adapter=adapter)
     router.update_market_mid("BTC/USD", 77064.20, T0_NS)
     engine = _engine(router, size=Decimal("0.00006488"))
-    decision = _compiled_decision(symbol="BTC/USD")
+    decision = DecisionCompiler().compile(
+        truth_frame=_truth_frame(),
+        strategy_votes=[_vote("seam3-decision-uuid")],
+        additional_inputs={
+            "pre_trade_guardrail_verdict": _pre_trade_guardrail(
+                symbol="BTC/USD",
+                asset_class="crypto",
+                verdict="BLOCK",
+                route_permitted=False,
+                reason_codes=("RISK_MAX_BELOW_BROKER_MIN",),
+            )
+        },
+    )
 
     result = engine.execute_compiled_decision(
         decision,
@@ -257,13 +303,13 @@ def test_full_spine_preserves_min_notional_rejection_without_fake_fill_or_pendin
         is_attack=True,
     )
 
-    assert result.normalized_status == "rejected"
-    assert result.reason_code == "MIN_NOTIONAL_NOT_MET"
+    assert result.normalized_status == "blocked"
+    assert result.reason_code == "execution_admission_blocked"
+    assert "RISK_MAX_BELOW_BROKER_MIN" in result.pre_trade_guardrail_verdict["reason_codes"]
     assert result.fill is None
     assert result.broker_order_id is None
-    assert result.client_order_id not in engine._state.pending_orders
-    assert router.get_gateway_response(result.client_order_id).reason_code == "MIN_NOTIONAL_NOT_MET"
-    assert transport.calls[0]["body"]["time_in_force"] == "gtc"
+    assert result.client_order_id is None
+    assert transport.calls == []
 
 
 def test_full_spine_blocks_unsupported_sell_before_gateway_post():

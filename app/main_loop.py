@@ -63,6 +63,19 @@ from app.models import (
 )
 from app.models.enums import RegimeType, SleeveType, SignalType, TruthStatus, RiskMode, OrderSide, InternalOrderStatus, StrategyID
 from app.risk.safety import SafetyGate
+from app.risk.pre_trade_guardrails import (
+    PreTradeGuardrailRequest,
+    evaluate_pre_trade_guardrails,
+)
+from app.market.capability_registry import build_default_capability_registry
+from app.market.venue_capabilities import (
+    CapabilityAwareCandidate,
+    PortalAssetClass,
+    PortalEnvironment,
+    PortalPolicyMode,
+    PortalSelectionRequest,
+    classify_quote_session,
+)
 from app.telemetry.event_store import TelemetryEventStore
 from app.symbol_runtime import SymbolRuntime
 from app.strategies.council_metadata import (
@@ -105,6 +118,155 @@ def _log_dispatch_diag(reason_code: str, **fields: Any) -> None:
         reason_code,
         clean_fields,
     )
+
+
+def _to_decimal_or_none(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _infer_asset_class_for_guardrail(symbol: str, metadata: Dict[str, Any]) -> str:
+    if metadata.get("asset_class"):
+        return str(metadata["asset_class"]).lower()
+    normalized = str(symbol or "").upper()
+    if "/" in normalized:
+        return PortalAssetClass.CRYPTO.value
+    if normalized in {"SPY", "QQQ", "DIA"}:
+        return PortalAssetClass.ETF.value
+    return PortalAssetClass.EQUITY.value
+
+
+def _preferred_portal_for_guardrail(config: Any, symbol: str) -> Optional[str]:
+    preferred = getattr(config, "preferred_trading_portal", None)
+    if preferred:
+        return preferred
+    # Minimal test doubles predating venue policy do not carry config defaults.
+    # Preserve their historical PaperBroker/Kraken crypto route unless a real
+    # Config explicitly selects Alpaca PAPER.
+    if "/" in str(symbol or ""):
+        return "kraken_paper"
+    return "alpaca_paper"
+
+
+def _metadata_sequence(value: Any) -> Tuple[Dict[str, Any], ...]:
+    if value is None:
+        return ()
+    if isinstance(value, dict):
+        return (dict(value),)
+    if isinstance(value, (str, bytes)):
+        return ()
+    try:
+        return tuple(item for item in value if isinstance(item, dict))
+    except TypeError:
+        return ()
+
+
+def _build_pre_trade_guardrail_verdict(
+    *,
+    config: Any,
+    symbol: str,
+    signal: Any,
+    runtime: Any,
+    is_attack: bool,
+) -> Dict[str, Any]:
+    metadata = getattr(signal, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    current_price = _to_decimal_or_none(getattr(runtime, "last_price", None))
+    quantity = _to_decimal_or_none(getattr(signal, "quantity", None)) or Decimal("0")
+    asset_class = _infer_asset_class_for_guardrail(symbol, metadata)
+    order_type = str(metadata.get("order_type") or ("limit" if is_attack else "market")).lower()
+
+    registry = build_default_capability_registry()
+    preferred_portal = _preferred_portal_for_guardrail(config, symbol)
+    policy_mode = getattr(config, "portal_selection_policy", None)
+    if not policy_mode:
+        policy_mode = PortalPolicyMode.EXPLICIT_PREFERRED_VENUE.value
+    environment = PortalEnvironment.PAPER.value if getattr(config, "broker_mode", "paper") == "paper" else PortalEnvironment.LIVE.value
+
+    preselected_time_in_force = metadata.get("time_in_force")
+    portal_request = PortalSelectionRequest(
+        symbol=symbol,
+        asset_class=asset_class,
+        environment=environment,
+        action=str(getattr(signal, "side", "buy")).lower(),
+        order_type=order_type,
+        time_in_force=str(preselected_time_in_force).upper() if preselected_time_in_force else None,
+        policy_mode=str(policy_mode),
+        preferred_venue=preferred_portal,
+        allow_fallback=bool(getattr(config, "allow_portal_fallback", False)),
+    )
+    portal_result = registry.resolve(portal_request)
+    capability = portal_result.selected
+    time_in_force = (
+        str(preselected_time_in_force).upper()
+        if preselected_time_in_force
+        else (capability.default_time_in_force if capability is not None else None)
+    )
+
+    if capability is not None and preselected_time_in_force is None and time_in_force:
+        portal_request = PortalSelectionRequest(
+            symbol=symbol,
+            asset_class=asset_class,
+            environment=environment,
+            action=str(getattr(signal, "side", "buy")).lower(),
+            order_type=order_type,
+            time_in_force=time_in_force,
+            policy_mode=str(policy_mode),
+            preferred_venue=preferred_portal,
+            allow_fallback=bool(getattr(config, "allow_portal_fallback", False)),
+        )
+        portal_result = registry.resolve(portal_request)
+        capability = portal_result.selected
+
+    quote_classification = None
+    if capability is not None:
+        candidate = CapabilityAwareCandidate.from_capability(capability, tradable=True)
+        quote_classification = classify_quote_session(
+            candidate,
+            market_session_open=metadata.get("market_session_open"),
+            quote_present=current_price is not None and current_price > Decimal("0"),
+            quote_fresh=metadata.get("quote_fresh", True),
+            spread_bps=_to_decimal_or_none(metadata.get("spread_bps")),
+        )
+
+    requested_notional = _to_decimal_or_none(metadata.get("requested_notional"))
+    if requested_notional is None and current_price is not None and quantity > Decimal("0"):
+        requested_notional = abs(quantity * current_price)
+    internal_max_notional = _to_decimal_or_none(metadata.get("internal_max_notional")) or requested_notional
+
+    verdict = evaluate_pre_trade_guardrails(
+        PreTradeGuardrailRequest(
+            symbol=symbol,
+            side=str(getattr(signal, "side", "buy")).lower(),
+            order_type=order_type,
+            time_in_force=time_in_force,
+            quantity=quantity,
+            limit_price=current_price if order_type == "limit" else None,
+            current_price=current_price,
+            internal_max_notional=internal_max_notional,
+            capability=capability,
+            portal_selection_result=portal_result,
+            quote_classification=quote_classification,
+            existing_positions=_metadata_sequence(metadata.get("existing_positions")),
+            open_orders=_metadata_sequence(metadata.get("open_orders")),
+            reservations=_metadata_sequence(metadata.get("reservations")),
+            add_on_allowed=bool(metadata.get("add_on_allowed", False)),
+            approval_present=bool(metadata.get("approval_present", False)),
+            protective_context=metadata.get("protective_context"),
+            economics_context=metadata.get("economics_context"),
+            strategy_context=metadata.get("strategy_context"),
+            source="main_loop_dispatch",
+        )
+    )
+    return verdict.to_dict()
 
 
 def _format_sector_rotation_diag_detail(detail: Optional[Dict[str, Any]]) -> str:
@@ -1419,6 +1581,15 @@ class MainLoop:
             signal_metadata["aggression_replay_proof"] = aggression_replay_proof
 
         truth_frame = self._build_truth_frame(exchange_ts_ns)
+        pre_trade_guardrail_verdict = _build_pre_trade_guardrail_verdict(
+            config=self.config,
+            symbol=symbol,
+            signal=signal,
+            runtime=runtime,
+            is_attack=aggression_contract.execution_is_attack,
+        )
+        if isinstance(signal_metadata, dict):
+            signal_metadata["pre_trade_guardrail_verdict"] = pre_trade_guardrail_verdict
 
         _log_dispatch_diag(
             "decision_compile_attempted",
@@ -1433,6 +1604,7 @@ class MainLoop:
             additional_inputs={
                 "canonical_aggression_contract": aggression_contract_metadata,
                 "aggression_replay_proof": aggression_replay_proof,
+                "pre_trade_guardrail_verdict": pre_trade_guardrail_verdict,
             },
         )
         self._metrics.compilation_cycles += 1
