@@ -47,6 +47,12 @@ import requests
 
 from app.execution.fee_model import FeeModel as _FeeModel
 from app.execution.latency_model import LatencyModel as _LatencyModel
+from app.execution.broker_gateway import (
+    BrokerGatewayError,
+    BrokerGatewayResponse,
+    BrokerOrderSubmitRequest as _GatewayOrderSubmitRequest,
+    NormalizedBrokerStatus as _GatewayStatus,
+)
 from app.execution.paper_broker import PaperBroker as _SovereignPaperBroker, PaperBrokerConfig as _PaperBrokerConfig
 from app.execution.slippage_model import SlippageModel as _SlippageModel
 from app.models import EventEnvelope, OrderFill, OrderRequest
@@ -151,6 +157,7 @@ class OrderRouter:
         state_store: Optional[StateStore] = None,
         reservation_lifecycle_coordinator: Optional[Any] = None,
         reservation_lifecycle_enabled: bool = False,
+        broker_gateway_adapter: Optional[Any] = None,
     ):
         self.primary_exchange = primary_exchange
         self.secondary_exchange = secondary_exchange
@@ -168,6 +175,8 @@ class OrderRouter:
         self._state_store = state_store
         self._reservation_lifecycle_coordinator = reservation_lifecycle_coordinator
         self._reservation_lifecycle_enabled = bool(reservation_lifecycle_enabled)
+        self._broker_gateway_adapter = broker_gateway_adapter
+        self._gateway_responses_by_client_order_id: Dict[str, BrokerGatewayResponse] = {}
         self._reservation_lifecycle_ack_open_results: List[Dict[str, Any]] = []
         self._reservation_lifecycle_partial_fill_results: List[Dict[str, Any]] = []
         self._reservation_lifecycle_full_fill_results: List[Dict[str, Any]] = []
@@ -2577,6 +2586,9 @@ class OrderRouter:
         """Submit order to exchange or sovereign paper broker."""
         self._record_order_submission_telemetry(order)
         if self.paper_mode:
+            if self._should_use_external_paper_gateway():
+                self._submit_order_gateway(order)
+                return None
             return self._submit_order_paper(order)
 
         try:
@@ -2709,6 +2721,129 @@ class OrderRouter:
         )
 
         return fill
+
+    def get_gateway_response(self, client_order_id: str) -> Optional[BrokerGatewayResponse]:
+        """Return the normalized external broker-paper response for a routed client order."""
+        return self._gateway_responses_by_client_order_id.get(client_order_id)
+
+    def _should_use_external_paper_gateway(self) -> bool:
+        return (
+            self.paper_mode
+            and self.primary_exchange == "alpaca"
+            and self._broker_gateway_adapter is not None
+        )
+
+    def _submit_order_gateway(self, order: OrderRequest) -> BrokerGatewayResponse:
+        """
+        Route an external broker-paper order through the governed gateway.
+
+        The gateway response is canonical broker truth. This method never
+        fabricates a fill and never falls back to the simulated PaperBroker.
+        """
+        request = self._gateway_request_from_order(order)
+        try:
+            response = self._broker_gateway_adapter.submit_order(request)
+        except BrokerGatewayError as exc:
+            identity = self._broker_gateway_adapter.identity
+            response = BrokerGatewayResponse(
+                adapter_id=identity.adapter_id,
+                venue_id=identity.venue_id,
+                portal_id=identity.portal_id,
+                environment=identity.environment,
+                request_method="POST",
+                endpoint_path="/v2/orders",
+                ok=False,
+                mutation_occurred=False,
+                live_blocked=identity.live_blocked,
+                client_order_id=order.id,
+                normalized_status=_GatewayStatus.REJECTED.value,
+                reason_code=exc.reason_code,
+                message=exc.message,
+                reconciliation_metadata={
+                    "source": identity.adapter_id,
+                    "blocked_before_submit": True,
+                },
+            )
+        self._gateway_responses_by_client_order_id[order.id] = response
+        ack_ts_ns = now_ns()
+
+        if response.ok and response.broker_order_id:
+            self._register_active_order_id_mapping(
+                order,
+                broker=response.venue_id,
+                venue_order_id=response.broker_order_id,
+                broker_order_id=response.broker_order_id,
+                exchange_txid=None,
+                id_mapping_source=f"{response.adapter_id}.submit_order_response",
+                ack_ts_ns=ack_ts_ns,
+            )
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source=f"{response.adapter_id}.submit_order_response",
+                lifecycle_phase="order_acknowledged",
+                event_ts_ns=ack_ts_ns,
+                ack_seen=True,
+                venue_order_id=response.broker_order_id,
+                broker_order_id=response.broker_order_id,
+                original_qty=order.quantity,
+                cumulative_filled_qty=_Decimal("0"),
+                remaining_qty=order.quantity,
+                cumulative_fee=_Decimal("0"),
+                is_terminal=response.normalized_status
+                in {
+                    _GatewayStatus.FILLED.value,
+                    _GatewayStatus.REJECTED.value,
+                    _GatewayStatus.CANCELED.value,
+                    _GatewayStatus.EXPIRED.value,
+                },
+                status_source=f"{response.adapter_id}.submit_order_response",
+                id_mapping_source=f"{response.adapter_id}.submit_order_response",
+                idempotency_key=(
+                    f"{order.decision_uuid}:{order.id}:order_acknowledged:"
+                    f"{response.broker_order_id}:{ack_ts_ns}:{response.adapter_id}_submit_order"
+                ),
+            )
+            if response.normalized_status in {_GatewayStatus.ACCEPTED.value, _GatewayStatus.OPEN.value}:
+                self._pending_orders[order.id] = order
+            self._order_status_cache[order.id] = OrderStatus(
+                order_id=order.id,
+                status=response.normalized_status,
+                timestamp_ns=ack_ts_ns,
+            )
+            return response
+
+        self._order_status_cache[order.id] = OrderStatus(
+            order_id=order.id,
+            status=response.normalized_status,
+            timestamp_ns=ack_ts_ns,
+        )
+        self._record_rejection_telemetry(order, response.reason_code or response.message or "broker_gateway_rejected")
+        return response
+
+    def _gateway_request_from_order(self, order: OrderRequest) -> _GatewayOrderSubmitRequest:
+        side = str(getattr(order.side, "value", order.side)).lower()
+        order_type = str(getattr(order.order_type, "value", order.order_type)).lower()
+        metadata = order.metadata if isinstance(order.metadata, dict) else {}
+        time_in_force = str(metadata.get("time_in_force") or metadata.get("tif") or "day")
+        asset_class = metadata.get("asset_class")
+        return _GatewayOrderSubmitRequest(
+            symbol=order.symbol,
+            side=side,
+            order_type=order_type,
+            time_in_force=time_in_force,
+            quantity=_Decimal(str(order.quantity)),
+            limit_price=_Decimal(str(order.limit_price)) if order.limit_price is not None else None,
+            client_order_id=order.id,
+            asset_class=str(asset_class) if asset_class is not None else None,
+            metadata={
+                "decision_uuid": order.decision_uuid,
+                "strategy": str(getattr(order.strategy, "value", order.strategy)),
+                "execution_adapter": metadata.get("execution_adapter"),
+                "portal_name": metadata.get("portal_name"),
+                "venue_id": metadata.get("venue_id"),
+                "environment": metadata.get("environment"),
+            },
+        )
 
     def _submit_order_kraken(self, order: OrderRequest) -> Optional[OrderFill]:
         endpoint = self._endpoints["kraken"]["order"]
@@ -2992,6 +3127,9 @@ class OrderRouter:
     # ============================================
 
     def cancel_order(self, order_id: str) -> bool:
+        if self._should_use_external_paper_gateway():
+            logger.warning("External paper gateway cancel is not authorized for %s", order_id)
+            return False
         if self.paper_mode:
             return self._cancel_order_paper(order_id)
 
