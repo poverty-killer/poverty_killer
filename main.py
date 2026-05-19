@@ -66,6 +66,12 @@ from app.execution.engine import ExecutionEngine
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
 from app.instrument_registry import InstrumentRegistry
+from app.market import (
+    CapabilityAwareCandidate,
+    PortalSelectionRequest,
+    VenueCapabilityRegistry,
+    build_default_capability_registry,
+)
 from app.main_loop import create_main_loop
 from app.models import Candle
 from app.models.enums import ExchangeType
@@ -133,16 +139,66 @@ def _feed_symbols_for_venue(venue: str, universe: list, active_markets: list) ->
 
 def get_active_symbols(config: Config) -> Set[str]:
     """
-    Get the set of active symbols for paper trading from configuration.
-    
-    Returns symbols from symbol_universe that belong to primary_feed_venue
-    and are in active_markets.
+    Get the legacy raw feed symbols for the configured primary feed venue.
+
+    This compatibility surface intentionally returns plain symbols because
+    MainLoop still consumes symbol strings. Capability-aware venue identity is
+    available through get_active_capability_candidates().
     """
-    return set(_feed_symbols_for_venue(
-        config.primary_feed_venue,
-        config.symbol_universe,
-        config.active_markets,
-    ))
+    return {
+        candidate.raw_symbol
+        for candidate in get_active_capability_candidates(config)
+        if candidate.tradable and candidate.venue_id == config.primary_feed_venue
+    }
+
+
+def get_active_capability_candidates(
+    config: Config,
+    registry: VenueCapabilityRegistry | None = None,
+) -> tuple[CapabilityAwareCandidate, ...]:
+    """
+    Return capability-aware runtime candidates for the configured universe.
+
+    Venue, asset class, environment, quote source, execution adapter, and
+    reconciliation adapter travel with each candidate. This is selection
+    metadata only; it does not authorize broker mutation.
+    """
+    capability_registry = registry or build_default_capability_registry()
+    environment = "paper" if config.broker_mode == "paper" else "live"
+    candidates = capability_registry.build_candidate_identities(
+        symbols=config.symbol_universe,
+        active_markets=config.active_markets,
+        environment=environment,
+    )
+    enabled_portals = {str(portal) for portal in getattr(config, "enabled_trading_portals", ())}
+    if not enabled_portals:
+        return candidates
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.portal_name in enabled_portals or f"{candidate.venue_id}_{candidate.environment}" in enabled_portals
+    )
+
+
+def resolve_runtime_portal(
+    config: Config,
+    *,
+    symbol: str,
+    asset_class: str | None = None,
+    registry: VenueCapabilityRegistry | None = None,
+):
+    capability_registry = registry or build_default_capability_registry()
+    environment = "paper" if config.broker_mode == "paper" else "live"
+    return capability_registry.resolve(
+        PortalSelectionRequest(
+            symbol=symbol,
+            asset_class=asset_class,
+            environment=environment,
+            policy_mode=config.portal_selection_policy,
+            preferred_venue=config.preferred_trading_portal,
+            allow_fallback=config.allow_portal_fallback,
+        )
+    )
 
 
 class SovereignHeartbeat:
@@ -278,11 +334,8 @@ class SovereignHeartbeat:
         )
 
         self._primary_feed_venue: str = config.primary_feed_venue
-        self._feed_symbols: list = _feed_symbols_for_venue(
-            self._primary_feed_venue,
-            config.symbol_universe,
-            config.active_markets,
-        )
+        self._capability_candidates = get_active_capability_candidates(config)
+        self._feed_symbols: list = sorted(get_active_symbols(config))
         self._primary_symbol: str = (
             self._feed_symbols[0]
             if self._feed_symbols
@@ -295,6 +348,22 @@ class SovereignHeartbeat:
         # Get active symbols set for multi-symbol support
         self._active_symbols: Set[str] = get_active_symbols(config)
         logger.info("Active symbols for paper trading: %s", self._active_symbols)
+        logger.info(
+            "Capability-aware runtime candidates: %s",
+            [
+                {
+                    "symbol": candidate.raw_symbol,
+                    "venue": candidate.venue_id,
+                    "asset_class": candidate.asset_class,
+                    "environment": candidate.environment,
+                    "execution_adapter": candidate.execution_adapter,
+                    "tradable": candidate.tradable,
+                    "mutation_authorized": candidate.mutation_authorized,
+                    "fail_closed_reason": candidate.fail_closed_reason_code,
+                }
+                for candidate in self._capability_candidates
+            ],
+        )
 
         # BUNDLE MULTI-SYMBOL RUNTIME: Per-symbol engines are now created
         # inside MainLoop's SymbolRuntime containers. Legacy single-symbol
@@ -900,6 +969,19 @@ class SovereignHeartbeat:
             "shans_curve": self.shans_curve.get_stats(),
             "main_loop": self.main_loop.get_status(),
             "active_symbols": list(self._active_symbols),
+            "capability_candidates": [
+                {
+                    "symbol": candidate.raw_symbol,
+                    "venue": candidate.venue_id,
+                    "asset_class": candidate.asset_class,
+                    "environment": candidate.environment,
+                    "execution_adapter": candidate.execution_adapter,
+                    "reconciliation_adapter": candidate.reconciliation_adapter,
+                    "tradable": candidate.tradable,
+                    "mutation_authorized": candidate.mutation_authorized,
+                }
+                for candidate in self._capability_candidates
+            ],
             "primary_symbol": self._primary_symbol,
         }
 

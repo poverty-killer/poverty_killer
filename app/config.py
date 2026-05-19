@@ -288,6 +288,22 @@ class Config(BaseSettings):
         default=False,
         description="Enable paper-only reservation lifecycle mutation. Ignored unless broker_mode is paper.",
     )
+    portal_selection_policy: Literal["explicit_preferred_venue", "capability_first", "fail_closed"] = Field(
+        default="explicit_preferred_venue",
+        description="How the venue capability registry resolves multiple matching portals.",
+    )
+    preferred_trading_portal: Optional[str] = Field(
+        default="alpaca_paper",
+        description="Operator-selected portal for explicit_preferred_venue policy.",
+    )
+    allow_portal_fallback: bool = Field(
+        default=False,
+        description="Allow fallback when the explicit preferred portal is unsupported.",
+    )
+    enabled_trading_portals: List[str] = Field(
+        default=["kraken_paper", "alpaca_paper"],
+        description="Configured paper portals available to capability selection.",
+    )
 
     # Primary market data venue.
     # Literal enforces only currently-supported venues.
@@ -319,6 +335,13 @@ class Config(BaseSettings):
         if unknown:
             raise ValueError(f"Unknown market class(es): {unknown}. Valid: {valid}")
         return [str(m).lower() for m in v]
+
+    @field_validator("enabled_trading_portals", mode="before")
+    @classmethod
+    def parse_enabled_trading_portals(cls, v):
+        if isinstance(v, str):
+            return json.loads(v) if v.startswith("[") else [v]
+        return v
 
     # Kraken (Crypto)
     kraken_api_key: Optional[str] = Field(default=None, description="Kraken API key")
