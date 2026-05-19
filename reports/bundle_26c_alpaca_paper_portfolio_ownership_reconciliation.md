@@ -1,0 +1,230 @@
+# BUNDLE 26C - Alpaca Paper Portfolio Ownership / Batch Post-Fill Reconciliation
+
+Verdict: CONDITIONAL
+
+Changed files:
+- `tests/test_alpaca_paper_portfolio_ownership_reconciliation.py`
+- `reports/bundle_26c_alpaca_paper_portfolio_ownership_reconciliation.md`
+
+Tests run:
+- `/tmp/pk25i-venv/bin/python -m pytest tests/test_alpaca_paper_portfolio_ownership_reconciliation.py -q -s -rs --tb=short`
+# result
+  - sandbox network run: `3 passed, 1 skipped in 1.22s`
+  - skipped fresh broker read because sandbox network returned `URLError`
+- `/tmp/pk25i-venv/bin/python -m pytest tests/test_alpaca_paper_portfolio_ownership_reconciliation.py -q -s -rs --tb=short`
+# result
+  - escalated Alpaca PAPER read-only run: `4 passed in 3.89s`
+  - HTTP method guard: GET only
+  - no POST, PATCH, DELETE, cancel, or replace
+- `env -u POVERTY_KILLER_APPROVE_ALPACA_PAPER_10_SYMBOL_BATCH_26B -u POVERTY_KILLER_APPROVE_ALPACA_PAPER_TINY_ORDER_25Z /tmp/pk25i-venv/bin/python -m pytest tests/test_alpaca_paper_post_fill_reconciliation_runtime.py tests/test_alpaca_paper_10_symbol_batch_execution.py tests/test_alpaca_paper_tiny_order_execution.py tests/test_alpaca_paper_read_only_broker_truth.py tests/test_whole_bot_replay_regime_stress.py tests/test_whole_bot_contribution_activation_harness.py tests/test_runtime_reservation_bootstrap.py tests/test_order_lifecycle_replay.py tests/test_execution_sr_decimal.py -q -s -rs --tb=short`
+# result
+  - `56 passed, 2 skipped, 80 warnings in 17.37s`
+  - skipped `tests/test_alpaca_paper_10_symbol_batch_execution.py`: 26B batch approval flag missing; no POST allowed
+  - skipped `tests/test_alpaca_paper_tiny_order_execution.py`: 25Z Board approval flag missing; no POST allowed
+
+Portfolio ownership / batch post-fill reconciliation:
+- Account snapshot:
+  - status: `ACTIVE`
+  - currency: `USD`
+  - cash: `99965`
+  - buying_power: `199964.93`
+  - equity: `99999.93`
+  - portfolio_value: `99999.93`
+  - receive timestamp: captured by the test harness with `now_ns()`
+- Positions:
+  - broker returned 7 positions
+  - all expected paper positions are present: `AAPL`, `NVDA`, `AMZN`, `GOOGL`, `TSLA`, `SPY`, `QQQ`
+  - no extra positions were returned
+  - broker truth is canonical; dashboard observations were not used as position truth
+- Open orders:
+  - open_orders_count: `0`
+  - no 25Z-B or 26B order remained open
+- Activities/fills:
+  - all seven known filled broker orders had matching fill activity
+  - direct known-order GETs confirmed filled order identity and quantity
+  - fee and fee currency are carried as missing gaps because the recorded order truth did not provide them
+- Known order reconciliation:
+  - 25Z-B AAPL order `b47cdef4-a913-4517-9cac-5d96f319de91` mapped to position and fill activity
+  - 26B NVDA, AMZN, GOOGL, TSLA, SPY, and QQQ orders mapped to positions and fill activity
+  - no duplicate known order ID was accepted by the harness
+  - no missing filled order without reason was accepted by the harness
+- Skipped-symbol reconciliation:
+  - `AAPL`: `existing_position_present`
+  - `MSFT`: `quote_wide_spread`
+  - `META`: `quote_wide_spread`
+  - `AMD`: `reason_not_emitted_by_existing_26b_harness`
+- Economic truth/gaps:
+  - gross filled notional was computed only as passive `filled_qty * avg_fill_price`
+  - total known gross filled notional: `34.99622517`
+  - no PnL, slippage, net edge, profitability, or alpha claim was made
+  - fee, fee currency, arrival price, slippage, net edge, live execution, and paper-vs-live gaps remain explicit
+- Local runtime/recovery classification:
+  - these positions were created through controlled test harnesses, not the full production DecisionCompiler runtime path
+  - broker-paper truth is canonical
+  - local runtime must not assume flat
+  - local reservations were not mutated retroactively
+  - live reservation lifecycle remains disabled
+  - PaperBroker internal state remains separate from Alpaca PAPER broker state
+  - future runtime must ingest/read broker state before any new entry or exposure decision
+- No-go/readiness state:
+  - new orders remain blocked without portfolio-aware preflight and future Board approval
+  - exits/cancels remain blocked without explicit Board approval
+  - live mode remains blocked
+  - live reservation lifecycle remains blocked
+  - economics veto activation remains blocked
+  - profitability claims remain blocked
+
+Current broker-paper portfolio:
+- account_status: `ACTIVE`
+- cash: `99965`
+- buying_power: `199964.93`
+- equity/portfolio_value: `99999.93` / `99999.93`
+- open_orders_count: `0`
+- positions_count: `7`
+- positions:
+  - AAPL:
+    - qty: `0.016903`
+    - market_value: `5.018332`
+    - average_entry_price: `295.78`
+    - side: `long`
+    - current_price: `296.89`
+  - NVDA:
+    - qty: `0.022593`
+    - market_value: `4.988083`
+    - average_entry_price: `221.284`
+    - side: `long`
+    - current_price: `220.78`
+  - AMZN:
+    - qty: `0.018912`
+    - market_value: `4.981421`
+    - average_entry_price: `264.372`
+    - side: `long`
+    - current_price: `263.4`
+  - GOOGL:
+    - qty: `0.012572`
+    - market_value: `5.002399`
+    - average_entry_price: `397.628`
+    - side: `long`
+    - current_price: `397.9`
+  - TSLA:
+    - qty: `0.012195`
+    - market_value: `4.943731`
+    - average_entry_price: `409.966`
+    - side: `long`
+    - current_price: `405.39`
+  - SPY:
+    - qty: `0.006787`
+    - market_value: `5.001883`
+    - average_entry_price: `736.628`
+    - side: `long`
+    - current_price: `736.98`
+  - QQQ:
+    - qty: `0.007111`
+    - market_value: `4.991211`
+    - average_entry_price: `703.048`
+    - side: `long`
+    - current_price: `701.9`
+  - extra_positions_if_any: none
+- recent_fills:
+  - AAPL:
+    - order_id: `b47cdef4-a913-4517-9cac-5d96f319de91`
+    - client_order_id: `pk25z-paper-aapl-buy-limit-day-1777948800000000100`
+    - qty: `0.016903`
+    - avg fill: `295.78`
+    - gross filled notional: `4.99956934`
+  - NVDA:
+    - order_id: `9f7a4b8f-5f46-4657-9fc9-64a39126e61f`
+    - client_order_id: `pk26b-paper-batch-nvda-buy-limit-day-1779133016649129759`
+    - qty: `0.022593`
+    - avg fill: `221.284`
+    - gross filled notional: `4.99946941`
+  - AMZN:
+    - order_id: `fcc9b06f-6e6c-4bba-b73f-c77258a39c68`
+    - client_order_id: `pk26b-paper-batch-amzn-buy-limit-day-1779133016649129760`
+    - qty: `0.018912`
+    - avg fill: `264.372`
+    - gross filled notional: `4.99980326`
+  - GOOGL:
+    - order_id: `e636c120-9948-4732-b7c8-a38fa3fbe9c7`
+    - client_order_id: `pk26b-paper-batch-googl-buy-limit-day-1779133016649129762`
+    - qty: `0.012572`
+    - avg fill: `397.628`
+    - gross filled notional: `4.99897922`
+  - TSLA:
+    - order_id: `3a3e04f9-69d4-4ff4-a153-a4e898d763e7`
+    - client_order_id: `pk26b-paper-batch-tsla-buy-limit-day-1779133016649129763`
+    - qty: `0.012195`
+    - avg fill: `409.966`
+    - gross filled notional: `4.99953537`
+  - SPY:
+    - order_id: `f78c7c5c-6ce3-41f0-977d-8238558488c1`
+    - client_order_id: `pk26b-paper-batch-spy-buy-limit-day-1779133016649129765`
+    - qty: `0.006787`
+    - avg fill: `736.628`
+    - gross filled notional: `4.99949424`
+  - QQQ:
+    - order_id: `18ad682e-16f6-44fa-b3d5-ac3875399bcd`
+    - client_order_id: `pk26b-paper-batch-qqq-buy-limit-day-1779133016649129766`
+    - qty: `0.007111`
+    - avg fill: `703.048`
+    - gross filled notional: `4.99937433`
+
+Gaps explicitly carried:
+- AMD skip reason was not emitted by the existing 26B harness.
+- Fee missing if not returned by broker activity.
+- Fee currency missing if not returned by broker activity.
+- Arrival price gap.
+- Slippage gap.
+- Net edge gap.
+- Real live execution gap.
+- Paper-vs-live simulation gap.
+- Full production DecisionCompiler runtime path gap.
+
+Recommended next packet:
+- 26D - Controlled Paper Portfolio Runtime / Exposure Response
+- Why this is the single next seam:
+  - 26C establishes broker-paper ownership with seven current positions, no open orders, and known fills reconciled.
+  - The next capability seam is runtime/exposure response with existing Alpaca PAPER positions visible.
+  - No new order, exit, cancel, replace, live mode, or economics veto activation should occur without a future Board packet.
+
+Authority boundaries confirmed:
+- No production behavior changed.
+- No broker mutation occurred in 26C.
+- No POST, PATCH, DELETE, cancel, or replace occurred.
+- No live endpoint.
+- No live mode.
+- No broker_adapter/live_broker activation.
+- No live reservation lifecycle activation.
+- No NetEdge/TradeEfficiency veto activation.
+- No StrategyAllocator/SovereignGovernor/SovereignExecutionGuard activation.
+- No threshold changes.
+- No routing/execution broadening.
+- No duplicate execution/risk/economics authority.
+- No fake local fills.
+- No retroactive local reservation mutation.
+- Broker truth remains canonical.
+
+Confirmations:
+- Production behavior changed: no
+- If yes, exact helper only:
+  - n/a
+- Real broker/network call made: yes, Alpaca PAPER read-only only
+- Credentials used: yes, env vars only
+- Secrets printed/written/committed: no
+- Live endpoint used: no
+- Paper endpoint used: yes
+- Order placed in this packet: no
+- Cancel sent: no
+- Replace sent: no
+- HTTP methods used:
+  - GET only
+- Live mode used: no
+- broker_adapter edited/activated: no
+- live_broker edited/activated: no
+- Live reservation lifecycle activated: no
+- Dormant governors activated: no
+- Economics veto activated: no
+- Thresholds changed: no
+- Routing/execution broadened: no
+- Duplicate authority introduced: no
+- Git staging/commit/push/reset/clean/stash/delete: none
