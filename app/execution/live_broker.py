@@ -1,7 +1,7 @@
-﻿\"\"\"
+﻿"""
 live_broker
 Poverty Killer module - Under construction.
-\"\"\"
+"""
 
 def main():
     pass

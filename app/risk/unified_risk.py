@@ -307,7 +307,7 @@ class UnifiedRiskPolicyConfig:
     journal_capacity: int = 50_000
 
     def __post_init__(self) -> None:
-        decimal_fields = [
+        unit_interval_fields = [
             "toxicity_hard_deny_threshold",
             "toxicity_degrade_threshold",
             "exposure_hard_deny_threshold",
@@ -321,10 +321,17 @@ class UnifiedRiskPolicyConfig:
             "exposure_reduce_only_threshold",
             "exposure_hedge_only_threshold",
             "toxicity_reduce_only_threshold",
-            "hysteresis_improve_multiplier",
         ]
-        for name in decimal_fields:
+        for name in unit_interval_fields:
             object.__setattr__(self, name, _ensure_unit_interval(_d(getattr(self, name), field_name=name), name))
+
+        hysteresis_improve_multiplier = _d(
+            self.hysteresis_improve_multiplier,
+            field_name="hysteresis_improve_multiplier",
+        )
+        if hysteresis_improve_multiplier <= ZERO:
+            raise ValueError("hysteresis_improve_multiplier must be > 0")
+        object.__setattr__(self, "hysteresis_improve_multiplier", hysteresis_improve_multiplier)
 
         if self.journal_capacity < 100:
             raise ValueError("journal_capacity must be >= 100")
