@@ -30,6 +30,11 @@ from app.strategies.council_metadata import (
     BIAS_UNKNOWN,
     FEED_MISSING,
     FEED_REAL,
+    KEY_FEED_STATUS,
+    KEY_PROTECTIVE_ONLY,
+    KEY_REASON,
+    KEY_SOURCE_MODULE,
+    KEY_SOURCE_OUTPUT_TYPE,
     MODULE_ADAPTIVE_DC,
     MODULE_GAMMA_FRONT,
     MODULE_LIQUIDITY_VOID,
@@ -42,6 +47,7 @@ from app.strategies.council_metadata import (
     SOURCE_FLOOR_SIGNAL_RECOMMENDATION,
     SOURCE_STRATEGY_SIGNAL,
     build_council_metadata,
+    build_runtime_evidence_record,
 )
 
 if TYPE_CHECKING:
@@ -440,10 +446,72 @@ def adapt_sector_rotation_to_vote(
     )
 
 
+def adapt_vote_to_runtime_evidence(vote: StrategyVote) -> dict:
+    """
+    Convert a StrategyVote into the Seam 7E runtime evidence contract.
+
+    Pure transform only. This preserves provenance and does not authorize
+    dispatch, execution, broker routing, sizing, or risk approval.
+    """
+    metadata = dict(vote.metadata or {})
+    module_name = str(metadata.get(KEY_SOURCE_MODULE) or vote.strategy_id)
+    protective_only = bool(metadata.get(KEY_PROTECTIVE_ONLY, False))
+    feed_status = str(metadata.get(KEY_FEED_STATUS) or FEED_MISSING)
+    status = "ACTIVE_PROTECTION" if protective_only else "ACTIVE_STRATEGY_VOTE"
+    effect = "PROTECT_TOTAL_PROFIT" if protective_only else "VOTE"
+    if feed_status == FEED_MISSING:
+        status = "MISSING_FEED_TRUTH"
+        effect = "NO_EFFECT_WITH_REASON"
+
+    return build_runtime_evidence_record(
+        module_name=module_name,
+        category="strategy_alpha",
+        status=status,
+        input_truth=f"strategy_vote.feed_status:{feed_status}",
+        output_summary=str(metadata.get(KEY_SOURCE_OUTPUT_TYPE) or "StrategyVote"),
+        effect=effect,
+        score_or_direction=vote.signal,
+        confidence=vote.confidence,
+        reason=str(metadata.get(KEY_REASON) or "STRATEGY_VOTE_PRESENT"),
+        timestamp_ns=vote.timestamp_ns,
+        provenance={
+            "vote_id": vote.vote_id,
+            "decision_uuid": vote.decision_uuid,
+            "strategy_id": str(vote.strategy_id),
+            "metadata": metadata,
+        },
+    )
+
+
+def missing_strategy_runtime_evidence(
+    *,
+    module_name: str,
+    reason: str,
+    timestamp_ns: int,
+    category: str = "strategy_alpha",
+) -> dict:
+    """
+    Represent a strategy module that could not lawfully emit native evidence.
+    """
+    return build_runtime_evidence_record(
+        module_name=module_name,
+        category=category,
+        status="MISSING_FEED_TRUTH",
+        input_truth="native_strategy_input_absent",
+        output_summary="No native strategy vote or signal was supplied; no alpha was invented.",
+        effect="NO_EFFECT_WITH_REASON",
+        reason=reason,
+        timestamp_ns=timestamp_ns,
+        provenance={"adapter": "missing_strategy_runtime_evidence"},
+    )
+
+
 __all__ = [
     "adapt_adaptive_dc_to_vote",
     "adapt_gamma_front_to_vote",
     "adapt_liquidity_void_to_vote",
     "adapt_moving_floor_to_vote",
     "adapt_sector_rotation_to_vote",
+    "adapt_vote_to_runtime_evidence",
+    "missing_strategy_runtime_evidence",
 ]

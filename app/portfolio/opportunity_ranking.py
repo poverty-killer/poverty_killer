@@ -353,6 +353,37 @@ class OpportunityRanker:
         )
 
 
+def summarize_opportunity_ranking(report: OpportunityRankingReport) -> Dict[str, object]:
+    """
+    Build passive ranking telemetry for DecisionRecord metadata.
+
+    This does not allocate, size orders, route, or execute. Cost fields remain
+    the report's own assumptions and are not broker truth or profitability.
+    """
+    if report.top_opportunity is None:
+        status = "ABSTAIN"
+        reason = "NO_RANKABLE_OPPORTUNITY"
+    elif report.total_ranked == report.total_skipped:
+        status = "ABSTAIN"
+        reason = "ALL_OPPORTUNITIES_SKIPPED"
+    else:
+        status = "RANKED"
+        reason = "PASSIVE_OPPORTUNITY_RANKING_COMPLETE"
+
+    return {
+        "module_name": "opportunity_ranking",
+        "category": "opportunity_ranking",
+        "status": status,
+        "effect": "RANK" if status == "RANKED" else "NO_EFFECT_WITH_REASON",
+        "reason": reason,
+        "top_opportunity": report.top_opportunity,
+        "total_ranked": report.total_ranked,
+        "total_skipped": report.total_skipped,
+        "assumptions": report.assumptions,
+        "execution_authority": "none",
+    }
+
+
 # ────────────────────────────────────────────────────────────────
 # Module Exports
 # ────────────────────────────────────────────────────────────────
@@ -366,4 +397,5 @@ __all__ = [
     "OpportunityRank",
     "OpportunityRankingReport",
     "OpportunityRanker",
+    "summarize_opportunity_ranking",
 ]

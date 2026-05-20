@@ -12,6 +12,8 @@ DecisionCompiler does not consume these keys in Stage 2.
 Stage 3 enforcement (contribution_role authority separation) is a future bundle.
 """
 
+from typing import Any, Iterable, Mapping, Optional
+
 # ── Metadata key names ────────────────────────────────────────────────────────
 
 KEY_COUNCIL_VERSION               = "council_version"
@@ -227,6 +229,56 @@ _VALID_SOURCE_MODULES = frozenset({
 # ── Convention version ────────────────────────────────────────────────────────
 
 COUNCIL_CONVENTION_VERSION = "6G-C"
+RUNTIME_EVIDENCE_CONTRACT_VERSION = "7E"
+
+
+RUNTIME_EVIDENCE_KEYS = frozenset({
+    "module_name",
+    "category",
+    "status",
+    "input_truth",
+    "input_source",
+    "output_summary",
+    "effect",
+    "score_or_direction",
+    "confidence",
+    "reason",
+    "provenance",
+    "timestamp_ns",
+    "contract_version",
+})
+
+_VALID_RUNTIME_STATUSES = frozenset({
+    "ACTIVE_NATIVE_SIGNAL",
+    "ACTIVE_PROTECTION",
+    "ACTIVE_STRATEGY_VOTE",
+    "ACTIVE_WORLD_AWARENESS_ADVISORY",
+    "ACTIVE_INTELLIGENCE_ADVISORY",
+    "ACTIVE_LOCAL_CACHE",
+    "ACTIVE_REPLAY",
+    "DEGRADED_FALLBACK",
+    "MISSING_FEED_TRUTH",
+    "NOT_READY_DATA_WARMUP",
+    "INTENTIONALLY_BLOCKED_COMPLIANCE",
+    "INTENTIONALLY_BLOCKED_LIVE_ONLY",
+    "INTENTIONALLY_BLOCKED_PREMIUM_KEY_MISSING",
+    "FAILED_CLOSED",
+    "ABSTAIN",
+})
+
+_VALID_RUNTIME_EFFECTS = frozenset({
+    "RANK",
+    "VOTE",
+    "ADVISORY",
+    "PROTECT_TOTAL_PROFIT",
+    "PROTECT_PORTFOLIO_PROFIT",
+    "ALPHA_SIGNAL",
+    "WORLD_AWARENESS_CONTEXT",
+    "INTELLIGENCE_CONTEXT",
+    "BLOCK",
+    "VETO",
+    "NO_EFFECT_WITH_REASON",
+})
 
 
 # ── Builder ───────────────────────────────────────────────────────────────────
@@ -308,3 +360,83 @@ def build_council_metadata(
     }
     base.update(module_specific)
     return base
+
+
+def build_runtime_evidence_record(
+    *,
+    module_name: str,
+    category: str,
+    status: str,
+    input_truth: str,
+    output_summary: str,
+    effect: str,
+    reason: str,
+    timestamp_ns: int,
+    score_or_direction: Optional[Any] = None,
+    confidence: Optional[Any] = None,
+    provenance: Optional[Mapping[str, Any]] = None,
+) -> dict:
+    """
+    Build the Seam 7E normalized runtime evidence record.
+
+    This is an advisory evidence contract only. It does not grant routing,
+    execution, risk, broker, or reconciliation authority to the producer.
+    """
+    if status not in _VALID_RUNTIME_STATUSES:
+        raise ValueError(f"invalid runtime evidence status={status!r}")
+    if effect not in _VALID_RUNTIME_EFFECTS:
+        raise ValueError(f"invalid runtime evidence effect={effect!r}")
+    if timestamp_ns <= 0:
+        raise ValueError(f"timestamp_ns must be positive: {timestamp_ns!r}")
+
+    input_truth_text = str(input_truth)
+    return {
+        "module_name": str(module_name),
+        "category": str(category),
+        "status": status,
+        "input_truth": input_truth_text,
+        "input_source": input_truth_text,
+        "output_summary": str(output_summary),
+        "effect": effect,
+        "score_or_direction": None if score_or_direction is None else str(score_or_direction),
+        "confidence": None if confidence is None else str(confidence),
+        "reason": str(reason),
+        "provenance": dict(provenance or {}),
+        "timestamp_ns": int(timestamp_ns),
+        "contract_version": RUNTIME_EVIDENCE_CONTRACT_VERSION,
+    }
+
+
+def summarize_runtime_evidence(records: Iterable[Mapping[str, Any]]) -> dict:
+    """
+    Summarize normalized records without converting missing truth into signal.
+    """
+    record_list = tuple(records)
+    participants = []
+    missing = []
+    degraded = []
+    blocked = []
+    abstained = []
+
+    for record in record_list:
+        module_name = str(record.get("module_name", "unknown"))
+        status = str(record.get("status", ""))
+        if status.startswith("ACTIVE_"):
+            participants.append(module_name)
+        elif status == "DEGRADED_FALLBACK":
+            degraded.append(module_name)
+        elif status == "MISSING_FEED_TRUTH":
+            missing.append(module_name)
+        elif status.startswith("INTENTIONALLY_BLOCKED") or status == "FAILED_CLOSED":
+            blocked.append(module_name)
+        elif status == "ABSTAIN":
+            abstained.append(module_name)
+
+    return {
+        "participants": tuple(participants),
+        "missing": tuple(missing),
+        "degraded": tuple(degraded),
+        "blocked": tuple(blocked),
+        "abstained": tuple(abstained),
+        "total_records": len(record_list),
+    }

@@ -199,10 +199,23 @@ class DecisionCompiler:
         truth_status_str = _safe_str(truth_frame.status)
         risk_mode_str = _safe_str(risk_decision.risk_mode) if risk_decision else None
         edge_attribution = None
+        attribution_sections: Dict[str, Any] = {}
         if isinstance(additional_inputs, dict):
             candidate_attribution = additional_inputs.get("edge_attribution")
             if isinstance(candidate_attribution, dict):
                 edge_attribution = candidate_attribution
+            for section_name in (
+                "strategy_attribution",
+                "intelligence_attribution",
+                "world_awareness_attribution",
+                "fusion_summary",
+                "opportunity_ranking_summary",
+                "missing_truth_summary",
+                "degraded_fallback_summary",
+                "blocked_or_abstained_summary",
+            ):
+                if section_name in additional_inputs:
+                    attribution_sections[section_name] = additional_inputs[section_name]
 
         metadata: Dict[str, Any] = {
             "truth_status": truth_status_str,
@@ -211,6 +224,35 @@ class DecisionCompiler:
         if edge_attribution is not None:
             metadata["edge_attribution"] = edge_attribution
             metadata["edge_attribution_module_count"] = len(edge_attribution)
+            attribution_sections.setdefault(
+                "missing_truth_summary",
+                tuple(
+                    name
+                    for name, item in edge_attribution.items()
+                    if isinstance(item, dict) and item.get("status") == "MISSING_FEED_TRUTH"
+                ),
+            )
+            attribution_sections.setdefault(
+                "degraded_fallback_summary",
+                tuple(
+                    name
+                    for name, item in edge_attribution.items()
+                    if isinstance(item, dict) and item.get("status") == "DEGRADED_FALLBACK"
+                ),
+            )
+            attribution_sections.setdefault(
+                "blocked_or_abstained_summary",
+                tuple(
+                    name
+                    for name, item in edge_attribution.items()
+                    if isinstance(item, dict)
+                    and (
+                        str(item.get("status", "")).startswith("INTENTIONALLY_BLOCKED")
+                        or item.get("status") in {"ABSTAIN", "FAILED_CLOSED"}
+                    )
+                ),
+            )
+        metadata.update(attribution_sections)
         
         record = DecisionRecord(
             decision_uuid=decision_uuid,

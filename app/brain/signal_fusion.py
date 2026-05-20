@@ -41,7 +41,7 @@ FUSION LANE REPAIR — KELLY REMOVED FROM FUSION (PP6D, 2026-04-29)
 
 import math
 import logging
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Any, Tuple
 from dataclasses import dataclass
 
 # Lawful contracts imported strictly from provided repo truth
@@ -49,6 +49,7 @@ from app.models.fusion import FusionDecision
 from app.models.enums import RegimeType, SleeveType
 from app.brain.toxicity_engine import ToxicityRegime
 from app.core.whole_bot_attribution import make_signature
+from app.strategies.council_metadata import summarize_runtime_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,7 @@ class SignalFusion:
         
         # Temporal Cache: key -> (payload_object, timestamp_nanoseconds)
         self._cache: Dict[str, Tuple[Any, int]] = {}
+        self._external_evidence: Dict[str, Tuple[dict, ...]] = {}
         
         # Core State Tracking
         self._state = HysteresisState()
@@ -258,6 +260,37 @@ class SignalFusion:
     def update_physical(self, payload: Any, timestamp_ns: int) -> None:
         self._ingest("physical", payload, timestamp_ns)
 
+    def update_strategy_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int) -> None:
+        self._ingest_external_evidence("strategy_attribution", records, timestamp_ns)
+
+    def update_intelligence_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int) -> None:
+        self._ingest_external_evidence("intelligence_attribution", records, timestamp_ns)
+
+    def update_world_awareness_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int) -> None:
+        self._ingest_external_evidence("world_awareness_attribution", records, timestamp_ns)
+
+    def _ingest_external_evidence(
+        self,
+        section: str,
+        records: Iterable[Mapping[str, Any]],
+        timestamp_ns: int,
+    ) -> None:
+        """
+        Store advisory evidence for the next fusion cycle.
+
+        No scoring, routing, risk, broker, or execution authority is granted
+        here. Records are carried into telemetry and DecisionRecord metadata.
+        """
+        if timestamp_ns <= 0:
+            raise ValueError(f"timestamp_ns must be positive: {timestamp_ns!r}")
+        normalized = []
+        for record in records:
+            item = dict(record)
+            item.setdefault("timestamp_ns", int(timestamp_ns))
+            item.setdefault("input_source", item.get("input_truth", "unknown"))
+            normalized.append(item)
+        self._external_evidence[section] = tuple(normalized)
+
     # =========================================================================
     # STATE EXPORT & OBSERVABILITY
     # =========================================================================
@@ -269,6 +302,35 @@ class SignalFusion:
     def get_fusion_telemetry(self) -> Dict[str, Any]:
         """Exposes internal mathematical weights and kinematic states."""
         return self._telemetry
+
+    def get_runtime_evidence(self) -> Dict[str, Tuple[dict, ...]]:
+        """Return advisory runtime evidence staged for fusion telemetry."""
+        return {key: tuple(dict(item) for item in value) for key, value in self._external_evidence.items()}
+
+    def _attach_external_evidence_to_telemetry(self) -> None:
+        edge_attribution = self._telemetry.setdefault("edge_attribution", {})
+        missing = []
+        degraded = []
+        blocked_or_abstained = []
+
+        for section, records in self._external_evidence.items():
+            record_tuple = tuple(dict(record) for record in records)
+            self._telemetry[section] = record_tuple
+            self._telemetry[f"{section}_summary"] = summarize_runtime_evidence(record_tuple)
+            for record in record_tuple:
+                module_name = str(record.get("module_name") or "unknown")
+                edge_attribution.setdefault(module_name, record)
+                status = str(record.get("status", ""))
+                if status == "MISSING_FEED_TRUTH":
+                    missing.append(module_name)
+                elif status == "DEGRADED_FALLBACK":
+                    degraded.append(module_name)
+                elif status == "ABSTAIN" or status.startswith("INTENTIONALLY_BLOCKED") or status == "FAILED_CLOSED":
+                    blocked_or_abstained.append(module_name)
+
+        self._telemetry["missing_truth_summary"] = tuple(missing)
+        self._telemetry["degraded_fallback_summary"] = tuple(degraded)
+        self._telemetry["blocked_or_abstained_summary"] = tuple(blocked_or_abstained)
 
     def _record_fusion_attribution(
         self,
@@ -325,6 +387,7 @@ class SignalFusion:
         self._telemetry["missing_inputs"] = []
         self._telemetry["edge_attribution"] = {}
         self._telemetry["missing_penalty_factor"] = 1.0
+        self._attach_external_evidence_to_telemetry()
         missing_penalty_factor: float = MISSING_PENALTY_FACTOR  # default; refined after non-critical staleness scan
         self._telemetry["missing_penalty_factor"] = missing_penalty_factor
 

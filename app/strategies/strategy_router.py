@@ -33,8 +33,32 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.constants import ControlMode, SleeveType
 from app.models.fusion import FusionDecision
+from app.models.contracts import StrategyVote
+from app.models.enums import StrategyID
+from app.strategies.council_metadata import (
+    build_runtime_evidence_record,
+    summarize_runtime_evidence,
+)
+from app.strategies.strategy_vote_adapters import (
+    adapt_vote_to_runtime_evidence,
+    missing_strategy_runtime_evidence,
+)
 
 logger = logging.getLogger(__name__)
+
+
+_SLEEVE_MODULE_NAMES: Dict[SleeveType, str] = {
+    SleeveType.SHADOW_FRONT: StrategyID.SHADOW_FRONT.value,
+    SleeveType.FLV: StrategyID.LIQUIDITY_VOID.value,
+    SleeveType.ENTROPY_DECODER: "entropy_decoder",
+    SleeveType.GAMMA_FRONT: StrategyID.GAMMA_FRONT.value,
+    SleeveType.SECTOR_ROTATION: StrategyID.SECTOR_ROTATION.value,
+}
+
+_PROTECTED_STRATEGY_MODULES: Tuple[str, ...] = (
+    StrategyID.MOVING_FLOOR.value,
+    StrategyID.ADAPTIVE_DC.value,
+)
 
 
 class StrategyRouter:
@@ -183,6 +207,90 @@ class StrategyRouter:
             return SleeveType.ENTROPY_DECODER
 
         return eligible[0]
+
+    def collect_strategy_runtime_evidence(
+        self,
+        fusion: FusionDecision,
+        *,
+        strategy_votes: Optional[List[StrategyVote]] = None,
+        timestamp_ns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Surface router/vote evidence for SignalFusion and DecisionRecord metadata.
+
+        This is evidence wiring only. It does not call strategy engines, allocate
+        capital, submit orders, or grant execution authority.
+        """
+        ts = int(timestamp_ns or fusion.exchange_ts_ns)
+        eligible = self.get_eligible_strategies(fusion)
+        eligible_set = set(eligible)
+        records: List[dict] = []
+        vote_modules: Set[str] = set()
+
+        for vote in strategy_votes or []:
+            evidence = adapt_vote_to_runtime_evidence(vote)
+            records.append(evidence)
+            vote_modules.add(str(evidence["module_name"]))
+
+        for sleeve, module_name in _SLEEVE_MODULE_NAMES.items():
+            if module_name in vote_modules:
+                continue
+            if sleeve in eligible_set:
+                records.append(
+                    build_runtime_evidence_record(
+                        module_name=module_name,
+                        category="strategy_alpha",
+                        status="ACTIVE_STRATEGY_VOTE",
+                        input_truth="fusion_decision.eligibility_flags",
+                        output_summary="Strategy sleeve eligible in router pipeline; native vote not supplied in this packet.",
+                        effect="RANK",
+                        score_or_direction=sleeve.value,
+                        confidence=fusion.confidence,
+                        reason="ROUTER_ELIGIBLE_FROM_FUSION",
+                        timestamp_ns=ts,
+                        provenance={
+                            "preferred_sleeve": fusion.preferred_sleeve,
+                            "eligible_sleeves": [s.value for s in eligible],
+                            "router_authority": "ranking_only_no_execution",
+                        },
+                    )
+                )
+            else:
+                records.append(
+                    build_runtime_evidence_record(
+                        module_name=module_name,
+                        category="strategy_alpha",
+                        status="ABSTAIN",
+                        input_truth="fusion_decision.eligibility_flags",
+                        output_summary="Strategy sleeve was not eligible in this routing cycle.",
+                        effect="NO_EFFECT_WITH_REASON",
+                        reason="SLEEVE_NOT_ELIGIBLE",
+                        timestamp_ns=ts,
+                        provenance={
+                            "preferred_sleeve": fusion.preferred_sleeve,
+                            "eligible_sleeves": [s.value for s in eligible],
+                            "router_authority": "ranking_only_no_execution",
+                        },
+                    )
+                )
+
+        for module_name in _PROTECTED_STRATEGY_MODULES:
+            if module_name not in vote_modules:
+                records.append(
+                    missing_strategy_runtime_evidence(
+                        module_name=module_name,
+                        reason="NO_PROTECTIVE_OR_ALPHA_VOTE_SUPPLIED",
+                        timestamp_ns=ts,
+                    )
+                )
+
+        return {
+            "strategy_attribution": records,
+            "strategy_router_summary": summarize_runtime_evidence(tuple(records)),
+            "eligible_sleeves": tuple(s.value for s in eligible),
+            "preferred_sleeve": fusion.preferred_sleeve,
+            "authority": "ranking_only_no_execution",
+        }
 
     # ============================================
     # STAGE 1 — FUSION ELIGIBILITY COLLECTION
