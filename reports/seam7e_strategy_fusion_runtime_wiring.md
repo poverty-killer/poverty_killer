@@ -8,10 +8,10 @@ Seam 7E wires runtime evidence flow only. It does not submit orders, mutate brok
 
 Changed files:
 
+- `app/brain/signal_fusion.py`
 - `app/strategies/council_metadata.py`
 - `app/strategies/strategy_vote_adapters.py`
 - `app/strategies/strategy_router.py`
-- `app/brain/signal_fusion.py`
 - `app/portfolio/opportunity_ranking.py`
 - `app/core/decision_compiler.py`
 - `tests/test_seam7e_strategy_fusion_runtime_wiring.py`
@@ -139,6 +139,60 @@ Intentionally blocked:
 - SEC EDGAR live source status remains `INTENTIONALLY_BLOCKED_LIVE_ONLY` from Seam 7D source catalog.
 - No live scraping, premium query, or portal fact fabrication was added.
 
+## Seam 7E Completion Correction - Native Activation Proof
+
+Current rework HEAD before commit: `e6c7e37`
+
+The completion correction adds a focused native activation test that calls each in-scope module through its native API, normalizes the real native output into runtime evidence, feeds that evidence through `SignalFusion`, and carries it into `DecisionCompiler` metadata. It also fixes one exact `SignalFusion` attribution collision: when externally supplied native evidence already owns a module key such as `ShansCurve`, fusion-cache attribution is retained under `ShansCurve:fusion_cache` instead of overwriting the native record.
+
+Native strategy/alpha proof:
+
+| Module | Native API called | Native output carried | Runtime entry | Decision metadata proof |
+| --- | --- | --- | --- | --- |
+| MovingFloor | `TopologicalMovingFloor.process_tick(FloorMarketTick)` | protective recommendation converted through `adapt_moving_floor_to_vote` with native provenance | `SignalFusion.update_strategy_evidence(...)` | `strategy_attribution` and `edge_attribution["moving_floor"]` |
+| Shans Curve | `ShansCurve.update_order_book(...)` | `ShansCurveSignal` | `SignalFusion.update_strategy_evidence(...)` | `strategy_attribution` and `edge_attribution["ShansCurve"]` |
+| AdaptiveDC | `AdaptiveDC.process_tick(DCMarketTick)` | DC recommendation converted through `adapt_adaptive_dc_to_vote` with native provenance | `SignalFusion.update_strategy_evidence(...)` | `strategy_attribution` and `edge_attribution["adaptive_dc"]` |
+| gamma_front | `GammaFrontStrategy.update_dark_pool(DarkPoolPrint)` | `StrategySignal` | `SignalFusion.update_strategy_evidence(...)` | `strategy_attribution` and `edge_attribution["gamma_front"]` |
+| sector_rotation | `SectorRotationStrategy.update_candle(...)` | `StrategySignal` | `SignalFusion.update_strategy_evidence(...)` | `strategy_attribution` and `edge_attribution["sector_rotation"]` |
+| liquidity_void | `LiquidityVoidStrategy.update_topology(...)` plus `update_order_book(...)` | `StrategySignal` | `SignalFusion.update_strategy_evidence(...)` | `strategy_attribution` and `edge_attribution["liquidity_void"]` |
+| hedging_flow | `HedgingFlow.assess(...)` plus `recommend(...)` | `HedgeRecommendation` | `SignalFusion.update_strategy_evidence(...)` | `strategy_attribution` and `edge_attribution["hedging_flow"]` |
+
+Native intelligence/data proof:
+
+| Module | Native API called | Native output carried | Runtime entry | Decision metadata proof |
+| --- | --- | --- | --- | --- |
+| sentiment_engine | `SentimentEngine.update_source(...)` plus `aggregate(...)` | `AggregateSentiment` | `SignalFusion.update_intelligence_evidence(...)` | `intelligence_attribution` and `edge_attribution["sentiment_engine"]` |
+| sentiment_velocity | `SentimentVelocityEngine.update_sentiment(...)` plus `analyze(...)` | `SentimentVector`; `MacroSignal` asserted present | `SignalFusion.update_intelligence_evidence(...)` | `intelligence_attribution` and `edge_attribution["sentiment_velocity"]` |
+| whale_zone_engine | `WhaleZoneEngine.update(...)` | `WhalePresenceZone` | `SignalFusion.update_intelligence_evidence(...)` | `intelligence_attribution` and `edge_attribution["whale_zone_engine"]` |
+| regime_detector | `RegimeDetector.update(FeatureVector, ...)` | `RegimeType` plus detector confidence | `SignalFusion.update_intelligence_evidence(...)` | `intelligence_attribution` and `edge_attribution["regime_detector"]` |
+| feature_builder | `FeatureBuilder.build_all_features(...)` | feature dict with `volatility_zscore` and `order_book_imbalance` | `SignalFusion.update_intelligence_evidence(...)` | `intelligence_attribution` and `edge_attribution["feature_builder"]` |
+| ghost_tick_detector | `FastGhostTickDetector.update(...)` plus `detect_vector(...)` | `np.ndarray[bool]` for supported single-instrument vector path | `SignalFusion.update_intelligence_evidence(...)` | `intelligence_attribution` and `edge_attribution["ghost_tick_detector"]` |
+| validators | `DataValidator.validate_order_book(...)` | `ValidationResult` | `SignalFusion.update_intelligence_evidence(...)` | `intelligence_attribution` and `edge_attribution["validators"]` |
+
+World-awareness and ranking proof:
+
+| Module | Native API called | Native output carried | Runtime entry | Decision metadata proof |
+| --- | --- | --- | --- | --- |
+| world_awareness/source_catalog | `source_status_signature(SourceFamily.SEC_EDGAR)` | source status signature | `SignalFusion.update_world_awareness_evidence(...)` | `world_awareness_attribution` and `edge_attribution["world_awareness/source_catalog"]` |
+| openinsider | `OpenInsiderAdapter.normalize_payload(...)` | `WorldAwarenessEvent` with `canonical_truth_claimed=False`, `live_attached=False` | `SignalFusion.update_world_awareness_evidence(...)` | `world_awareness_attribution` and `edge_attribution["openinsider_adapter"]` |
+| sec_edgar | `SecEdgarAdapter.normalize_payload(...)` | `WorldAwarenessEvent` with no live/premium truth claim | `SignalFusion.update_world_awareness_evidence(...)` | `world_awareness_attribution` and `edge_attribution["sec_edgar_adapter"]` |
+| capitol_trades | `CapitolTradesAdapter.normalize_payload(...)` | `WorldAwarenessEvent` with no live/premium truth claim | `SignalFusion.update_world_awareness_evidence(...)` | `world_awareness_attribution` and `edge_attribution["capitol_trades_adapter"]` |
+| quiver_free | `QuiverFreeAdapter.normalize_payload(...)` | `WorldAwarenessEvent` with no live/premium truth claim | `SignalFusion.update_world_awareness_evidence(...)` | `world_awareness_attribution` and `edge_attribution["quiver_free_adapter"]` |
+| official_calendars | `OfficialCalendarsAdapter.normalize_payload(...)` | `WorldAwarenessEvent` with no live/premium truth claim | `SignalFusion.update_world_awareness_evidence(...)` | `world_awareness_attribution` and `edge_attribution["official_calendars_adapter"]` |
+| official_releases | `OfficialReleasesAdapter.normalize_payload(...)` | `WorldAwarenessEvent` with no live/premium truth claim | `SignalFusion.update_world_awareness_evidence(...)` | `world_awareness_attribution` and `edge_attribution["official_releases_adapter"]` |
+| opportunity_ranking | `OpportunityRanker.rank(...)` plus `summarize_opportunity_ranking(...)` | `OpportunityRankingReport`, `status=RANKED`, `execution_authority=none` | Decision metadata via `opportunity_ranking_summary` | `record.metadata["opportunity_ranking_summary"]` |
+
+Focused assertion proof:
+
+- `test_seam7e_completion_correction_calls_every_native_module_and_carries_output_to_decision_record` asserts every listed module is called through the native API, carries native output/provenance, enters `SignalFusion` evidence ingestion, and appears in `DecisionCompiler` metadata.
+- The same test asserts `OpportunityRanker` produces a ranked report while preserving `execution_authority=none`.
+- The test asserts world-awareness adapter fixtures do not claim canonical live truth or live attachment.
+
+Residual native branch blockers:
+
+- `FeatureBuilder.calculate_depth_contraction(...)` is not counted as activated. Its optional `depth_history` branch currently expects `order_book.market_depth`, but the canonical `OrderBookSnapshot` used by the test does not expose `market_depth`. The module is activated through `build_all_features(...)` on supported candle/order-book/spread/whale-zone inputs only.
+- `FastGhostTickDetector.detect_vector(...)` multi-instrument covariance branch is not counted as activated. The branch currently computes a one-dimensional Mahalanobis expression and then sums on `axis=1`, producing `numpy.exceptions.AxisError: axis 1 is out of bounds for array of dimension 1` for the two-instrument fixture. The module is activated through the supported single-instrument vector path only.
+
 ## Verification
 
 Compile:
@@ -155,7 +209,7 @@ Focused Seam 7E:
 venv/Scripts/python.exe -m pytest -q tests/test_seam7e_strategy_fusion_runtime_wiring.py
 ```
 
-Result: `10 passed`.
+Result: `11 passed`.
 
 Scoped non-mutating regression:
 

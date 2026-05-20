@@ -3,26 +3,48 @@ from __future__ import annotations
 from decimal import Decimal
 from types import SimpleNamespace
 
+import numpy as np
+
 from app.brain.signal_fusion import SignalFusion
+from app.brain.shans_curve import ShansCurve
+from app.brain.sentiment_engine import SentimentEngine
+from app.brain.sentiment_velocity import SentimentVelocityEngine
+from app.brain.topological_engine import TopologicalSignal
+from app.brain.whale_zone_engine import WhaleZoneEngine
 from app.constants import ControlMode, SleeveType
 from app.core.decision_compiler import DecisionCompiler
+from app.data.feature_builder import FeatureBuilder
+from app.data.ghost_tick_detector import FastGhostTickDetector
+from app.data.regime_detector import RegimeDetector
+from app.data.validators import DataValidator
 from app.models.contracts import (
     ExchangeTruth,
     ExecutionTruth,
+    FeaturePayload,
+    FeatureVector,
     PortfolioTruth,
     RiskTruth,
     StrategyTruth,
     StrategyVote,
     TruthFrame,
 )
-from app.models.enums import SignalDirection, SignalType, StrategyID, TruthStatus
+from app.models.enums import BookIntegrity, LiquidityRegime, RegimeType, SignalDirection, SignalType, StrategyID, ToxicityLevel, TruthStatus
 from app.models.fusion import FusionDecision
+from app.models.market_data import Candle, OrderBookSnapshot
 from app.portfolio.opportunity_ranking import (
+    OpportunityRanker,
     OpportunityRankingReport,
     summarize_opportunity_ranking,
 )
+from app.strategies.adaptive_dc import AdaptiveDC, DCMarketTick
+from app.strategies.hedging_flow import HedgingFlow, HedgeMarketContext, PortfolioExposureSnapshot
+from app.strategies.gamma_front import GammaFrontStrategy
+from app.strategies.liquidity_void import LiquidityVoidStrategy
+from app.strategies.moving_floor import FloorMarketTick, TopologicalMovingFloor
+from app.strategies.sector_rotation import SectorRotationStrategy
 from app.strategies.strategy_router import StrategyRouter
 from app.strategies.strategy_vote_adapters import (
+    adapt_adaptive_dc_to_vote,
     adapt_gamma_front_to_vote,
     adapt_moving_floor_to_vote,
     adapt_vote_to_runtime_evidence,
@@ -31,7 +53,13 @@ from app.strategies.council_metadata import (
     build_runtime_evidence_record,
     summarize_runtime_evidence,
 )
-from app.models.signals import StrategySignal
+from app.models.signals import DarkPoolPrint, StrategySignal
+from app.world_awareness.adapters.capitol_trades import CapitolTradesAdapter
+from app.world_awareness.adapters.official_calendars import OfficialCalendarsAdapter
+from app.world_awareness.adapters.official_releases import OfficialReleasesAdapter
+from app.world_awareness.adapters.openinsider import OpenInsiderAdapter
+from app.world_awareness.adapters.quiver_free import QuiverFreeAdapter
+from app.world_awareness.adapters.sec_edgar import SecEdgarAdapter
 from app.world_awareness.enums import SourceFamily
 from app.world_awareness.source_catalog import source_status_signature
 
@@ -346,3 +374,478 @@ def test_no_target_module_exposes_broker_mutation_or_live_endpoint_authority():
 
     for module in modules:
         assert forbidden_attrs.isdisjoint(set(dir(module)))
+
+
+def _strategy_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        strategies=SimpleNamespace(
+            dark_pool_enabled=True,
+            options_flow_enabled=False,
+            dark_pool_volume_threshold=2.0,
+            min_confidence=0.10,
+            sector_rotation_enabled=True,
+            sector_inflow_threshold=0.10,
+            flv_max_hold_bars=3,
+            flv_kelly_multiplier=0.50,
+            flv_volume_anomaly_threshold=0.10,
+            flv_spread_expansion_threshold=5.0,
+            sector_rotation_ranging_eligible=False,
+        )
+    )
+
+
+def _order_book(ts_ns: int, *, spread: float = 0.20) -> OrderBookSnapshot:
+    mid = 100.0
+    half = spread / 2.0
+    return OrderBookSnapshot(
+        symbol="AAPL",
+        exchange_ts_ns=ts_ns,
+        bids=[(mid - half, 1000.0), (mid - half - 0.01, 500.0)],
+        asks=[(mid + half, 1000.0), (mid + half + 0.01, 500.0)],
+    )
+
+
+def _native_evidence_from_object(
+    *,
+    module_name: str,
+    category: str,
+    output: object,
+    output_summary: str,
+    effect: str,
+    reason: str,
+    timestamp_ns: int = T0_NS,
+) -> dict:
+    return build_runtime_evidence_record(
+        module_name=module_name,
+        category=category,
+        status="ACTIVE_NATIVE_SIGNAL" if category == "strategy_alpha" else "ACTIVE_INTELLIGENCE_ADVISORY",
+        input_truth="deterministic_native_shape_fixture_not_live_truth",
+        output_summary=output_summary,
+        effect=effect,
+        reason=reason,
+        timestamp_ns=timestamp_ns,
+        confidence=getattr(output, "confidence", None),
+        score_or_direction=getattr(output, "signal_direction", getattr(output, "level", None)),
+        provenance={
+            "native_type": type(output).__name__,
+            "native_output": repr(output),
+            "fixture_truth": "deterministic_native_shape_fixture_not_live_truth",
+        },
+    )
+
+
+def _world_event_record(module_name: str, event: object) -> dict:
+    return build_runtime_evidence_record(
+        module_name=module_name,
+        category="world_awareness",
+        status="ACTIVE_WORLD_AWARENESS_ADVISORY",
+        input_truth="deterministic_local_cache_fixture_not_live_truth",
+        output_summary=type(event).__name__,
+        effect="WORLD_AWARENESS_CONTEXT",
+        reason="NATIVE_ADAPTER_NORMALIZED_LOCAL_CACHE_FIXTURE",
+        timestamp_ns=T0_NS,
+        provenance={
+            "native_type": type(event).__name__,
+            "canonical_truth_claimed": getattr(event, "canonical_truth_claimed", None),
+            "live_attached": getattr(event, "live_attached", None),
+        },
+    )
+
+
+def _native_strategy_records() -> dict[str, dict]:
+    config = _strategy_config()
+
+    moving_floor = TopologicalMovingFloor()
+    moving_floor.process_tick(
+        FloorMarketTick("AAPL", Decimal("100"), T0_NS, Decimal("1000"), Decimal("1000"))
+    )
+    _, _, floor_rec = moving_floor.process_tick(
+        FloorMarketTick("AAPL", Decimal("97"), T0_NS + 2_000_000_000, Decimal("100"), Decimal("1000"))
+    )
+    assert floor_rec is not None
+    moving_floor_record = adapt_vote_to_runtime_evidence(
+        adapt_moving_floor_to_vote(floor_rec, T0_NS + 2_000_000_000, "seam7e-native-mf")
+    )
+    moving_floor_record["provenance"]["native_type"] = type(floor_rec).__name__
+    moving_floor_record["provenance"]["native_output"] = repr(floor_rec)
+
+    shans = ShansCurve(
+        risk_guard=SimpleNamespace(),
+        safety_gate=SimpleNamespace(),
+        data_validator=SimpleNamespace(validate=lambda **_: (True, "fixture_ok")),
+        entropy_decoder=SimpleNamespace(get_current=lambda _symbol: SimpleNamespace(entropy=0.20)),
+        curvature_window=5,
+        enable_denoising=False,
+    )
+    shans_signal = None
+    for i, price in enumerate((100.0, 100.4, 100.9, 101.7, 102.8), start=1):
+        shans_signal = shans.update_order_book("AAPL", price, 2000 + i * 100, 1000 - i * 20, 0.0, T0_NS + i)
+    assert shans_signal is not None
+    shans_record = _native_evidence_from_object(
+        module_name="ShansCurve",
+        category="strategy_alpha",
+        output=shans_signal,
+        output_summary="ShansCurveSignal",
+        effect="ALPHA_SIGNAL",
+        reason="NATIVE_SHANS_CURVE_SIGNAL",
+    )
+
+    adaptive = AdaptiveDC(initial_theta=Decimal("0.005"))
+    adaptive.process_tick(DCMarketTick("AAPL", Decimal("100"), T0_NS))
+    _, _, dc_rec = adaptive.process_tick(DCMarketTick("AAPL", Decimal("101"), T0_NS + 1))
+    assert dc_rec is not None
+    adaptive_record = adapt_vote_to_runtime_evidence(
+        adapt_adaptive_dc_to_vote(dc_rec, T0_NS + 1, "seam7e-native-dc")
+    )
+    adaptive_record["provenance"]["native_type"] = type(dc_rec).__name__
+    adaptive_record["provenance"]["native_output"] = repr(dc_rec)
+
+    gamma = GammaFrontStrategy(config, "AAPL")
+    gamma_signal = None
+    for i in range(5):
+        gamma.update_dark_pool(
+            DarkPoolPrint(symbol="AAPL", exchange_ts_ns=T0_NS + i, price=100.0, size=100.0, exchange="ATS", is_buy=True)
+        )
+    gamma_signal = gamma.update_dark_pool(
+        DarkPoolPrint(symbol="AAPL", exchange_ts_ns=T0_NS + 10, price=100.0, size=1000.0, exchange="ATS", is_buy=True)
+    )
+    assert gamma_signal is not None
+    gamma_record = adapt_vote_to_runtime_evidence(
+        adapt_gamma_front_to_vote(gamma_signal, gamma_signal.exchange_ts_ns, "seam7e-native-gamma")
+    )
+    gamma_record["provenance"]["native_type"] = type(gamma_signal).__name__
+    gamma_record["provenance"]["native_output"] = repr(gamma_signal)
+
+    sector = SectorRotationStrategy(config, "AAPL")
+    sector_signal = None
+    for i in range(10):
+        sector.update_candle(100.0 + (i * 0.01), 100.0, T0_NS + i)
+    sector_signal = sector.update_candle(101.0, 1000.0, T0_NS + 20)
+    assert sector_signal is not None
+    sector_record = _native_evidence_from_object(
+        module_name="sector_rotation",
+        category="strategy_alpha",
+        output=sector_signal,
+        output_summary="StrategySignal",
+        effect="ALPHA_SIGNAL",
+        reason="NATIVE_SECTOR_ROTATION_SIGNAL",
+        timestamp_ns=sector_signal.exchange_ts_ns,
+    )
+
+    flv = LiquidityVoidStrategy(config, "AAPL")
+    flv.update_topology(
+        TopologicalSignal(
+            coherence_score=0.90,
+            betti_0=1,
+            betti_1=2,
+            persistence_score=0.80,
+            super_void_detected=True,
+            structural_collapse=False,
+            confidence=0.88,
+            exchange_ts_ns=T0_NS,
+            reason="deterministic_tpe_fixture",
+        )
+    )
+    flv_signal = flv.update_order_book(_order_book(T0_NS + 30, spread=0.20))
+    assert flv_signal is not None
+    flv_record = _native_evidence_from_object(
+        module_name="liquidity_void",
+        category="strategy_alpha",
+        output=flv_signal,
+        output_summary="StrategySignal",
+        effect="ALPHA_SIGNAL",
+        reason="NATIVE_LIQUIDITY_VOID_SIGNAL",
+        timestamp_ns=flv_signal.exchange_ts_ns,
+    )
+
+    hedge = HedgingFlow()
+    hedge_assessment = hedge.assess(
+        PortfolioExposureSnapshot(
+            net_delta=Decimal("2000"),
+            total_equity=Decimal("10000"),
+            target_symbol="AAPL",
+            sleeve="hedging_flow",
+        ),
+        HedgeMarketContext(symbol="AAPL", price=Decimal("100"), bid=Decimal("99.99"), ask=Decimal("100.01")),
+    )
+    hedge_rec = hedge.recommend(hedge_assessment, HedgeMarketContext(symbol="AAPL", price=Decimal("100")))
+    assert hedge_assessment.hedge_required is True
+    assert hedge_rec is not None
+    hedge_record = _native_evidence_from_object(
+        module_name="hedging_flow",
+        category="strategy_alpha",
+        output=hedge_rec,
+        output_summary="HedgeRecommendation",
+        effect="ADVISORY",
+        reason="NATIVE_HEDGING_FLOW_RECOMMENDATION",
+    )
+
+    return {
+        "MovingFloor": moving_floor_record,
+        "ShansCurve": shans_record,
+        "AdaptiveDC": adaptive_record,
+        "gamma_front": gamma_record,
+        "sector_rotation": sector_record,
+        "liquidity_void": flv_record,
+        "hedging_flow": hedge_record,
+    }
+
+
+def _native_intelligence_records() -> dict[str, dict]:
+    sentiment = SentimentEngine(min_sources=2)
+    sentiment.update_source("AAPL", "technical", 0.40, T0_NS, confidence=0.90)
+    sentiment.update_source("AAPL", "macro", 0.30, T0_NS + 1, confidence=0.80)
+    aggregate = sentiment.aggregate("AAPL", T0_NS + 2)
+    assert aggregate is not None
+
+    velocity = SentimentVelocityEngine(min_history_points=3)
+    vector = None
+    for i, value in enumerate((0.10, 0.20, 0.35), start=1):
+        vector = velocity.update_sentiment(value, T0_NS + i)
+    macro = velocity.analyze(T0_NS + 10)
+    assert vector is not None
+    assert macro is not None
+
+    whale = WhaleZoneEngine({"zone_stability_required": 2, "zone_confidence_threshold": 0.10})
+    zone = None
+    for i in range(4):
+        zone = whale.update("AAPL", close=101.9, high=102.0, low=100.0, volume=5000.0, vwap=101.7, exchange_ts_ns=T0_NS + i)
+    assert zone is not None
+
+    regime_detector = RegimeDetector(min_samples=1, transition_cooldown_ns=0)
+    feature_vector = FeatureVector(
+        decision_uuid="seam7e-native-regime",
+        timestamp_ns=T0_NS,
+        symbol="AAPL",
+        features=FeaturePayload(
+            topological_coherence=Decimal("0.90"),
+            entropy=Decimal("0.20"),
+            void_depth=Decimal("0.10"),
+            sentiment_velocity=Decimal("0.50"),
+        ),
+    )
+    regime = regime_detector.update(feature_vector, T0_NS)
+    assert regime in {RegimeType.TRENDING_BULL, RegimeType.UNKNOWN}
+
+    candles = [
+        Candle(symbol="AAPL", exchange_ts_ns=T0_NS + i, open=100 + i, high=101 + i, low=99 + i, close=100.5 + i, volume=1000 + i * 10)
+        for i in range(8)
+    ]
+    feature_builder = FeatureBuilder(slow_window=3, fast_window=2)
+    features = feature_builder.build_all_features(
+        candles,
+        len(candles),
+        order_book=_order_book(T0_NS + 50, spread=0.10),
+        historical_spreads=[1.0, 1.1, 1.2],
+        whale_zone=(99.0, 103.0),
+    )
+    assert "volatility_zscore" in features
+    assert "order_book_imbalance" in features
+
+    ghost = FastGhostTickDetector(window=4, threshold=3.5)
+    for price in (100.0, 100.1, 100.2, 100.3):
+        ghost.update(1, price)
+        ghost.update(2, price * 2)
+    ghost_flags = ghost.detect_vector([1], np.array([100.4]))
+    assert ghost_flags.shape == (1,)
+
+    validator = DataValidator(stale_threshold_seconds=10)
+    validation = validator.validate_order_book(_order_book(T0_NS + 80, spread=0.10), current_time_ns=T0_NS + 81)
+    assert validation.is_valid is True
+
+    return {
+        "sentiment_engine": _native_evidence_from_object(
+            module_name="sentiment_engine",
+            category="intelligence",
+            output=aggregate,
+            output_summary="AggregateSentiment",
+            effect="INTELLIGENCE_CONTEXT",
+            reason="NATIVE_SENTIMENT_AGGREGATE",
+        ),
+        "sentiment_velocity": _native_evidence_from_object(
+            module_name="sentiment_velocity",
+            category="intelligence",
+            output=vector,
+            output_summary="SentimentVector",
+            effect="INTELLIGENCE_CONTEXT",
+            reason="NATIVE_SENTIMENT_VECTOR",
+        ),
+        "whale_zone_engine": _native_evidence_from_object(
+            module_name="whale_zone_engine",
+            category="intelligence",
+            output=zone,
+            output_summary="WhalePresenceZone",
+            effect="INTELLIGENCE_CONTEXT",
+            reason="NATIVE_WHALE_ZONE",
+        ),
+        "regime_detector": _native_evidence_from_object(
+            module_name="regime_detector",
+            category="intelligence",
+            output=SimpleNamespace(confidence=regime_detector.get_current_confidence(), signal_direction=regime.value),
+            output_summary="RegimeType",
+            effect="INTELLIGENCE_CONTEXT",
+            reason="NATIVE_REGIME_DETECTION",
+        ),
+        "feature_builder": _native_evidence_from_object(
+            module_name="feature_builder",
+            category="intelligence",
+            output=SimpleNamespace(confidence=1.0, signal_direction="feature_dict"),
+            output_summary="feature_dict",
+            effect="INTELLIGENCE_CONTEXT",
+            reason="NATIVE_FEATURE_BUILD",
+        ),
+        "ghost_tick_detector": _native_evidence_from_object(
+            module_name="ghost_tick_detector",
+            category="intelligence",
+            output=SimpleNamespace(confidence=1.0, signal_direction=f"ghost_flags={ghost_flags.tolist()}"),
+            output_summary="np.ndarray[bool]",
+            effect="INTELLIGENCE_CONTEXT",
+            reason="NATIVE_GHOST_TICK_VECTOR",
+        ),
+        "validators": _native_evidence_from_object(
+            module_name="validators",
+            category="intelligence",
+            output=SimpleNamespace(confidence=1.0, signal_direction=f"is_valid={validation.is_valid}"),
+            output_summary="ValidationResult",
+            effect="INTELLIGENCE_CONTEXT",
+            reason="NATIVE_DATA_VALIDATION",
+        ),
+    }
+
+
+def _native_world_records() -> dict[str, dict]:
+    payload = {
+        "symbol": "AAPL",
+        "issuer": "Deterministic Fixture Issuer",
+        "actor": "Deterministic Fixture Actor",
+        "source_event_type": "deterministic_cache_fixture",
+        "fixture_only": True,
+    }
+    adapters = {
+        "openinsider_adapter": OpenInsiderAdapter(),
+        "sec_edgar_adapter": SecEdgarAdapter(),
+        "capitol_trades_adapter": CapitolTradesAdapter(),
+        "quiver_free_adapter": QuiverFreeAdapter(),
+        "official_calendars_adapter": OfficialCalendarsAdapter(),
+        "official_releases_adapter": OfficialReleasesAdapter(),
+    }
+    records = {
+        "world_awareness/source_catalog": build_runtime_evidence_record(
+            module_name="world_awareness/source_catalog",
+            category="world_awareness",
+            status="ACTIVE_WORLD_AWARENESS_ADVISORY",
+            input_truth="catalog_status_function",
+            output_summary="source_status_signature",
+            effect="WORLD_AWARENESS_CONTEXT",
+            reason="NATIVE_SOURCE_STATUS_SIGNATURE",
+            timestamp_ns=T0_NS,
+            provenance={"native_output": source_status_signature(SourceFamily.SEC_EDGAR)},
+        )
+    }
+    for name, adapter in adapters.items():
+        event = adapter.normalize_payload(payload)
+        assert event.canonical_truth_claimed is False
+        assert event.live_attached is False
+        records[name] = _world_event_record(name, event)
+    return records
+
+
+def test_seam7e_completion_correction_calls_every_native_module_and_carries_output_to_decision_record():
+    strategy_records_by_name = _native_strategy_records()
+    intelligence_records_by_name = _native_intelligence_records()
+    world_records_by_name = _native_world_records()
+
+    ranker = OpportunityRanker(min_net_edge_bps=Decimal("1"), min_confidence=Decimal("0.10"))
+    ranking_report = ranker.rank(
+        candidates=[("AAPL", "gamma_front", Decimal("20"), Decimal("0.80"), Decimal("1000"))],
+        instruments={
+            "AAPL": SimpleNamespace(
+                symbol="AAPL",
+                constraints=SimpleNamespace(max_spread_bps=Decimal("2.0")),
+            )
+        },
+        existing_exposures={},
+        total_equity=Decimal("10000"),
+        available_capital=Decimal("5000"),
+        timestamp_ns=T0_NS,
+    )
+    ranking_summary = summarize_opportunity_ranking(ranking_report)
+    assert ranking_report.total_ranked == 1
+    assert ranking_summary["status"] == "RANKED"
+    assert ranking_summary["execution_authority"] == "none"
+
+    fusion = SignalFusion(SimpleNamespace(strategies=SimpleNamespace(sector_rotation_ranging_eligible=False)))
+    fusion.update_strategy_evidence(strategy_records_by_name.values(), T0_NS)
+    fusion.update_intelligence_evidence(intelligence_records_by_name.values(), T0_NS)
+    fusion.update_world_awareness_evidence(world_records_by_name.values(), T0_NS)
+    fusion.update_physical({"health_score": 0.90}, T0_NS)
+    fusion.update_toxicity(SimpleNamespace(toxicity_score=0.10, regime=SimpleNamespace(value=0)), T0_NS)
+    fusion.fuse(T0_NS)
+    telemetry = fusion.get_fusion_telemetry()
+
+    all_records_by_name = {
+        record["module_name"]: record
+        for record in (
+            *strategy_records_by_name.values(),
+            *intelligence_records_by_name.values(),
+            *world_records_by_name.values(),
+        )
+    }
+    assert set(all_records_by_name) >= {
+        "moving_floor",
+        "ShansCurve",
+        "adaptive_dc",
+        "gamma_front",
+        "sector_rotation",
+        "liquidity_void",
+        "hedging_flow",
+        "sentiment_engine",
+        "sentiment_velocity",
+        "whale_zone_engine",
+        "regime_detector",
+        "feature_builder",
+        "ghost_tick_detector",
+        "validators",
+        "world_awareness/source_catalog",
+        "openinsider_adapter",
+        "sec_edgar_adapter",
+        "capitol_trades_adapter",
+        "quiver_free_adapter",
+        "official_calendars_adapter",
+        "official_releases_adapter",
+    }
+    edge_attribution = telemetry["edge_attribution"]
+    for module_name, record in all_records_by_name.items():
+        assert module_name in edge_attribution
+        provenance = edge_attribution[module_name]["provenance"]
+        assert provenance.get("native_type") or provenance.get("native_output")
+        assert record["status"] in {
+            "ACTIVE_NATIVE_SIGNAL",
+            "ACTIVE_PROTECTION",
+            "ACTIVE_STRATEGY_VOTE",
+            "ACTIVE_INTELLIGENCE_ADVISORY",
+            "ACTIVE_WORLD_AWARENESS_ADVISORY",
+        }
+
+    record = DecisionCompiler().compile(
+        truth_frame=_truth_frame(),
+        strategy_votes=[
+            adapt_gamma_front_to_vote(_gamma_signal(), T0_NS, "seam7e-native-metadata")
+        ],
+        additional_inputs={
+            "edge_attribution": edge_attribution,
+            "strategy_attribution": tuple(strategy_records_by_name.values()),
+            "intelligence_attribution": tuple(intelligence_records_by_name.values()),
+            "world_awareness_attribution": tuple(world_records_by_name.values()),
+            "fusion_summary": {"preferred_sleeve": fusion.get_last_fusion().preferred_sleeve},
+            "opportunity_ranking_summary": ranking_summary,
+            "missing_truth_summary": telemetry["missing_truth_summary"],
+            "degraded_fallback_summary": telemetry["degraded_fallback_summary"],
+            "blocked_or_abstained_summary": telemetry["blocked_or_abstained_summary"],
+        },
+    )
+
+    for module_name in all_records_by_name:
+        assert module_name in record.metadata["edge_attribution"]
+    assert record.metadata["opportunity_ranking_summary"]["status"] == "RANKED"
+    assert record.metadata["opportunity_ranking_summary"]["execution_authority"] == "none"

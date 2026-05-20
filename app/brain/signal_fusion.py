@@ -345,7 +345,7 @@ class SignalFusion:
     ) -> None:
         module_name, category = _ATTRIBUTION_NAMES.get(key, (key, "signal_decision_path"))
         edge_attribution = self._telemetry.setdefault("edge_attribution", {})
-        edge_attribution[module_name] = make_signature(
+        signature = make_signature(
             module_name=module_name,
             category=category,
             status=status,
@@ -355,6 +355,10 @@ class SignalFusion:
             reason=reason,
             timestamp=timestamp_ns,
         )
+        if module_name in edge_attribution:
+            edge_attribution[f"{module_name}:fusion_cache"] = signature
+            return
+        edge_attribution[module_name] = signature
 
     def _bridge_shans_bias(self, raw_bias: float) -> str:
         """
