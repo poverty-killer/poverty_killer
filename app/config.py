@@ -6,9 +6,21 @@ HARDENED: Asset-class specific leverage, SigmaRiskConfig for regime-based scalin
 """
 
 from typing import List, Optional, Dict, Literal
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from pydantic_settings import BaseSettings
 import json
+import os
+
+
+def _env_bool(value: str | None, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return default
 
 
 # ============================================
@@ -284,6 +296,10 @@ class Config(BaseSettings):
     # Broker Configuration
     # ============================================
     broker_mode: Literal["paper", "live"] = Field(default="paper", description="paper = simulation, live = real trading")
+    shadow_read_only: bool = Field(
+        default=False,
+        description="Bot-wide read-only runtime gate: allow decisions/telemetry, block broker mutation.",
+    )
     reservation_lifecycle_paper_enabled: bool = Field(
         default=False,
         description="Enable paper-only reservation lifecycle mutation. Ignored unless broker_mode is paper.",
@@ -365,6 +381,12 @@ class Config(BaseSettings):
             raise ValueError(f"Unknown capability discovery asset class(es): {unknown}. Valid: {valid}")
         return [str(m).lower() for m in v]
 
+    @model_validator(mode="after")
+    def validate_shadow_read_only_no_live_mode(self):
+        if self.shadow_read_only and self.broker_mode != "paper":
+            raise ValueError("shadow_read_only requires broker_mode='paper'; live mode is forbidden")
+        return self
+
     # Kraken (Crypto)
     kraken_api_key: Optional[str] = Field(default=None, description="Kraken API key")
     kraken_api_secret: Optional[str] = Field(default=None, description="Kraken API secret")
@@ -431,7 +453,12 @@ class Config(BaseSettings):
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment."""
-        return cls()
+        return cls(
+            shadow_read_only=_env_bool(
+                os.environ.get("POVERTY_KILLER_SHADOW_READ_ONLY"),
+                default=False,
+            ),
+        )
 
     def get_class_limit(self, asset_class: str) -> float:
         """Get exposure limit for an asset class."""

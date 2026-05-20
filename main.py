@@ -338,6 +338,7 @@ class SovereignHeartbeat:
             maker_offset_pct=0.001,
             emergency_cancel_workers=10,
             telemetry_store=self.telemetry_store,
+            shadow_read_only=config.shadow_read_only,
         )
 
         self._primary_feed_venue: str = config.primary_feed_venue
@@ -418,6 +419,7 @@ class SovereignHeartbeat:
         logger.info("SovereignHeartbeat initialized")
         logger.info("Attack Mode: %s", "ENABLED" if attack_mode else "DISABLED")
         logger.info("Broker Mode: %s", config.broker_mode)
+        logger.info("Shadow Read Only: %s", "ENABLED" if config.shadow_read_only else "DISABLED")
         logger.info("Initial Capital: $%0.2f", config.initial_capital)
         logger.info("Primary symbol: %s", self._primary_symbol)
         logger.info("Active symbols: %s", self._active_symbols)
@@ -1014,6 +1016,11 @@ def parse_arguments():
         help="Force paper trading mode (overrides .env)",
     )
     parser.add_argument(
+        "--shadow-read-only",
+        action="store_true",
+        help="Run full runtime read-only: compile decisions and telemetry, block broker mutation.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -1036,6 +1043,9 @@ def main() -> int:
 
     if args.paper:
         config.broker_mode = "paper"
+    if args.shadow_read_only:
+        config.shadow_read_only = True
+        config.broker_mode = "paper"
 
     setup_logger(config, level=args.log_level)
 
@@ -1045,10 +1055,13 @@ def main() -> int:
     logger.info("Version: 1.0.0")
     logger.info("Attack Mode: %s", "ENABLED" if args.attack else "DISABLED")
     logger.info("Broker Mode: %s", config.broker_mode)
+    logger.info("Shadow Read Only: %s", "ENABLED" if config.shadow_read_only else "DISABLED")
     logger.info("Initial Capital: $%0.2f", config.initial_capital)
     logger.info("Target: $%0.2f", config.initial_capital * 2)
     if args.paper:
         logger.info("Paper mode forced via command line")
+    if args.shadow_read_only:
+        logger.info("Shadow read-only mode forced via command line")
     logger.info("=" * 60)
 
     heartbeat = SovereignHeartbeat(config, attack_mode=args.attack)

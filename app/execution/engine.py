@@ -42,7 +42,8 @@ from app.commander import Commander
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
 from app.models import OrderFill, OrderRequest, StrategySignal
-from app.models.contracts import DecisionRecord
+from app.models.contracts import DecisionRecord, EventEnvelope
+from app.models.enums import EventType
 from app.risk.guard import HybridRiskGuard
 from app.utils.time_utils import now_ns
 from app.telemetry.event_store import TelemetryEventStore
@@ -125,7 +126,8 @@ class ExecutionEngine:
         recalibration_pause_sec: float = 14400.0,
         maker_offset_pct: float = 0.001,
         emergency_cancel_workers: int = 10,
-        telemetry_store: Optional[TelemetryEventStore] = None
+        telemetry_store: Optional[TelemetryEventStore] = None,
+        shadow_read_only: bool = False,
     ):
         self.commander = commander
         self.risk_guard = risk_guard
@@ -142,6 +144,7 @@ class ExecutionEngine:
         self.recalibration_pause_sec = recalibration_pause_sec
         self.maker_offset_pct = Decimal(str(maker_offset_pct))
         self.emergency_cancel_workers = emergency_cancel_workers
+        self.shadow_read_only = bool(shadow_read_only)
 
         self._signal_ttl_ns = int(max(0.0, signal_ttl_ms) * NS_PER_MS)
         self._recalibration_pause_ns = int(max(0.0, recalibration_pause_sec) * NS_PER_SECOND)
@@ -150,6 +153,17 @@ class ExecutionEngine:
         self._state = ExecutionState()
         self._execution_queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
+        self._shadow_read_only_events: List[Dict[str, Any]] = []
+        self._shadow_broker_mutation_counts: Dict[str, int] = {
+            "POST": 0,
+            "PATCH": 0,
+            "DELETE": 0,
+            "cancel": 0,
+            "replace": 0,
+            "sell": 0,
+            "rebalance": 0,
+        }
+        self._last_admission_block_result: Optional[ExecutionSpineResult] = None
         self._sweeper_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
         self._executor_thread: Optional[threading.Thread] = None
@@ -210,6 +224,16 @@ class ExecutionEngine:
         """
         return
 
+    def get_shadow_read_only_events(self) -> Tuple[Dict[str, Any], ...]:
+        """Return in-memory shadow broker-mutation blocks for diagnostics/tests."""
+        with self._lock:
+            return tuple(dict(event) for event in self._shadow_read_only_events)
+
+    def get_shadow_broker_mutation_counts(self) -> Dict[str, int]:
+        """Return broker mutation counts proven by the shadow gate."""
+        with self._lock:
+            return dict(self._shadow_broker_mutation_counts)
+
     def update_equity(self, current_equity: float) -> None:
         """Update current equity for risk tracking."""
         with self._lock:
@@ -234,6 +258,7 @@ class ExecutionEngine:
 
         Queue admission uses canonical now_ns() and explicit state gating.
         """
+        self._last_admission_block_result = None
         if not self._state.is_running:
             return False
 
@@ -284,6 +309,39 @@ class ExecutionEngine:
                 signal.symbol,
                 guardrail_verdict.get("verdict"),
                 guardrail_verdict.get("reason_codes"),
+            )
+            return False
+
+        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        if (
+            guardrail_verdict is None
+            and signal_metadata.get("execution_adapter") == "alpaca_paper_rest"
+        ):
+            self._last_admission_block_result = ExecutionSpineResult(
+                decision_uuid=resolved_decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="blocked",
+                route="execution_engine",
+                reason_code="PRE_TRADE_GUARDRAIL_MISSING",
+                message="External Alpaca PAPER route requires a pre-trade guardrail verdict before broker routing.",
+                decision_artifact=(
+                    self._decision_artifact_summary(decision_record)
+                    if decision_record is not None
+                    else None
+                ),
+                pre_trade_guardrail_verdict=None,
+            )
+            return False
+
+        if self.shadow_read_only:
+            self._last_admission_block_result = self._record_shadow_read_only_block(
+                signal=signal,
+                current_price=current_price,
+                is_attack=is_attack,
+                decision_uuid=resolved_decision_uuid,
+                decision_record=decision_record,
+                guardrail_verdict=guardrail_verdict,
             )
             return False
 
@@ -355,6 +413,12 @@ class ExecutionEngine:
             decision_record=decision_record,
         )
         if not admitted:
+            block_result = self._last_admission_block_result
+            if (
+                block_result is not None
+                and block_result.decision_uuid == decision_uuid
+            ):
+                return block_result
             return ExecutionSpineResult(
                 decision_uuid=decision_uuid,
                 client_order_id=None,
@@ -415,6 +479,96 @@ class ExecutionEngine:
     # ============================================
     # INTERNAL METHODS
     # ============================================
+
+    def _record_shadow_read_only_block(
+        self,
+        *,
+        signal: StrategySignal,
+        current_price: Decimal,
+        is_attack: bool,
+        decision_uuid: Optional[str],
+        decision_record: Optional[DecisionRecord],
+        guardrail_verdict: Optional[Dict[str, Any]],
+    ) -> ExecutionSpineResult:
+        ts_ns = now_ns()
+        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        decision_artifact = (
+            self._decision_artifact_summary(decision_record)
+            if decision_record is not None
+            else signal_metadata.get("compiled_decision_artifact")
+        )
+        if not isinstance(decision_artifact, dict):
+            decision_artifact = None
+
+        guardrail = guardrail_verdict if isinstance(guardrail_verdict, dict) else {}
+        asset_class = (
+            signal_metadata.get("asset_class")
+            or guardrail.get("asset_class")
+            or guardrail.get("capability_identity", {}).get("asset_class")
+            or "unknown"
+        )
+        order_type = (
+            signal_metadata.get("order_type")
+            or guardrail.get("order_type")
+            or ("limit" if is_attack else "market")
+        )
+        payload = {
+            "timestamp_ns": ts_ns,
+            "symbol": getattr(signal, "symbol", None),
+            "asset_class": asset_class,
+            "side": getattr(signal, "side", None),
+            "order_type": str(order_type).lower(),
+            "notional_intent": (
+                signal_metadata.get("requested_notional")
+                or guardrail.get("requested_notional")
+            ),
+            "quantity_intent": str(getattr(signal, "quantity", "")),
+            "current_price": str(current_price),
+            "guardrail_verdict": guardrail_verdict,
+            "reason": "SHADOW_READ_ONLY_BLOCKED_BROKER_MUTATION",
+            "shadow_read_only": True,
+            "broker_post_patch_delete_count": 0,
+            "broker_mutation_counts": self.get_shadow_broker_mutation_counts(),
+            "confirmation": {
+                "broker_mutation_impossible_at_execution_gate": True,
+                "order_router_submit_order_reached": False,
+                "live_mode": False,
+            },
+        }
+
+        with self._lock:
+            self._shadow_read_only_events.append(dict(payload))
+
+        if self.telemetry_store is not None:
+            event = EventEnvelope(
+                decision_uuid=decision_uuid,
+                event_type=EventType.AUDIT_EVENT,
+                source_module="app.execution.engine.shadow_read_only",
+                exchange_ts_ns=int(getattr(signal, "exchange_ts_ns", 0) or ts_ns),
+                receive_ts_ns=ts_ns,
+                decision_ts_ns=ts_ns,
+                payload=payload,
+            )
+            self.telemetry_store.record_event(event)
+
+        logger.info(
+            "[EXEC_DIAG] SHADOW_READ_ONLY_BLOCKED_BROKER_MUTATION: symbol=%s side=%s qty=%s decision_uuid=%s",
+            getattr(signal, "symbol", None),
+            getattr(signal, "side", None),
+            getattr(signal, "quantity", None),
+            decision_uuid,
+        )
+        return ExecutionSpineResult(
+            decision_uuid=decision_uuid,
+            client_order_id=None,
+            broker_order_id=None,
+            normalized_status="blocked",
+            route="shadow_read_only",
+            reason_code="SHADOW_READ_ONLY_BLOCKED_BROKER_MUTATION",
+            message="Shadow read-only runtime blocked broker mutation before OrderRouter.",
+            decision_artifact=decision_artifact,
+            pre_trade_guardrail_verdict=guardrail_verdict,
+        )
 
     def _is_signal_economically_admissible(self, signal: StrategySignal) -> bool:
         """
@@ -571,6 +725,16 @@ class ExecutionEngine:
                 reason_code=reason,
                 decision_artifact=decision_artifact,
                 pre_trade_guardrail_verdict=guardrail_verdict,
+            )
+
+        if self.shadow_read_only:
+            return self._record_shadow_read_only_block(
+                signal=signal,
+                current_price=current_price,
+                is_attack=is_attack,
+                decision_uuid=queued.decision_uuid,
+                decision_record=None,
+                guardrail_verdict=guardrail_verdict,
             )
 
         masked = self.masking_layer.mask_order(signal.quantity)
@@ -776,6 +940,12 @@ class ExecutionEngine:
 
     def _cancel_pending_order_with_pcv(self, order_id: str) -> bool:
         """Cancel a pending order with PCV. Normal operations only."""
+        if self.shadow_read_only:
+            logger.info(
+                "[EXEC_DIAG] SHADOW_READ_ONLY_BLOCKED_CANCEL: order_id=%s",
+                order_id,
+            )
+            return False
         try:
             cancel_success = self.order_router.cancel_order(order_id)
             if not cancel_success:
@@ -804,6 +974,13 @@ class ExecutionEngine:
         """
         Emergency liquidation - fire-and-forget sequence.
         """
+        if self.shadow_read_only:
+            logger.critical(
+                "SHADOW_READ_ONLY_BLOCKED_EMERGENCY_LIQUIDATION: broker mutation remains disabled"
+            )
+            with self._lock:
+                self._state.is_emergency_liquidation_in_progress = False
+            return
         if self._state.is_emergency_liquidation_in_progress:
             logger.warning("Emergency liquidation already in progress")
             return
@@ -844,6 +1021,12 @@ class ExecutionEngine:
 
     def _emergency_cancel_order(self, order_id: str) -> None:
         """Fire-and-forget cancel helper."""
+        if self.shadow_read_only:
+            logger.info(
+                "[EXEC_DIAG] SHADOW_READ_ONLY_BLOCKED_EMERGENCY_CANCEL: order_id=%s",
+                order_id,
+            )
+            return
         try:
             self.order_router.cancel_order(order_id)
         except Exception as e:
