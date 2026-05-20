@@ -46,7 +46,7 @@ from app.utils.time_utils import now_ns
 
 APPROVAL_ENV = "POVERTY_KILLER_APPROVE_SEAM6_ALPACA_PAPER_PORTFOLIO_EXPANSION"
 APPROVAL_VALUE = "YES_I_APPROVE_UP_TO_15_BUY_LIMIT_10_NOTIONAL_SEAM6"
-REPORT_PATH = Path("reports/seam6_controlled_alpaca_paper_portfolio_expansion_machine.md")
+REPORT_PATH = Path("reports/seam6c_corrected_alpaca_paper_crypto_fallthrough_expansion.md")
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 TARGET_NOTIONAL = Decimal("10.00")
 MAX_SUBMITTED_SYMBOLS = 15
@@ -463,7 +463,7 @@ def _order_summary(order: dict[str, Any]) -> dict[str, Any]:
 def _write_report(summary: dict[str, Any]) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        "# Seam 6 Controlled Alpaca PAPER Portfolio Expansion Machine",
+        "# Seam 6C Corrected Alpaca PAPER Crypto Fallthrough Expansion",
         "",
         f"- report_ts_ns: {summary['report_ts_ns']}",
         f"- endpoint: {summary['endpoint']}",
@@ -471,6 +471,8 @@ def _write_report(summary: dict[str, Any]) -> None:
         f"- selected_candidate_universe: `{json.dumps(summary['candidate_universe'])}`",
         f"- system_chosen_symbols: `{json.dumps(summary['system_chosen_symbols'])}`",
         f"- submitted_orders_count: {len(summary['submitted_orders'])}",
+        f"- broker_post_count: {summary['safety']['adapter_request_counts'].get('POST', 0)}",
+        f"- crypto_fallthrough_behavior: {summary['crypto_fallthrough_behavior']}",
         f"- no_live_endpoint_or_mode: {summary['safety']['no_live_endpoint_or_mode']}",
         f"- no_sell_rebalance_cancel_replace_retry_storm: {summary['safety']['no_sell_rebalance_cancel_replace_retry_storm']}",
         f"- no_fake_broker_facts: {summary['safety']['no_fake_broker_facts']}",
@@ -888,6 +890,12 @@ def test_real_seam6_controlled_alpaca_paper_portfolio_expansion_machine(tmp_path
         "open_orders_after": [_order_summary(row) for row in open_orders_after],
         "account_after": _selected_account_fields(account_after),
         "machine_evidence": machine_evidence,
+        "crypto_fallthrough_behavior": (
+            "equity/ETF candidates were skipped for MARKET_CLOSED/stale quote truth, "
+            "crypto candidates were evaluated, and crypto failed closed on min-notional/precision/cap truth"
+            if not submitted
+            else "candidate selection produced submitted orders after evaluating equity/ETF priority and crypto fallthrough gates"
+        ),
         "safety": {
             "no_live_endpoint_or_mode": identity.base_url == EXPECTED_ALPACA_PAPER_BASE_URL and identity.environment == "paper",
             "no_market_orders": True,
