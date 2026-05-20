@@ -811,6 +811,19 @@ class KrakenWebSocketClient:
             "messages_rejected_no_timestamp": self._messages_rejected_no_timestamp,
             "messages_processed": self._messages_processed
         }
+
+    def get_feed_truth_status(self) -> Dict[str, Any]:
+        """Return machine-readable websocket feed truth without inventing REST state."""
+        status = "WEBSOCKET_ACTIVE" if self._connected or self._messages_processed > 0 else "WEBSOCKET_INACTIVE"
+        return {
+            "status": status,
+            "exchange": "kraken",
+            "endpoint": self.ws_url,
+            "connected": self._connected,
+            "last_message_time_ns": self._last_message_time_ns,
+            "messages_processed": self._messages_processed,
+            "messages_rejected_no_timestamp": self._messages_rejected_no_timestamp,
+        }
     
     async def start(self) -> None:
         """Start the WebSocket client."""

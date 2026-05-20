@@ -113,6 +113,9 @@ class HealthReasonCode(str, Enum):
     COMPONENT_DISABLED = "COMPONENT_DISABLED"
     COMPONENT_QUARANTINED = "COMPONENT_QUARANTINED"
     NOMINAL = "NOMINAL"
+    DEGRADED_MARKET_DATA = "DEGRADED_MARKET_DATA"
+    REST_DNS_FAILURE = "REST_DNS_FAILURE"
+    MARKET_DATA_PARTIAL_TRUTH = "MARKET_DATA_PARTIAL_TRUTH"
 
 
 @unique
@@ -448,6 +451,47 @@ class HealthMonitor:
             state=comp.state,
             payload={"error_message": error_message},
         )
+
+    def record_market_data_truth(
+        self,
+        *,
+        component_name: str,
+        ts_ns: int,
+        feed_truth: Dict[str, Any],
+        criticality: ComponentCriticality = ComponentCriticality.IMPORTANT,
+    ) -> None:
+        """Record structured market-data truth without generating market data."""
+        if ts_ns <= 0:
+            raise ValueError("ts_ns must be positive")
+        if component_name not in self._components:
+            self.register_component(component_name, criticality=criticality)
+
+        status = str(feed_truth.get("status", "UNKNOWN"))
+        metadata = {
+            "feed_truth_status": status,
+            "market_truth": feed_truth.get("market_truth"),
+            "missing_truth": tuple(feed_truth.get("missing_truth", ())),
+        }
+        self.pulse_canonical(
+            component_name=component_name,
+            ts_ns=ts_ns,
+            metadata=metadata,
+            timestamp_source=TimestampSource.EXPLICIT_INPUT,
+        )
+        if status in {"WEBSOCKET_ACTIVE_REST_DNS_FAILED", "REST_POLLING_DEGRADED"}:
+            self.record_error(
+                component_name,
+                ts_ns=ts_ns,
+                error_message=status,
+                metadata={
+                    "reason_code": (
+                        HealthReasonCode.REST_DNS_FAILURE.value
+                        if status == "WEBSOCKET_ACTIVE_REST_DNS_FAILED"
+                        else HealthReasonCode.DEGRADED_MARKET_DATA.value
+                    ),
+                    **metadata,
+                },
+            )
 
     # ------------------------------------------------------------------
     # Evaluation

@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -38,6 +39,7 @@ class PollingClient:
         interval: float = 1.0,
         on_candle: Optional[Callable] = None,
         on_order_book: Optional[Callable] = None,
+        on_feed_truth: Optional[Callable[[Dict[str, Any]], None]] = None,
         exchange: str = "kraken"
     ):
         """
@@ -54,6 +56,7 @@ class PollingClient:
         self.interval = interval
         self.on_candle = on_candle
         self.on_order_book = on_order_book
+        self.on_feed_truth = on_feed_truth
         self.exchange = exchange
 
         self._running = False
@@ -63,6 +66,9 @@ class PollingClient:
         # Track last candle timestamps to avoid duplicates
         self._last_candle_timestamps_ns: Dict[str, int] = {}
         self._last_failure_status: Dict[str, Any] = {}
+        self._last_success_status: Dict[str, Any] = {}
+        self._failure_status_by_symbol_feed: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._failure_history: List[Dict[str, Any]] = []
 
         # API endpoints (example for Kraken)
         self._endpoints = {
@@ -149,6 +155,13 @@ class PollingClient:
         try:
             endpoint = self._endpoints.get(self.exchange, {}).get("candle")
             if not endpoint:
+                self._record_polling_failure(
+                    symbol,
+                    "candle",
+                    RuntimeError("missing REST candle endpoint"),
+                    endpoint=None,
+                    status="MISSING_CANDLE_TRUTH",
+                )
                 return
 
             # Format symbol for exchange
@@ -174,12 +187,24 @@ class PollingClient:
 
                         if self.on_candle:
                             await self._safe_callback(self.on_candle, candle)
+                    self._record_polling_success(symbol, "candle", endpoint)
+                else:
+                    self._record_polling_failure(
+                        symbol,
+                        "candle",
+                        RuntimeError(f"HTTP {response.status}"),
+                        endpoint=endpoint,
+                        status="REST_POLLING_FAILED",
+                    )
 
         except aiohttp.ClientError as e:
-            self._record_polling_failure(symbol, "candle", e)
+            self._record_polling_failure(symbol, "candle", e, endpoint=endpoint)
             logger.error(f"HTTP error fetching candles for {symbol}: {e}")
+        except asyncio.TimeoutError as e:
+            self._record_polling_failure(symbol, "candle", e, endpoint=endpoint, status="REST_POLLING_FAILED")
+            logger.error(f"Timeout fetching candles for {symbol}: {e}")
         except Exception as e:
-            self._record_polling_failure(symbol, "candle", e)
+            self._record_polling_failure(symbol, "candle", e, endpoint=endpoint)
             logger.error(f"Error fetching candles for {symbol}: {e}")
 
     async def _fetch_order_book(self, symbol: str) -> None:
@@ -192,6 +217,13 @@ class PollingClient:
         try:
             endpoint = self._endpoints.get(self.exchange, {}).get("order_book")
             if not endpoint:
+                self._record_polling_failure(
+                    symbol,
+                    "order_book",
+                    RuntimeError("missing REST order book endpoint"),
+                    endpoint=None,
+                    status="MISSING_ORDER_BOOK_TRUTH",
+                )
                 return
 
             formatted_symbol = self._format_symbol(symbol)
@@ -208,12 +240,33 @@ class PollingClient:
 
                     if order_book and self.on_order_book:
                         await self._safe_callback(self.on_order_book, order_book)
+                    if order_book:
+                        self._record_polling_success(symbol, "order_book", endpoint)
+                    else:
+                        self._record_polling_failure(
+                            symbol,
+                            "order_book",
+                            RuntimeError("REST order book parse returned no snapshot"),
+                            endpoint=endpoint,
+                            status="MISSING_ORDER_BOOK_TRUTH",
+                        )
+                else:
+                    self._record_polling_failure(
+                        symbol,
+                        "order_book",
+                        RuntimeError(f"HTTP {response.status}"),
+                        endpoint=endpoint,
+                        status="REST_POLLING_FAILED",
+                    )
 
         except aiohttp.ClientError as e:
-            self._record_polling_failure(symbol, "order_book", e)
+            self._record_polling_failure(symbol, "order_book", e, endpoint=endpoint)
             logger.error(f"HTTP error fetching order book for {symbol}: {e}")
+        except asyncio.TimeoutError as e:
+            self._record_polling_failure(symbol, "order_book", e, endpoint=endpoint, status="REST_POLLING_FAILED")
+            logger.error(f"Timeout fetching order book for {symbol}: {e}")
         except Exception as e:
-            self._record_polling_failure(symbol, "order_book", e)
+            self._record_polling_failure(symbol, "order_book", e, endpoint=endpoint)
             logger.error(f"Error fetching order book for {symbol}: {e}")
 
     def _format_symbol(self, symbol: str) -> str:
@@ -232,14 +285,68 @@ class PollingClient:
             return f"{base}{quote}"
         return symbol
 
-    def _record_polling_failure(self, symbol: str, feed_type: str, exc: Exception) -> None:
-        reason = "DNS_FAILURE_RECORDED" if isinstance(exc, aiohttp.ClientConnectorError) else "FAILED_CLOSED"
-        self._last_failure_status = {
+    def _classify_polling_failure(self, exc: Exception, explicit_status: Optional[str] = None) -> str:
+        if explicit_status:
+            return explicit_status
+
+        message = str(exc).lower()
+        os_error = getattr(exc, "os_error", None)
+        os_error_message = str(os_error).lower() if os_error is not None else ""
+        is_connector_dns = isinstance(exc, aiohttp.ClientConnectorError) and any(
+            token in f"{message} {os_error_message}"
+            for token in ("dns", "name resolution", "resolve", "temporary failure", "could not contact dns")
+        )
+        if is_connector_dns:
+            return "DNS_FAILURE_RECORDED"
+
+        if isinstance(exc, (aiohttp.ClientConnectorError, asyncio.TimeoutError)):
+            return "REST_POLLING_FAILED"
+
+        return "FAILED_CLOSED"
+
+    def _endpoint_domain(self, endpoint: Optional[str]) -> Optional[str]:
+        if not endpoint:
+            return None
+        parsed = urlparse(endpoint)
+        return parsed.hostname
+
+    def _record_polling_failure(
+        self,
+        symbol: str,
+        feed_type: str,
+        exc: Exception,
+        *,
+        endpoint: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> None:
+        reason = self._classify_polling_failure(exc, status)
+        failure_status = {
             "status": reason,
             "symbol": symbol,
             "feed_type": feed_type,
             "exception_type": exc.__class__.__name__,
             "exchange": self.exchange,
+            "endpoint_domain": self._endpoint_domain(endpoint),
+            "rest_status": "REST_POLLING_DEGRADED",
+            "market_truth": "MISSING_CANDLE_TRUTH" if feed_type == "candle" else "MISSING_ORDER_BOOK_TRUTH",
+            "timestamp_ns": now_ns(),
+        }
+        self._last_failure_status = failure_status
+        self._failure_status_by_symbol_feed.setdefault(symbol, {})[feed_type] = failure_status
+        self._failure_history.append(failure_status)
+        if len(self._failure_history) > 100:
+            self._failure_history = self._failure_history[-100:]
+        if self.on_feed_truth:
+            self.on_feed_truth(dict(failure_status))
+
+    def _record_polling_success(self, symbol: str, feed_type: str, endpoint: Optional[str]) -> None:
+        self._last_success_status = {
+            "status": "REST_ACTIVE",
+            "symbol": symbol,
+            "feed_type": feed_type,
+            "exchange": self.exchange,
+            "endpoint_domain": self._endpoint_domain(endpoint),
+            "timestamp_ns": now_ns(),
         }
 
     def _parse_candles(self, data: Dict, symbol: str) -> List[Candle]:
@@ -385,6 +492,12 @@ class PollingClient:
             "symbols": len(self.symbols),
             "last_candle_timestamps_ns": self._last_candle_timestamps_ns.copy(),
             "last_failure_status": dict(self._last_failure_status),
+            "last_success_status": dict(self._last_success_status),
+            "failure_status_by_symbol_feed": {
+                symbol: {feed_type: dict(status) for feed_type, status in feeds.items()}
+                for symbol, feeds in self._failure_status_by_symbol_feed.items()
+            },
+            "failure_history": [dict(item) for item in self._failure_history[-20:]],
         }
 
     async def force_poll(self, symbol: Optional[str] = None) -> None:

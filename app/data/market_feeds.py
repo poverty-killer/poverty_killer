@@ -56,6 +56,11 @@ class MarketFeeds:
         # Clients
         self.websocket_client: Optional[KrakenWebSocketClient] = None
         self.polling_client: Optional[PollingClient] = None
+        self._websocket_truth: Dict[str, Any] = {
+            "status": "WEBSOCKET_INACTIVE",
+            "exchange": "kraken",
+        }
+        self._rest_truth_by_symbol_feed: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
         # Callbacks
         self._candle_callbacks: List[Callable] = []
@@ -75,7 +80,8 @@ class MarketFeeds:
             symbols=self.symbols,
             on_candle=self._on_candle,
             on_order_book=self._on_order_book,
-            on_trade=self._on_trade
+            on_trade=self._on_trade,
+            on_health=self._on_websocket_health,
         )
         await self.websocket_client.start()
 
@@ -84,7 +90,8 @@ class MarketFeeds:
             symbols=self.symbols,
             interval=self.config.data.polling_interval_seconds,
             on_candle=self._on_candle,
-            on_order_book=self._on_order_book
+            on_order_book=self._on_order_book,
+            on_feed_truth=self._on_rest_feed_truth,
         )
         await self.polling_client.start()
 
@@ -101,6 +108,22 @@ class MarketFeeds:
             await self.polling_client.stop()
 
         logger.info("Market feeds stopped")
+
+    def _on_websocket_health(self, ping_ns: int, pong_ns: int) -> None:
+        self._websocket_truth = {
+            "status": "WEBSOCKET_ACTIVE",
+            "exchange": "kraken",
+            "ping_ns": ping_ns,
+            "pong_ns": pong_ns,
+            "timestamp_ns": now_ns(),
+        }
+
+    def _on_rest_feed_truth(self, status: Dict[str, Any]) -> None:
+        symbol = str(status.get("symbol", ""))
+        feed_type = str(status.get("feed_type", ""))
+        if not symbol or not feed_type:
+            return
+        self._rest_truth_by_symbol_feed.setdefault(symbol, {})[feed_type] = dict(status)
 
     def _on_candle(self, candle: Candle) -> None:
         """
@@ -343,6 +366,7 @@ class MarketFeeds:
         Returns:
             Dictionary with market status information
         """
+        feed_truth = self.get_feed_truth_status()
         return {
             "symbols": len(self.symbols),
             "candles_per_symbol": {
@@ -352,7 +376,77 @@ class MarketFeeds:
             "stale_symbols": [s for s in self.symbols if self.is_stale(s)],
             "websocket_connected": self.websocket_client._connected if self.websocket_client else False,
             "polling_active": self.polling_client.is_running if self.polling_client else False,
+            "feed_truth": feed_truth,
+            "feed_truth_status": feed_truth["status"],
             "timestamp_ns": now_ns()
+        }
+
+    def get_feed_truth_status(self) -> Dict[str, Any]:
+        """
+        Return combined websocket/REST market-data truth.
+
+        This does not substitute websocket data for missing REST truth. It marks
+        partial truth explicitly so downstream components can degrade or fail
+        closed according to their own contracts.
+        """
+        ws_truth = (
+            self.websocket_client.get_feed_truth_status()
+            if self.websocket_client and hasattr(self.websocket_client, "get_feed_truth_status")
+            else dict(self._websocket_truth)
+        )
+        polling_stats = self.polling_client.get_stats() if self.polling_client else {}
+        rest_failures = polling_stats.get("failure_status_by_symbol_feed") or self._rest_truth_by_symbol_feed
+        latest_rest_failure = polling_stats.get("last_failure_status") or {}
+        latest_rest_success = polling_stats.get("last_success_status") or {}
+
+        websocket_active = ws_truth.get("status") == "WEBSOCKET_ACTIVE"
+        dns_failure = latest_rest_failure.get("status") == "DNS_FAILURE_RECORDED" or any(
+            feed_status.get("status") == "DNS_FAILURE_RECORDED"
+            for by_feed in rest_failures.values()
+            for feed_status in by_feed.values()
+        )
+        rest_active = bool(latest_rest_success) and not dns_failure
+
+        if websocket_active and dns_failure:
+            status = "WEBSOCKET_ACTIVE_REST_DNS_FAILED"
+            market_truth = "MARKET_DATA_PARTIAL_TRUTH"
+        elif websocket_active and rest_active:
+            status = "WEBSOCKET_ACTIVE"
+            market_truth = "MARKET_DATA_FULL_TRUTH"
+        elif dns_failure:
+            status = "REST_POLLING_DEGRADED"
+            market_truth = "MARKET_DATA_PARTIAL_TRUTH" if self.order_books else "FAILED_CLOSED"
+        elif websocket_active:
+            status = "WEBSOCKET_ACTIVE"
+            market_truth = "MARKET_DATA_PARTIAL_TRUTH"
+        else:
+            status = "FAILED_CLOSED"
+            market_truth = "MISSING_FEED_TRUTH"
+
+        missing_truth = []
+        if dns_failure or status in {"REST_POLLING_DEGRADED", "WEBSOCKET_ACTIVE_REST_DNS_FAILED"}:
+            missing_truth.extend(["MISSING_CANDLE_TRUTH", "MISSING_ORDER_BOOK_TRUTH"])
+        for symbol in self.symbols:
+            if symbol not in self.order_books:
+                missing_truth.append(f"MISSING_ORDER_BOOK_TRUTH:{symbol}")
+            if self.candles.get_count(symbol) <= 0:
+                missing_truth.append(f"MISSING_CANDLE_TRUTH:{symbol}")
+            elif self.is_stale(symbol):
+                missing_truth.append(f"STALE_MARKET_TRUTH:{symbol}")
+
+        return {
+            "status": status,
+            "market_truth": market_truth,
+            "websocket": ws_truth,
+            "rest": {
+                "active": rest_active,
+                "latest_success": latest_rest_success,
+                "latest_failure": latest_rest_failure,
+                "failures_by_symbol_feed": rest_failures,
+            },
+            "missing_truth": tuple(sorted(set(missing_truth))),
+            "order_book_symbols": tuple(sorted(self.order_books.keys())),
+            "timestamp_ns": now_ns(),
         }
 
     def get_symbol_stats(self, symbol: str) -> Dict[str, Any]:

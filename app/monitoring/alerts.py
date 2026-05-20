@@ -40,6 +40,7 @@ class AlertType(Enum):
     KILL_SWITCH_TRIGGERED = "kill_switch_triggered"
     VOL_FUSE_TRIGGERED = "vol_fuse_triggered"
     EXCHANGE_OUTAGE = "exchange_outage"
+    REST_DNS_FAILURE = "rest_dns_failure"
     ZOMBIE_ORDERS = "zombie_orders"
     POSITION_LIMIT = "position_limit"
     DRAWDOWN_LIMIT = "drawdown_limit"
@@ -440,6 +441,22 @@ class SovereignSentinel:
             AlertSeverity.CRITICAL,
             f"EXCHANGE OUTAGE: {exchange} no heartbeat for {age_sec:.1f}s",
             {"exchange": exchange, "age_sec": age_sec}
+        )
+
+    def alert_rest_dns_failure(self, exchange: str, endpoint_domain: str, symbol: str, feed_type: str) -> None:
+        """Record local alert when REST DNS fails while preserving feed truth."""
+        self.send_alert(
+            AlertType.REST_DNS_FAILURE,
+            AlertSeverity.WARNING,
+            f"REST DNS FAILURE: {exchange} {endpoint_domain} {symbol} {feed_type}",
+            {
+                "exchange": exchange,
+                "endpoint_domain": endpoint_domain,
+                "symbol": symbol,
+                "feed_type": feed_type,
+                "reason": "DNS_FAILURE_RECORDED",
+                "market_truth": "MARKET_DATA_PARTIAL_TRUTH",
+            },
         )
     
     def alert_zombie_orders(self, count: int, value: float, oldest_age_sec: float) -> None:
