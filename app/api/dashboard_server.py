@@ -33,7 +33,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ConnectionState:
     """Track WebSocket connection state."""
     websocket: WebSocket
@@ -42,8 +42,6 @@ class ConnectionState:
     last_heartbeat: datetime
     last_state_hash: str = ""
     last_state: Dict[str, Any] = field(default_factory=dict)
-
-    __slots__ = ("websocket", "client_id", "connected_at", "last_heartbeat", "last_state_hash", "last_state")
 
 
 class SovereignDashboard:

@@ -1,110 +1,93 @@
 # Operation Whole-Bot Active Edge Shadow Stress
 
-## Files Changed
+Current Seam 7H base HEAD: `8b0cc34`.
 
-- `app/core/whole_bot_attribution.py`
-- `app/core/decision_compiler.py`
-- `app/brain/signal_fusion.py`
-- `app/main_loop.py`
-- `app/execution/engine.py`
-- `main.py`
-- `tests/test_whole_bot_active_edge_attribution.py`
-- `reports/autonomous_paper_friday_readiness.md`
-- `reports/operation_whole_bot_active_edge_shadow_stress.md`
+## Active Runtime Wiring Evidence
 
-## Attribution Schema
+- Strategy/router/fusion attribution was completed by Seam 7E.
+- Residual depth/ghost math repair was completed before Seam 7F.
+- Risk/capital defense/economics wiring was completed by Seam 7F.
+- Market infrastructure, venue capability truth, broker read-only proof, and reconciliation spine were completed by Seam 7G.
+- Operator/monitoring/readiness validation is covered by Seam 7H.
 
-Each runtime signature carries:
+## Shadow Command
 
-`module_name`, `category`, `status`, `input_source`, `output_summary`, `effect`, `reason`, `timestamp`.
-
-Allowed statuses and effects are enforced in `app/core/whole_bot_attribution.py`.
-
-## Modules Wired
-
-- Signal path: `SignalFusion`, `DecisionCompiler`, `DecisionRecord.metadata`.
-- Strategy/alpha signatures: `MovingFloor`, `AdaptiveDC`, `ShadowFront`.
-- Intelligence/portal signatures: `WhaleFlow`, `Toxicity`, `RegimeDetector`, `EntropyDecoder`, `InsiderSignalEngine`, `ShansCurve`.
-- Governors: `NetEdgeGovernor`, `TradeEfficiencyGovernor`, sourced from pre-trade guardrail module evidence when available.
-- Safety/truth/state: `PreTradeGuardrails`, `TruthKernel`, `InvariantChecker`, `Reconciliation`, `StateStore`.
-- Venue/execution: `CapabilityRegistry`, `AlpacaPaperAdapter`, `ExecutionEngine`, `OrderRouter`, `BrokerGateway`, `ShadowReadOnlyGate`.
-- Startup audit: `RuntimeBootstrap`.
-
-## Runtime Evidence
-
-Command:
+The bounded command requiring explicit approval before execution:
 
 ```bash
 timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO
 ```
 
-Result:
-
-- Exit code `124` from the 60-second timeout.
-- Startup reached full runtime.
-- `Broker Mode: paper` observed.
-- `Shadow Read Only: ENABLED` observed.
-- Kraken websocket connected to `wss://ws.kraken.com/v2`.
-- Live `FEED_CANDLE` and `FEED_BOOK` ingress occurred.
-- Startup attribution audit event recorded in `data/telemetry.db`.
-- Startup attribution module count: `19`.
-- Startup shadow broker mutation counts: `POST=0`, `PATCH=0`, `DELETE=0`, `cancel=0`, `replace=0`, `sell=0`, `rebalance=0`.
-
-## Mutation Scan
-
-Current-run log scan over `2026-05-20T03:58` and `2026-05-20T03:59` found no:
-
-- `ORDER_SUBMIT_ATTEMPT`
-- `PAPERBROKER_REACH_COUNT`
-- `PAPER_FILL_COUNT`
-- `/v2/orders`
-- `SHADOW_READ_ONLY_BLOCKED`
-- `Broker Mode: live`
-
-No live mode, no live endpoint, no market/sell/rebalance/cancel/replace/retry storm, and no broker mutation were observed.
-
-## Feed Truth
-
-- Websocket feed: active, connected, produced candles/books.
-- REST polling: degraded with DNS failure: `Cannot connect to host api.kraken.com:443 ssl:default [Could not contact DNS servers]`.
-- Broker read-only truth was not proven in this shadow run; missing broker reconciliation truth is reported as missing/degraded rather than invented.
-
-## Decision And Guardrails
-
-- No `DecisionRecord compiled` line appeared in the 60-second run.
-- Dispatch diagnostics reported `shans_not_ready`, for example `submit_signal_called=False`.
-- No shadow would-submit packet occurred because the active dispatch path did not produce an executable signal.
-- Focused tests prove that when a decision is compiled, `DecisionRecord.metadata["edge_attribution"]` carries whole-bot attribution and shadow telemetry carries it through the no-mutation boundary.
-
-## Governor And Portal Status
-
-- `NetEdgeGovernor`: signed as missing economic truth/advisory through guardrail evidence; no net edge or profitability was invented.
-- `TradeEfficiencyGovernor`: signed as missing economic truth/advisory through guardrail evidence; no slippage or efficiency result was invented.
-- `InsiderSignalEngine`: signs `MISSING_FEED_TRUTH` unless lawful live insider/corporate feed truth is supplied. No MNPI or synthetic portal data is used.
-
-## Truth And Invariants
-
-- `TruthKernel` signs active truth checks when a `TruthFrame` is present.
-- `InvariantChecker` signs missing hot-dispatch invariant snapshot truth when the full invariant snapshot is unavailable in the dispatch packet.
-- `Reconciliation` signs missing broker reconciliation snapshot truth when account/positions/open-orders truth is not attached.
-- Local `StateStore` signs as supporting evidence only.
-
-## Blockers
-
-- `app/brain/shans_curve.py:_savitzky_golay` failed Numba nopython compilation during live order-book processing:
-  `exception_match(none, LinAlgError)` is unsupported because nopython exception matching is limited to `Exception`.
-- Kraken REST polling DNS failed for candle and order-book refreshes.
-- Active live-data shadow did not reach executable candidate submission; autonomous PAPER launch remains blocked until the active path can run without the ShansCurve runtime error and required feed/broker truth is available.
-
-## Tests
-
-- `venv/Scripts/python.exe -m py_compile app/core/whole_bot_attribution.py app/core/decision_compiler.py app/brain/signal_fusion.py app/main_loop.py app/execution/engine.py main.py tests/test_whole_bot_active_edge_attribution.py` passed.
-- `venv/Scripts/python.exe -m pytest -q tests/test_whole_bot_active_edge_attribution.py` passed: `6 passed`.
-- `venv/Scripts/python.exe -m pytest -q tests/test_bot_wide_shadow_read_only_runtime_gate.py tests/test_upstream_dispatch_signal_submission.py` passed: `32 passed`.
-- Regression slice passed: `131 passed, 1 skipped`.
-
-Regression slice:
+Unbounded operator shadow command:
 
 ```bash
-venv/Scripts/python.exe -m pytest -q tests/test_whole_bot_active_edge_attribution.py tests/test_bot_wide_shadow_read_only_runtime_gate.py tests/test_execution_spine_order_routing.py tests/test_broker_gateway_adapter_layer.py tests/test_pre_trade_guardrail_constraints.py tests/test_signal_fusion.py tests/test_upstream_dispatch_signal_submission.py tests/test_intelligence_portfolio_state_truth_spine.py tests/test_state_store.py tests/test_state_recovery_spine.py tests/test_venue_market_asset_capability_layer.py tests/test_seam6_controlled_alpaca_paper_portfolio_expansion_machine.py
+venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO
 ```
+
+Autonomous PAPER command, only after explicit user approval:
+
+```bash
+venv/Scripts/python.exe main.py --paper --log-level INFO
+```
+
+## Required Shadow Proof
+
+A clean shadow stress run must prove:
+
+- paper mode enabled
+- shadow-read-only enabled
+- no live endpoint
+- no live mode
+- broker mutation count zero
+- no broker mutation in shadow
+- no POST/PATCH/DELETE/cancel/replace/sell/rebalance/emergency liquidation
+- feed truth or explicit feed failure
+- broker read-only truth or explicit broker truth blocker
+- DecisionRecord/would-submit telemetry if a candidate appears
+- risk/economics/market/truth/reconciliation attribution if a candidate appears
+- TruthKernel and InvariantChecker status or exact blocker
+- monitoring health summary
+
+## Operator Monitoring Posture
+
+- `ControlPlane`: active operator control; no broker mutation authority.
+- `SovereignDashboard`: intentionally blocked server start during Seam 7H tests because it opens a port and has operator command endpoints.
+- `SovereignSentinel`: local alert records validated; external webhook/Telegram dispatch intentionally unconfigured and not sent.
+- `HealthMonitor`: subsystem health records validated from explicit component heartbeat truth.
+- `PerformanceAttributor`: no invented PnL; empty truth returns partial zero attribution.
+- `ReportGenerator`: report packet generation uses provided evidence only.
+
+## Current Test Evidence
+
+- Compile check passed for Seam 7H target files.
+- Focused Seam 7H operator/monitoring/readiness test passed: `5 passed`.
+- Scoped Seam 7G/7F/7E/execution/broker/guardrail/state regression passed: `68 passed`.
+- Packet-listed `tests/test_shadow_read_only_runtime_gate.py` does not exist and was omitted under the packet's missing-file rule.
+
+## Current Shadow Stress Result
+
+Approved bounded shadow command:
+
+```bash
+timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO
+```
+
+Result: exited `124` at the external 60-second timeout.
+
+Runtime evidence:
+
+- Paper mode confirmed: `Broker Mode: paper`.
+- Shadow mode confirmed: `Shadow Read Only: ENABLED`.
+- Runtime venue posture included paper candidates with `mutation_authorized: False`.
+- Kraken websocket connected to `wss://ws.kraken.com/v2`.
+- Live feed ingress occurred: `FEED_CANDLE #1`, `FEED_BOOK #1`, and later `FEED_BOOK #2200`.
+- Signal/fusion runtime path was active: `FUSION_UPDATE_CALLED` appeared for runtime symbols.
+- Early dispatch not-ready diagnostics recorded `submit_signal_called=False`.
+- Bounded-window log scan found no current-run `ORDER_SUBMIT_ATTEMPT`, `/v2/orders`, live broker mode, sell, rebalance, cancel, replace, emergency liquidation, or broker mutation markers.
+
+## Current Blockers
+
+- Critical health blocker: runtime emitted repeated `HEALTH ALERT: Physical fuse triggered!`.
+- Market data blocker/degradation: Kraken REST candle and order-book polling repeatedly failed DNS with `Cannot connect to host api.kraken.com:443 ssl:default [Could not contact DNS servers]`.
+- Broker truth blocker: Alpaca PAPER read-only account/positions/open-orders reconciliation truth was not proven in the bounded shadow output.
+- Final readiness status for autonomous PAPER launch is `NOT_READY_FOR_AUTONOMOUS_PAPER` until the blockers are cleared and a clean bounded shadow run is recorded.

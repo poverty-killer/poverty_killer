@@ -1,94 +1,136 @@
 # Autonomous PAPER Friday Readiness
 
-## Current Commit
+Current commit at Seam 7H start: `8b0cc34` - Wire market truth reconciliation spine.
 
-- Base HEAD before this operation: `687c1e3` - Add bot-wide shadow read-only runtime gate.
-- Closeout commit for this operation: pending at report write time.
+Friday target: Friday 10:00 AM America/Chicago.
 
 ## Commands
 
-Shadow proof command:
+Shadow command:
 
 ```bash
-main.py --paper --shadow-read-only --log-level INFO
+venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO
 ```
 
-Equivalent env override:
+Optional bounded shadow command:
 
 ```bash
-POVERTY_KILLER_SHADOW_READ_ONLY=1 main.py --paper --log-level INFO
+timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO
 ```
 
-Autonomous PAPER command, only after explicit Board approval:
+Autonomous PAPER command, only after explicit user approval:
 
 ```bash
-main.py --paper --log-level INFO
+venv/Scripts/python.exe main.py --paper --log-level INFO
 ```
 
-Equivalent env posture:
-
-```bash
-POVERTY_KILLER_SHADOW_READ_ONLY=0 main.py --paper --log-level INFO
-```
-
-Do not use live mode. Do not pass `--attack` unless separately approved.
+Do not run autonomous PAPER mutation until approval is given after shadow evidence is reviewed.
 
 ## Environment
 
-- Required broker posture: `--paper`.
-- Required shadow proof posture before autonomous launch: `--shadow-read-only` or `POVERTY_KILLER_SHADOW_READ_ONLY=1`.
-- If Windows venv is run from WSL, keep credentials in the existing non-secret env path pattern; do not print or copy secrets.
-- Mutation approval flags from Seam 6/6C must remain unset during shadow tests.
+- `POVERTY_KILLER_SHADOW_READ_ONLY=1` for shadow.
+- `POVERTY_KILLER_SHADOW_READ_ONLY=0` for autonomous paper only after explicit approval.
+- `POVERTY_KILLER_ALPACA_PAPER_ENV_PATH=...` only if Windows venv from WSL needs the existing non-secret credential path override.
+- Do not print, copy, or commit secrets.
+- Do not set mutation approval flags during shadow-read-only tests.
 
-## Risk And Sizing
+## Broker And Venue
 
-- Current config initial capital observed in shadow run: `$20000.00`.
-- Current PositionSizingEngine log: `risk_per_trade=2.00%`, `kelly_max=0.25`, `hard_cap=25%`.
-- For future Alpaca PAPER crypto tiny-order expansion, use a notional that clears broker minimums. Recommended paper notional is at least `$11`; `$15` gives safer room for precision while still being controlled. Do not exceed Board-approved caps.
+- Alpaca PAPER only for broker mutation.
+- Required endpoint: `https://paper-api.alpaca.markets`.
+- No live endpoint.
+- No live mode.
+- Kraken/websocket feed may provide lawful market feed truth where configured.
+- Broker truth remains canonical; local state remains supporting evidence only.
 
-## Endpoint And Mode
+## Sizing And Risk
 
-- Shadow run confirmed `Broker Mode: paper`.
-- Shadow run confirmed `Shadow Read Only: ENABLED`.
-- No live endpoint or live broker mode appeared in the current-run mutation-marker scan.
-- Alpaca PAPER remains the current proven external paper broker path; Kraken provided websocket feed truth in the shadow run.
+- Current config default initial capital: `$20000`.
+- Current autonomous paper posture must use existing risk, guardrail, sizing, broker constraint, reconciliation, and invariant paths.
+- Prior broker evidence showed Alpaca PAPER crypto rejects below `$10` cost basis. If a future approved paper crypto expansion is needed, use a controlled notional above that minimum only when config/Board approval supports it; `$11` or `$15` is operationally safer than `$10` for precision room.
+- No threshold change is approved by this runbook.
 
-## Friday 10:00 AM Launch Checklist
+## Required Pre-Launch Checks
 
-1. Confirm latest pushed HEAD includes this operation.
-2. Run `git status --short` and verify no unintended staged files.
-3. Run the shadow command and verify:
-   - `Broker Mode: paper`
-   - `Shadow Read Only: ENABLED`
-   - websocket feed connects
-   - broker mutation count remains zero
-   - no `ORDER_SUBMIT_ATTEMPT`, `PAPERBROKER_REACH_COUNT`, `PAPER_FILL_COUNT`, `/v2/orders`, or live-mode markers
-4. Review remaining blockers below.
-5. Request explicit Board approval before autonomous PAPER mutation.
+1. Confirm latest pushed HEAD includes Seam 7H.
+2. Run scoped `git status --short` and verify no unintended staged files.
+3. Run compile and focused Seam 7H tests.
+4. Run the Seam 7G/7F/7E/shadow/execution/broker/guardrail/state regression set.
+5. Run bounded shadow only after approval:
+   `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+6. Verify shadow output:
+   - paper mode confirmed
+   - shadow-read-only confirmed
+   - no live endpoint
+   - no live mode
+   - broker mutation count zero
+   - no broker mutation in shadow
+   - no POST/PATCH/DELETE/cancel/replace/sell/rebalance
+   - feed truth or explicit feed failure recorded
+   - broker read-only truth or explicit missing/DNS failure recorded
+   - TruthKernel, InvariantChecker, and reconciliation status recorded or exact blocker reported
+7. Request explicit approval before running autonomous PAPER.
 
 ## Stop Conditions
 
-- Live endpoint or live mode appears.
-- Shadow mode can mutate broker state.
-- Broker mutation markers appear during shadow.
-- DecisionCompiler, ExecutionEngine, OrderRouter, BrokerGateway, PreTradeGuardrails, TruthKernel, or reconciliation are bypassed.
-- Quote, feed, broker, state, or economic truth is missing and not labeled truthfully.
-- ShansCurve runtime nopython compile error remains unresolved for the active live-data path.
-- REST DNS failures prevent required read-only broker/feed truth.
+- Live endpoint appears.
+- Live mode appears.
+- Broker mutation in shadow.
+- POST/PATCH/DELETE in shadow.
+- Unexpected sell, rebalance, cancel, replace, retry storm, or emergency liquidation.
+- Invariant failure.
+- State/broker reconciliation conflict.
+- Feed stale beyond configured threshold.
+- DNS failures prevent required truth.
+- Missing broker truth prevents canonical reconciliation.
+- Risk, guardrail, DecisionCompiler, ExecutionEngine, OrderRouter, BrokerGateway, TruthKernel, or reconciliation is bypassed.
+- Unhandled exception loop.
 
-## Rollback / Kill
+## Rollback And Kill
 
-- Stop the runtime with `Ctrl-C` in the owning terminal.
-- If process control is needed, terminate the `main.py --paper ...` process. Do not run emergency liquidation in shadow mode.
+- Stop foreground runtime with `Ctrl+C`.
+- If Windows process hangs:
+
+```powershell
+taskkill /IM python.exe /F
+```
+
+- Disable autonomous paper by setting `POVERTY_KILLER_SHADOW_READ_ONLY=1`.
+- Remove paper mutation approval flags.
+- Do not use emergency liquidation in shadow mode.
 
 ## Forbidden Actions
 
 - No live real-money trading.
+- No live endpoint.
+- No unapproved broker mutation.
 - No direct broker REST bypass.
-- No market orders, sell orders, rebalance, cancel/replace loops, retry storms, fake fills, fake quotes, fake PnL, fake slippage, fake net edge, or fake profitability.
+- No market orders unless separately approved by governing execution law.
+- No sell, rebalance, cancel/replace loop, retry storm, fake fills, fake quotes, fake PnL, fake slippage, fake fees, fake net edge, or fake profitability.
 
-## Remaining Blockers
+## Readiness Status
 
-- `app/brain/shans_curve.py:_savitzky_golay` hit a Numba nopython compile error in the 60-second shadow run: exception matching on `np.linalg.LinAlgError` is unsupported in nopython mode.
-- Kraken REST polling returned DNS failures: `Cannot connect to host api.kraken.com:443 ssl:default [Could not contact DNS servers]`.
-- During the shadow run, dispatch stayed at `shans_not_ready` / no executable signal. No autonomous PAPER mutation should be approved until the active live-data path is clean.
+Seam 7H compile/focused/regression proof:
+
+- Compile check passed.
+- Focused Seam 7H operator/monitoring/readiness test passed: `5 passed`.
+- Scoped Seam 7G/7F/7E/execution/broker/guardrail/state regression passed: `68 passed`.
+- Packet-listed `tests/test_shadow_read_only_runtime_gate.py` does not exist and was omitted under the packet's missing-file rule.
+- Approved bounded shadow command ran:
+  `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+- Bounded shadow result: exited `124` at the external 60-second timeout.
+- Paper mode confirmed in runtime output/logs: `Broker Mode: paper`.
+- Shadow mode confirmed in runtime output/logs: `Shadow Read Only: ENABLED`.
+- Feed ingress confirmed: Kraken websocket connected, `FEED_CANDLE #1`, `FEED_BOOK #1`, and later `FEED_BOOK #2200`.
+- Fusion path active: `FUSION_UPDATE_CALLED` appeared for runtime symbols.
+- No current-run broker mutation/order markers were found in the bounded-window log scan.
+
+Current verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
+
+Reason: module-level operator/monitoring readiness and no-live/no-mutation posture passed, but the bounded shadow run exposed launch blockers:
+
+- Critical health alert: `HEALTH ALERT: Physical fuse triggered!`.
+- Kraken REST candle/order-book polling DNS failures: `Cannot connect to host api.kraken.com:443 ssl:default [Could not contact DNS servers]`.
+- Alpaca PAPER read-only account/positions/open-orders reconciliation truth was not proven in the bounded shadow output.
+
+Autonomous PAPER mutation should not be launched until these blockers are cleared and a fresh bounded shadow run is clean.

@@ -47,7 +47,7 @@ class AlertType(Enum):
     STRATEGY_ERROR = "strategy_error"
 
 
-@dataclass
+@dataclass(slots=True)
 class Alert:
     """Alert data structure."""
     alert_type: AlertType
@@ -55,8 +55,6 @@ class Alert:
     message: str
     timestamp: datetime
     data: Dict[str, Any] = field(default_factory=dict)
-
-    __slots__ = ("alert_type", "severity", "message", "timestamp", "data")
 
 
 class SovereignSentinel:

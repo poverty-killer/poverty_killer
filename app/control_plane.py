@@ -16,7 +16,6 @@ from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, asdict
 
 from app.constants import ControlMode, RiskProfile, SleeveType
-from app.models import ControlCommand, SystemStatus
 
 try:
     from watchdog.observers import Observer
@@ -273,7 +272,7 @@ class ControlPlane:
             logger.info("Kill switch reset")
             return self.set_mode(ControlMode.SAFE, "kill_switch_reset")
 
-    def process_command(self, command):
+    def process_command(self, command: Any):
         logger.info(f"Processing command: {command.command} from {command.source}")
         if command.command == "SET_MODE":
             if command.mode:
