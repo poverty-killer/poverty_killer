@@ -32,6 +32,8 @@ class FeatureBuilder:
         """
         self.slow_window = slow_window
         self.fast_window = fast_window
+        self.last_depth_contraction_status = "NOT_EVALUATED"
+        self.last_depth_contraction_reason = "NOT_EVALUATED"
         logger.info(f"FeatureBuilder initialized: slow={slow_window}, fast={fast_window}")
 
     def calculate_volatility_zscore(self, candles: List[Candle], current_idx: int) -> float:
@@ -195,6 +197,32 @@ class FeatureBuilder:
 
         return current_spread / avg_spread
 
+    def _derive_market_depth(self, order_book: OrderBookSnapshot, levels: int = 10) -> Optional[float]:
+        """
+        Derive two-sided market depth from the canonical OrderBookSnapshot fields.
+
+        The canonical model exposes bids/asks plus depth_at_levels(...), not a
+        market_depth attribute. Missing or non-finite depth is treated as absent
+        truth instead of being converted to zero.
+        """
+        if order_book is None or not order_book.bids or not order_book.asks:
+            return None
+
+        if hasattr(order_book, "depth_at_levels"):
+            bid_depth, ask_depth = order_book.depth_at_levels(levels)
+        else:
+            bid_depth = sum(size for _, size in order_book.bids[:levels])
+            ask_depth = sum(size for _, size in order_book.asks[:levels])
+
+        depths = np.array([bid_depth, ask_depth], dtype=float)
+        if not np.all(np.isfinite(depths)):
+            return None
+
+        total_depth = float(bid_depth + ask_depth)
+        if total_depth <= 0:
+            return None
+        return total_depth
+
     def calculate_depth_contraction(self, order_book: OrderBookSnapshot, historical_depths: List[float]) -> float:
         """
         Calculate depth contraction ratio.
@@ -206,14 +234,31 @@ class FeatureBuilder:
         Returns:
             Depth contraction ratio (current / average)
         """
-        current_depth = order_book.market_depth
-        if not historical_depths:
+        current_depth = self._derive_market_depth(order_book)
+        if current_depth is None:
+            self.last_depth_contraction_status = "MISSING_DEPTH_TRUTH"
+            self.last_depth_contraction_reason = "ORDER_BOOK_DEPTH_UNAVAILABLE"
             return 1.0
 
-        avg_depth = np.mean(historical_depths)
-        if avg_depth == 0:
+        if not historical_depths or len(historical_depths) < 2:
+            self.last_depth_contraction_status = "NOT_READY_DATA_WARMUP"
+            self.last_depth_contraction_reason = "INSUFFICIENT_DEPTH_HISTORY"
             return 1.0
 
+        finite_depths = np.array(historical_depths, dtype=float)
+        if not np.all(np.isfinite(finite_depths)):
+            self.last_depth_contraction_status = "MISSING_DEPTH_TRUTH"
+            self.last_depth_contraction_reason = "NON_FINITE_DEPTH_HISTORY"
+            return 1.0
+
+        avg_depth = float(np.mean(finite_depths))
+        if avg_depth <= 0:
+            self.last_depth_contraction_status = "MISSING_DEPTH_TRUTH"
+            self.last_depth_contraction_reason = "NON_POSITIVE_DEPTH_BASELINE"
+            return 1.0
+
+        self.last_depth_contraction_status = "ACTIVE_DEPTH_TRUTH"
+        self.last_depth_contraction_reason = "CANONICAL_BID_ASK_DEPTH"
         return current_depth / avg_depth
 
     def calculate_refill_velocity(self, depth_history: List[float], time_delta: float) -> float:

@@ -410,6 +410,10 @@ class FastGhostTickDetector:
         self.threshold = threshold
         self._price_buffer: Dict[int, np.ndarray] = {}
         self._covariance: Dict[Tuple[int, ...], np.ndarray] = {}
+        self._sample_counts: Dict[int, int] = {}
+        self.last_vector_status = "NOT_EVALUATED"
+        self.last_vector_reason = "NOT_EVALUATED"
+        self.last_vector_distance = 0.0
     
     def update(self, instrument_id: int, price: float) -> None:
         """Update price buffer for instrument."""
@@ -420,6 +424,7 @@ class FastGhostTickDetector:
         buffer = np.roll(buffer, -1)
         buffer[-1] = price
         self._price_buffer[instrument_id] = buffer
+        self._sample_counts[instrument_id] = min(self._sample_counts.get(instrument_id, 0) + 1, self.window)
     
     def detect_vector(self, instrument_ids: List[int], current_prices: np.ndarray) -> np.ndarray:
         """
@@ -427,32 +432,104 @@ class FastGhostTickDetector:
         Returns boolean array of ghost flags.
         """
         if len(instrument_ids) < 2:
+            self.last_vector_status = "NOT_READY_DATA_WARMUP"
+            self.last_vector_reason = "SINGLE_INSTRUMENT_VECTOR"
+            self.last_vector_distance = 0.0
+            return np.zeros(len(instrument_ids), dtype=bool)
+
+        current_prices = np.asarray(current_prices, dtype=float).reshape(-1)
+        if current_prices.shape[0] != len(instrument_ids):
+            self.last_vector_status = "FAILED_CLOSED"
+            self.last_vector_reason = "CURRENT_PRICE_VECTOR_LENGTH_MISMATCH"
+            self.last_vector_distance = 0.0
+            return np.zeros(len(instrument_ids), dtype=bool)
+
+        if not np.all(np.isfinite(current_prices)):
+            self.last_vector_status = "FAILED_CLOSED"
+            self.last_vector_reason = "NON_FINITE_CURRENT_PRICE_VECTOR"
+            self.last_vector_distance = 0.0
             return np.zeros(len(instrument_ids), dtype=bool)
         
         # Build price matrix
-        key = tuple(sorted(instrument_ids))
+        key = tuple(instrument_ids)
         if key not in self._covariance:
             # Build covariance matrix from recent prices
             price_matrix = []
             for inst_id in instrument_ids:
-                if inst_id in self._price_buffer:
-                    price_matrix.append(self._price_buffer[inst_id])
-                else:
+                if inst_id not in self._price_buffer:
+                    self.last_vector_status = "NOT_READY_DATA_WARMUP"
+                    self.last_vector_reason = f"MISSING_PRICE_BUFFER:{inst_id}"
+                    self.last_vector_distance = 0.0
                     return np.zeros(len(instrument_ids), dtype=bool)
+
+                if self._sample_counts.get(inst_id, 0) < self.window:
+                    self.last_vector_status = "NOT_READY_DATA_WARMUP"
+                    self.last_vector_reason = f"INSUFFICIENT_PRICE_HISTORY:{inst_id}"
+                    self.last_vector_distance = 0.0
+                    return np.zeros(len(instrument_ids), dtype=bool)
+
+                history = np.asarray(self._price_buffer[inst_id], dtype=float)
+                if not np.all(np.isfinite(history)):
+                    self.last_vector_status = "FAILED_CLOSED"
+                    self.last_vector_reason = f"NON_FINITE_PRICE_HISTORY:{inst_id}"
+                    self.last_vector_distance = 0.0
+                    return np.zeros(len(instrument_ids), dtype=bool)
+                price_matrix.append(history)
             
             price_matrix = np.array(price_matrix)
             self._covariance[key] = np.cov(price_matrix)
         
-        cov = self._covariance[key]
+        cov = np.atleast_2d(np.asarray(self._covariance[key], dtype=float))
+        if cov.shape != (len(instrument_ids), len(instrument_ids)) or not np.all(np.isfinite(cov)):
+            self.last_vector_status = "FAILED_CLOSED"
+            self.last_vector_reason = "INVALID_COVARIANCE_SHAPE_OR_VALUE"
+            self.last_vector_distance = 0.0
+            return np.zeros(len(instrument_ids), dtype=bool)
+
         mean = np.mean([self._price_buffer[inst_id][-self.window:] for inst_id in instrument_ids], axis=1)
+        if not np.all(np.isfinite(mean)):
+            self.last_vector_status = "FAILED_CLOSED"
+            self.last_vector_reason = "NON_FINITE_MEAN_VECTOR"
+            self.last_vector_distance = 0.0
+            return np.zeros(len(instrument_ids), dtype=bool)
         
         # Calculate Mahalanobis distance vectorized
         diff = current_prices - mean
+        used_pinv = False
         try:
-            inv_cov = np.linalg.inv(cov + np.eye(cov.shape[0]) * 1e-6)
-            distances = np.sqrt(np.sum(diff * (inv_cov @ diff.T).T, axis=1))
-            return distances > self.threshold
+            regularized_cov = cov + np.eye(cov.shape[0]) * 1e-6
+            inv_cov = np.linalg.inv(regularized_cov)
         except np.linalg.LinAlgError:
+            try:
+                inv_cov = np.linalg.pinv(cov)
+                used_pinv = True
+            except np.linalg.LinAlgError:
+                self.last_vector_status = "FAILED_CLOSED"
+                self.last_vector_reason = "SINGULAR_COVARIANCE"
+                self.last_vector_distance = 0.0
+                return np.zeros(len(instrument_ids), dtype=bool)
+
+        try:
+            distance = float(np.sqrt(diff.T @ inv_cov @ diff))
+            if not np.isfinite(distance):
+                self.last_vector_status = "FAILED_CLOSED"
+                self.last_vector_reason = "NON_FINITE_MAHALANOBIS_DISTANCE"
+                self.last_vector_distance = 0.0
+                return np.zeros(len(instrument_ids), dtype=bool)
+
+            is_anomaly = distance > self.threshold
+            self.last_vector_distance = distance
+            if used_pinv:
+                self.last_vector_status = "ACTIVE_COVARIANCE_TRUTH_PINV"
+                self.last_vector_reason = "SINGULAR_COVARIANCE_PINV_USED"
+            else:
+                self.last_vector_status = "ACTIVE_COVARIANCE_TRUTH"
+                self.last_vector_reason = "BASKET_MAHALANOBIS_DISTANCE"
+            return np.full(len(instrument_ids), is_anomaly, dtype=bool)
+        except np.linalg.LinAlgError:
+            self.last_vector_status = "FAILED_CLOSED"
+            self.last_vector_reason = "COVARIANCE_DISTANCE_ERROR"
+            self.last_vector_distance = 0.0
             return np.zeros(len(instrument_ids), dtype=bool)
 
 
