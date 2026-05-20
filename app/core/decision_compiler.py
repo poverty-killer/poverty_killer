@@ -198,6 +198,19 @@ class DecisionCompiler:
         # Safely serialize metadata
         truth_status_str = _safe_str(truth_frame.status)
         risk_mode_str = _safe_str(risk_decision.risk_mode) if risk_decision else None
+        edge_attribution = None
+        if isinstance(additional_inputs, dict):
+            candidate_attribution = additional_inputs.get("edge_attribution")
+            if isinstance(candidate_attribution, dict):
+                edge_attribution = candidate_attribution
+
+        metadata: Dict[str, Any] = {
+            "truth_status": truth_status_str,
+            "risk_mode": risk_mode_str,
+        }
+        if edge_attribution is not None:
+            metadata["edge_attribution"] = edge_attribution
+            metadata["edge_attribution_module_count"] = len(edge_attribution)
         
         record = DecisionRecord(
             decision_uuid=decision_uuid,
@@ -205,10 +218,7 @@ class DecisionCompiler:
             decision_type=decision_type,
             inputs=inputs,
             outputs=outputs,
-            metadata={
-                "truth_status": truth_status_str,
-                "risk_mode": risk_mode_str
-            }
+            metadata=metadata,
         )
         
         # BUNDLE F1: Record decision to telemetry if enabled

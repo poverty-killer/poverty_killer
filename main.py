@@ -60,6 +60,7 @@ from app.brain.signal_fusion import SignalFusion
 from app.brain.whale_flow_engine import WhaleFlowEngine
 from app.commander import Commander
 from app.config import Config
+from app.core.whole_bot_attribution import build_startup_attribution
 from app.data.polling_client import PollingClient
 from app.data.websocket_client import KrakenWebSocketClient
 from app.execution.engine import ExecutionEngine
@@ -73,8 +74,8 @@ from app.market import (
     build_default_capability_registry,
 )
 from app.main_loop import create_main_loop
-from app.models import Candle
-from app.models.enums import ExchangeType
+from app.models import Candle, EventEnvelope
+from app.models.enums import EventType, ExchangeType
 from app.monitoring.logger import setup_logger
 from app.risk.exposure_manager import ExposureManager
 from app.risk.guard import HybridRiskGuard
@@ -82,6 +83,7 @@ from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoord
 from app.risk.safety import SafetyGate
 from app.state.state_store import StateStore
 from app.telemetry.event_store import TelemetryEventStore
+from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +404,7 @@ class SovereignHeartbeat:
             telemetry_store=self.telemetry_store,
             active_symbols=self._active_symbols,
         )
+        self._record_whole_bot_startup_attribution()
 
         self._running = False
         self._stopping = False
@@ -423,6 +426,31 @@ class SovereignHeartbeat:
         logger.info("Initial Capital: $%0.2f", config.initial_capital)
         logger.info("Primary symbol: %s", self._primary_symbol)
         logger.info("Active symbols: %s", self._active_symbols)
+
+    def _record_whole_bot_startup_attribution(self) -> None:
+        ts_ns = now_ns()
+        attribution = build_startup_attribution(
+            timestamp_ns=ts_ns,
+            broker_mode=str(getattr(self.config, "broker_mode", "unknown")),
+            shadow_read_only=bool(getattr(self.config, "shadow_read_only", False)),
+            active_symbols=self._active_symbols,
+            capability_candidates=self._capability_candidates,
+        )
+        self.telemetry_store.record_event(
+            EventEnvelope(
+                event_type=EventType.AUDIT_EVENT,
+                source_module="main.whole_bot_startup_attribution",
+                exchange_ts_ns=ts_ns,
+                receive_ts_ns=ts_ns,
+                decision_ts_ns=0,
+                payload={
+                    "edge_attribution": attribution,
+                    "shadow_read_only": bool(getattr(self.config, "shadow_read_only", False)),
+                    "broker_mutation_counts": self.execution_engine.get_shadow_broker_mutation_counts(),
+                    "live_mode": False,
+                },
+            )
+        )
 
     def _bootstrap_reservation_lifecycle_disabled(self, config: Config) -> None:
         """

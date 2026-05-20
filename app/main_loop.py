@@ -39,6 +39,7 @@ from app.strategies.strategy_router import StrategyRouter
 from app.strategies.shadow_front import ShadowFrontStrategy
 from app.core.decision_compiler import DecisionCompiler
 from app.core.truth_reconciler import TruthReconciler
+from app.core.whole_bot_attribution import build_runtime_edge_attribution
 from app.models import (
     OrderBookSnapshot,
     Candle,
@@ -1591,6 +1592,33 @@ class MainLoop:
         if isinstance(signal_metadata, dict):
             signal_metadata["pre_trade_guardrail_verdict"] = pre_trade_guardrail_verdict
 
+        fusion_telemetry: Dict[str, Any] = {}
+        signal_fusion = getattr(self, "signal_fusion", None)
+        get_fusion_telemetry = getattr(signal_fusion, "get_fusion_telemetry", None)
+        if callable(get_fusion_telemetry):
+            telemetry_candidate = get_fusion_telemetry()
+            if isinstance(telemetry_candidate, dict):
+                fusion_telemetry = telemetry_candidate
+        execution_engine = getattr(self, "execution_engine", None)
+        get_shadow_counts = getattr(execution_engine, "get_shadow_broker_mutation_counts", None)
+        edge_attribution = build_runtime_edge_attribution(
+            timestamp_ns=exchange_ts_ns,
+            symbol=symbol,
+            signal=signal,
+            signal_metadata=signal_metadata if isinstance(signal_metadata, dict) else {},
+            fusion_attribution=fusion_telemetry.get("edge_attribution", {}),
+            guardrail_verdict=pre_trade_guardrail_verdict,
+            truth_frame=truth_frame,
+            shadow_read_only=bool(getattr(self.config, "shadow_read_only", False)),
+            broker_mutation_counts=(
+                get_shadow_counts()
+                if callable(get_shadow_counts)
+                else {}
+            ),
+        )
+        if isinstance(signal_metadata, dict):
+            signal_metadata["edge_attribution"] = edge_attribution
+
         _log_dispatch_diag(
             "decision_compile_attempted",
             symbol=symbol,
@@ -1605,6 +1633,7 @@ class MainLoop:
                 "canonical_aggression_contract": aggression_contract_metadata,
                 "aggression_replay_proof": aggression_replay_proof,
                 "pre_trade_guardrail_verdict": pre_trade_guardrail_verdict,
+                "edge_attribution": edge_attribution,
             },
         )
         self._metrics.compilation_cycles += 1

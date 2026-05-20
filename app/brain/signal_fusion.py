@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from app.models.fusion import FusionDecision
 from app.models.enums import RegimeType, SleeveType
 from app.brain.toxicity_engine import ToxicityRegime
+from app.core.whole_bot_attribution import make_signature
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,16 @@ MISSING_PENALTY_FACTOR: float = MISSING_PENALTY_FLOOR
 missing_penalty_factor: float = MISSING_PENALTY_FACTOR
 MISSING_DATA_PENALTY: float = MISSING_PENALTY_FACTOR
 MISSING_DATA_PENALTY_FACTOR: float = MISSING_PENALTY_FACTOR
+
+_ATTRIBUTION_NAMES = {
+    "physical": ("PhysicalValidator", "risk_guardrails"),
+    "toxicity": ("Toxicity", "intelligence_node"),
+    "whale_flow": ("WhaleFlow", "intelligence_node"),
+    "shans_curve": ("ShansCurve", "strategy_alpha"),
+    "entropy": ("EntropyDecoder", "intelligence_node"),
+    "insider": ("InsiderSignalEngine", "specialized_portal"),
+    "regime": ("RegimeDetector", "intelligence_node"),
+}
 
 
 # =========================================================================
@@ -259,6 +270,30 @@ class SignalFusion:
         """Exposes internal mathematical weights and kinematic states."""
         return self._telemetry
 
+    def _record_fusion_attribution(
+        self,
+        key: str,
+        *,
+        status: str,
+        input_source: str,
+        output_summary: str,
+        effect: str,
+        reason: str,
+        timestamp_ns: int,
+    ) -> None:
+        module_name, category = _ATTRIBUTION_NAMES.get(key, (key, "signal_decision_path"))
+        edge_attribution = self._telemetry.setdefault("edge_attribution", {})
+        edge_attribution[module_name] = make_signature(
+            module_name=module_name,
+            category=category,
+            status=status,
+            input_source=input_source,
+            output_summary=output_summary,
+            effect=effect,
+            reason=reason,
+            timestamp=timestamp_ns,
+        )
+
     def _bridge_shans_bias(self, raw_bias: float) -> str:
         """
         Contract Bridge: Transforms the continuous numerical bias from shans_curve.py 
@@ -288,6 +323,7 @@ class SignalFusion:
         self._telemetry.clear()
         self._telemetry["execution_ts"] = current_ts_ns
         self._telemetry["missing_inputs"] = []
+        self._telemetry["edge_attribution"] = {}
         self._telemetry["missing_penalty_factor"] = 1.0
         missing_penalty_factor: float = MISSING_PENALTY_FACTOR  # default; refined after non-critical staleness scan
         self._telemetry["missing_penalty_factor"] = missing_penalty_factor
@@ -303,14 +339,41 @@ class SignalFusion:
         for sig in critical_signals:
             ttl = self._ttl_ns[sig]
             if sig not in self._cache:
+                self._record_fusion_attribution(
+                    sig,
+                    status="MISSING_FEED_TRUTH",
+                    input_source="fusion_cache",
+                    output_summary="Critical signal missing; fusion fails closed.",
+                    effect="VETO",
+                    reason=f"MISSING_CRITICAL_SIGNAL:{sig}",
+                    timestamp_ns=current_ts_ns,
+                )
                 logger.info("[FUSION_DIAG] Missing CRITICAL signal: %s → veto", sig)
                 return self._issue_hard_veto(current_ts_ns, f"Missing critical signal [{sig}]")
             _, ts = self._cache[sig]
             age_ns = current_ts_ns - ts
             if age_ns > ttl:
+                self._record_fusion_attribution(
+                    sig,
+                    status="MISSING_FEED_TRUTH",
+                    input_source="fusion_cache",
+                    output_summary=f"Critical signal stale: age_ns={age_ns} ttl_ns={ttl}.",
+                    effect="VETO",
+                    reason=f"STALE_CRITICAL_SIGNAL:{sig}",
+                    timestamp_ns=current_ts_ns,
+                )
                 logger.info("[FUSION_DIAG] Stale CRITICAL signal: %s age=%.1fs ttl=%.1fs → veto",
                             sig, age_ns/1e9, ttl/1e9)
                 return self._issue_hard_veto(current_ts_ns, f"Stale critical signal [{sig}] (Age: {age_ns/1e9:.2f}s)")
+            self._record_fusion_attribution(
+                sig,
+                status="ACTIVE_TRUTH_CHECK",
+                input_source="fusion_cache",
+                output_summary=f"Critical signal present and fresh: age_ns={age_ns} ttl_ns={ttl}.",
+                effect="APPROVED",
+                reason="CRITICAL_SIGNAL_FRESH",
+                timestamp_ns=current_ts_ns,
+            )
 
         # Record missing/stale for non-critical signals but do not veto
         for sig in noncritical_signals:
@@ -318,16 +381,43 @@ class SignalFusion:
             st = self._cache.get(sig)
             if st is None:
                 missing_or_stale_noncrit[sig] = True
+                self._record_fusion_attribution(
+                    sig,
+                    status="MISSING_FEED_TRUTH",
+                    input_source="fusion_cache",
+                    output_summary="Native feed missing; neutral default plus explicit missing-truth penalty.",
+                    effect="ADVISORY",
+                    reason=f"MISSING_NONCRITICAL_SIGNAL:{sig}",
+                    timestamp_ns=current_ts_ns,
+                )
                 logger.info("[FUSION_DIAG] Missing non-critical signal: %s → neutral default with penalty", sig)
                 continue
             _, ts = st
             age_ns = current_ts_ns - ts
             if age_ns > ttl:
                 missing_or_stale_noncrit[sig] = True
+                self._record_fusion_attribution(
+                    sig,
+                    status="MISSING_FEED_TRUTH",
+                    input_source="fusion_cache",
+                    output_summary=f"Native feed stale; neutral default plus explicit missing-truth penalty: age_ns={age_ns} ttl_ns={ttl}.",
+                    effect="ADVISORY",
+                    reason=f"STALE_NONCRITICAL_SIGNAL:{sig}",
+                    timestamp_ns=current_ts_ns,
+                )
                 logger.info("[FUSION_DIAG] Stale non-critical signal: %s age=%.1fs ttl=%.1fs → neutral default with penalty",
                             sig, age_ns/1e9, ttl/1e9)
             else:
                 missing_or_stale_noncrit[sig] = False
+                self._record_fusion_attribution(
+                    sig,
+                    status="ACTIVE_NATIVE_SIGNAL",
+                    input_source="fusion_cache",
+                    output_summary=f"Native signal present and fresh: age_ns={age_ns} ttl_ns={ttl}.",
+                    effect="ADVISORY",
+                    reason="NATIVE_SIGNAL_FRESH",
+                    timestamp_ns=current_ts_ns,
+                )
 
         self._telemetry["missing_inputs"] = [k for k, v in missing_or_stale_noncrit.items() if v]
 

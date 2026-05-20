@@ -499,6 +499,13 @@ class ExecutionEngine:
         )
         if not isinstance(decision_artifact, dict):
             decision_artifact = None
+        edge_attribution = signal_metadata.get("edge_attribution")
+        if not isinstance(edge_attribution, dict) and isinstance(decision_artifact, dict):
+            metadata = decision_artifact.get("metadata")
+            if isinstance(metadata, dict):
+                edge_attribution = metadata.get("edge_attribution")
+        if not isinstance(edge_attribution, dict):
+            edge_attribution = {}
 
         guardrail = guardrail_verdict if isinstance(guardrail_verdict, dict) else {}
         asset_class = (
@@ -525,6 +532,7 @@ class ExecutionEngine:
             "quantity_intent": str(getattr(signal, "quantity", "")),
             "current_price": str(current_price),
             "guardrail_verdict": guardrail_verdict,
+            "edge_attribution": edge_attribution,
             "reason": "SHADOW_READ_ONLY_BLOCKED_BROKER_MUTATION",
             "shadow_read_only": True,
             "broker_post_patch_delete_count": 0,
@@ -788,6 +796,7 @@ class ExecutionEngine:
             "requested_notional",
             "compiled_decision_artifact",
             "pre_trade_guardrail_verdict",
+            "edge_attribution",
         ):
             if key in signal_metadata:
                 order_metadata[key] = signal_metadata[key]
