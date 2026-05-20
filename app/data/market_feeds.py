@@ -148,7 +148,8 @@ class MarketFeeds:
             # Update depth history
             if order_book.symbol not in self.depth_history:
                 self.depth_history[order_book.symbol] = []
-            self.depth_history[order_book.symbol].append(order_book.market_depth)
+            bid_depth, ask_depth = order_book.depth_at_levels(10)
+            self.depth_history[order_book.symbol].append(bid_depth + ask_depth)
             if len(self.depth_history[order_book.symbol]) > 100:
                 self.depth_history[order_book.symbol] = self.depth_history[order_book.symbol][-100:]
 

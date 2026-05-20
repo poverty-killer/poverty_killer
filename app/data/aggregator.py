@@ -45,7 +45,7 @@ class FeedSource(Enum):
     IBKR = "ibkr"
 
 
-@dataclass
+@dataclass(slots=True)
 class Tick:
     """Normalized tick data structure — memory optimized with __slots__."""
     symbol: str
@@ -56,8 +56,6 @@ class Tick:
     source: FeedSource
     bid: Optional[float] = None
     ask: Optional[float] = None
-    
-    __slots__ = ("symbol", "instrument_id", "price", "volume", "timestamp_ns", "source", "bid", "ask")
 
 
 class LockFreeRingBuffer:

@@ -62,6 +62,7 @@ class PollingClient:
 
         # Track last candle timestamps to avoid duplicates
         self._last_candle_timestamps_ns: Dict[str, int] = {}
+        self._last_failure_status: Dict[str, Any] = {}
 
         # API endpoints (example for Kraken)
         self._endpoints = {
@@ -175,8 +176,10 @@ class PollingClient:
                             await self._safe_callback(self.on_candle, candle)
 
         except aiohttp.ClientError as e:
+            self._record_polling_failure(symbol, "candle", e)
             logger.error(f"HTTP error fetching candles for {symbol}: {e}")
         except Exception as e:
+            self._record_polling_failure(symbol, "candle", e)
             logger.error(f"Error fetching candles for {symbol}: {e}")
 
     async def _fetch_order_book(self, symbol: str) -> None:
@@ -207,8 +210,10 @@ class PollingClient:
                         await self._safe_callback(self.on_order_book, order_book)
 
         except aiohttp.ClientError as e:
+            self._record_polling_failure(symbol, "order_book", e)
             logger.error(f"HTTP error fetching order book for {symbol}: {e}")
         except Exception as e:
+            self._record_polling_failure(symbol, "order_book", e)
             logger.error(f"Error fetching order book for {symbol}: {e}")
 
     def _format_symbol(self, symbol: str) -> str:
@@ -226,6 +231,16 @@ class PollingClient:
             base = _KRAKEN_BASE_MAP.get(base, base)
             return f"{base}{quote}"
         return symbol
+
+    def _record_polling_failure(self, symbol: str, feed_type: str, exc: Exception) -> None:
+        reason = "DNS_FAILURE_RECORDED" if isinstance(exc, aiohttp.ClientConnectorError) else "FAILED_CLOSED"
+        self._last_failure_status = {
+            "status": reason,
+            "symbol": symbol,
+            "feed_type": feed_type,
+            "exception_type": exc.__class__.__name__,
+            "exchange": self.exchange,
+        }
 
     def _parse_candles(self, data: Dict, symbol: str) -> List[Candle]:
         """
@@ -273,6 +288,19 @@ class PollingClient:
         """
         Parse order book from exchange response.
 
+        Kraken Depth response format:
+        {
+            "result": {
+                "XBTUSD": {
+                    "bids": [["price", "size", "timestamp"], ...],
+                    "asks": [["price", "size", "timestamp"], ...]
+                }
+            }
+        }
+
+        Some entries may have 2 fields (price, size) or 3+ fields (price, size, timestamp, ...).
+        This parser safely extracts the first 2 fields (price, size) and ignores extras.
+
         Args:
             data: Raw API response
             symbol: Trading symbol
@@ -284,9 +312,34 @@ class PollingClient:
             result = data.get("result", {})
             for key, book_data in result.items():
                 if isinstance(book_data, dict):
-                    bids = [(float(price), float(size)) for price, size in book_data.get("bids", [])]
-                    asks = [(float(price), float(size)) for price, size in book_data.get("asks", [])]
-                    
+                    bids_raw = book_data.get("bids", [])
+                    asks_raw = book_data.get("asks", [])
+
+                    bids = []
+                    for entry in bids_raw:
+                        try:
+                            # Safely extract first two fields regardless of entry length
+                            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                                price = float(entry[0])
+                                size = float(entry[1])
+                                bids.append((price, size))
+                            else:
+                                logger.warning(f"Malformed bid entry in order book for {symbol}: {entry}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Failed to convert bid entry for {symbol}: {entry} - {e}")
+
+                    asks = []
+                    for entry in asks_raw:
+                        try:
+                            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                                price = float(entry[0])
+                                size = float(entry[1])
+                                asks.append((price, size))
+                            else:
+                                logger.warning(f"Malformed ask entry in order book for {symbol}: {entry}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Failed to convert ask entry for {symbol}: {entry} - {e}")
+
                     # REST responses often lack timestamp; use receipt time as fallback
                     # This is a REST polling fallback, not authoritative WebSocket path
                     exchange_ts_ns = now_ns()
@@ -299,7 +352,7 @@ class PollingClient:
                     )
 
         except Exception as e:
-            logger.error(f"Failed to parse order book: {e}")
+            logger.error(f"Failed to parse order book for {symbol}: {e}")
 
         return None
 
@@ -330,7 +383,8 @@ class PollingClient:
             "running": self._running,
             "interval": self.interval,
             "symbols": len(self.symbols),
-            "last_candle_timestamps_ns": self._last_candle_timestamps_ns.copy()
+            "last_candle_timestamps_ns": self._last_candle_timestamps_ns.copy(),
+            "last_failure_status": dict(self._last_failure_status),
         }
 
     async def force_poll(self, symbol: Optional[str] = None) -> None:

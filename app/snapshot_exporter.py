@@ -5,6 +5,8 @@ Used for Gemini/Claude review and performance monitoring.
 HARDENED: Added previous_regime, signal metadata, atomic writing with temp-rename pattern.
 """
 
+from __future__ import annotations
+
 import json
 import threading
 import time
@@ -16,10 +18,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 
-from app.models import (
-    PortfolioSnapshot, RiskSnapshot, HealthSnapshot,
-    PositionRecord, OrderRequest, OrderFill, StrategySignal
-)
+from app.models import PortfolioSnapshot, OrderRequest, OrderFill, StrategySignal
 from app.constants import ControlMode, SleeveType, RegimeType
 
 logger = logging.getLogger(__name__)

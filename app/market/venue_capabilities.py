@@ -214,6 +214,10 @@ class CapabilityAwareCandidate:
     supported_time_in_force: frozenset[str]
     default_order_type: str | None
     default_time_in_force: str | None
+    fractional_support: bool
+    min_notional: Decimal | None
+    min_quantity: Decimal | None
+    quantity_step: Decimal | None
     order_constraint_source: str | None
     unavailable_reason: str | None
     disabled_reason: str | None
@@ -243,6 +247,10 @@ class CapabilityAwareCandidate:
             supported_time_in_force=capability.supported_time_in_force,
             default_order_type=capability.default_order_type,
             default_time_in_force=capability.default_time_in_force,
+            fractional_support=capability.fractional_support,
+            min_notional=capability.min_notional,
+            min_quantity=capability.min_quantity,
+            quantity_step=capability.quantity_step,
             order_constraint_source=capability.order_constraint_source,
             unavailable_reason=reason,
             disabled_reason=capability.disabled_reason,

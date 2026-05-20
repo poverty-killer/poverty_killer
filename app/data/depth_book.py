@@ -8,7 +8,7 @@ Sovereign Grade - Complete implementation.
 import logging
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 
 from app.models import OrderBookSnapshot, LiquidityMetrics
@@ -93,7 +93,7 @@ class DepthBook:
             self._asks_sizes[i] = snapshot.asks[i][1]
         
         # Update timestamps
-        self.timestamp = snapshot.timestamp
+        self.timestamp = datetime.fromtimestamp(snapshot.exchange_ts_ns / 1_000_000_000, tz=timezone.utc)
         self.exchange_ts_ns = snapshot.exchange_ts_ns
         
         # Update micro-price
