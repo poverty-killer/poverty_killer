@@ -110,6 +110,11 @@ class AlpacaDataReadOnlyClient:
         path = f"/v2/stocks/{urllib.parse.quote(symbol, safe='')}/quotes/latest"
         return self._get(path)
 
+    def latest_crypto_quote(self, symbol: str) -> dict[str, Any]:
+        # Alpaca's current crypto latest-quote REST path is v1beta3/crypto/{loc}/latest/quotes.
+        path = f"/v1beta3/crypto/us/latest/quotes?{urllib.parse.urlencode({'symbols': symbol})}"
+        return self._get(path)
+
     def _get(self, path: str) -> dict[str, Any]:
         request = urllib.request.Request(
             ALPACA_DATA_BASE_URL + path,
@@ -206,6 +211,20 @@ def _quote_from_payload(symbol: str, payload: dict[str, Any], receive_ts_ns: int
     )
 
 
+def _quote_from_crypto_payload(symbol: str, payload: dict[str, Any], receive_ts_ns: int) -> QuoteTruth:
+    quotes = payload.get("quotes") if isinstance(payload, dict) else {}
+    quote = quotes.get(symbol) if isinstance(quotes, dict) else {}
+    quote = quote if isinstance(quote, dict) else {}
+    return QuoteTruth(
+        symbol=symbol,
+        bid=_decimal(quote.get("bp") or quote.get("bid_price") or quote.get("b") or quote.get("bid")),
+        ask=_decimal(quote.get("ap") or quote.get("ask_price") or quote.get("a") or quote.get("ask")),
+        quote_ts_ns=_ns_from_iso(quote.get("t") or quote.get("timestamp")),
+        receive_ts_ns=receive_ts_ns,
+        source="alpaca_data_latest_crypto_quote",
+    )
+
+
 def _registry_universe() -> tuple[tuple[str, str], ...]:
     registry = build_default_capability_registry()
     pairs: list[tuple[str, str]] = []
@@ -246,6 +265,123 @@ def _sizing(limit_price: Decimal, capability_min_notional: Decimal | None) -> tu
     if capability_min_notional is not None and intended < capability_min_notional:
         reasons.append("MIN_NOTIONAL_CANNOT_BE_MET_WITH_CAP_AND_PRECISION")
     return qty, intended, tuple(reasons)
+
+
+def _evaluate_expansion_candidates(
+    *,
+    universe: tuple[tuple[str, str], ...],
+    positions: tuple[dict[str, Any], ...],
+    open_orders: tuple[dict[str, Any], ...],
+    quotes: dict[str, QuoteTruth],
+    asset_truth: dict[str, tuple[bool, tuple[str, ...]]],
+    equity_market_open: bool,
+    current_ts_ns: int,
+    time_in_force_overrides: dict[str, str] | None = None,
+) -> tuple[list[CandidateDecision], list[tuple[Decimal, str, str, Decimal, Decimal, Decimal, dict[str, Any]]]]:
+    registry = build_default_capability_registry()
+    existing_symbols = {str(row.get("symbol") or "").upper() for row in positions if _decimal(row.get("qty")) != Decimal("0")}
+    active_open_order_symbols = {str(row.get("symbol") or "").upper() for row in _active_open_orders(open_orders)}
+    decisions: list[CandidateDecision] = []
+    passed: list[tuple[Decimal, str, str, Decimal, Decimal, Decimal, dict[str, Any]]] = []
+    tif_overrides = time_in_force_overrides or {}
+
+    for symbol, asset_class in universe:
+        reasons: list[str] = []
+        if symbol in existing_symbols:
+            reasons.append("DUPLICATE_EXISTING_EXPOSURE")
+        if symbol in active_open_order_symbols:
+            reasons.append("OPEN_ORDER_CONFLICT")
+
+        requested_tif = tif_overrides.get(symbol) or ("GTC" if asset_class == "crypto" else "DAY")
+        capability_result = registry.resolve(
+            PortalSelectionRequest(
+                symbol=symbol,
+                asset_class=asset_class,
+                environment=PortalEnvironment.PAPER.value,
+                action="buy",
+                order_type="limit",
+                time_in_force=requested_tif,
+                policy_mode=PortalPolicyMode.EXPLICIT_PREFERRED_VENUE.value,
+                preferred_venue="alpaca_paper",
+                allow_fallback=False,
+            )
+        )
+        capability = capability_result.selected
+        if capability is None:
+            rejected_reasons = tuple(reason for group in capability_result.rejected.values() for reason in group)
+            reasons.extend(rejected_reasons or capability_result.reason_codes or ("NO_USABLE_PORTAL",))
+            decisions.append(CandidateDecision(symbol, asset_class, "SKIP_CAPABILITY", tuple(dict.fromkeys(reasons))))
+            continue
+
+        asset_ok, asset_reasons = asset_truth.get(symbol, (True, ()))
+        reasons.extend(asset_reasons)
+
+        quote = quotes.get(symbol)
+        if quote is None:
+            reasons.append("QUOTE_MISSING")
+        else:
+            if not quote.fresh_at(current_ts_ns):
+                reasons.append("QUOTE_STALE")
+            if quote.spread_bps is None or quote.spread_bps > MAX_SPREAD_BPS:
+                reasons.append("QUOTE_WIDE_SPREAD")
+        market_open = equity_market_open if asset_class in {"equity", "etf"} else None
+        if asset_class in {"equity", "etf"} and market_open is not True:
+            reasons.append("MARKET_CLOSED")
+
+        limit_price = quote.ask if quote and quote.ask is not None else Decimal("0")
+        qty, intended_notional, sizing_reasons = _sizing(limit_price, capability.min_notional)
+        reasons.extend(sizing_reasons)
+        if intended_notional is not None and intended_notional > TARGET_NOTIONAL:
+            reasons.append("NOTIONAL_CAP_BREACH")
+
+        quote_classification = classify_quote_session(
+            CapabilityAwareCandidate.from_capability(capability, tradable=asset_ok),
+            market_session_open=market_open,
+            quote_present=quote is not None and quote.bid is not None and quote.ask is not None,
+            quote_fresh=quote.fresh_at(current_ts_ns) if quote is not None else False,
+            spread_bps=quote.spread_bps if quote is not None else None,
+            max_spread_bps=MAX_SPREAD_BPS,
+        )
+        guardrail = evaluate_pre_trade_guardrails(
+            PreTradeGuardrailRequest(
+                symbol=symbol,
+                side="buy",
+                order_type="limit",
+                time_in_force=requested_tif,
+                quantity=qty or Decimal("0"),
+                limit_price=limit_price,
+                current_price=limit_price,
+                internal_max_notional=TARGET_NOTIONAL,
+                capability=capability,
+                portal_selection_result=capability_result,
+                quote_classification=quote_classification,
+                existing_positions=positions,
+                open_orders=open_orders,
+            )
+        )
+        if not guardrail.route_permitted:
+            reasons.extend(guardrail.reason_codes)
+
+        unique_reasons = tuple(dict.fromkeys(reasons))
+        if unique_reasons:
+            decisions.append(
+                CandidateDecision(
+                    symbol,
+                    asset_class,
+                    "SKIP_GUARDRAIL_OR_TRUTH",
+                    unique_reasons,
+                    qty=qty,
+                    limit_price=limit_price if limit_price > 0 else None,
+                    intended_notional=intended_notional,
+                )
+            )
+            continue
+
+        rank_score = quote.spread_bps if quote and quote.spread_bps is not None else Decimal("999999")
+        passed.append((rank_score, symbol, asset_class, qty or Decimal("0"), limit_price, intended_notional or Decimal("0"), guardrail.to_dict()))
+
+    passed.sort(key=lambda item: (0 if item[2] in {"equity", "etf"} else 1, item[0], item[1]))
+    return decisions, passed[:MAX_SUBMITTED_SYMBOLS]
 
 
 def _build_engine(adapter: AlpacaPaperBrokerAdapter) -> tuple[ExecutionEngine, Seam6MaskingLayer, OrderRouter]:
@@ -403,6 +539,161 @@ def test_seam6_candidate_universe_is_registry_driven_and_broad_enough_for_fiftee
     assert ("BTC/USD", "crypto") in universe
 
 
+def _fixture_quote(
+    symbol: str,
+    *,
+    bid: str = "99999.50",
+    ask: str = "100000.00",
+    current_ts_ns: int = 1_779_230_000_000_000_000,
+    quote_ts_ns: int | None = None,
+) -> QuoteTruth:
+    return QuoteTruth(
+        symbol=symbol,
+        bid=Decimal(bid),
+        ask=Decimal(ask),
+        quote_ts_ns=current_ts_ns if quote_ts_ns is None else quote_ts_ns,
+        receive_ts_ns=current_ts_ns,
+        source="fixture",
+    )
+
+
+def test_seam6b_equity_market_closed_falls_through_to_valid_crypto_candidate():
+    current_ts_ns = 1_779_230_000_000_000_000
+    stale_ts_ns = current_ts_ns - MAX_QUOTE_AGE_NS - 1
+
+    decisions, selected = _evaluate_expansion_candidates(
+        universe=(("AAPL", "equity"), ("SPY", "etf"), ("BTC/USD", "crypto")),
+        positions=(),
+        open_orders=(),
+        quotes={
+            "AAPL": _fixture_quote("AAPL", bid="100.00", ask="110.00", current_ts_ns=current_ts_ns, quote_ts_ns=stale_ts_ns),
+            "SPY": _fixture_quote("SPY", bid="100.00", ask="110.00", current_ts_ns=current_ts_ns, quote_ts_ns=stale_ts_ns),
+            "BTC/USD": _fixture_quote("BTC/USD", current_ts_ns=current_ts_ns),
+        },
+        asset_truth={},
+        equity_market_open=False,
+        current_ts_ns=current_ts_ns,
+    )
+
+    skipped_by_symbol = {row.symbol: row for row in decisions}
+    assert skipped_by_symbol["AAPL"].final_action == "SKIP_GUARDRAIL_OR_TRUTH"
+    assert "MARKET_CLOSED" in skipped_by_symbol["AAPL"].reason_codes
+    assert "BTC/USD" not in skipped_by_symbol
+    assert [row[1] for row in selected] == ["BTC/USD"]
+    assert selected[0][2] == "crypto"
+    assert selected[0][3] == Decimal("0.000100")
+    assert selected[0][5] == Decimal("10.00")
+    assert selected[0][6]["route_permitted"] is True
+
+
+def test_seam6b_equity_priority_is_preserved_when_equity_and_crypto_both_pass():
+    current_ts_ns = 1_779_230_000_000_000_000
+
+    _decisions, selected = _evaluate_expansion_candidates(
+        universe=(("JPM", "equity"), ("BTC/USD", "crypto")),
+        positions=(),
+        open_orders=(),
+        quotes={
+            "JPM": _fixture_quote("JPM", bid="99.99", ask="100.00", current_ts_ns=current_ts_ns),
+            "BTC/USD": _fixture_quote("BTC/USD", current_ts_ns=current_ts_ns),
+        },
+        asset_truth={},
+        equity_market_open=True,
+        current_ts_ns=current_ts_ns,
+    )
+
+    assert [row[1] for row in selected] == ["JPM", "BTC/USD"]
+    assert selected[0][2] == "equity"
+
+
+@pytest.mark.parametrize(
+    ("case_name", "quotes", "positions", "open_orders", "asset_truth", "tif_overrides", "expected_reason"),
+    (
+        (
+            "min_notional_precision",
+            {"BTC/USD": _fixture_quote("BTC/USD", bid="3333.32", ask="3333.33")},
+            (),
+            (),
+            {},
+            {},
+            "MIN_NOTIONAL_CANNOT_BE_MET_WITH_CAP_AND_PRECISION",
+        ),
+        ("quote_missing", {}, (), (), {}, {}, "QUOTE_MISSING"),
+        (
+            "wide_spread",
+            {"BTC/USD": _fixture_quote("BTC/USD", bid="90000.00", ask="100000.00")},
+            (),
+            (),
+            {},
+            {},
+            "QUOTE_WIDE_SPREAD",
+        ),
+        (
+            "invalid_day_tif",
+            {"BTC/USD": _fixture_quote("BTC/USD")},
+            (),
+            (),
+            {},
+            {"BTC/USD": "DAY"},
+            "TIME_IN_FORCE_UNSUPPORTED",
+        ),
+        (
+            "duplicate_exposure",
+            {"BTC/USD": _fixture_quote("BTC/USD")},
+            ({"symbol": "BTC/USD", "qty": "0.01"},),
+            (),
+            {},
+            {},
+            "DUPLICATE_EXISTING_EXPOSURE",
+        ),
+        (
+            "asset_guardrail_fail",
+            {"BTC/USD": _fixture_quote("BTC/USD")},
+            (),
+            (),
+            {"BTC/USD": (False, ("BROKER_ASSET_NOT_TRADABLE",))},
+            {},
+            "BROKER_ASSET_NOT_TRADABLE",
+        ),
+        (
+            "open_order_conflict",
+            {"BTC/USD": _fixture_quote("BTC/USD")},
+            (),
+            ({"symbol": "BTC/USD", "side": "buy", "status": "open"},),
+            {},
+            {},
+            "OPEN_ORDER_CONFLICT",
+        ),
+    ),
+)
+def test_seam6b_crypto_fails_closed_for_required_crypto_gates(
+    case_name: str,
+    quotes: dict[str, QuoteTruth],
+    positions: tuple[dict[str, Any], ...],
+    open_orders: tuple[dict[str, Any], ...],
+    asset_truth: dict[str, tuple[bool, tuple[str, ...]]],
+    tif_overrides: dict[str, str],
+    expected_reason: str,
+):
+    current_ts_ns = 1_779_230_000_000_000_000
+
+    decisions, selected = _evaluate_expansion_candidates(
+        universe=(("BTC/USD", "crypto"),),
+        positions=positions,
+        open_orders=open_orders,
+        quotes=quotes,
+        asset_truth=asset_truth,
+        equity_market_open=False,
+        current_ts_ns=current_ts_ns,
+        time_in_force_overrides=tif_overrides,
+    )
+
+    assert selected == [], case_name
+    assert len(decisions) == 1
+    assert decisions[0].symbol == "BTC/USD"
+    assert expected_reason in decisions[0].reason_codes
+
+
 def test_real_seam6_controlled_alpaca_paper_portfolio_expansion_machine(tmp_path: Path):
     if not _approval_present():
         pytest.skip("Seam 6 Alpaca PAPER mutation approval env missing; no broker mutation attempted")
@@ -430,118 +721,31 @@ def test_real_seam6_controlled_alpaca_paper_portfolio_expansion_machine(tmp_path
     assert isinstance(clock, dict)
 
     data = AlpacaDataReadOnlyClient(credentials.key_id, credentials.secret_key)
-    registry = build_default_capability_registry()
     now = now_ns()
-    existing_symbols = {str(row.get("symbol") or "").upper() for row in positions_pre if _decimal(row.get("qty")) != Decimal("0")}
-    active_open_order_symbols = {str(row.get("symbol") or "").upper() for row in _active_open_orders(open_orders_pre)}
-    decisions: list[CandidateDecision] = []
-    passed: list[tuple[Decimal, str, str, Decimal, Decimal, Decimal, dict[str, Any]]] = []
-
-    for symbol, asset_class in _registry_universe():
-        reasons: list[str] = []
-        if symbol in existing_symbols:
-            reasons.append("DUPLICATE_EXISTING_EXPOSURE")
-        if symbol in active_open_order_symbols:
-            reasons.append("OPEN_ORDER_CONFLICT")
-        if asset_class == "crypto":
-            reasons.append("CRYPTO_NOT_SELECTED_EQUITIES_ETFS_FIRST_FOR_SEAM6")
-
-        capability_result = registry.resolve(
-            PortalSelectionRequest(
-                symbol=symbol,
-                asset_class=asset_class,
-                environment=PortalEnvironment.PAPER.value,
-                action="buy",
-                order_type="limit",
-                time_in_force="GTC" if asset_class == "crypto" else "DAY",
-                policy_mode=PortalPolicyMode.EXPLICIT_PREFERRED_VENUE.value,
-                preferred_venue="alpaca_paper",
-                allow_fallback=False,
-            )
-        )
-        capability = capability_result.selected
-        if capability is None:
-            reasons.extend(capability_result.reason_codes or ("NO_USABLE_PORTAL",))
-            decisions.append(CandidateDecision(symbol, asset_class, "SKIP_CAPABILITY", tuple(dict.fromkeys(reasons))))
-            continue
-
+    universe = _registry_universe()
+    quotes: dict[str, QuoteTruth] = {}
+    asset_truth: dict[str, tuple[bool, tuple[str, ...]]] = {}
+    for symbol, asset_class in universe:
         asset_response = adapter.get_asset(symbol)
-        asset_ok, asset_reasons = _asset_truth_ok(asset_response.payload)
-        reasons.extend(asset_reasons)
-
-        quote_payload: dict[str, Any] = {}
-        quote: QuoteTruth | None = None
+        asset_truth[symbol] = _asset_truth_ok(asset_response.payload)
         if asset_class in {"equity", "etf"}:
             quote_payload = data.latest_stock_quote(symbol)
-            if quote_payload.get("_quote_error"):
-                reasons.append(str(quote_payload.get("_quote_error")))
-            else:
-                quote = _quote_from_payload(symbol, quote_payload, now_ns())
-        if quote is None:
-            reasons.append("QUOTE_MISSING")
-        else:
-            if not quote.fresh_at(now_ns()):
-                reasons.append("QUOTE_STALE")
-            if quote.spread_bps is None or quote.spread_bps > MAX_SPREAD_BPS:
-                reasons.append("QUOTE_WIDE_SPREAD")
-        market_open = bool(clock.get("is_open")) if asset_class in {"equity", "etf"} else None
-        if asset_class in {"equity", "etf"} and market_open is not True:
-            reasons.append("MARKET_CLOSED")
+            if not quote_payload.get("_quote_error"):
+                quotes[symbol] = _quote_from_payload(symbol, quote_payload, now_ns())
+        elif asset_class == "crypto":
+            quote_payload = data.latest_crypto_quote(symbol)
+            if not quote_payload.get("_quote_error"):
+                quotes[symbol] = _quote_from_crypto_payload(symbol, quote_payload, now_ns())
 
-        limit_price = quote.ask if quote and quote.ask is not None else Decimal("0")
-        qty, intended_notional, sizing_reasons = _sizing(limit_price, capability.min_notional)
-        reasons.extend(sizing_reasons)
-        if intended_notional is not None and intended_notional > TARGET_NOTIONAL:
-            reasons.append("NOTIONAL_CAP_BREACH")
-
-        quote_classification = classify_quote_session(
-            CapabilityAwareCandidate.from_capability(capability, tradable=asset_ok),
-            market_session_open=market_open,
-            quote_present=quote is not None and quote.bid is not None and quote.ask is not None,
-            quote_fresh=quote.fresh_at(now_ns()) if quote is not None else False,
-            spread_bps=quote.spread_bps if quote is not None else None,
-            max_spread_bps=MAX_SPREAD_BPS,
-        )
-        guardrail = evaluate_pre_trade_guardrails(
-            PreTradeGuardrailRequest(
-                symbol=symbol,
-                side="buy",
-                order_type="limit",
-                time_in_force=capability.default_time_in_force,
-                quantity=qty or Decimal("0"),
-                limit_price=limit_price,
-                current_price=limit_price,
-                internal_max_notional=TARGET_NOTIONAL,
-                capability=capability,
-                portal_selection_result=capability_result,
-                quote_classification=quote_classification,
-                existing_positions=tuple(positions_pre),
-                open_orders=tuple(open_orders_pre),
-            )
-        )
-        if not guardrail.route_permitted:
-            reasons.extend(guardrail.reason_codes)
-
-        unique_reasons = tuple(dict.fromkeys(reasons))
-        if unique_reasons:
-            decisions.append(
-                CandidateDecision(
-                    symbol,
-                    asset_class,
-                    "SKIP_GUARDRAIL_OR_TRUTH",
-                    unique_reasons,
-                    qty=qty,
-                    limit_price=limit_price if limit_price > 0 else None,
-                    intended_notional=intended_notional,
-                )
-            )
-            continue
-
-        rank_score = quote.spread_bps if quote and quote.spread_bps is not None else Decimal("999999")
-        passed.append((rank_score, symbol, asset_class, qty or Decimal("0"), limit_price, intended_notional or Decimal("0"), guardrail.to_dict()))
-
-    passed.sort(key=lambda item: (0 if item[2] in {"equity", "etf"} else 1, item[0], item[1]))
-    selected = passed[:MAX_SUBMITTED_SYMBOLS]
+    decisions, selected = _evaluate_expansion_candidates(
+        universe=universe,
+        positions=tuple(positions_pre),
+        open_orders=tuple(open_orders_pre),
+        quotes=quotes,
+        asset_truth=asset_truth,
+        equity_market_open=bool(clock.get("is_open")),
+        current_ts_ns=now_ns(),
+    )
     total_intended = sum((item[5] for item in selected), Decimal("0"))
     assert total_intended <= MAX_TOTAL_INTENDED_NOTIONAL
 
