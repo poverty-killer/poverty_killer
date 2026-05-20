@@ -313,23 +313,31 @@ def _savitzky_golay(y: np.ndarray, window_size: int, poly_order: int) -> np.ndar
     """Savitzky-Golay filter."""
     if len(y) < window_size:
         return y.copy()
+    if window_size < 3 or poly_order < 0 or poly_order >= window_size:
+        return y.copy()
 
     half_window = window_size // 2
     result = np.zeros_like(y)
     x = np.arange(-half_window, half_window + 1, dtype=np.float64)
-    A = np.zeros((window_size, poly_order + 1))
-    for i in range(poly_order + 1):
-        A[:, i] = x**i
+    n_coeff = poly_order + 1
+    A = np.zeros((window_size, n_coeff), dtype=np.float64)
+    for row in range(window_size):
+        value = 1.0
+        for col in range(n_coeff):
+            A[row, col] = value
+            value *= x[row]
 
-    try:
-        pinv = np.linalg.pinv(A)
-    except np.linalg.LinAlgError:
-        return y.copy()
+    normal = A.T @ A
+    rhs = A.T
+    smoothing_rows = np.linalg.solve(normal, rhs)
+    center_weights = smoothing_rows[0]
 
     for i in range(half_window, len(y) - half_window):
         window = y[i - half_window:i + half_window + 1]
-        coeffs = pinv @ window
-        result[i] = coeffs[0]
+        smoothed = 0.0
+        for j in range(window_size):
+            smoothed += center_weights[j] * window[j]
+        result[i] = smoothed
 
     result[:half_window] = y[:half_window]
     result[-half_window:] = y[-half_window:]
