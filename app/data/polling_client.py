@@ -10,10 +10,11 @@ TIMESTAMP TRUTH:
 """
 
 import asyncio
+import calendar
 import logging
 import time
 from typing import Dict, List, Optional, Callable, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import aiohttp
@@ -75,11 +76,15 @@ class PollingClient:
         self._failure_history: List[Dict[str, Any]] = []
         self._dns_backoff_until_ns_by_domain: Dict[str, int] = {}
 
-        # API endpoints (example for Kraken)
+        # Public market-data endpoints only. Trading/account endpoints are not used here.
         self._endpoints = {
             "kraken": {
                 "candle": "https://api.kraken.com/0/public/OHLC",
                 "order_book": "https://api.kraken.com/0/public/Depth"
+            },
+            "coinbase": {
+                "candle": "https://api.exchange.coinbase.com/products/{product_id}/candles",
+                "order_book": "https://api.exchange.coinbase.com/products/{product_id}/book",
             }
         }
 
@@ -158,7 +163,8 @@ class PollingClient:
             symbol: Trading symbol
         """
         try:
-            endpoint = self._endpoints.get(self.exchange, {}).get("candle")
+            formatted_symbol = self._format_symbol(symbol)
+            endpoint = self._resolve_endpoint("candle", formatted_symbol)
             if not endpoint:
                 self._record_polling_failure(
                     symbol,
@@ -171,13 +177,7 @@ class PollingClient:
             if self._dns_backoff_active(endpoint):
                 return
 
-            # Format symbol for exchange
-            formatted_symbol = self._format_symbol(symbol)
-
-            params = {
-                "pair": formatted_symbol,
-                "interval": 1  # 1 minute
-            }
+            params = self._build_candle_params(formatted_symbol)
 
             async with self._session.get(endpoint, params=params) as response:
                 if response.status == 200:
@@ -222,7 +222,8 @@ class PollingClient:
             symbol: Trading symbol
         """
         try:
-            endpoint = self._endpoints.get(self.exchange, {}).get("order_book")
+            formatted_symbol = self._format_symbol(symbol)
+            endpoint = self._resolve_endpoint("order_book", formatted_symbol)
             if not endpoint:
                 self._record_polling_failure(
                     symbol,
@@ -235,12 +236,7 @@ class PollingClient:
             if self._dns_backoff_active(endpoint):
                 return
 
-            formatted_symbol = self._format_symbol(symbol)
-
-            params = {
-                "pair": formatted_symbol,
-                "count": 50
-            }
+            params = self._build_order_book_params(formatted_symbol)
 
             async with self._session.get(endpoint, params=params) as response:
                 if response.status == 200:
@@ -280,19 +276,59 @@ class PollingClient:
 
     def _format_symbol(self, symbol: str) -> str:
         """
-        Format symbol for Kraken REST API.
+        Format a canonical slash-form symbol for the configured public REST API.
 
         Args:
             symbol: Trading symbol in canonical slash-form (e.g., "BTC/USD")
 
         Returns:
-            Kraken REST pair identifier (e.g., "XBTUSD")
+            Exchange REST pair identifier.
         """
+        if self.exchange == "coinbase":
+            return symbol.replace("/", "-")
         if "/" in symbol:
             base, quote = symbol.split("/", 1)
             base = _KRAKEN_BASE_MAP.get(base, base)
             return f"{base}{quote}"
         return symbol
+
+    def _resolve_endpoint(self, feed_type: str, formatted_symbol: str) -> Optional[str]:
+        endpoint = self._endpoints.get(self.exchange, {}).get(feed_type)
+        if not endpoint:
+            return None
+        return endpoint.format(product_id=formatted_symbol)
+
+    def _build_candle_params(self, formatted_symbol: str) -> Dict[str, Any]:
+        if self.exchange == "coinbase":
+            return {"granularity": 60}
+        return {
+            "pair": formatted_symbol,
+            "interval": 1,
+        }
+
+    def _build_order_book_params(self, formatted_symbol: str) -> Dict[str, Any]:
+        if self.exchange == "coinbase":
+            return {"level": 2}
+        return {
+            "pair": formatted_symbol,
+            "count": 50,
+        }
+
+    def _parse_iso8601_to_ns(self, value: Any) -> Optional[int]:
+        if not value:
+            return None
+        try:
+            text = str(value).strip()
+            if text.endswith("Z"):
+                text = f"{text[:-1]}+00:00"
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed_utc = parsed.astimezone(timezone.utc)
+            return calendar.timegm(parsed_utc.utctimetuple()) * 1_000_000_000 + parsed_utc.microsecond * 1_000
+        except Exception as exc:
+            logger.warning("Failed to parse %s timestamp %r: %s", self.exchange, value, exc)
+            return None
 
     def _classify_polling_failure(self, exc: Exception, explicit_status: Optional[str] = None) -> str:
         if explicit_status:
@@ -416,6 +452,23 @@ class PollingClient:
         candles = []
 
         try:
+            if self.exchange == "coinbase":
+                for item in data if isinstance(data, list) else []:
+                    if len(item) >= 6:
+                        timestamp_sec = item[0]
+                        candle = Candle(
+                            symbol=symbol,
+                            exchange_ts_ns=int(timestamp_sec) * 1_000_000_000,
+                            open=float(item[3]),
+                            high=float(item[2]),
+                            low=float(item[1]),
+                            close=float(item[4]),
+                            volume=float(item[5]),
+                            timeframe="1m",
+                        )
+                        candles.append(candle)
+                return sorted(candles, key=lambda candle: candle.exchange_ts_ns)
+
             # Kraken format: result[formatted_symbol] = [[time, open, high, low, close, vwap, volume, count], ...]
             result = data.get("result", {})
             for key, ohlc_data in result.items():
@@ -469,6 +522,20 @@ class PollingClient:
             OrderBookSnapshot or None
         """
         try:
+            if self.exchange == "coinbase":
+                bids = self._parse_price_size_levels(data.get("bids", []), symbol, "bid")
+                asks = self._parse_price_size_levels(data.get("asks", []), symbol, "ask")
+                exchange_ts_ns = self._parse_iso8601_to_ns(data.get("time"))
+                if exchange_ts_ns is None:
+                    logger.warning("Coinbase order book missing authoritative time for %s", symbol)
+                    return None
+                return OrderBookSnapshot(
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    bids=bids[:50],
+                    asks=asks[:50],
+                )
+
             result = data.get("result", {})
             for key, book_data in result.items():
                 if isinstance(book_data, dict):
@@ -515,6 +582,38 @@ class PollingClient:
             logger.error(f"Failed to parse order book for {symbol}: {e}")
 
         return None
+
+    def _parse_price_size_levels(
+        self,
+        raw_levels: Any,
+        symbol: str,
+        side: str,
+    ) -> List[tuple[float, float]]:
+        levels: List[tuple[float, float]] = []
+        if not isinstance(raw_levels, list):
+            logger.warning("Malformed %s levels in order book for %s: %r", side, symbol, raw_levels)
+            return levels
+
+        for entry in raw_levels:
+            try:
+                if isinstance(entry, dict):
+                    price = float(entry["price"])
+                    size = float(entry["size"])
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    price = float(entry[0])
+                    size = float(entry[1])
+                else:
+                    logger.warning("Malformed %s entry in order book for %s: %r", side, symbol, entry)
+                    continue
+                if price <= 0 or size <= 0:
+                    logger.warning("Non-positive %s entry in order book for %s: %r", side, symbol, entry)
+                    continue
+                levels.append((price, size))
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.warning("Failed to convert %s entry for %s: %r - %s", side, symbol, entry, exc)
+
+        reverse = side == "bid"
+        return sorted(levels, key=lambda level: level[0], reverse=reverse)
 
     async def _safe_callback(self, callback: Callable, data: Any) -> None:
         """

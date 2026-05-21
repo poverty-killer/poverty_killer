@@ -96,21 +96,30 @@ class MarketFeeds:
             "Market-data provider selected: %s",
             self._feed_provider_selection.to_telemetry(),
         )
-        if selected_provider_id != "kraken_public":
+        if selected_provider_id not in {"coinbase_public", "kraken_public"}:
             raise RuntimeError(
                 "selected_market_data_provider_unavailable:"
                 f"{selected_provider_id or self._feed_provider_selection.reason}"
             )
 
-        # Initialize WebSocket client
-        self.websocket_client = KrakenWebSocketClient(
-            symbols=self.symbols,
-            on_candle=self._on_candle,
-            on_order_book=self._on_order_book,
-            on_trade=self._on_trade,
-            on_health=self._on_websocket_health,
-        )
-        await self.websocket_client.start()
+        selected_exchange = "coinbase" if selected_provider_id == "coinbase_public" else "kraken"
+        if selected_exchange != "kraken":
+            self._websocket_truth = {
+                "status": "WEBSOCKET_UNSUPPORTED_FOR_SELECTED_PROVIDER",
+                "exchange": selected_exchange,
+                "provider_id": selected_provider_id,
+            }
+
+        # Initialize WebSocket client only for providers with an active WS transport.
+        if selected_exchange == "kraken":
+            self.websocket_client = KrakenWebSocketClient(
+                symbols=self.symbols,
+                on_candle=self._on_candle,
+                on_order_book=self._on_order_book,
+                on_trade=self._on_trade,
+                on_health=self._on_websocket_health,
+            )
+            await self.websocket_client.start()
 
         # Initialize polling client as fallback
         self.polling_client = PollingClient(
@@ -119,6 +128,7 @@ class MarketFeeds:
             on_candle=self._on_candle,
             on_order_book=self._on_order_book,
             on_feed_truth=self._on_rest_feed_truth,
+            exchange=selected_exchange,
         )
         await self.polling_client.start()
 

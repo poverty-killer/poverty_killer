@@ -122,6 +122,7 @@ SUPPORTED_EXECUTION_BROKERS = frozenset(
 )
 
 _FEED_PROVIDER_TO_VENUE = {
+    "coinbase_public": "coinbase",
     "kraken_public": "kraken",
 }
 
@@ -1029,9 +1030,13 @@ class SovereignHeartbeat:
             "Market-data provider failover telemetry: %s",
             selection.to_telemetry(),
         )
-        if selection.selected_provider_id and selection.selected_provider_id != "kraken_public":
+        if (
+            selection.selected_provider_id
+            and selection.selected_provider_id != self._selected_market_data_provider_id
+        ):
             logger.warning(
-                "Market-data fallback candidate selected but transport adapter is not active in this packet: %s",
+                "Market-data fallback candidate selected but active transport remains %s: candidate=%s",
+                self._selected_market_data_provider_id,
                 selection.selected_provider_id,
             )
 
@@ -1047,6 +1052,13 @@ class SovereignHeartbeat:
         if not ws_symbols:
             logger.warning(
                 "No feed symbols for venue %r — whale WebSocket not started",
+                self._primary_feed_venue,
+            )
+            return
+        if self._primary_feed_venue != "kraken":
+            logger.info(
+                "No WebSocket transport active for market-data venue %r; "
+                "using REST polling transport for supported data types",
                 self._primary_feed_venue,
             )
             return

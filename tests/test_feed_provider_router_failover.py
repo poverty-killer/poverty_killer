@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import main
+from app.data.polling_client import PollingClient
 from app.data.feed_provider_router import (
     FeedProviderDescriptor,
     FeedProviderLane,
@@ -76,26 +77,25 @@ def test_configured_provider_priority_is_respected_when_transport_is_available()
 
 
 def test_missing_fallback_transport_does_not_fake_market_data():
-    result = _router(("coinbase_public", "binance_us_public")).select_provider(_request())
+    result = _router(("binance_us_public",)).select_provider(_request())
 
     assert result.status == "FAILED_CLOSED"
     assert result.reason == "MISSING_MARKET_TRUTH"
     assert result.selected_provider is None
-    assert "MISSING_TRANSPORT" in result.skipped["coinbase_public"]
     assert "MISSING_TRANSPORT" in result.skipped["binance_us_public"]
 
 
-def test_safe_crypto_priority_prefers_public_fallbacks_but_uses_implemented_kraken_only_if_clean():
+def test_safe_crypto_priority_selects_coinbase_public_before_kraken():
     result = _router().select_provider(_request())
 
     assert result.status == "SELECTED"
-    assert result.reason == "FALLBACK_SELECTED"
-    assert result.selected_provider_id == "kraken_public"
-    assert "MISSING_TRANSPORT" in result.skipped["coinbase_public"]
+    assert result.reason == "PRIMARY_SELECTED"
+    assert result.selected_provider_id == "coinbase_public"
+    assert result.selected_provider.to_telemetry()["transport_adapter"] == "coinbase_exchange_public_rest"
     assert "MISSING_TRANSPORT" in result.skipped["binance_us_public"]
 
 
-def test_degraded_kraken_is_skipped_and_missing_fallback_transport_fails_closed():
+def test_degraded_kraken_is_skipped_after_coinbase_public_selected():
     result = _router().select_provider(
         _request(),
         provider_status={
@@ -107,11 +107,11 @@ def test_degraded_kraken_is_skipped_and_missing_fallback_transport_fails_closed(
         },
     )
 
-    assert result.status == "FAILED_CLOSED"
-    assert result.reason == "MISSING_MARKET_TRUTH"
-    assert result.selected_provider is None
+    assert result.status == "SELECTED"
+    assert result.reason == "PRIMARY_SELECTED"
+    assert result.selected_provider_id == "coinbase_public"
     assert result.skipped["kraken_public"] == ("DNS_FAILURE",)
-    assert "MISSING_TRANSPORT" in result.skipped["coinbase_public"]
+    assert "MISSING_TRANSPORT" in result.skipped["binance_us_public"]
 
 
 def test_primary_crossed_book_is_quarantined_and_fallback_attempted():
@@ -126,8 +126,8 @@ def test_primary_crossed_book_is_quarantined_and_fallback_attempted():
         },
     )
 
-    assert result.status == "FAILED_CLOSED"
-    assert result.selected_provider is None
+    assert result.status == "SELECTED"
+    assert result.selected_provider_id == "coinbase_public"
     assert result.skipped["kraken_public"] == ("CROSSED_BOOK",)
 
 
@@ -143,8 +143,8 @@ def test_primary_duplicate_candle_is_rejected_and_fallback_attempted():
         },
     )
 
-    assert result.status == "FAILED_CLOSED"
-    assert result.selected_provider is None
+    assert result.status == "SELECTED"
+    assert result.selected_provider_id == "coinbase_public"
     assert result.skipped["kraken_public"] == ("DUPLICATE_CANDLE",)
 
 
@@ -251,9 +251,9 @@ def test_selected_provider_and_fallback_reason_are_recorded():
 
     telemetry = result.to_telemetry()
 
-    assert telemetry["status"] == "FAILED_CLOSED"
-    assert telemetry["reason"] == "MISSING_MARKET_TRUTH"
-    assert telemetry["selected_provider_id"] is None
+    assert telemetry["status"] == "SELECTED"
+    assert telemetry["reason"] == "PRIMARY_SELECTED"
+    assert telemetry["selected_provider_id"] == "coinbase_public"
     assert telemetry["skipped"]["kraken_public"] == ("DNS_FAILURE",)
     assert telemetry["provider_lane"] == "crypto_market_data"
 
@@ -267,6 +267,87 @@ def test_router_telemetry_does_not_touch_broker_mutation_path():
     assert "broker_gateway" not in serialized
     assert "broker mutation" not in serialized
     assert telemetry["selected_provider"]["provider_type"] == "executable_market_data"
+
+
+def test_coinbase_public_does_not_advertise_unsupported_trades_or_ticker():
+    trades = _router(("coinbase_public",)).select_provider(_request("trades"))
+    ticker = _router(("coinbase_public",)).select_provider(_request("ticker"))
+
+    assert trades.status == "FAILED_CLOSED"
+    assert trades.reason == "MISSING_MARKET_TRUTH"
+    assert trades.skipped["coinbase_public"] == ("UNSUPPORTED_DATA_TYPE",)
+    assert ticker.status == "FAILED_CLOSED"
+    assert ticker.reason == "MISSING_MARKET_TRUTH"
+    assert ticker.skipped["coinbase_public"] == ("UNSUPPORTED_DATA_TYPE",)
+
+
+def test_coinbase_public_symbol_and_endpoint_mapping_are_public_market_data_only():
+    client = PollingClient(symbols=["BTC/USD"], exchange="coinbase")
+    formatted = client._format_symbol("BTC/USD")
+
+    assert formatted == "BTC-USD"
+    assert client._resolve_endpoint("order_book", formatted) == (
+        "https://api.exchange.coinbase.com/products/BTC-USD/book"
+    )
+    assert client._resolve_endpoint("candle", formatted) == (
+        "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+    )
+    assert client._build_order_book_params(formatted) == {"level": 2}
+    assert client._build_candle_params(formatted) == {"granularity": 60}
+
+
+def test_coinbase_public_parses_documented_book_without_fabricated_timestamp():
+    client = PollingClient(symbols=["BTC/USD"], exchange="coinbase")
+    snapshot = client._parse_order_book(
+        {
+            "sequence": 13051505638,
+            "bids": [["6247.58", "6.3578146", 2]],
+            "asks": [["6251.52", "2", 1]],
+            "time": "2021-02-12T01:09:23.334Z",
+        },
+        "BTC/USD",
+    )
+
+    assert snapshot is not None
+    assert snapshot.symbol == "BTC/USD"
+    assert snapshot.exchange_ts_ns == 1613092163334000000
+    assert snapshot.bids == [(6247.58, 6.3578146)]
+    assert snapshot.asks == [(6251.52, 2.0)]
+
+
+def test_coinbase_public_rejects_book_without_exchange_time():
+    client = PollingClient(symbols=["BTC/USD"], exchange="coinbase")
+
+    snapshot = client._parse_order_book(
+        {
+            "bids": [["6247.58", "6.3578146", 2]],
+            "asks": [["6251.52", "2", 1]],
+        },
+        "BTC/USD",
+    )
+
+    assert snapshot is None
+
+
+def test_coinbase_public_parses_documented_candles_in_time_order():
+    client = PollingClient(symbols=["BTC/USD"], exchange="coinbase")
+    candles = client._parse_candles(
+        [
+            [1613092223, "6200.0", "6300.0", "6250.0", "6260.0", "1.5"],
+            [1613092163, "6100.0", "6200.0", "6150.0", "6160.0", "2.5"],
+        ],
+        "BTC/USD",
+    )
+
+    assert [candle.exchange_ts_ns for candle in candles] == [
+        1613092163000000000,
+        1613092223000000000,
+    ]
+    assert candles[0].open == 6150.0
+    assert candles[0].high == 6200.0
+    assert candles[0].low == 6100.0
+    assert candles[0].close == 6160.0
+    assert candles[0].volume == 2.5
 
 
 def test_equity_missing_entitlement_is_explicit_and_limited_iex_is_labeled():
