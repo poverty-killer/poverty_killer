@@ -148,6 +148,24 @@ Remaining blocker:
 
 This is internal timing truth, not an equity market-session issue and not a broker endpoint issue.
 
+## Final Finite RTT Follow-Up
+
+The next burn-down found that the websocket health callback still mixed liveness and RTT truth:
+
+- `KrakenWebSocketClient.connect()` reported `(now, now)` as health on connection.
+- `KrakenWebSocketClient._process_message(...)` reported every received message as `(receive_ts_ns, receive_ts_ns)`.
+
+That behavior could initialize a finite zero-millisecond RTT from generic message receipt. It was corrected so router websocket health is emitted only on explicit Kraken `pong`, using the recorded sent ping timestamp and the pong receive timestamp.
+
+Fresh bounded shadow-read-only result after this correction:
+
+- startup: `MISSING_LATENCY_TRUTH`
+- post-pong finite recovery: `Latency recovered: 101.1ms, exiting safe mode`
+- no `LAG ABORT: infms > 200.0ms`
+- no broker mutation or live endpoint markers
+
+Final latency readiness status: finite latency truth proven in shadow, with the `200.0ms` threshold preserved.
+
 ## Safety Confirmation
 
 - No live endpoint.

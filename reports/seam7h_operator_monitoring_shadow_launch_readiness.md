@@ -240,3 +240,22 @@ Fresh bounded shadow-read-only result after correction:
 Updated verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
 
 Reason: operator monitoring, physical fuse reset, and Alpaca PAPER read-only reconciliation are resolved, but autonomous PAPER launch still requires a clean bounded shadow-readiness snapshot with finite latency truth or an explicitly resolved latency warmup condition.
+
+## Final Finite Latency Readiness Follow-Up
+
+The final latency burn-down corrected the websocket health source so only explicit Kraken pong messages initialize router RTT truth. Generic websocket message receipt no longer creates fake zero-millisecond latency.
+
+Fresh bounded shadow-read-only result:
+
+- command: `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+- paper mode confirmed
+- shadow-read-only confirmed
+- initial `MISSING_LATENCY_TRUTH` recorded during startup warmup
+- finite recovery recorded: `Latency recovered: 101.1ms, exiting safe mode`
+- no `LAG ABORT: infms > 200.0ms`
+- no order submission or broker mutation markers
+- no live endpoint markers
+
+Updated verdict: `READY_FOR_AUTONOMOUS_PAPER_AFTER_SEPARATE_APPROVAL`.
+
+Reason: physical fuse reset, Alpaca PAPER read-only reconciliation, feed degradation classification, finite latency recovery, and shadow no-mutation proof are now recorded. Autonomous PAPER mutation still requires separate explicit approval.

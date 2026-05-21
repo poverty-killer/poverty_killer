@@ -147,11 +147,6 @@ class KrakenWebSocketClient:
             self._last_message_time_ns = now_ns()
             self._last_heartbeat_sent_ns = now_ns()
             
-            # Report initial connection health
-            if self.on_health:
-                current_ns = now_ns()
-                self.on_health(current_ns, current_ns)
-            
             # Send initial ping to Kraken
             await self._send_ping()
             
@@ -374,14 +369,14 @@ class KrakenWebSocketClient:
         try:
             data = json.loads(raw_message)
 
-            # Report health on every received message (any message proves connection alive)
-            if self.on_health:
-                self.on_health(receive_ts_ns, receive_ts_ns)
-
             # Check for heartbeat/pong response
             if data.get("method") == "pong":
+                if self.on_health and self._last_heartbeat_sent_ns > 0:
+                    if receive_ts_ns >= self._last_heartbeat_sent_ns:
+                        self.on_health(self._last_heartbeat_sent_ns, receive_ts_ns)
+                    else:
+                        logger.warning("Pong received before recorded ping timestamp; RTT truth not emitted")
                 logger.debug("Pong received")
-                # Explicit pong handling preserved (already reported above)
                 return
             
             # Check for subscription confirmation

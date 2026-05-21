@@ -263,3 +263,43 @@ Lag burn-down verification:
 Current verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
 
 Reason: the false `infms` measured-latency presentation is repaired, physical fuse is cleared, and Alpaca PAPER read-only reconciliation is proven. Autonomous PAPER remains blocked until a clean bounded shadow-readiness snapshot proves finite `LATENCY_OK` or otherwise resolves startup `MISSING_LATENCY_TRUTH` without broker mutation or live endpoint risk.
+
+## Final Finite Latency Shadow Proof Update
+
+Current packet base HEAD: `fa63103`.
+
+Related causal issues found and addressed:
+
+- Startup warmup: `ExecutionEngine` can see missing websocket RTT before Kraken returns a ping/pong pair. This remains `MISSING_LATENCY_TRUTH` and keeps safe mode active.
+- Websocket RTT purity: `KrakenWebSocketClient` previously reported connection establishment and every received message as `(timestamp, timestamp)`, which could masquerade as zero-millisecond RTT. It now reports router websocket health only on explicit Kraken `pong` using sent ping timestamp to pong receive timestamp.
+- Readiness evidence: the bounded shadow run now proves transition from startup missing truth to finite recovery.
+
+Fresh bounded shadow-read-only proof:
+
+- command: `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+- result: external timeout exit `124`
+- paper mode confirmed
+- shadow-read-only confirmed
+- startup latency truth reported `MISSING_LATENCY_TRUTH`
+- finite recovery reported: `Latency recovered: 101.1ms, exiting safe mode`
+- Kraken websocket connected and feed/fusion diagnostics appeared
+- Kraken REST DNS remained degraded feed truth
+- targeted marker scan found no `ORDER_SUBMIT_ATTEMPT`, `ORDER_SUBMITTED`, `/v2/orders`, `POST /v2/orders`, `PATCH /v2/orders`, `DELETE /v2/orders`, `BROKER_MUTATION`, `EMERGENCY_LIQUIDATION`, live broker mode, or live endpoint marker
+
+Verification:
+
+- compile: passed
+- focused final latency/readiness test: `9 passed`
+- scoped regression: `56 passed`
+- no broker mutation
+- no live endpoint
+- no fake latency or feed truth
+- latency threshold remained `200.0ms`
+
+Current verdict: `READY_FOR_AUTONOMOUS_PAPER_AFTER_SEPARATE_APPROVAL`.
+
+Autonomous PAPER mutation remains forbidden until the user separately approves the autonomous paper command:
+
+```bash
+venv/Scripts/python.exe main.py --paper --log-level INFO
+```
