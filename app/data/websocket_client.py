@@ -50,6 +50,7 @@ class KrakenWebSocketClient:
         max_queue_size: int = 10000,
         ping_interval: int = 30,
         ping_timeout: int = 10,
+        application_ping_interval: Optional[float] = None,
         close_timeout: int = 5,
         reconnect_base_delay: float = 1.0,
         reconnect_max_delay: float = 30.0,
@@ -68,6 +69,7 @@ class KrakenWebSocketClient:
             max_queue_size: Maximum queued messages before dropping
             ping_interval: WebSocket ping interval (seconds)
             ping_timeout: WebSocket ping timeout (seconds)
+            application_ping_interval: Kraken application-level ping interval (seconds)
             close_timeout: WebSocket close timeout (seconds)
             reconnect_base_delay: Initial reconnect delay (seconds)
             reconnect_max_delay: Maximum reconnect delay (seconds)
@@ -81,6 +83,14 @@ class KrakenWebSocketClient:
         self.max_queue_size = max_queue_size
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
+        self.application_ping_interval = max(
+            1.0,
+            float(
+                application_ping_interval
+                if application_ping_interval is not None
+                else min(10.0, max(1.0, ping_interval / 3.0))
+            ),
+        )
         self.close_timeout = close_timeout
         self.reconnect_base_delay = reconnect_base_delay
         self.reconnect_max_delay = reconnect_max_delay
@@ -102,6 +112,9 @@ class KrakenWebSocketClient:
         self._processing_lag = deque(maxlen=100)
         self._last_message_time_ns = 0
         self._last_heartbeat_sent_ns = 0
+        self._last_pong_received_ns = 0
+        self._last_rtt_ms: Optional[float] = None
+        self._pong_count = 0
         
         # Subscription status
         self._subscriptions: Dict[str, List[str]] = {}
@@ -128,6 +141,10 @@ class KrakenWebSocketClient:
         self._messages_processed = 0
         
         logger.info(f"KrakenWebSocketClient initialized: {len(symbols)} symbols")
+        logger.info(
+            "  RTT TRUTH: Kraken app ping interval=%.1fs, explicit pong required for finite RTT",
+            self.application_ping_interval,
+        )
         logger.info("  BOOK TRUTH: local L2 book truncates to subscribed depth=%d after every update", self.book_depth)
         logger.info("  TIMESTAMP TRUTH: Strict authoritative path — messages without lawful nested exchange timestamp are REJECTED")
     
@@ -205,12 +222,13 @@ class KrakenWebSocketClient:
     async def _heartbeat_loop(self) -> None:
         """
         Heartbeat loop to monitor connection health.
-        Sends pings every 30 seconds and checks for responses.
+        Sends explicit Kraken app pings inside the 30s RTT stale window and
+        checks for responses.
         Does NOT report health via on_health to avoid false latency spikes.
         """
         while self._running and self._connected:
             try:
-                await asyncio.sleep(30)
+                await asyncio.sleep(self.application_ping_interval)
                 
                 # Send ping
                 await self._send_ping()
@@ -378,9 +396,13 @@ class KrakenWebSocketClient:
 
             # Check for heartbeat/pong response
             if data.get("method") == "pong":
-                if self.on_health and self._last_heartbeat_sent_ns > 0:
+                if self._last_heartbeat_sent_ns > 0:
                     if receive_ts_ns >= self._last_heartbeat_sent_ns:
-                        self.on_health(self._last_heartbeat_sent_ns, receive_ts_ns)
+                        self._last_pong_received_ns = receive_ts_ns
+                        self._last_rtt_ms = (receive_ts_ns - self._last_heartbeat_sent_ns) / 1_000_000.0
+                        self._pong_count += 1
+                        if self.on_health:
+                            self.on_health(self._last_heartbeat_sent_ns, receive_ts_ns)
                     else:
                         logger.warning("Pong received before recorded ping timestamp; RTT truth not emitted")
                 logger.debug("Pong received")
@@ -907,12 +929,54 @@ class KrakenWebSocketClient:
             "messages_received": self._messages_received,
             "messages_rejected_no_timestamp": self._messages_rejected_no_timestamp,
             "messages_processed": self._messages_processed,
+            "application_ping_interval": self.application_ping_interval,
+            "last_heartbeat_sent_ns": self._last_heartbeat_sent_ns,
+            "last_pong_received_ns": self._last_pong_received_ns,
+            "last_rtt_ms": self._last_rtt_ms,
+            "pong_count": self._pong_count,
             "book_quality_by_symbol": {
                 symbol: dict(status)
                 for symbol, status in self._book_quality_by_symbol.items()
             },
             "book_crossed_rejections_by_symbol": dict(self._book_crossed_rejections_by_symbol),
             "candle_duplicate_rejections_by_symbol": dict(self._candle_duplicate_rejections_by_symbol),
+        }
+
+    def _websocket_rtt_truth(self, current_ns: Optional[int] = None) -> Dict[str, Any]:
+        current_ns = int(current_ns or now_ns())
+        if self._last_pong_received_ns <= 0:
+            return {
+                "status": "MISSING_LATENCY_TRUTH",
+                "reason": "WEBSOCKET_RTT_NOT_READY",
+                "application_ping_interval": self.application_ping_interval,
+                "last_heartbeat_sent_ns": self._last_heartbeat_sent_ns,
+                "last_pong_received_ns": self._last_pong_received_ns,
+                "last_rtt_ms": self._last_rtt_ms,
+                "pong_count": self._pong_count,
+            }
+
+        staleness_ms = max(0.0, (current_ns - self._last_pong_received_ns) / 1_000_000.0)
+        if staleness_ms > 30_000.0:
+            return {
+                "status": "STALE_MARKET_TRUTH",
+                "reason": "WEBSOCKET_RTT_STALE",
+                "application_ping_interval": self.application_ping_interval,
+                "last_heartbeat_sent_ns": self._last_heartbeat_sent_ns,
+                "last_pong_received_ns": self._last_pong_received_ns,
+                "last_rtt_ms": self._last_rtt_ms,
+                "pong_count": self._pong_count,
+                "staleness_ms": staleness_ms,
+            }
+
+        return {
+            "status": "WEBSOCKET_RTT_ACTIVE",
+            "reason": "EXPLICIT_KRAKEN_PONG",
+            "application_ping_interval": self.application_ping_interval,
+            "last_heartbeat_sent_ns": self._last_heartbeat_sent_ns,
+            "last_pong_received_ns": self._last_pong_received_ns,
+            "last_rtt_ms": self._last_rtt_ms,
+            "pong_count": self._pong_count,
+            "staleness_ms": staleness_ms,
         }
 
     def get_feed_truth_status(self) -> Dict[str, Any]:
@@ -926,6 +990,7 @@ class KrakenWebSocketClient:
             "last_message_time_ns": self._last_message_time_ns,
             "messages_processed": self._messages_processed,
             "messages_rejected_no_timestamp": self._messages_rejected_no_timestamp,
+            "rtt": self._websocket_rtt_truth(),
             "book_quality_by_symbol": {
                 symbol: dict(status)
                 for symbol, status in self._book_quality_by_symbol.items()

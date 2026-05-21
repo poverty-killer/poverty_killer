@@ -96,6 +96,10 @@ def test_kraken_pong_wires_first_finite_rtt_into_order_router(tmp_path):
 
     assert router.measure_latency() == 7.0
     assert router.is_websocket_connected() is True
+    rtt_truth = client.get_feed_truth_status()["rtt"]
+    assert rtt_truth["status"] == "WEBSOCKET_RTT_ACTIVE"
+    assert rtt_truth["reason"] == "EXPLICIT_KRAKEN_PONG"
+    assert rtt_truth["last_rtt_ms"] == 7.0
     engine = _engine(tmp_path, router)
     truth = engine._classify_latency_truth(router.measure_latency(), current_ns=receive_ns)
     assert truth.status == "LATENCY_OK"
@@ -115,6 +119,14 @@ def test_non_pong_message_does_not_fabricate_zero_rtt(tmp_path):
     engine = _engine(tmp_path, router)
     truth = engine._classify_latency_truth(router.measure_latency(), current_ns=101 * NS_PER_SECOND)
     assert truth.status == "MISSING_LATENCY_TRUTH"
+    assert client.get_feed_truth_status()["rtt"]["status"] == "MISSING_LATENCY_TRUTH"
+
+
+def test_kraken_application_ping_cadence_stays_inside_rtt_stale_window():
+    client = KrakenWebSocketClient(symbols=["BTC/USD"], ping_interval=30)
+
+    assert client.application_ping_interval == 10.0
+    assert client.application_ping_interval < 30.0
 
 
 def test_stale_rtt_blocks_readiness_as_stale_market_truth(tmp_path):

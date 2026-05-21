@@ -9,6 +9,7 @@ from app.core.decision_compiler import DecisionCompiler
 from app.data.market_feeds import MarketFeeds
 from app.data.polling_client import PollingClient
 from app.data.websocket_client import KrakenWebSocketClient
+from app.models import Candle, OrderBookSnapshot
 from app.models.contracts import (
     ExchangeTruth,
     ExecutionTruth,
@@ -29,6 +30,37 @@ class FailingDnsSession:
     def get(self, *args, **kwargs):
         conn_key = SimpleNamespace(host="api.kraken.com", port=443, ssl=True)
         raise aiohttp.ClientConnectorError(conn_key, OSError("dns failure"))
+
+
+class CountingSession:
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        raise AssertionError("DNS backoff should suppress REST call")
+
+
+def _book(ts_ns: int) -> OrderBookSnapshot:
+    return OrderBookSnapshot(
+        symbol="BTC/USD",
+        exchange_ts_ns=ts_ns,
+        bids=[(100.0, 1.0)],
+        asks=[(101.0, 1.0)],
+    )
+
+
+def _candle(ts_ns: int) -> Candle:
+    return Candle(
+        symbol="BTC/USD",
+        exchange_ts_ns=ts_ns,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10.0,
+        timeframe="1m",
+    )
 
 
 def _config():
@@ -74,6 +106,24 @@ def test_polling_client_records_dns_failure_without_fake_candle_truth():
     assert emitted_truth[-1]["status"] == "DNS_FAILURE_RECORDED"
 
 
+def test_polling_client_dns_failure_activates_domain_backoff_without_fake_success():
+    polling = PollingClient(symbols=["BTC/USD"], dns_backoff_seconds=15)
+    polling._session = FailingDnsSession()
+
+    asyncio.run(polling._fetch_candles("BTC/USD"))
+    stats = polling.get_stats()
+
+    assert stats["last_failure_status"]["status"] == "DNS_FAILURE_RECORDED"
+    assert stats["dns_backoff_until_ns_by_domain"]["api.kraken.com"] > stats["last_failure_status"]["timestamp_ns"]
+
+    counting_session = CountingSession()
+    polling._session = counting_session
+    asyncio.run(polling._fetch_order_book("BTC/USD"))
+
+    assert counting_session.calls == 0
+    assert polling.get_stats()["last_success_status"] == {}
+
+
 def test_polling_client_records_dns_failure_without_fake_order_book_truth():
     emitted_books = []
     polling = PollingClient(symbols=["BTC/USD"], on_order_book=emitted_books.append)
@@ -116,6 +166,63 @@ def test_websocket_active_rest_dns_failure_is_partial_market_truth():
     assert truth["rest"]["latest_failure"]["status"] == "DNS_FAILURE_RECORDED"
     assert "MISSING_CANDLE_TRUTH" in truth["missing_truth"]
     assert "MISSING_ORDER_BOOK_TRUTH:BTC/USD" in truth["missing_truth"]
+
+
+def test_matching_rest_success_clears_unresolved_dns_failure_without_erasing_history():
+    polling = PollingClient(symbols=["BTC/USD"])
+    polling._record_polling_failure(
+        "BTC/USD",
+        "candle",
+        aiohttp.ClientConnectorError(
+            SimpleNamespace(host="api.kraken.com", port=443, ssl=True),
+            OSError("dns failure"),
+        ),
+        endpoint="https://api.kraken.com/0/public/OHLC",
+    )
+
+    assert polling.get_stats()["last_failure_status"]["status"] == "DNS_FAILURE_RECORDED"
+
+    polling._record_polling_success("BTC/USD", "candle", "https://api.kraken.com/0/public/OHLC")
+    stats = polling.get_stats()
+
+    assert stats["last_failure_status"] == {}
+    assert stats["failure_status_by_symbol_feed"] == {}
+    assert stats["last_success_status"]["status"] == "REST_ACTIVE"
+    assert stats["last_recovery_status"]["status"] == "REST_FAILURE_RECOVERED"
+    assert stats["last_recovery_status"]["recovered_status"] == "DNS_FAILURE_RECORDED"
+    assert stats["failure_history"][-1]["status"] == "DNS_FAILURE_RECORDED"
+
+
+def test_rest_dns_degradation_clears_from_market_truth_after_matching_success():
+    feeds = MarketFeeds(_config())
+    websocket = KrakenWebSocketClient(symbols=["BTC/USD"])
+    websocket._connected = True
+    websocket._messages_processed = 3
+    websocket._last_message_time_ns = T0_NS
+    polling = PollingClient(symbols=["BTC/USD"])
+    polling._record_polling_failure(
+        "BTC/USD",
+        "candle",
+        aiohttp.ClientConnectorError(
+            SimpleNamespace(host="api.kraken.com", port=443, ssl=True),
+            OSError("dns failure"),
+        ),
+        endpoint="https://api.kraken.com/0/public/OHLC",
+    )
+    feeds.websocket_client = websocket
+    feeds.polling_client = polling
+    feeds.order_books["BTC/USD"] = _book(T0_NS)
+    feeds.candles.add_candle(_candle(T0_NS))
+
+    assert feeds.get_feed_truth_status()["status"] == "WEBSOCKET_ACTIVE_REST_DNS_FAILED"
+
+    polling._record_polling_success("BTC/USD", "candle", "https://api.kraken.com/0/public/OHLC")
+    truth = feeds.get_feed_truth_status()
+
+    assert truth["status"] == "WEBSOCKET_ACTIVE"
+    assert truth["rest"]["latest_failure"] == {}
+    assert truth["rest"]["latest_success"]["status"] == "REST_ACTIVE"
+    assert "MISSING_CANDLE_TRUTH" not in truth["missing_truth"]
 
 
 def test_market_status_preserves_websocket_provenance_and_missing_rest_truth():

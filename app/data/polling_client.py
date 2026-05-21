@@ -40,7 +40,8 @@ class PollingClient:
         on_candle: Optional[Callable] = None,
         on_order_book: Optional[Callable] = None,
         on_feed_truth: Optional[Callable[[Dict[str, Any]], None]] = None,
-        exchange: str = "kraken"
+        exchange: str = "kraken",
+        dns_backoff_seconds: float = 15.0,
     ):
         """
         Initialize polling client.
@@ -51,6 +52,7 @@ class PollingClient:
             on_candle: Callback for candle data
             on_order_book: Callback for order book data
             exchange: Exchange name for API endpoints
+            dns_backoff_seconds: Fail-closed REST DNS retry backoff per endpoint domain
         """
         self.symbols = symbols
         self.interval = interval
@@ -58,6 +60,7 @@ class PollingClient:
         self.on_order_book = on_order_book
         self.on_feed_truth = on_feed_truth
         self.exchange = exchange
+        self.dns_backoff_seconds = max(1.0, float(dns_backoff_seconds))
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -67,8 +70,10 @@ class PollingClient:
         self._last_candle_timestamps_ns: Dict[str, int] = {}
         self._last_failure_status: Dict[str, Any] = {}
         self._last_success_status: Dict[str, Any] = {}
+        self._last_recovery_status: Dict[str, Any] = {}
         self._failure_status_by_symbol_feed: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._failure_history: List[Dict[str, Any]] = []
+        self._dns_backoff_until_ns_by_domain: Dict[str, int] = {}
 
         # API endpoints (example for Kraken)
         self._endpoints = {
@@ -163,6 +168,8 @@ class PollingClient:
                     status="MISSING_CANDLE_TRUTH",
                 )
                 return
+            if self._dns_backoff_active(endpoint):
+                return
 
             # Format symbol for exchange
             formatted_symbol = self._format_symbol(symbol)
@@ -224,6 +231,8 @@ class PollingClient:
                     endpoint=None,
                     status="MISSING_ORDER_BOOK_TRUTH",
                 )
+                return
+            if self._dns_backoff_active(endpoint):
                 return
 
             formatted_symbol = self._format_symbol(symbol)
@@ -310,6 +319,17 @@ class PollingClient:
         parsed = urlparse(endpoint)
         return parsed.hostname
 
+    def _dns_backoff_active(self, endpoint: Optional[str], current_ns: Optional[int] = None) -> bool:
+        domain = self._endpoint_domain(endpoint)
+        if not domain:
+            return False
+        current_ns = int(current_ns or now_ns())
+        until_ns = int(self._dns_backoff_until_ns_by_domain.get(domain, 0) or 0)
+        if until_ns <= current_ns:
+            self._dns_backoff_until_ns_by_domain.pop(domain, None)
+            return False
+        return True
+
     def _record_polling_failure(
         self,
         symbol: str,
@@ -331,6 +351,10 @@ class PollingClient:
             "market_truth": "MISSING_CANDLE_TRUTH" if feed_type == "candle" else "MISSING_ORDER_BOOK_TRUTH",
             "timestamp_ns": now_ns(),
         }
+        if reason == "DNS_FAILURE_RECORDED" and failure_status["endpoint_domain"]:
+            self._dns_backoff_until_ns_by_domain[failure_status["endpoint_domain"]] = (
+                failure_status["timestamp_ns"] + int(self.dns_backoff_seconds * 1_000_000_000)
+            )
         self._last_failure_status = failure_status
         self._failure_status_by_symbol_feed.setdefault(symbol, {})[feed_type] = failure_status
         self._failure_history.append(failure_status)
@@ -339,15 +363,44 @@ class PollingClient:
         if self.on_feed_truth:
             self.on_feed_truth(dict(failure_status))
 
+    def _latest_unresolved_failure_status(self) -> Dict[str, Any]:
+        unresolved = [
+            status
+            for by_feed in self._failure_status_by_symbol_feed.values()
+            for status in by_feed.values()
+        ]
+        if not unresolved:
+            return {}
+        return dict(max(unresolved, key=lambda status: int(status.get("timestamp_ns", 0) or 0)))
+
     def _record_polling_success(self, symbol: str, feed_type: str, endpoint: Optional[str]) -> None:
+        recovered_status = self._failure_status_by_symbol_feed.get(symbol, {}).pop(feed_type, None)
+        if symbol in self._failure_status_by_symbol_feed and not self._failure_status_by_symbol_feed[symbol]:
+            self._failure_status_by_symbol_feed.pop(symbol, None)
+
+        timestamp_ns = now_ns()
         self._last_success_status = {
             "status": "REST_ACTIVE",
             "symbol": symbol,
             "feed_type": feed_type,
             "exchange": self.exchange,
             "endpoint_domain": self._endpoint_domain(endpoint),
-            "timestamp_ns": now_ns(),
+            "timestamp_ns": timestamp_ns,
         }
+        if recovered_status:
+            self._last_recovery_status = {
+                "status": "REST_FAILURE_RECOVERED",
+                "recovered_status": recovered_status.get("status"),
+                "symbol": symbol,
+                "feed_type": feed_type,
+                "exchange": self.exchange,
+                "endpoint_domain": self._endpoint_domain(endpoint),
+                "timestamp_ns": timestamp_ns,
+            }
+        endpoint_domain = self._endpoint_domain(endpoint)
+        if endpoint_domain:
+            self._dns_backoff_until_ns_by_domain.pop(endpoint_domain, None)
+        self._last_failure_status = self._latest_unresolved_failure_status()
 
     def _parse_candles(self, data: Dict, symbol: str) -> List[Candle]:
         """
@@ -493,6 +546,9 @@ class PollingClient:
             "last_candle_timestamps_ns": self._last_candle_timestamps_ns.copy(),
             "last_failure_status": dict(self._last_failure_status),
             "last_success_status": dict(self._last_success_status),
+            "last_recovery_status": dict(self._last_recovery_status),
+            "dns_backoff_seconds": self.dns_backoff_seconds,
+            "dns_backoff_until_ns_by_domain": dict(self._dns_backoff_until_ns_by_domain),
             "failure_status_by_symbol_feed": {
                 symbol: {feed_type: dict(status) for feed_type, status in feeds.items()}
                 for symbol, feeds in self._failure_status_by_symbol_feed.items()
