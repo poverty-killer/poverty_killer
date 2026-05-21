@@ -152,3 +152,12 @@ Reason: module-level operator/monitoring readiness and no-live/no-mutation postu
 - Remaining blocker: `PHYSICAL_FUSE_REQUIRES_OPERATOR_ACTION`.
 
 Autonomous PAPER mutation should not be launched until the physical fuse is lawfully reset/acknowledged by the owning guard and a fresh bounded shadow run is clean.
+
+Physical fuse operator reset packet update:
+
+- Owner-confirmed reset authority: `HybridRiskGuard` in `app/risk/guard.py`.
+- Lawful reset path added: `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)`.
+- Reset requirements: stale fuse classification, explicit operator acknowledgment, paper broker read-only reconciliation, no live endpoint, no broker mutation, POST/PATCH/DELETE count `0`, shadow-read-only evidence, no broker/local conflict, and no other active fuse.
+- Real persisted state was not reset in this packet.
+- Current real fuse status remains `PHYSICAL_FUSE_STALE`.
+- Current final verdict remains `NOT_READY_FOR_AUTONOMOUS_PAPER` until the operator applies the evidence-gated reset path and a fresh bounded shadow-read-only run is clean.

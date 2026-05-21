@@ -151,3 +151,9 @@ Observed blockers/degraded truth:
 `NOT_READY_FOR_AUTONOMOUS_PAPER`
 
 Reason: operator/monitoring launch controls and no-live/no-mutation posture are validated, and Alpaca PAPER read-only reconciliation is now proven. However, the persisted physical fuse remains active/stale and requires lawful operator reset before Friday autonomous PAPER launch can be marked ready.
+
+Follow-up operator reset path status:
+
+- `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)` now provides the owner-side evidence-gated stale fuse reset path.
+- The real persisted fuse was not reset in that packet.
+- Launch readiness remains blocked by `PHYSICAL_FUSE_REQUIRES_OPERATOR_ACTION` until the operator reset is applied and a fresh bounded shadow-read-only run is clean.

@@ -119,3 +119,14 @@ Result:
 `NOT_READY_FOR_AUTONOMOUS_PAPER`
 
 Reason: Alpaca PAPER read-only reconciliation is proven with real read-only GETs and zero mutation. The persisted physical fuse remains active/stale and requires lawful operator reset before autonomous paper launch readiness can be upgraded.
+
+## Operator Reset Path Update
+
+The follow-up physical fuse operator reset packet added the owner-side evidence-gated reset path in `HybridRiskGuard`:
+
+- `PhysicalFuseOperatorResetEvidence`
+- `PhysicalFuseOperatorResetResult`
+- `HybridRiskGuard.classify_physical_fuse_state()`
+- `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)`
+
+The real persisted fuse was not reset by this packet. Current verdict remains `NOT_READY_FOR_AUTONOMOUS_PAPER` until the operator applies the evidence-gated reset path and a fresh bounded shadow-read-only run proves clean health/no-mutation posture.

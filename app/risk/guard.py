@@ -74,6 +74,48 @@ class RiskState:
     estimated_tax_liability: float = 0.0
     tax_rate: float = 0.25
     tradeable_equity: float = 0.0
+    last_operator_reset_audit: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class PhysicalFuseOperatorResetEvidence:
+    """Operator-supplied evidence required before stale physical fuse reset."""
+
+    operator_acknowledged: bool
+    broker_read_only_reconciled: bool
+    broker_environment: str
+    live_endpoint_used: bool
+    mutation_occurred: bool
+    request_counts: Dict[str, int] = field(default_factory=dict)
+    shadow_read_only: bool = False
+    broker_local_conflict: bool = False
+    source: str = "operator"
+    note: str = ""
+
+    def mutation_count(self) -> int:
+        return sum(int(self.request_counts.get(method, 0) or 0) for method in ("POST", "PATCH", "DELETE"))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "operator_acknowledged": self.operator_acknowledged,
+            "broker_read_only_reconciled": self.broker_read_only_reconciled,
+            "broker_environment": self.broker_environment,
+            "live_endpoint_used": self.live_endpoint_used,
+            "mutation_occurred": self.mutation_occurred,
+            "request_counts": dict(self.request_counts),
+            "shadow_read_only": self.shadow_read_only,
+            "broker_local_conflict": self.broker_local_conflict,
+            "source": self.source,
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True)
+class PhysicalFuseOperatorResetResult:
+    status: str
+    reset_applied: bool
+    reason_codes: Tuple[str, ...]
+    audit_event: Dict[str, Any]
 
 
 class HybridRiskGuard:
@@ -332,7 +374,8 @@ class HybridRiskGuard:
                     estimated_tax_liability=data.get("estimated_tax_liability", 0.0),
                     tax_rate=data.get("tax_rate", self.tax_rate),
                     tradeable_equity=data.get("tradeable_equity", initial_equity),
-                    max_latency_ms=data.get("max_latency_ms", self.max_latency_ms)
+                    max_latency_ms=data.get("max_latency_ms", self.max_latency_ms),
+                    last_operator_reset_audit=data.get("last_operator_reset_audit"),
                 )
                 logger.info(f"Loaded persistent risk state: peak=${state.high_water_mark:,.2f}, "
                            f"history_entries={len(state.equity_history)}")
@@ -364,7 +407,8 @@ class HybridRiskGuard:
                     estimated_tax_liability=data.get("estimated_tax_liability", 0.0),
                     tax_rate=data.get("tax_rate", self.tax_rate),
                     tradeable_equity=data.get("tradeable_equity", initial_equity),
-                    max_latency_ms=data.get("max_latency_ms", self.max_latency_ms)
+                    max_latency_ms=data.get("max_latency_ms", self.max_latency_ms),
+                    last_operator_reset_audit=data.get("last_operator_reset_audit"),
                 )
                 self._counters["RESTORED_FROM_BACKUP"] += 1
                 logger.warning(f"RESTORED_FROM_BACKUP fired: counters={self._counters} backup={self.backup_file}")
@@ -406,7 +450,8 @@ class HybridRiskGuard:
             "estimated_tax_liability": self._state.estimated_tax_liability,
             "tax_rate": self._state.tax_rate,
             "tradeable_equity": self._state.tradeable_equity,
-            "max_latency_ms": self._state.max_latency_ms
+            "max_latency_ms": self._state.max_latency_ms,
+            "last_operator_reset_audit": self._state.last_operator_reset_audit,
         }
         
         if not self._atomic_write_json(data, self.state_file):
@@ -922,6 +967,96 @@ class HybridRiskGuard:
                 return False
             return True
 
+    def classify_physical_fuse_state(self) -> str:
+        """Classify current physical fuse state without clearing it."""
+        with self._lock:
+            if not self._state.physical_fuse_triggered:
+                return "PHYSICAL_FUSE_CLEARED"
+            if self._state.current_equity > self.get_physical_fuse():
+                return "PHYSICAL_FUSE_STALE"
+            return "PHYSICAL_FUSE_ACTIVE"
+
+    def reset_stale_physical_fuse_with_evidence(
+        self,
+        evidence: PhysicalFuseOperatorResetEvidence,
+    ) -> PhysicalFuseOperatorResetResult:
+        """
+        Reset a stale physical fuse only after explicit operator and safety evidence.
+
+        This is the owner-side launch-blocker burn-down path. It does not bypass
+        an active drawdown fuse, does not accept live broker evidence, and refuses
+        any broker mutation markers.
+        """
+        with self._lock:
+            classification = self.classify_physical_fuse_state()
+            reasons: List[str] = []
+
+            if classification == "PHYSICAL_FUSE_CLEARED":
+                reasons.append("PHYSICAL_FUSE_ALREADY_CLEARED")
+            elif classification == "PHYSICAL_FUSE_ACTIVE":
+                reasons.append("PHYSICAL_FUSE_ACTIVE")
+                reasons.append("PHYSICAL_FUSE_BLOCKS_AUTONOMOUS_PAPER")
+            elif classification != "PHYSICAL_FUSE_STALE":
+                reasons.append("PHYSICAL_FUSE_STATUS_UNKNOWN")
+
+            if not evidence.operator_acknowledged:
+                reasons.append("PHYSICAL_FUSE_REQUIRES_OPERATOR_ACTION")
+            if not evidence.broker_read_only_reconciled:
+                reasons.append("BROKER_READ_ONLY_RECONCILIATION_REQUIRED")
+            if evidence.broker_environment.lower() != "paper":
+                reasons.append("PAPER_BROKER_ENVIRONMENT_REQUIRED")
+            if evidence.live_endpoint_used:
+                reasons.append("LIVE_ENDPOINT_USED_BLOCKS_RESET")
+            if evidence.mutation_occurred or evidence.mutation_count() != 0:
+                reasons.append("BROKER_MUTATION_BLOCKS_RESET")
+            if not evidence.shadow_read_only:
+                reasons.append("SHADOW_READ_ONLY_EVIDENCE_REQUIRED")
+            if evidence.broker_local_conflict:
+                reasons.append("BROKER_LOCAL_CONFLICT_BLOCKS_RESET")
+            if self._state.vol_fuse_triggered:
+                reasons.append("VOL_FUSE_ACTIVE_BLOCKS_RESET")
+            if self._state.lag_abort_triggered:
+                reasons.append("LAG_ABORT_ACTIVE_BLOCKS_RESET")
+            if self._state.exchange_outage_triggered:
+                reasons.append("EXCHANGE_OUTAGE_ACTIVE_BLOCKS_RESET")
+
+            audit_event = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "event": "PHYSICAL_FUSE_OPERATOR_RESET_EVALUATED",
+                "classification_before": classification,
+                "current_equity": self._state.current_equity,
+                "high_water_mark": self._state.high_water_mark,
+                "physical_fuse": self.get_physical_fuse(),
+                "evidence": evidence.to_dict(),
+                "reason_codes": tuple(dict.fromkeys(reasons)),
+            }
+
+            if reasons:
+                return PhysicalFuseOperatorResetResult(
+                    status="FAILED_CLOSED",
+                    reset_applied=False,
+                    reason_codes=tuple(dict.fromkeys(reasons)),
+                    audit_event=audit_event,
+                )
+
+            self._state.physical_fuse_triggered = False
+            self._state.adaptive_floor_breached = False
+            self._state.high_water_mark = self._state.current_equity
+            self._state.equity_history = []
+            audit_event["event"] = "PHYSICAL_FUSE_OPERATOR_RESET_APPLIED"
+            audit_event["classification_after"] = "PHYSICAL_FUSE_CLEARED"
+            audit_event["reason_codes"] = ("PHYSICAL_FUSE_CLEARED",)
+            self._state.last_operator_reset_audit = audit_event
+            self._update_tradeable_equity()
+            self._save_state()
+            logger.info("RiskGuard: stale physical fuse reset with operator evidence")
+            return PhysicalFuseOperatorResetResult(
+                status="PHYSICAL_FUSE_CLEARED",
+                reset_applied=True,
+                reason_codes=("PHYSICAL_FUSE_CLEARED",),
+                audit_event=audit_event,
+            )
+
     def reset_fuse(self) -> None:
         """Reset physical fuse (manual intervention required)."""
         with self._lock:
@@ -966,4 +1101,6 @@ class HybridRiskGuard:
                 "equity_history_count": len(self._state.equity_history),
                 "can_trade": self.can_trade(),
                 "persistence_counters": dict(self._counters),
+                "physical_fuse_status": self.classify_physical_fuse_state(),
+                "last_operator_reset_audit": self._state.last_operator_reset_audit,
             }
