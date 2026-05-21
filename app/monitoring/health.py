@@ -240,6 +240,88 @@ class HealthJournalRecord:
     payload: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class PhysicalFuseReadiness:
+    status: str
+    blocks_autonomous_paper: bool
+    requires_operator_action: bool
+    reason_codes: tuple[str, ...]
+    current_equity: Decimal | None = None
+    high_water_mark: Decimal | None = None
+    physical_fuse: Decimal | None = None
+    drawdown_from_peak: Decimal | None = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "blocks_autonomous_paper": self.blocks_autonomous_paper,
+            "requires_operator_action": self.requires_operator_action,
+            "reason_codes": self.reason_codes,
+            "current_equity": str(self.current_equity) if self.current_equity is not None else None,
+            "high_water_mark": str(self.high_water_mark) if self.high_water_mark is not None else None,
+            "physical_fuse": str(self.physical_fuse) if self.physical_fuse is not None else None,
+            "drawdown_from_peak": str(self.drawdown_from_peak) if self.drawdown_from_peak is not None else None,
+        }
+
+
+def evaluate_physical_fuse_readiness(risk_status: Dict[str, Any]) -> PhysicalFuseReadiness:
+    """
+    Classify HybridRiskGuard physical fuse state without clearing it.
+
+    The physical fuse is an absolute risk guard. A persisted active fuse blocks
+    autonomous paper even when the current equity is back above the fuse level;
+    that stale state requires explicit operator reset via the owning guard.
+    """
+    current_equity = _decimal_or_none(risk_status.get("current_equity"))
+    high_water_mark = _decimal_or_none(risk_status.get("high_water_mark"))
+    physical_fuse = _decimal_or_none(risk_status.get("physical_fuse"))
+    drawdown = _decimal_or_none(risk_status.get("drawdown_from_peak"))
+    active = bool(risk_status.get("physical_fuse_triggered"))
+
+    if active:
+        if current_equity is not None and physical_fuse is not None and current_equity > physical_fuse:
+            return PhysicalFuseReadiness(
+                status="PHYSICAL_FUSE_STALE",
+                blocks_autonomous_paper=True,
+                requires_operator_action=True,
+                reason_codes=("PHYSICAL_FUSE_STALE", "PHYSICAL_FUSE_REQUIRES_OPERATOR_ACTION"),
+                current_equity=current_equity,
+                high_water_mark=high_water_mark,
+                physical_fuse=physical_fuse,
+                drawdown_from_peak=drawdown,
+            )
+        return PhysicalFuseReadiness(
+            status="PHYSICAL_FUSE_ACTIVE",
+            blocks_autonomous_paper=True,
+            requires_operator_action=True,
+            reason_codes=("PHYSICAL_FUSE_ACTIVE", "PHYSICAL_FUSE_BLOCKS_AUTONOMOUS_PAPER"),
+            current_equity=current_equity,
+            high_water_mark=high_water_mark,
+            physical_fuse=physical_fuse,
+            drawdown_from_peak=drawdown,
+        )
+
+    return PhysicalFuseReadiness(
+        status="PHYSICAL_FUSE_CLEARED",
+        blocks_autonomous_paper=False,
+        requires_operator_action=False,
+        reason_codes=("PHYSICAL_FUSE_CLEARED",),
+        current_equity=current_equity,
+        high_water_mark=high_water_mark,
+        physical_fuse=physical_fuse,
+        drawdown_from_peak=drawdown,
+    )
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
 # ============================================================================
 # ENGINE
 # ============================================================================
@@ -824,5 +906,7 @@ __all__ = [
     "HealthViolation",
     "HealthSnapshot",
     "HealthJournalRecord",
+    "PhysicalFuseReadiness",
+    "evaluate_physical_fuse_readiness",
     "HealthMonitor",
 ]

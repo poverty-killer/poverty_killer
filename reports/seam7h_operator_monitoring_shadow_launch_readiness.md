@@ -139,8 +139,10 @@ Observed blockers/degraded truth:
 ## Remaining Blockers
 
 - Critical launch blocker: bounded shadow run emitted `HEALTH ALERT: Physical fuse triggered!`.
-- Market data blocker/degradation: Kraken REST polling DNS failures prevented full REST candle/order-book truth despite websocket feed ingress.
-- Broker truth blocker: Alpaca PAPER read-only reconciliation truth was not proven in the bounded shadow output.
+- Final burn-down classified the owning `HybridRiskGuard` state as `PHYSICAL_FUSE_STALE`: persisted `physical_fuse_triggered=true` while current equity and high-water mark are both `20000.0`, above the `15000.0` physical fuse threshold.
+- The physical fuse still blocks autonomous paper because `HybridRiskGuard.reset_fuse()` is documented as manual intervention and was not called.
+- Market data blocker/degradation: Kraken REST DNS handling was corrected after Seam 7H and now records `WEBSOCKET_ACTIVE_REST_DNS_FAILED` / `MARKET_DATA_PARTIAL_TRUTH` instead of vague network noise.
+- Broker truth blocker: cleared by approved sanitized Alpaca PAPER read-only GET proof: endpoint paper, account read, positions count `7`, open orders count `0`, request counts `GET=3`, `POST=0`, no mutation, no live endpoint.
 - Dashboard server start is intentionally blocked in tests because it opens a port and contains operator command endpoints.
 - External alert dispatch is intentionally blocked/unconfigured in tests.
 
@@ -148,4 +150,4 @@ Observed blockers/degraded truth:
 
 `NOT_READY_FOR_AUTONOMOUS_PAPER`
 
-Reason: operator/monitoring launch controls and no-live/no-mutation posture are validated, and the bounded shadow run showed feed/fusion activity without broker mutation. However, critical health fuse alerts, REST DNS truth gaps, and missing broker read-only reconciliation proof must be cleared before Friday autonomous PAPER launch can be marked ready.
+Reason: operator/monitoring launch controls and no-live/no-mutation posture are validated, and Alpaca PAPER read-only reconciliation is now proven. However, the persisted physical fuse remains active/stale and requires lawful operator reset before Friday autonomous PAPER launch can be marked ready.

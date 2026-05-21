@@ -78,6 +78,36 @@ class AlpacaPaperCredentials:
         return BrokerCredentialStatus.MISSING.value
 
 
+@dataclass(frozen=True)
+class AlpacaPaperReadOnlyReconciliationProof:
+    status: str
+    reason_codes: tuple[str, ...]
+    endpoint: str
+    environment: str
+    account_status: str
+    positions_count: int
+    open_orders_count: int
+    request_counts: dict[str, int]
+    broker_truth: dict[str, Any]
+    mutation_occurred: bool = False
+    live_endpoint_used: bool = False
+
+    def to_sanitized_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason_codes": self.reason_codes,
+            "endpoint": self.endpoint,
+            "environment": self.environment,
+            "account_status": self.account_status,
+            "positions_count": self.positions_count,
+            "open_orders_count": self.open_orders_count,
+            "request_counts": dict(self.request_counts),
+            "mutation_occurred": self.mutation_occurred,
+            "live_endpoint_used": self.live_endpoint_used,
+            "broker_truth_keys": tuple(sorted(self.broker_truth.keys())),
+        }
+
+
 def load_alpaca_paper_credentials(path: Path | None = None) -> AlpacaPaperCredentials:
     values: dict[str, str] = {}
     configured_path = os.environ.get("POVERTY_KILLER_ALPACA_PAPER_ENV_PATH")
@@ -312,6 +342,76 @@ class AlpacaPaperBrokerAdapter:
                 "requires_reconciliation": method == "POST",
             },
         )
+
+
+def collect_alpaca_paper_read_only_reconciliation_truth(
+    adapter: AlpacaPaperBrokerAdapter,
+) -> AlpacaPaperReadOnlyReconciliationProof:
+    """
+    Collect canonical Alpaca PAPER read-only broker truth through adapter GETs.
+
+    This helper does not submit orders and does not mutate broker state. It
+    exists to bundle account, positions, and open-orders truth with request
+    counts for readiness/reconciliation evidence.
+    """
+    identity = adapter.identity
+    reasons: list[str] = []
+    if identity.base_url != EXPECTED_ALPACA_PAPER_BASE_URL:
+        reasons.append("ALPACA_PAPER_ENDPOINT_REQUIRED")
+    if identity.environment != BrokerEnvironment.PAPER.value:
+        reasons.append("ALPACA_ENVIRONMENT_NOT_PAPER")
+    if identity.live_blocked is not True:
+        reasons.append("LIVE_ENDPOINT_NOT_BLOCKED")
+
+    try:
+        account = adapter.get_account()
+        positions = adapter.get_positions()
+        open_orders = adapter.get_open_orders()
+    except BrokerGatewayError as exc:
+        return AlpacaPaperReadOnlyReconciliationProof(
+            status="MISSING_BROKER_TRUTH",
+            reason_codes=tuple(dict.fromkeys([*reasons, exc.reason_code])),
+            endpoint=identity.base_url,
+            environment=identity.environment,
+            account_status="missing",
+            positions_count=0,
+            open_orders_count=0,
+            request_counts=dict(adapter.request_counts),
+            broker_truth={},
+            mutation_occurred=False,
+            live_endpoint_used=identity.base_url == FORBIDDEN_ALPACA_LIVE_BASE_URL,
+        )
+
+    responses = (account, positions, open_orders)
+    if any(not response.ok for response in responses):
+        reasons.append("BROKER_READ_ONLY_GET_FAILED")
+    if any(response.mutation_occurred for response in responses):
+        reasons.append("BROKER_READ_ONLY_MUTATION_OCCURRED")
+
+    counts = dict(adapter.request_counts)
+    if counts.get("POST", 0) != 0:
+        reasons.append("POST_COUNT_NONZERO")
+
+    broker_truth = {
+        "account": account.payload,
+        "positions": positions.payload if isinstance(positions.payload, list) else [],
+        "open_orders": open_orders.payload if isinstance(open_orders.payload, list) else [],
+    }
+    status = "BROKER_READ_ONLY_RECONCILED" if not reasons else "FAILED_CLOSED"
+    account_status = "read" if account.ok else "missing"
+    return AlpacaPaperReadOnlyReconciliationProof(
+        status=status,
+        reason_codes=tuple(dict.fromkeys(reasons or ["BROKER_READ_ONLY_GETS_SUCCEEDED"])),
+        endpoint=identity.base_url,
+        environment=identity.environment,
+        account_status=account_status,
+        positions_count=len(broker_truth["positions"]),
+        open_orders_count=len(broker_truth["open_orders"]),
+        request_counts=counts,
+        broker_truth=broker_truth,
+        mutation_occurred=any(response.mutation_occurred for response in responses),
+        live_endpoint_used=identity.base_url == FORBIDDEN_ALPACA_LIVE_BASE_URL,
+    )
 
 
 def _normalize_status(raw_status: Any, *, ok: bool) -> str:

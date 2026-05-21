@@ -125,12 +125,30 @@ Seam 7H compile/focused/regression proof:
 - Fusion path active: `FUSION_UPDATE_CALLED` appeared for runtime symbols.
 - No current-run broker mutation/order markers were found in the bounded-window log scan.
 
+Final blocker burn-down update at `4b7ac8e` plus current working packet:
+
+- Kraken REST DNS / feed truth blocker: cleared at deterministic level by explicit `WEBSOCKET_ACTIVE_REST_DNS_FAILED` / `MARKET_DATA_PARTIAL_TRUTH` handling.
+- Alpaca PAPER read-only reconciliation: proven with sanitized real read-only GETs through `AlpacaPaperBrokerAdapter`.
+  - endpoint: `https://paper-api.alpaca.markets`
+  - environment: `paper`
+  - account_status: `read`
+  - positions_count: `7`
+  - open_orders_count: `0`
+  - request_counts: `GET=3`, `POST=0`
+  - mutation_occurred: `false`
+  - live_endpoint_used: `false`
+- Physical fuse: `PHYSICAL_FUSE_STALE`.
+  - persisted `physical_fuse_triggered=true`
+  - `current_equity=20000.0`
+  - `high_water_mark=20000.0`
+  - `physical_fuse=15000.0`
+  - `last_breach_time=2026-05-08T08:08:13.711138`
+  - requires operator action through the owning `HybridRiskGuard` reset path.
+
 Current verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
 
-Reason: module-level operator/monitoring readiness and no-live/no-mutation posture passed, but the bounded shadow run exposed launch blockers:
+Reason: module-level operator/monitoring readiness and no-live/no-mutation posture passed, and Alpaca PAPER read-only reconciliation is now proven. Autonomous PAPER mutation remains blocked because the persisted physical fuse is still active/stale and must not be bypassed.
 
-- Critical health alert: `HEALTH ALERT: Physical fuse triggered!`.
-- Kraken REST candle/order-book polling DNS failures: `Cannot connect to host api.kraken.com:443 ssl:default [Could not contact DNS servers]`.
-- Alpaca PAPER read-only account/positions/open-orders reconciliation truth was not proven in the bounded shadow output.
+- Remaining blocker: `PHYSICAL_FUSE_REQUIRES_OPERATOR_ACTION`.
 
-Autonomous PAPER mutation should not be launched until these blockers are cleared and a fresh bounded shadow run is clean.
+Autonomous PAPER mutation should not be launched until the physical fuse is lawfully reset/acknowledged by the owning guard and a fresh bounded shadow run is clean.
