@@ -30,6 +30,7 @@ BUNDLE F1 Ã¢â‚¬â€ TELEMETRY INTEGRATION
 
 import concurrent.futures
 import logging
+import math
 import queue
 import threading
 import time
@@ -63,6 +64,7 @@ class ExecutionState:
     is_in_recalibration: bool = False
     recalibration_until_ns: int = 0
     last_latency_ms: float = 0.0
+    last_latency_truth: Dict[str, Any] = field(default_factory=dict)
     pending_orders: Dict[str, OrderRequest] = field(default_factory=dict)
     filled_orders: List[OrderFill] = field(default_factory=list)
     last_health_check_ns: int = 0
@@ -96,6 +98,32 @@ class ExecutionSpineResult:
     gateway_response: Optional[Any] = None
     decision_artifact: Optional[Dict[str, Any]] = None
     pre_trade_guardrail_verdict: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class LatencyTruthResult:
+    """Classified latency truth at the execution safety boundary."""
+
+    status: str
+    reason_code: str
+    latency_ms: Optional[float]
+    threshold_ms: float
+    source: str
+    safe_mode_required: bool
+    missing_source: Optional[str] = None
+    staleness_ms: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "latency_ms": self.latency_ms,
+            "threshold_ms": self.threshold_ms,
+            "source": self.source,
+            "safe_mode_required": self.safe_mode_required,
+            "missing_source": self.missing_source,
+            "staleness_ms": self.staleness_ms,
+        }
 
 
 class ExecutionEngine:
@@ -467,6 +495,7 @@ class ExecutionEngine:
                 "is_in_recalibration": self._state.is_in_recalibration,
                 "recalibration_until_ns": self._state.recalibration_until_ns,
                 "last_latency_ms": self._state.last_latency_ms,
+                "last_latency_truth": dict(self._state.last_latency_truth),
                 "pending_orders_count": len(self._state.pending_orders),
                 "pending_orders_value": sum(o.quantity * (o.limit_price or Decimal("0")) for o in self._state.pending_orders.values()),
                 "filled_orders_count": len(self._state.filled_orders),
@@ -479,6 +508,133 @@ class ExecutionEngine:
     # ============================================
     # INTERNAL METHODS
     # ============================================
+
+    def _classify_latency_truth(
+        self,
+        latency_ms: Any,
+        *,
+        current_ns: Optional[int] = None,
+    ) -> LatencyTruthResult:
+        """Classify router latency without converting missing timing into fake lag."""
+        threshold = float(self.lag_threshold_ms)
+        source = "order_router.websocket_rtt"
+        current_ns = int(current_ns or now_ns())
+
+        ping_ns = int(getattr(self.order_router, "_last_websocket_ping_ns", 0) or 0)
+        pong_ns = int(getattr(self.order_router, "_last_websocket_pong_ns", 0) or 0)
+
+        try:
+            latency_value = float(latency_ms)
+        except (TypeError, ValueError):
+            return LatencyTruthResult(
+                status="INVALID_TIMESTAMP_TRUTH",
+                reason_code="LATENCY_VALUE_NOT_NUMERIC",
+                latency_ms=None,
+                threshold_ms=threshold,
+                source=source,
+                safe_mode_required=True,
+                missing_source="order_router.measure_latency",
+            )
+
+        if ping_ns > 0 and pong_ns > 0 and pong_ns < ping_ns:
+            return LatencyTruthResult(
+                status="CLOCK_DELTA_INVALID",
+                reason_code="WEBSOCKET_PONG_BEFORE_PING",
+                latency_ms=None,
+                threshold_ms=threshold,
+                source=source,
+                safe_mode_required=True,
+            )
+
+        if not math.isfinite(latency_value):
+            missing = "websocket_ping_or_pong_timestamp"
+            if ping_ns > 0 and pong_ns > 0:
+                missing = "finite_websocket_rtt"
+            return LatencyTruthResult(
+                status="MISSING_LATENCY_TRUTH",
+                reason_code="WEBSOCKET_RTT_NOT_READY",
+                latency_ms=None,
+                threshold_ms=threshold,
+                source=source,
+                safe_mode_required=True,
+                missing_source=missing,
+            )
+
+        if latency_value < 0:
+            return LatencyTruthResult(
+                status="CLOCK_DELTA_INVALID",
+                reason_code="NEGATIVE_WEBSOCKET_RTT",
+                latency_ms=latency_value,
+                threshold_ms=threshold,
+                source=source,
+                safe_mode_required=True,
+            )
+
+        if pong_ns > 0:
+            staleness_ms = max(0.0, (current_ns - pong_ns) / NS_PER_MS)
+            if staleness_ms > 30_000.0:
+                return LatencyTruthResult(
+                    status="STALE_MARKET_TRUTH",
+                    reason_code="WEBSOCKET_RTT_STALE",
+                    latency_ms=latency_value,
+                    threshold_ms=threshold,
+                    source=source,
+                    safe_mode_required=True,
+                    staleness_ms=staleness_ms,
+                )
+
+        if latency_value > threshold:
+            return LatencyTruthResult(
+                status="LAG_ABORT_ACTIVE",
+                reason_code="LATENCY_THRESHOLD_EXCEEDED",
+                latency_ms=latency_value,
+                threshold_ms=threshold,
+                source=source,
+                safe_mode_required=True,
+            )
+
+        return LatencyTruthResult(
+            status="LATENCY_OK",
+            reason_code="LATENCY_WITHIN_THRESHOLD",
+            latency_ms=latency_value,
+            threshold_ms=threshold,
+            source=source,
+            safe_mode_required=False,
+        )
+
+    def _apply_latency_truth(self, latency_truth: LatencyTruthResult) -> None:
+        """Apply classified latency truth to execution and risk safety state."""
+        self._state.last_latency_truth = latency_truth.to_dict()
+        self._state.last_latency_ms = (
+            latency_truth.latency_ms
+            if latency_truth.latency_ms is not None
+            else 0.0
+        )
+
+        if latency_truth.status == "LATENCY_OK":
+            self.risk_guard.update_latency(latency_truth.latency_ms or 0.0)
+            if self._state.is_in_safe_mode:
+                self._state.is_in_safe_mode = False
+                logger.info(
+                    "Latency recovered: %.1fms, exiting safe mode",
+                    latency_truth.latency_ms or 0.0,
+                )
+            return
+
+        if latency_truth.status == "LAG_ABORT_ACTIVE":
+            self.risk_guard.update_latency(latency_truth.latency_ms or 0.0)
+            return
+
+        if not self._state.is_in_safe_mode:
+            logger.warning(
+                "LATENCY TRUTH BLOCK: status=%s reason=%s source=%s missing_source=%s threshold=%.1fms",
+                latency_truth.status,
+                latency_truth.reason_code,
+                latency_truth.source,
+                latency_truth.missing_source,
+                latency_truth.threshold_ms,
+            )
+        self._state.is_in_safe_mode = True
 
     def _record_shadow_read_only_block(
         self,
@@ -1137,13 +1293,9 @@ class ExecutionEngine:
         """Background thread for latency monitoring."""
         while self._state.is_running:
             try:
-                latency = self.order_router.measure_latency()
-                self._state.last_latency_ms = latency
-                self.risk_guard.update_latency(latency)
-
-                if latency < self.lag_threshold_ms and self._state.is_in_safe_mode:
-                    self._state.is_in_safe_mode = False
-                    logger.info("Latency recovered: %.1fms, exiting safe mode", latency)
+                measured_latency = self.order_router.measure_latency()
+                latency_truth = self._classify_latency_truth(measured_latency)
+                self._apply_latency_truth(latency_truth)
 
                 if self.order_router.is_websocket_connected():
                     self.risk_guard.update_websocket_heartbeat()

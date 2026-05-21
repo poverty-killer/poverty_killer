@@ -91,3 +91,20 @@ Runtime evidence:
 - Market data blocker/degradation: Kraken REST candle and order-book polling repeatedly failed DNS with `Cannot connect to host api.kraken.com:443 ssl:default [Could not contact DNS servers]`.
 - Broker truth blocker: Alpaca PAPER read-only account/positions/open-orders reconciliation truth was not proven in the bounded shadow output.
 - Final readiness status for autonomous PAPER launch is `NOT_READY_FOR_AUTONOMOUS_PAPER` until the blockers are cleared and a clean bounded shadow run is recorded.
+
+## Later Blocker Burn-Down Status
+
+Subsequent packets cleared or reclassified the original Seam 7H blockers:
+
+- Physical fuse: lawfully reset through `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)`.
+- Alpaca PAPER read-only reconciliation: proven through sanitized read-only broker evidence with endpoint `https://paper-api.alpaca.markets`, `GET=3`, `POST=0`, positions count `7`, and open orders count `0`.
+- Kraken REST DNS: preserved as structured degraded feed truth with `DNS_FAILURE_RECORDED`, `WEBSOCKET_ACTIVE_REST_DNS_FAILED`, and `MARKET_DATA_PARTIAL_TRUTH`.
+
+The latest bounded shadow-read-only run exposed a latency-readiness blocker:
+
+- previous presentation: `LAG ABORT: infms > 200.0ms`
+- root cause: missing websocket RTT ping/pong timestamp truth at startup, not a finite measured latency breach
+- corrected status: `MISSING_LATENCY_TRUTH`
+- preserved safety: finite latency above `200.0ms` still triggers `LAG_ABORT_ACTIVE`, and missing/invalid/stale latency keeps execution safe mode active
+
+Current readiness status remains `NOT_READY_FOR_AUTONOMOUS_PAPER` until a clean bounded shadow-readiness snapshot proves finite latency truth or an explicitly resolved latency warmup condition, with broker mutation count still zero and no live endpoint.

@@ -204,3 +204,39 @@ Applied reset verification:
 - no autonomous paper launch
 - no mutation approval flags
 - no broker mutation
+
+## Lag Abort INFMS Follow-Up
+
+The later lag burn-down packet identified the `LAG ABORT: infms > 200.0ms` event as missing websocket RTT timestamp truth, not a finite measured latency breach.
+
+Authority path:
+
+- `OrderRouter.get_websocket_rtt_ms()` returns non-finite RTT while ping/pong timestamps are not initialized.
+- `ExecutionEngine._monitor_loop()` owns execution-side latency monitoring.
+- `HybridRiskGuard.update_latency(...)` owns the hard `200.0ms` lag-abort threshold.
+- `ExecutionEngine` owns safe-mode entry/exit.
+
+Correction applied:
+
+- Missing websocket RTT is now classified as `MISSING_LATENCY_TRUTH`.
+- Invalid RTT clock ordering is classified as `CLOCK_DELTA_INVALID`.
+- Stale RTT truth is classified as `STALE_MARKET_TRUTH`.
+- True finite RTT above `200.0ms` still triggers `LAG_ABORT_ACTIVE`.
+- Safe mode is preserved for missing/invalid/stale latency truth and exits only after finite `LATENCY_OK`.
+
+Fresh bounded shadow-read-only result after correction:
+
+- command: `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+- result: external timeout exit `124`
+- paper mode confirmed
+- shadow-read-only mode confirmed
+- startup latency truth:
+  `LATENCY TRUTH BLOCK: status=MISSING_LATENCY_TRUTH reason=WEBSOCKET_RTT_NOT_READY source=order_router.websocket_rtt missing_source=websocket_ping_or_pong_timestamp threshold=200.0ms`
+- no `LAG ABORT: infms > 200.0ms` appeared in the bounded command output
+- no autonomous PAPER launch
+- no mutation approval flags
+- no broker mutation
+
+Updated verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
+
+Reason: operator monitoring, physical fuse reset, and Alpaca PAPER read-only reconciliation are resolved, but autonomous PAPER launch still requires a clean bounded shadow-readiness snapshot with finite latency truth or an explicitly resolved latency warmup condition.

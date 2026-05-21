@@ -215,3 +215,51 @@ Applied reset verification:
 - scoped regression: `57 passed`
 - no mutation approval flags were set
 - no autonomous PAPER launch was run
+
+## Lag Abort INFMS Burn-Down Update
+
+Current packet base HEAD: `c682211`.
+
+Root cause:
+
+- `OrderRouter.get_websocket_rtt_ms()` returned `float("inf")` while websocket ping/pong timestamp truth was not initialized.
+- `ExecutionEngine._monitor_loop()` previously passed that non-finite value directly into `HybridRiskGuard.update_latency(...)`.
+- `HybridRiskGuard` formatted that non-finite value as `infms`, emitted `LAG ABORT: infms > 200.0ms`, and put execution into safe mode.
+
+Correction:
+
+- Execution latency truth is now classified before the risk guard threshold path.
+- Missing websocket RTT is reported as `MISSING_LATENCY_TRUTH` with `missing_source=websocket_ping_or_pong_timestamp`.
+- Invalid clock truth is reported as `CLOCK_DELTA_INVALID`.
+- Stale RTT truth is reported as `STALE_MARKET_TRUTH`.
+- True finite latency above the preserved `200.0ms` threshold still reports `LAG_ABORT_ACTIVE` and keeps the hard safety path.
+- Missing/invalid/stale latency still blocks readiness and keeps execution safe mode active until finite `LATENCY_OK` is proven.
+
+Fresh bounded shadow-read-only validation after the correction:
+
+- command: `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+- result: external timeout exit `124`
+- paper mode confirmed
+- shadow-read-only mode confirmed
+- no live mode used
+- no mutation approval flags set
+- no autonomous PAPER launch run
+- startup latency truth reported:
+  `LATENCY TRUTH BLOCK: status=MISSING_LATENCY_TRUTH reason=WEBSOCKET_RTT_NOT_READY source=order_router.websocket_rtt missing_source=websocket_ping_or_pong_timestamp threshold=200.0ms`
+- no `LAG ABORT: infms > 200.0ms` appeared in the bounded command output
+- Kraken websocket connected and feed/fusion diagnostics appeared
+- Kraken REST DNS failures remained structured degraded feed truth
+
+Lag burn-down verification:
+
+- compile: passed
+- focused lag test: `9 passed`
+- scoped regression: `64 passed`
+- no broker mutation
+- no live endpoint
+- no fake latency or feed truth
+- latency threshold remained `200.0ms`
+
+Current verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
+
+Reason: the false `infms` measured-latency presentation is repaired, physical fuse is cleared, and Alpaca PAPER read-only reconciliation is proven. Autonomous PAPER remains blocked until a clean bounded shadow-readiness snapshot proves finite `LATENCY_OK` or otherwise resolves startup `MISSING_LATENCY_TRUTH` without broker mutation or live endpoint risk.
