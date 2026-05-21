@@ -34,6 +34,7 @@ BUNDLE STRATEGY-GATING REPAIR — WHALE OVERLAY WIRING (2026-04-27)
 import argparse
 import asyncio
 import logging
+import math
 import os
 import signal
 import sys
@@ -531,6 +532,15 @@ class SovereignHeartbeat:
             )
         self._primary_feed_venue = selected_feed_venue
         self._selected_market_data_provider_id = selected_market_data_provider
+        if hasattr(self.order_router, "set_market_data_latency_source"):
+            latency_source = "websocket" if self._primary_feed_venue == "kraken" else "rest_polling"
+            self.order_router.set_market_data_latency_source(latency_source)
+            logger.info(
+                "Market-data latency source selected: provider=%s venue=%s source=%s",
+                self._selected_market_data_provider_id,
+                self._primary_feed_venue,
+                latency_source,
+            )
         logger.info(
             "Market-data provider resolved: %s",
             self._market_data_provider_selection.to_telemetry(),
@@ -1040,6 +1050,20 @@ class SovereignHeartbeat:
                 selection.selected_provider_id,
             )
 
+    def _on_rest_latency(self, latency_truth: dict) -> None:
+        """Route REST polling latency truth into the execution latency authority."""
+        try:
+            self.order_router.update_rest_market_data_latency(
+                request_start_ns=int(latency_truth.get("request_start_ns") or 0),
+                response_received_ns=int(latency_truth.get("response_received_ns") or 0),
+                exchange=str(latency_truth.get("exchange") or self._primary_feed_venue),
+                provider_id=self._selected_market_data_provider_id,
+                symbol=str(latency_truth.get("symbol") or ""),
+                feed_type=str(latency_truth.get("feed_type") or ""),
+            )
+        except Exception as exc:
+            logger.exception("REST latency truth routing error: %s", exc)
+
     def _start_whale_websocket(self) -> None:
         """
         Launch venue WebSocket client in a background asyncio daemon thread.
@@ -1150,6 +1174,7 @@ class SovereignHeartbeat:
                 on_order_book=running_ref._on_order_book,
                 on_candle=running_ref._on_candle,
                 on_feed_truth=running_ref._on_feed_truth,
+                on_rest_latency=running_ref._on_rest_latency,
                 exchange=running_ref._primary_feed_venue,
             )
             try:
@@ -1218,8 +1243,13 @@ class SovereignHeartbeat:
             logger.critical("HEALTH ALERT: VoL fuse triggered!")
 
         ws_connected = status["order_router"]["websocket_connected"]
-        if not ws_connected:
+        latency_source = status["order_router"].get("market_data_latency_source")
+        if self._primary_feed_venue == "kraken" and not ws_connected:
             logger.warning("HEALTH ALERT: WebSocket disconnected!")
+        elif latency_source == "rest_polling" and not math.isfinite(
+            float(status["order_router"].get("rest_market_data_rtt_ms", float("inf")))
+        ):
+            logger.warning("HEALTH ALERT: REST feed latency not ready!")
 
         logger.debug("Health check: %s", status["execution_engine"]["is_running"])
 

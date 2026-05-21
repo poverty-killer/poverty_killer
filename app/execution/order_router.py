@@ -205,6 +205,14 @@ class OrderRouter:
         self._websocket_connected = False
         self._last_websocket_ping_ns = 0
         self._last_websocket_pong_ns = 0
+        self._market_data_latency_source = "websocket"
+        self._last_rest_market_data_request_ns = 0
+        self._last_rest_market_data_response_ns = 0
+        self._last_rest_market_data_latency_ms = float("inf")
+        self._last_rest_market_data_provider_id: Optional[str] = None
+        self._last_rest_market_data_exchange: Optional[str] = None
+        self._last_rest_market_data_symbol: Optional[str] = None
+        self._last_rest_market_data_feed_type: Optional[str] = None
 
         self._pending_orders: Dict[str, OrderRequest] = {}
         self._order_status_cache: Dict[str, OrderStatus] = {}
@@ -1778,6 +1786,37 @@ class OrderRouter:
             self._last_websocket_pong_ns = pong_ns
             self._websocket_connected = (pong_ns - ping_ns) < (self.latency_threshold_ms * 1_000_000)
 
+    def set_market_data_latency_source(self, source: str) -> None:
+        normalized = str(source or "websocket").strip().lower()
+        if normalized not in {"websocket", "rest_polling"}:
+            raise ValueError(f"unsupported_market_data_latency_source:{source}")
+        with self._lock:
+            self._market_data_latency_source = normalized
+
+    def update_rest_market_data_latency(
+        self,
+        *,
+        request_start_ns: int,
+        response_received_ns: int,
+        exchange: str,
+        provider_id: str,
+        symbol: str,
+        feed_type: str,
+    ) -> None:
+        with self._lock:
+            self._last_rest_market_data_request_ns = int(request_start_ns or 0)
+            self._last_rest_market_data_response_ns = int(response_received_ns or 0)
+            if self._last_rest_market_data_request_ns > 0 and self._last_rest_market_data_response_ns > 0:
+                self._last_rest_market_data_latency_ms = (
+                    self._last_rest_market_data_response_ns - self._last_rest_market_data_request_ns
+                ) / 1_000_000.0
+            else:
+                self._last_rest_market_data_latency_ms = float("inf")
+            self._last_rest_market_data_exchange = str(exchange or "")
+            self._last_rest_market_data_provider_id = str(provider_id or "")
+            self._last_rest_market_data_symbol = str(symbol or "")
+            self._last_rest_market_data_feed_type = str(feed_type or "")
+
     def is_websocket_connected(self) -> bool:
         with self._lock:
             if not self._websocket_connected:
@@ -1793,8 +1832,49 @@ class OrderRouter:
                 return float("inf")
             return (self._last_websocket_pong_ns - self._last_websocket_ping_ns) / 1_000_000
 
+    def get_rest_market_data_rtt_ms(self) -> float:
+        with self._lock:
+            if self._last_rest_market_data_request_ns == 0 or self._last_rest_market_data_response_ns == 0:
+                return float("inf")
+            return self._last_rest_market_data_latency_ms
+
+    def get_latency_measurement(self) -> Dict[str, Any]:
+        with self._lock:
+            if self._market_data_latency_source == "rest_polling":
+                rest_latency_ms = (
+                    self._last_rest_market_data_latency_ms
+                    if self._last_rest_market_data_request_ns > 0
+                    and self._last_rest_market_data_response_ns > 0
+                    else float("inf")
+                )
+                return {
+                    "latency_ms": rest_latency_ms,
+                    "source": "market_data.rest_polling_rtt",
+                    "request_start_ns": self._last_rest_market_data_request_ns,
+                    "response_received_ns": self._last_rest_market_data_response_ns,
+                    "exchange": self._last_rest_market_data_exchange,
+                    "provider_id": self._last_rest_market_data_provider_id,
+                    "symbol": self._last_rest_market_data_symbol,
+                    "feed_type": self._last_rest_market_data_feed_type,
+                }
+            websocket_rtt_ms = (
+                (self._last_websocket_pong_ns - self._last_websocket_ping_ns) / 1_000_000
+                if self._last_websocket_ping_ns > 0 and self._last_websocket_pong_ns > 0
+                else float("inf")
+            )
+            return {
+                "latency_ms": websocket_rtt_ms,
+                "source": "order_router.websocket_rtt",
+                "ping_ns": self._last_websocket_ping_ns,
+                "pong_ns": self._last_websocket_pong_ns,
+            }
+
     def measure_latency(self) -> float:
-        return self.get_websocket_rtt_ms()
+        measurement = self.get_latency_measurement()
+        try:
+            return float(measurement.get("latency_ms"))
+        except (TypeError, ValueError):
+            return float("inf")
 
     # ============================================
     # KRAKEN API AUTHENTICATION
@@ -3666,6 +3746,10 @@ class OrderRouter:
             "latency_threshold_ms": self.latency_threshold_ms,
             "current_latency_ms": self.measure_latency(),
             "websocket_rtt_ms": self.get_websocket_rtt_ms(),
+            "market_data_latency_source": self._market_data_latency_source,
+            "rest_market_data_rtt_ms": self.get_rest_market_data_rtt_ms(),
+            "rest_market_data_provider_id": self._last_rest_market_data_provider_id,
+            "rest_market_data_exchange": self._last_rest_market_data_exchange,
             "paper_mode": self.paper_mode,
             "execution_broker": self.execution_broker,
             "external_paper_broker_requested": self._external_paper_broker_requested,

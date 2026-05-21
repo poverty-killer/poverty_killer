@@ -517,14 +517,25 @@ class ExecutionEngine:
     ) -> LatencyTruthResult:
         """Classify router latency without converting missing timing into fake lag."""
         threshold = float(self.lag_threshold_ms)
-        source = "order_router.websocket_rtt"
+        latency_measurement = latency_ms if isinstance(latency_ms, dict) else {}
+        source = str(latency_measurement.get("source") or "order_router.websocket_rtt")
         current_ns = int(current_ns or now_ns())
 
-        ping_ns = int(getattr(self.order_router, "_last_websocket_ping_ns", 0) or 0)
-        pong_ns = int(getattr(self.order_router, "_last_websocket_pong_ns", 0) or 0)
+        if source == "market_data.rest_polling_rtt":
+            request_start_ns = int(latency_measurement.get("request_start_ns") or 0)
+            response_received_ns = int(latency_measurement.get("response_received_ns") or 0)
+            latency_value_raw = latency_measurement.get("latency_ms")
+        else:
+            ping_ns = int(latency_measurement.get("ping_ns") or getattr(self.order_router, "_last_websocket_ping_ns", 0) or 0)
+            pong_ns = int(latency_measurement.get("pong_ns") or getattr(self.order_router, "_last_websocket_pong_ns", 0) or 0)
+            latency_value_raw = (
+                latency_measurement.get("latency_ms")
+                if isinstance(latency_ms, dict)
+                else latency_ms
+            )
 
         try:
-            latency_value = float(latency_ms)
+            latency_value = float(latency_value_raw)
         except (TypeError, ValueError):
             return LatencyTruthResult(
                 status="INVALID_TIMESTAMP_TRUTH",
@@ -533,7 +544,74 @@ class ExecutionEngine:
                 threshold_ms=threshold,
                 source=source,
                 safe_mode_required=True,
-                missing_source="order_router.measure_latency",
+                missing_source="order_router.get_latency_measurement",
+            )
+
+        if source == "market_data.rest_polling_rtt":
+            if request_start_ns > 0 and response_received_ns > 0 and response_received_ns < request_start_ns:
+                return LatencyTruthResult(
+                    status="CLOCK_DELTA_INVALID",
+                    reason_code="REST_RESPONSE_BEFORE_REQUEST",
+                    latency_ms=None,
+                    threshold_ms=threshold,
+                    source=source,
+                    safe_mode_required=True,
+                )
+
+            if not math.isfinite(latency_value):
+                missing = "rest_request_or_response_timestamp"
+                if request_start_ns > 0 and response_received_ns > 0:
+                    missing = "finite_rest_polling_rtt"
+                return LatencyTruthResult(
+                    status="MISSING_LATENCY_TRUTH",
+                    reason_code="REST_RTT_NOT_READY",
+                    latency_ms=None,
+                    threshold_ms=threshold,
+                    source=source,
+                    safe_mode_required=True,
+                    missing_source=missing,
+                )
+
+            if latency_value < 0:
+                return LatencyTruthResult(
+                    status="CLOCK_DELTA_INVALID",
+                    reason_code="NEGATIVE_REST_RTT",
+                    latency_ms=latency_value,
+                    threshold_ms=threshold,
+                    source=source,
+                    safe_mode_required=True,
+                )
+
+            if response_received_ns > 0:
+                staleness_ms = max(0.0, (current_ns - response_received_ns) / NS_PER_MS)
+                if staleness_ms > 30_000.0:
+                    return LatencyTruthResult(
+                        status="STALE_MARKET_TRUTH",
+                        reason_code="REST_RTT_STALE",
+                        latency_ms=latency_value,
+                        threshold_ms=threshold,
+                        source=source,
+                        safe_mode_required=True,
+                        staleness_ms=staleness_ms,
+                    )
+
+            if latency_value > threshold:
+                return LatencyTruthResult(
+                    status="LAG_ABORT_ACTIVE",
+                    reason_code="LATENCY_THRESHOLD_EXCEEDED",
+                    latency_ms=latency_value,
+                    threshold_ms=threshold,
+                    source=source,
+                    safe_mode_required=True,
+                )
+
+            return LatencyTruthResult(
+                status="LATENCY_OK",
+                reason_code="REST_LATENCY_WITHIN_THRESHOLD",
+                latency_ms=latency_value,
+                threshold_ms=threshold,
+                source=source,
+                safe_mode_required=False,
             )
 
         if ping_ns > 0 and pong_ns > 0 and pong_ns < ping_ns:
@@ -1293,7 +1371,10 @@ class ExecutionEngine:
         """Background thread for latency monitoring."""
         while self._state.is_running:
             try:
-                measured_latency = self.order_router.measure_latency()
+                if hasattr(self.order_router, "get_latency_measurement"):
+                    measured_latency = self.order_router.get_latency_measurement()
+                else:
+                    measured_latency = self.order_router.measure_latency()
                 latency_truth = self._classify_latency_truth(measured_latency)
                 self._apply_latency_truth(latency_truth)
 

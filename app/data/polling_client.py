@@ -41,6 +41,7 @@ class PollingClient:
         on_candle: Optional[Callable] = None,
         on_order_book: Optional[Callable] = None,
         on_feed_truth: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_rest_latency: Optional[Callable[[Dict[str, Any]], None]] = None,
         exchange: str = "kraken",
         dns_backoff_seconds: float = 15.0,
     ):
@@ -60,6 +61,7 @@ class PollingClient:
         self.on_candle = on_candle
         self.on_order_book = on_order_book
         self.on_feed_truth = on_feed_truth
+        self.on_rest_latency = on_rest_latency
         self.exchange = exchange
         self.dns_backoff_seconds = max(1.0, float(dns_backoff_seconds))
 
@@ -71,6 +73,7 @@ class PollingClient:
         self._last_candle_timestamps_ns: Dict[str, int] = {}
         self._last_failure_status: Dict[str, Any] = {}
         self._last_success_status: Dict[str, Any] = {}
+        self._last_rest_latency_status: Dict[str, Any] = {}
         self._last_recovery_status: Dict[str, Any] = {}
         self._failure_status_by_symbol_feed: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._failure_history: List[Dict[str, Any]] = []
@@ -102,9 +105,18 @@ class PollingClient:
             return
 
         self._running = True
-        self._session = aiohttp.ClientSession()
+        # Use Python's socket.getaddrinfo path explicitly. In WSL-launched
+        # Windows Python, aiohttp's optional async DNS resolver can diverge
+        # from the resolver the diagnostics and runtime process actually use.
+        connector = aiohttp.TCPConnector(
+            resolver=aiohttp.ThreadedResolver(),
+            ttl_dns_cache=30,
+            use_dns_cache=True,
+        )
+        timeout = aiohttp.ClientTimeout(total=10)
+        self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         self._task = asyncio.create_task(self._poll_loop())
-        logger.info("PollingClient started")
+        logger.info("PollingClient started: resolver=threaded_socket_getaddrinfo exchange=%s", self.exchange)
 
     async def stop(self) -> None:
         """Stop polling loop."""
@@ -179,9 +191,11 @@ class PollingClient:
 
             params = self._build_candle_params(formatted_symbol)
 
+            request_start_ns = now_ns()
             async with self._session.get(endpoint, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
+                    response_received_ns = now_ns()
                     candles = self._parse_candles(data, symbol)
 
                     for candle in candles:
@@ -194,7 +208,13 @@ class PollingClient:
 
                         if self.on_candle:
                             await self._safe_callback(self.on_candle, candle)
-                    self._record_polling_success(symbol, "candle", endpoint)
+                    self._record_polling_success(
+                        symbol,
+                        "candle",
+                        endpoint,
+                        request_start_ns=request_start_ns,
+                        response_received_ns=response_received_ns,
+                    )
                 else:
                     self._record_polling_failure(
                         symbol,
@@ -238,15 +258,23 @@ class PollingClient:
 
             params = self._build_order_book_params(formatted_symbol)
 
+            request_start_ns = now_ns()
             async with self._session.get(endpoint, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
+                    response_received_ns = now_ns()
                     order_book = self._parse_order_book(data, symbol)
 
                     if order_book and self.on_order_book:
                         await self._safe_callback(self.on_order_book, order_book)
                     if order_book:
-                        self._record_polling_success(symbol, "order_book", endpoint)
+                        self._record_polling_success(
+                            symbol,
+                            "order_book",
+                            endpoint,
+                            request_start_ns=request_start_ns,
+                            response_received_ns=response_received_ns,
+                        )
                     else:
                         self._record_polling_failure(
                             symbol,
@@ -409,12 +437,23 @@ class PollingClient:
             return {}
         return dict(max(unresolved, key=lambda status: int(status.get("timestamp_ns", 0) or 0)))
 
-    def _record_polling_success(self, symbol: str, feed_type: str, endpoint: Optional[str]) -> None:
+    def _record_polling_success(
+        self,
+        symbol: str,
+        feed_type: str,
+        endpoint: Optional[str],
+        *,
+        request_start_ns: Optional[int] = None,
+        response_received_ns: Optional[int] = None,
+    ) -> None:
         recovered_status = self._failure_status_by_symbol_feed.get(symbol, {}).pop(feed_type, None)
         if symbol in self._failure_status_by_symbol_feed and not self._failure_status_by_symbol_feed[symbol]:
             self._failure_status_by_symbol_feed.pop(symbol, None)
 
         timestamp_ns = now_ns()
+        request_start_ns = int(request_start_ns or timestamp_ns)
+        response_received_ns = int(response_received_ns or timestamp_ns)
+        rest_latency_ms = max(0.0, (response_received_ns - request_start_ns) / 1_000_000.0)
         self._last_success_status = {
             "status": "REST_ACTIVE",
             "symbol": symbol,
@@ -422,7 +461,24 @@ class PollingClient:
             "exchange": self.exchange,
             "endpoint_domain": self._endpoint_domain(endpoint),
             "timestamp_ns": timestamp_ns,
+            "request_start_ns": request_start_ns,
+            "response_received_ns": response_received_ns,
+            "rest_latency_ms": rest_latency_ms,
         }
+        self._last_rest_latency_status = {
+            "status": "REST_LATENCY_OK",
+            "symbol": symbol,
+            "feed_type": feed_type,
+            "exchange": self.exchange,
+            "endpoint_domain": self._endpoint_domain(endpoint),
+            "request_start_ns": request_start_ns,
+            "response_received_ns": response_received_ns,
+            "latency_ms": rest_latency_ms,
+            "timestamp_ns": timestamp_ns,
+            "source": "market_data.rest_polling_rtt",
+        }
+        if self.on_rest_latency:
+            self.on_rest_latency(dict(self._last_rest_latency_status))
         if recovered_status:
             self._last_recovery_status = {
                 "status": "REST_FAILURE_RECOVERED",
@@ -645,6 +701,7 @@ class PollingClient:
             "last_candle_timestamps_ns": self._last_candle_timestamps_ns.copy(),
             "last_failure_status": dict(self._last_failure_status),
             "last_success_status": dict(self._last_success_status),
+            "last_rest_latency_status": dict(self._last_rest_latency_status),
             "last_recovery_status": dict(self._last_recovery_status),
             "dns_backoff_seconds": self.dns_backoff_seconds,
             "dns_backoff_until_ns_by_domain": dict(self._dns_backoff_until_ns_by_domain),
