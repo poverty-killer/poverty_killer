@@ -39,6 +39,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, Set
@@ -64,6 +65,7 @@ from app.config import Config
 from app.core.whole_bot_attribution import build_startup_attribution
 from app.data.feed_provider_router import (
     FeedProviderHealth,
+    FeedProviderLane,
     FeedProviderRequest,
     ProviderRuntimeStatus,
     build_feed_provider_router,
@@ -133,6 +135,13 @@ _REST_FEED_FAILURE_REASON_MAP = {
 
 class ExecutionBrokerSelectionError(RuntimeError):
     """Fail-closed runtime broker selection error with sanitized reasons."""
+
+
+@dataclass(frozen=True)
+class RuntimeUniverseResolution:
+    symbols: tuple[str, ...]
+    source: str
+    reason: str
 
 
 def get_configured_execution_broker(config: Config) -> str:
@@ -227,22 +236,37 @@ def _feed_symbols_for_venue(venue: str, universe: list, active_markets: list) ->
 
 def get_active_symbols(config: Config) -> Set[str]:
     """
-    Get the legacy raw feed symbols for the configured primary feed venue.
+    Get explicit runtime universe symbols.
 
     This compatibility surface intentionally returns plain symbols because
-    MainLoop still consumes symbol strings. Capability-aware venue identity is
-    available through get_active_capability_candidates().
+    MainLoop still consumes symbol strings. It no longer injects a hidden
+    venue-filtered symbol list.
     """
-    return {
-        candidate.raw_symbol
-        for candidate in get_active_capability_candidates(config)
-        if candidate.tradable and candidate.venue_id == config.primary_feed_venue
-    }
+    return set(resolve_runtime_universe(config).symbols)
+
+
+def resolve_runtime_universe(config: Config) -> RuntimeUniverseResolution:
+    watchlist = tuple(str(symbol).strip().upper() for symbol in getattr(config, "runtime_watchlist", ()) if str(symbol).strip())
+    if watchlist:
+        source = "CONFIG_EXPLICIT_ALLOWED:runtime_watchlist"
+        symbols = watchlist
+    else:
+        symbols = tuple(str(symbol).strip().upper() for symbol in getattr(config, "symbol_universe", ()) if str(symbol).strip())
+        source = "CONFIG_EXPLICIT_ALLOWED:symbol_universe" if symbols else "MISSING_UNIVERSE_TRUTH"
+
+    if not symbols:
+        return RuntimeUniverseResolution((), source, "MISSING_UNIVERSE_TRUTH")
+
+    unknown = tuple(symbol for symbol in symbols if InstrumentRegistry.get_asset_class(symbol) is None)
+    if unknown:
+        return RuntimeUniverseResolution((), source, "UNKNOWN_SYMBOLS:" + ",".join(unknown))
+    return RuntimeUniverseResolution(tuple(dict.fromkeys(symbols)), source, "UNIVERSE_READY")
 
 
 def get_active_capability_candidates(
     config: Config,
     registry: VenueCapabilityRegistry | None = None,
+    symbols: tuple[str, ...] | None = None,
 ) -> tuple[CapabilityAwareCandidate, ...]:
     """
     Return capability-aware runtime candidates for the configured universe.
@@ -260,7 +284,7 @@ def get_active_capability_candidates(
         else config.active_markets
     )
     candidates = capability_registry.build_candidate_identities(
-        symbols=config.symbol_universe,
+        symbols=symbols if symbols is not None else resolve_runtime_universe(config).symbols,
         active_markets=discovery_markets,
         environment=environment,
         discovery_mode=discovery_mode,
@@ -281,7 +305,20 @@ def get_configured_market_data_providers(config: Config, asset_class: str) -> tu
         return tuple(getattr(config, "crypto_market_data_providers", ()) or getattr(config, "market_data_providers", ()))
     if normalized in {"equity", "us_equity", "etf"}:
         return tuple(getattr(config, "equity_market_data_providers", ()) or getattr(config, "market_data_providers", ()))
+    if normalized == "options":
+        return tuple(getattr(config, "options_market_data_providers", ()) or getattr(config, "market_data_providers", ()))
     return tuple(getattr(config, "market_data_providers", ()))
+
+
+def provider_lane_for_asset_class(asset_class: str) -> str:
+    normalized = str(asset_class or "").strip().lower()
+    if normalized == "crypto":
+        return FeedProviderLane.CRYPTO_MARKET_DATA.value
+    if normalized in {"equity", "us_equity", "etf"}:
+        return FeedProviderLane.EQUITY_ETF_MARKET_DATA.value
+    if normalized == "options":
+        return FeedProviderLane.OPTIONS_MARKET_DATA.value
+    return FeedProviderLane.REFERENCE_MARKET_DATA.value
 
 
 def resolve_runtime_portal(
@@ -456,17 +493,11 @@ class SovereignHeartbeat:
             shadow_read_only=config.shadow_read_only,
         )
 
-        self._primary_feed_venue: str = config.primary_feed_venue
-        self._capability_candidates = get_active_capability_candidates(config)
-        self._feed_symbols: list = sorted(get_active_symbols(config))
-        self._primary_symbol: str = (
-            self._feed_symbols[0]
-            if self._feed_symbols
-            else _VENUE_PRIMARY_SYMBOL_FALLBACK.get(
-                self._primary_feed_venue,
-                "XBT/USD",
-            )
-        )
+        self._universe_resolution = resolve_runtime_universe(config)
+        if not self._universe_resolution.symbols:
+            raise RuntimeError(self._universe_resolution.reason)
+        self._runtime_universe_symbols = self._universe_resolution.symbols
+        self._primary_symbol = self._runtime_universe_symbols[0]
         primary_asset_class = InstrumentRegistry.get_asset_class(self._primary_symbol)
         primary_asset_class_value = primary_asset_class.value if primary_asset_class else "crypto"
         self._configured_market_data_providers = get_configured_market_data_providers(
@@ -482,28 +513,51 @@ class SovereignHeartbeat:
                 symbol=self._primary_symbol,
                 asset_class=primary_asset_class_value,
                 required_data_type="order_book",
+                provider_lane=provider_lane_for_asset_class(primary_asset_class_value),
                 execution_required=True,
             )
         )
         selected_market_data_provider = self._market_data_provider_selection.selected_provider_id
+        if selected_market_data_provider is None:
+            raise RuntimeError(self._market_data_provider_selection.reason)
         selected_feed_venue = _FEED_PROVIDER_TO_VENUE.get(str(selected_market_data_provider or ""))
+        if not selected_feed_venue:
+            raise RuntimeError(f"MISSING_TRANSPORT:{selected_market_data_provider}")
+        if config.primary_feed_venue and selected_feed_venue != config.primary_feed_venue:
+            raise RuntimeError(
+                "selected_market_data_provider_venue_mismatch:"
+                f"{selected_market_data_provider}:{selected_feed_venue}!={config.primary_feed_venue}"
+            )
+        self._primary_feed_venue = selected_feed_venue
+        self._selected_market_data_provider_id = selected_market_data_provider
         logger.info(
             "Market-data provider resolved: %s",
             self._market_data_provider_selection.to_telemetry(),
         )
-        if selected_feed_venue and selected_feed_venue != self._primary_feed_venue:
-            raise RuntimeError(
-                "selected_market_data_provider_venue_mismatch:"
-                f"{selected_market_data_provider}:{selected_feed_venue}!={self._primary_feed_venue}"
+        logger.info(
+            "Runtime universe resolved: source=%s count=%d symbols=%s",
+            self._universe_resolution.source,
+            len(self._runtime_universe_symbols),
+            self._runtime_universe_symbols,
+        )
+        self._capability_candidates = get_active_capability_candidates(
+            config,
+            symbols=self._runtime_universe_symbols,
+        )
+        selected_provider_asset_classes = set(self._market_data_provider_selection.selected_provider.asset_classes)
+        self._feed_symbols = sorted(
+            symbol
+            for symbol in self._runtime_universe_symbols
+            if (
+                (asset_class := InstrumentRegistry.get_asset_class(symbol))
+                and asset_class.value in selected_provider_asset_classes
             )
-        if selected_market_data_provider != "kraken_public":
-            raise RuntimeError(
-                "selected_market_data_provider_transport_not_implemented:"
-                f"{selected_market_data_provider or self._market_data_provider_selection.reason}"
-            )
+        )
+        if not self._feed_symbols:
+            raise RuntimeError("MISSING_MARKET_DATA_COVERAGE_FOR_UNIVERSE")
 
         # Get active symbols set for multi-symbol support
-        self._active_symbols: Set[str] = get_active_symbols(config)
+        self._active_symbols = set(self._feed_symbols)
         logger.info("Active symbols for paper trading: %s", self._active_symbols)
         logger.info(
             "Capability-aware runtime candidates: %s",
@@ -956,7 +1010,7 @@ class SovereignHeartbeat:
         status = str(feed_truth.get("status", ""))
         reason_code = _REST_FEED_FAILURE_REASON_MAP.get(status, status or "REST_UNAVAILABLE")
         provider_status = ProviderRuntimeStatus(
-            provider_id="kraken_public",
+            provider_id=self._selected_market_data_provider_id,
             health=FeedProviderHealth.FAILED.value if reason_code == "DNS_FAILURE" else FeedProviderHealth.DEGRADED.value,
             reason_codes=(reason_code,),
             last_error=str(feed_truth.get("exception_type", "")) or None,
@@ -966,9 +1020,10 @@ class SovereignHeartbeat:
                 symbol=str(feed_truth.get("symbol") or self._primary_symbol),
                 asset_class="crypto",
                 required_data_type=str(feed_truth.get("feed_type") or "order_book"),
+                provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
                 execution_required=True,
             ),
-            provider_status={"kraken_public": provider_status},
+            provider_status={self._selected_market_data_provider_id: provider_status},
         )
         logger.info(
             "Market-data provider failover telemetry: %s",
@@ -1203,6 +1258,16 @@ class SovereignHeartbeat:
             ],
             "primary_symbol": self._primary_symbol,
             "market_data_venue": self._primary_feed_venue,
+            "universe_source": self._universe_resolution.source,
+            "candidate_count": len(self._runtime_universe_symbols),
+            "market_data_provider_selection": self._market_data_provider_selection.to_telemetry(),
+            "provider_priority_list": self._configured_market_data_providers,
+            "fallback_used": self._market_data_provider_selection.reason == "FALLBACK_SELECTED",
+            "missing_universe_feed_truth_reason": (
+                None
+                if self._universe_resolution.reason == "UNIVERSE_READY"
+                else self._universe_resolution.reason
+            ),
             "execution_broker": self._execution_broker,
             "execution_primary_exchange": self._execution_primary_exchange,
             "execution_adapter": self._execution_adapter_id,

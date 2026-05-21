@@ -23,6 +23,17 @@ def _env_bool(value: str | None, *, default: bool = False) -> bool:
     return default
 
 
+def _env_list(value: str | None) -> List[str]:
+    if value is None:
+        return []
+    stripped = value.strip()
+    if not stripped:
+        return []
+    if stripped.startswith("["):
+        return [str(item).strip() for item in json.loads(stripped) if str(item).strip()]
+    return [item.strip() for item in stripped.split(",") if item.strip()]
+
+
 # ============================================
 # RISK CONFIGURATION
 # ============================================
@@ -332,33 +343,39 @@ class Config(BaseSettings):
         description="Asset classes exposed by registry-driven capability discovery.",
     )
 
-    # Primary market data venue.
-    # Literal enforces only currently-supported venues.
-    # To add a second venue: extend Literal, add entry to _VENUE_SYMBOL_FILTER in main.py,
-    # and add a client branch in SovereignHeartbeat._start_whale_websocket().
-    primary_feed_venue: Literal["kraken"] = Field(
-        default="kraken",
-        description="Primary market data feed venue. Currently: kraken only."
+    # Legacy market-data venue override. Runtime provider selection should use
+    # the provider router; this remains only for explicit compatibility.
+    primary_feed_venue: Optional[str] = Field(
+        default=None,
+        description="Optional explicit legacy market-data venue override."
     )
     market_data_providers: List[str] = Field(
-        default=["kraken_public", "coinbase_public", "binance_us_public"],
-        description="Ordered market-data provider candidates for router selection.",
+        default=[],
+        description="Explicit ordered market-data provider candidates for router selection.",
     )
     crypto_market_data_providers: List[str] = Field(
-        default=["kraken_public", "coinbase_public", "binance_us_public"],
-        description="Ordered executable crypto market-data provider candidates.",
+        default=[],
+        description="Explicit ordered executable crypto market-data provider candidates.",
     )
     equity_market_data_providers: List[str] = Field(
-        default=["alpaca_market_data"],
-        description="Ordered executable equity/ETF market-data provider candidates.",
+        default=[],
+        description="Explicit ordered executable equity/ETF market-data provider candidates.",
+    )
+    options_market_data_providers: List[str] = Field(
+        default=[],
+        description="Explicit ordered executable options market-data provider candidates.",
     )
     event_providers: List[str] = Field(
-        default=["sec_edgar", "official_company_press_releases", "official_calendars"],
-        description="Ordered advisory event provider candidates.",
+        default=[],
+        description="Explicit ordered advisory event provider candidates.",
     )
     reference_data_providers: List[str] = Field(
-        default=["coingecko_reference"],
-        description="Ordered reference market-data provider candidates.",
+        default=[],
+        description="Explicit ordered reference market-data provider candidates.",
+    )
+    runtime_watchlist: List[str] = Field(
+        default=[],
+        description="Explicit runtime watchlist. Empty watchlist fails closed before feed startup.",
     )
 
     # Active market classes — user-controlled declaration of which markets are live.
@@ -394,8 +411,10 @@ class Config(BaseSettings):
         "market_data_providers",
         "crypto_market_data_providers",
         "equity_market_data_providers",
+        "options_market_data_providers",
         "event_providers",
         "reference_data_providers",
+        "runtime_watchlist",
         mode="before",
     )
     @classmethod
@@ -440,16 +459,7 @@ class Config(BaseSettings):
     # ============================================
     initial_capital: float = Field(default=20000.0, gt=0, description="Starting capital in USD")
 
-    symbol_universe: List[str] = Field(
-        default=[
-            "BTC/USD", "ETH/USD", "SOL/USD",
-            "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
-            "SPY", "QQQ", "DIA",
-            "JPM", "JNJ", "WMT",
-            "ES", "NQ", "YM"
-        ],
-        description="List of symbols to trade"
-    )
+    symbol_universe: List[str] = Field(default=[], description="Explicit legacy symbol universe")
 
     # ============================================
     # Sub-configurations
@@ -487,12 +497,25 @@ class Config(BaseSettings):
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment."""
-        return cls(
-            shadow_read_only=_env_bool(
+        overrides = {
+            "shadow_read_only": _env_bool(
                 os.environ.get("POVERTY_KILLER_SHADOW_READ_ONLY"),
                 default=False,
-            ),
-        )
+            )
+        }
+        env_to_field = {
+            "POVERTY_KILLER_RUNTIME_WATCHLIST": "runtime_watchlist",
+            "POVERTY_KILLER_MARKET_DATA_PROVIDERS": "market_data_providers",
+            "POVERTY_KILLER_CRYPTO_MARKET_DATA_PROVIDERS": "crypto_market_data_providers",
+            "POVERTY_KILLER_EQUITY_MARKET_DATA_PROVIDERS": "equity_market_data_providers",
+            "POVERTY_KILLER_OPTIONS_MARKET_DATA_PROVIDERS": "options_market_data_providers",
+            "POVERTY_KILLER_EVENT_PROVIDERS": "event_providers",
+            "POVERTY_KILLER_REFERENCE_DATA_PROVIDERS": "reference_data_providers",
+        }
+        for env_key, field_name in env_to_field.items():
+            if env_key in os.environ:
+                overrides[field_name] = _env_list(os.environ.get(env_key))
+        return cls(**overrides)
 
     def get_class_limit(self, asset_class: str) -> float:
         """Get exposure limit for an asset class."""

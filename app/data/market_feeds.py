@@ -21,6 +21,7 @@ from app.data.validators import DataValidator
 from app.data.websocket_client import KrakenWebSocketClient
 from app.data.polling_client import PollingClient
 from app.data.feed_provider_router import (
+    FeedProviderLane,
     FeedProviderRequest,
     build_feed_provider_router,
 )
@@ -66,13 +67,14 @@ class MarketFeeds:
         }
         self._rest_truth_by_symbol_feed: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.feed_provider_router = build_feed_provider_router(
-            configured_provider_ids=getattr(config, "crypto_market_data_providers", ("kraken_public",))
+            configured_provider_ids=getattr(config, "crypto_market_data_providers", ())
         )
         self._feed_provider_selection = self.feed_provider_router.select_provider(
             FeedProviderRequest(
                 symbol=self.symbols[0] if self.symbols else "",
                 asset_class="crypto",
                 required_data_type="order_book",
+                provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
                 execution_required=True,
             )
         )
@@ -96,7 +98,7 @@ class MarketFeeds:
         )
         if selected_provider_id != "kraken_public":
             raise RuntimeError(
-                "selected_market_data_provider_transport_not_implemented:"
+                "selected_market_data_provider_unavailable:"
                 f"{selected_provider_id or self._feed_provider_selection.reason}"
             )
 

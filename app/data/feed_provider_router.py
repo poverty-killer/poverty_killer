@@ -19,6 +19,14 @@ class FeedProviderHealth(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class FeedProviderLane(str, Enum):
+    CRYPTO_MARKET_DATA = "crypto_market_data"
+    EQUITY_ETF_MARKET_DATA = "equity_etf_market_data"
+    OPTIONS_MARKET_DATA = "options_market_data"
+    REFERENCE_MARKET_DATA = "reference_market_data"
+    EVENT_NEWS_ADVISORY = "event_news_advisory"
+
+
 EXECUTABLE_DATA_CAPABILITIES = frozenset(
     {
         "trades",
@@ -45,6 +53,7 @@ PROVIDER_FAILURE_REASON_CODES = frozenset(
         "UNSUPPORTED_DATA_TYPE",
         "PROVIDER_CONFLICT",
         "TRANSPORT_ADAPTER_NOT_IMPLEMENTED",
+        "MISSING_TRANSPORT",
     }
 )
 
@@ -67,6 +76,7 @@ FAILOVER_REASON_CODES = frozenset(
 class FeedProviderDescriptor:
     provider_id: str
     provider_type: str
+    provider_lane: str
     asset_classes: tuple[str, ...]
     data_capabilities: tuple[str, ...]
     auth_required: bool
@@ -77,6 +87,7 @@ class FeedProviderDescriptor:
     execution_eligible: bool
     advisory_only: bool
     priority: int
+    coverage_scope: str
     public_no_signup: bool = False
     jurisdiction_flag: str | None = None
     transport_adapter: str | None = None
@@ -106,6 +117,7 @@ class FeedProviderDescriptor:
         return {
             "provider_id": self.provider_id,
             "provider_type": self.provider_type,
+            "provider_lane": self.provider_lane,
             "asset_classes": self.asset_classes,
             "data_capabilities": self.data_capabilities,
             "auth_required": self.auth_required,
@@ -117,6 +129,7 @@ class FeedProviderDescriptor:
             "execution_eligible": self.execution_eligible,
             "advisory_only": self.advisory_only,
             "priority": self.priority,
+            "coverage_scope": self.coverage_scope,
             "public_no_signup": self.public_no_signup,
             "jurisdiction_flag": self.jurisdiction_flag,
             "transport_adapter": self.transport_adapter,
@@ -146,6 +159,7 @@ class FeedProviderRequest:
     symbol: str
     asset_class: str
     required_data_type: str
+    provider_lane: str | None = None
     execution_required: bool = True
 
 
@@ -172,6 +186,7 @@ class FeedSelectionResult:
             "symbol": self.request.symbol,
             "asset_class": self.request.asset_class,
             "required_data_type": self.request.required_data_type,
+            "provider_lane": self.request.provider_lane,
             "execution_required": self.request.execution_required,
             "selected_provider": self.selected_provider.to_telemetry() if self.selected_provider else None,
             "selected_provider_id": self.selected_provider_id,
@@ -190,11 +205,7 @@ class FeedProviderRouter:
         conflict_tolerance_bps: float = 50.0,
     ) -> None:
         self._providers = {provider.provider_id: provider for provider in providers}
-        configured = tuple(configured_provider_ids or ())
-        self._configured_provider_ids = configured or tuple(
-            provider.provider_id
-            for provider in sorted(self._providers.values(), key=lambda item: item.priority)
-        )
+        self._configured_provider_ids = tuple(configured_provider_ids or ())
         self._trusted_source_priority = tuple(trusted_source_priority or ())
         self._conflict_tolerance_bps = float(conflict_tolerance_bps)
         self._last_selection: FeedSelectionResult | None = None
@@ -220,6 +231,18 @@ class FeedProviderRouter:
         skipped: dict[str, tuple[str, ...]] = {}
         candidates: list[FeedProviderDescriptor] = []
 
+        if not self._configured_provider_ids:
+            result = FeedSelectionResult(
+                selected_provider=None,
+                request=request,
+                status="FAILED_CLOSED",
+                reason="MISSING_MARKET_DATA_PROVIDER_CONFIG",
+                fallback_path=(),
+                skipped={},
+            )
+            self._last_selection = result
+            return result
+
         for provider_id in self._configured_provider_ids:
             provider = self._providers.get(provider_id)
             if provider is None:
@@ -238,7 +261,7 @@ class FeedProviderRouter:
             return conflict_result
 
         if not candidates:
-            reason = "MISSING_MARKET_TRUTH"
+            reason = self._missing_truth_reason(request, skipped)
             if skipped and all("MISSING_CREDENTIALS" in reasons for reasons in skipped.values()):
                 reason = "MISSING_CREDENTIALS"
             result = FeedSelectionResult(
@@ -275,8 +298,13 @@ class FeedProviderRouter:
             reasons.append("UNSUPPORTED_ASSET")
         if not provider.supports_capability(request.required_data_type):
             reasons.append("UNSUPPORTED_DATA_TYPE")
+        if request.provider_lane and provider.provider_lane != request.provider_lane:
+            reasons.append("UNSUPPORTED_PROVIDER_LANE")
         if provider.auth_required and provider.credentials_present is not True:
             reasons.append("MISSING_CREDENTIALS")
+        for descriptor_reason in provider.reason_codes:
+            if descriptor_reason in PROVIDER_FAILURE_REASON_CODES:
+                reasons.append(descriptor_reason)
         if request.execution_required:
             required = _normalize_capability(request.required_data_type)
             if required in EXECUTABLE_DATA_CAPABILITIES:
@@ -296,6 +324,27 @@ class FeedProviderRouter:
                     reasons.extend(runtime_reasons)
 
         return tuple(dict.fromkeys(reasons))
+
+    def _missing_truth_reason(
+        self,
+        request: FeedProviderRequest,
+        skipped: Mapping[str, tuple[str, ...]],
+    ) -> str:
+        lane = request.provider_lane or _lane_for_asset_and_capability(request.asset_class, request.required_data_type)
+        all_reasons = tuple(reason for reasons in skipped.values() for reason in reasons)
+        if "MISSING_ENTITLEMENT" in all_reasons:
+            return "MISSING_ENTITLEMENT"
+        if "MISSING_TRANSPORT" in all_reasons or "TRANSPORT_ADAPTER_NOT_IMPLEMENTED" in all_reasons:
+            if lane == FeedProviderLane.OPTIONS_MARKET_DATA.value:
+                return "MISSING_OPTIONS_FEED_TRUTH"
+            if lane == FeedProviderLane.EQUITY_ETF_MARKET_DATA.value:
+                return "MISSING_EQUITY_MARKET_DATA_TRUTH"
+            return "MISSING_MARKET_TRUTH"
+        if lane == FeedProviderLane.OPTIONS_MARKET_DATA.value:
+            return "MISSING_OPTIONS_FEED_TRUTH"
+        if lane == FeedProviderLane.EQUITY_ETF_MARKET_DATA.value:
+            return "MISSING_EQUITY_MARKET_DATA_TRUTH"
+        return "MISSING_MARKET_TRUTH"
 
     def _conflict_result(
         self,
@@ -354,6 +403,7 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
         FeedProviderDescriptor(
             provider_id="kraken_public",
             provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
             asset_classes=("crypto",),
             data_capabilities=("trades", "order_book", "ticker", "candles"),
             auth_required=False,
@@ -364,6 +414,7 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=True,
             advisory_only=False,
             priority=10,
+            coverage_scope="public_crypto_spot_market_data",
             public_no_signup=True,
             transport_adapter="kraken_public_ws_rest",
             provider_health=FeedProviderHealth.UNKNOWN.value,
@@ -371,6 +422,7 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
         FeedProviderDescriptor(
             provider_id="coinbase_public",
             provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
             asset_classes=("crypto",),
             data_capabilities=("trades", "order_book", "ticker", "candles"),
             auth_required=False,
@@ -381,14 +433,16 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=True,
             advisory_only=False,
             priority=20,
+            coverage_scope="public_crypto_spot_market_data_candidate",
             public_no_signup=True,
             transport_adapter="not_implemented",
             provider_health=FeedProviderHealth.UNKNOWN.value,
-            reason_codes=("TRANSPORT_ADAPTER_NOT_IMPLEMENTED",),
+            reason_codes=("MISSING_TRANSPORT",),
         ),
         FeedProviderDescriptor(
             provider_id="binance_us_public",
             provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
             asset_classes=("crypto",),
             data_capabilities=("trades", "order_book", "ticker", "candles"),
             auth_required=False,
@@ -399,15 +453,17 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=True,
             advisory_only=False,
             priority=30,
+            coverage_scope="public_us_crypto_spot_market_data_candidate",
             public_no_signup=True,
             jurisdiction_flag="US_PUBLIC_CRYPTO_MARKET_DATA",
             transport_adapter="not_implemented",
             provider_health=FeedProviderHealth.UNKNOWN.value,
-            reason_codes=("TRANSPORT_ADAPTER_NOT_IMPLEMENTED",),
+            reason_codes=("MISSING_TRANSPORT",),
         ),
         FeedProviderDescriptor(
             provider_id="coingecko_reference",
             provider_type=FeedProviderType.REFERENCE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.REFERENCE_MARKET_DATA.value,
             asset_classes=("crypto",),
             data_capabilities=("reference_price", "ticker"),
             auth_required=False,
@@ -418,12 +474,14 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=True,
             priority=100,
+            coverage_scope="reference_price_metadata_only",
             public_no_signup=True,
             transport_adapter="not_implemented",
         ),
         FeedProviderDescriptor(
             provider_id="coinmarketcap_reference",
             provider_type=FeedProviderType.REFERENCE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.REFERENCE_MARKET_DATA.value,
             asset_classes=("crypto",),
             data_capabilities=("reference_price", "metadata"),
             auth_required=True,
@@ -434,12 +492,14 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=True,
             priority=110,
+            coverage_scope="reference_price_metadata_only",
             signup_or_entitlement="api_key_required",
             transport_adapter="not_implemented",
         ),
         FeedProviderDescriptor(
             provider_id="alpaca_market_data",
             provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.EQUITY_ETF_MARKET_DATA.value,
             asset_classes=("equity", "etf"),
             data_capabilities=("trades", "order_book", "ticker", "candles"),
             auth_required=True,
@@ -450,12 +510,34 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=True,
             advisory_only=False,
             priority=50,
+            coverage_scope="alpaca_market_data_entitlement_unknown",
             signup_or_entitlement="alpaca_market_data_entitlement_required",
             transport_adapter="not_implemented",
+            reason_codes=("MISSING_ENTITLEMENT", "MISSING_TRANSPORT"),
+        ),
+        FeedProviderDescriptor(
+            provider_id="alpaca_iex_limited",
+            provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.EQUITY_ETF_MARKET_DATA.value,
+            asset_classes=("equity", "etf"),
+            data_capabilities=("trades", "ticker", "candles"),
+            auth_required=True,
+            credentials_present=alpaca_creds_present,
+            rate_limit_policy="alpaca_iex_limited_entitlement_required",
+            freshness_policy={"quote_stale_seconds": 10, "candle_stale_seconds": 60},
+            quality_checks=("limited_iex_coverage_label", "stale_quote_reject"),
+            execution_eligible=False,
+            advisory_only=False,
+            priority=55,
+            coverage_scope="limited_iex_not_full_sip",
+            signup_or_entitlement="alpaca_iex_or_market_data_entitlement_required",
+            transport_adapter="not_implemented",
+            reason_codes=("MISSING_ENTITLEMENT", "MISSING_TRANSPORT"),
         ),
         FeedProviderDescriptor(
             provider_id="tiingo_optional",
             provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.EQUITY_ETF_MARKET_DATA.value,
             asset_classes=("equity", "etf"),
             data_capabilities=("ticker", "candles"),
             auth_required=True,
@@ -466,12 +548,15 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=False,
             priority=90,
+            coverage_scope="credentialed_equity_reference_or_delayed_candidate",
             signup_or_entitlement="api_key_required",
             transport_adapter="not_implemented",
+            reason_codes=("MISSING_TRANSPORT",),
         ),
         FeedProviderDescriptor(
             provider_id="polygon_or_massive_optional",
             provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.OPTIONS_MARKET_DATA.value,
             asset_classes=("equity", "etf", "options"),
             data_capabilities=("trades", "order_book", "ticker", "candles"),
             auth_required=True,
@@ -482,12 +567,15 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=False,
             priority=95,
+            coverage_scope="credentialed_equity_options_market_data_candidate",
             signup_or_entitlement="api_key_or_entitlement_required",
             transport_adapter="not_implemented",
+            reason_codes=("MISSING_TRANSPORT",),
         ),
         FeedProviderDescriptor(
             provider_id="sec_edgar",
             provider_type=FeedProviderType.PUBLIC_EVENT_ADVISORY.value,
+            provider_lane=FeedProviderLane.EVENT_NEWS_ADVISORY.value,
             asset_classes=("equity", "etf", "macro/events"),
             data_capabilities=("filings", "news/events"),
             auth_required=False,
@@ -498,12 +586,14 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=True,
             priority=200,
+            coverage_scope="official_public_filings_advisory_only",
             public_no_signup=True,
             transport_adapter="world_awareness_sec_edgar",
         ),
         FeedProviderDescriptor(
             provider_id="openinsider",
             provider_type=FeedProviderType.PUBLIC_EVENT_ADVISORY.value,
+            provider_lane=FeedProviderLane.EVENT_NEWS_ADVISORY.value,
             asset_classes=("equity",),
             data_capabilities=("news/events",),
             auth_required=False,
@@ -514,12 +604,14 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=True,
             priority=210,
+            coverage_scope="public_insider_activity_advisory_only",
             public_no_signup=True,
             transport_adapter="world_awareness_openinsider",
         ),
         FeedProviderDescriptor(
             provider_id="capitol_trades",
             provider_type=FeedProviderType.PUBLIC_EVENT_ADVISORY.value,
+            provider_lane=FeedProviderLane.EVENT_NEWS_ADVISORY.value,
             asset_classes=("equity", "macro/events"),
             data_capabilities=("news/events",),
             auth_required=False,
@@ -530,12 +622,14 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=True,
             priority=220,
+            coverage_scope="public_political_disclosure_advisory_only",
             public_no_signup=True,
             transport_adapter="world_awareness_capitol_trades",
         ),
         FeedProviderDescriptor(
             provider_id="official_company_press_releases",
             provider_type=FeedProviderType.PUBLIC_EVENT_ADVISORY.value,
+            provider_lane=FeedProviderLane.EVENT_NEWS_ADVISORY.value,
             asset_classes=("equity",),
             data_capabilities=("news/events",),
             auth_required=False,
@@ -546,12 +640,14 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=True,
             priority=230,
+            coverage_scope="official_issuer_release_advisory_only",
             public_no_signup=True,
             transport_adapter="world_awareness_official_releases",
         ),
         FeedProviderDescriptor(
             provider_id="official_calendars",
             provider_type=FeedProviderType.PUBLIC_EVENT_ADVISORY.value,
+            provider_lane=FeedProviderLane.EVENT_NEWS_ADVISORY.value,
             asset_classes=("macro/events", "equity"),
             data_capabilities=("news/events",),
             auth_required=False,
@@ -562,6 +658,7 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             execution_eligible=False,
             advisory_only=True,
             priority=240,
+            coverage_scope="official_calendar_advisory_only",
             public_no_signup=True,
             transport_adapter="world_awareness_official_calendars",
         ),
@@ -594,6 +691,7 @@ def select_configured_market_data_provider(
             symbol=symbol,
             asset_class=asset_class,
             required_data_type=required_data_type,
+            provider_lane=_lane_for_asset_and_capability(asset_class, required_data_type),
             execution_required=True,
         )
     )
@@ -620,3 +718,17 @@ def _normalize_capability(capability: str) -> str:
         "news": "news/events",
     }
     return aliases.get(normalized, normalized)
+
+
+def _lane_for_asset_and_capability(asset_class: str, capability: str) -> str:
+    normalized_asset = _normalize_asset_class(asset_class)
+    normalized_capability = _normalize_capability(capability)
+    if normalized_capability in {"reference_price", "metadata"}:
+        return FeedProviderLane.REFERENCE_MARKET_DATA.value
+    if normalized_capability in {"filings", "news/events"} or normalized_asset == "macro/events":
+        return FeedProviderLane.EVENT_NEWS_ADVISORY.value
+    if normalized_asset == "options":
+        return FeedProviderLane.OPTIONS_MARKET_DATA.value
+    if normalized_asset in {"equity", "etf"}:
+        return FeedProviderLane.EQUITY_ETF_MARKET_DATA.value
+    return FeedProviderLane.CRYPTO_MARKET_DATA.value
