@@ -34,6 +34,7 @@ BUNDLE STRATEGY-GATING REPAIR — WHALE OVERLAY WIRING (2026-04-27)
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 import threading
@@ -63,6 +64,8 @@ from app.config import Config
 from app.core.whole_bot_attribution import build_startup_attribution
 from app.data.polling_client import PollingClient
 from app.data.websocket_client import KrakenWebSocketClient
+from app.execution.alpaca_paper_adapter import AlpacaPaperBrokerAdapter
+from app.execution.broker_gateway import BrokerCredentialStatus, BrokerEnvironment, BrokerGatewayError
 from app.execution.engine import ExecutionEngine
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
@@ -99,6 +102,72 @@ _VENUE_SYMBOL_FILTER: dict = {
 _VENUE_PRIMARY_SYMBOL_FALLBACK: dict = {
     "kraken": "XBT/USD",
 }
+
+EXECUTION_BROKER_ENV_VAR = "POVERTY_KILLER_EXECUTION_BROKER"
+INTERNAL_PAPER_EXECUTION_BROKER = "internal_paper"
+ALPACA_PAPER_EXECUTION_BROKER = "alpaca_paper"
+SUPPORTED_EXECUTION_BROKERS = frozenset(
+    {
+        INTERNAL_PAPER_EXECUTION_BROKER,
+        ALPACA_PAPER_EXECUTION_BROKER,
+    }
+)
+
+
+class ExecutionBrokerSelectionError(RuntimeError):
+    """Fail-closed runtime broker selection error with sanitized reasons."""
+
+
+def get_configured_execution_broker(config: Config) -> str:
+    """
+    Return the operator-selected execution broker.
+
+    Market-data venue remains separate. Absence of the env selector preserves
+    explicit local simulation rather than silently assuming any external broker.
+    """
+    raw = os.environ.get(EXECUTION_BROKER_ENV_VAR, INTERNAL_PAPER_EXECUTION_BROKER)
+    broker = str(raw or "").strip().lower()
+    if not broker:
+        broker = INTERNAL_PAPER_EXECUTION_BROKER
+    if broker not in SUPPORTED_EXECUTION_BROKERS:
+        raise ExecutionBrokerSelectionError(f"unsupported_execution_broker:{broker}")
+    if broker != INTERNAL_PAPER_EXECUTION_BROKER and config.broker_mode != "paper":
+        raise ExecutionBrokerSelectionError("external_execution_broker_requires_paper_mode")
+    return broker
+
+
+def resolve_execution_broker_gateway(config: Config) -> tuple[str, str, Any | None, str]:
+    """
+    Resolve active execution broker and optional BrokerGateway adapter.
+
+    Returns:
+        execution_broker, order_router_primary_exchange, gateway_adapter, adapter_id
+    """
+    execution_broker = get_configured_execution_broker(config)
+    if execution_broker == INTERNAL_PAPER_EXECUTION_BROKER:
+        return execution_broker, "kraken", None, "internal_sovereign_paper_broker"
+
+    if execution_broker == ALPACA_PAPER_EXECUTION_BROKER:
+        try:
+            adapter = AlpacaPaperBrokerAdapter.from_env()
+        except BrokerGatewayError as exc:
+            raise ExecutionBrokerSelectionError(f"alpaca_paper_adapter_blocked:{exc.reason_code}") from exc
+
+        identity = adapter.identity
+        reasons: list[str] = []
+        if identity.environment != BrokerEnvironment.PAPER.value:
+            reasons.append("adapter_environment_not_paper")
+        if identity.credential_status != BrokerCredentialStatus.CONFIGURED.value:
+            reasons.append("adapter_credentials_missing")
+        if identity.live_blocked is not True:
+            reasons.append("adapter_live_endpoint_not_blocked")
+        if identity.venue_id != "alpaca":
+            reasons.append("adapter_venue_mismatch")
+        if reasons:
+            raise ExecutionBrokerSelectionError("alpaca_paper_adapter_blocked:" + ",".join(reasons))
+        return execution_broker, identity.venue_id, adapter, identity.adapter_id
+
+    raise ExecutionBrokerSelectionError(f"unsupported_execution_broker:{execution_broker}")
 
 
 def _feed_symbols_for_venue(venue: str, universe: list, active_markets: list) -> list:
@@ -272,9 +341,25 @@ class SovereignHeartbeat:
             websocket_heartbeat_timeout_sec=30.0,
         )
 
+        (
+            self._execution_broker,
+            self._execution_primary_exchange,
+            self._broker_gateway_adapter,
+            self._execution_adapter_id,
+        ) = resolve_execution_broker_gateway(config)
+        logger.info(
+            "Execution broker resolved: market_data_venue=%s execution_broker=%s execution_primary_exchange=%s execution_adapter=%s shadow_read_only=%s broker_mode=%s",
+            config.primary_feed_venue,
+            self._execution_broker,
+            self._execution_primary_exchange,
+            self._execution_adapter_id,
+            bool(config.shadow_read_only),
+            config.broker_mode,
+        )
+
         # BUNDLE F1: Pass telemetry_store to OrderRouter
         self.order_router = OrderRouter(
-            primary_exchange="kraken",
+            primary_exchange=self._execution_primary_exchange,
             secondary_exchange="coinbase",
             primary_api_key=config.kraken_api_key or "",
             primary_api_secret=config.kraken_api_secret or "",
@@ -288,6 +373,8 @@ class SovereignHeartbeat:
             state_store=self.state_store,
             reservation_lifecycle_coordinator=self.reservation_lifecycle_coordinator,
             reservation_lifecycle_enabled=self.reservation_lifecycle_enabled,
+            execution_broker=self._execution_broker,
+            broker_gateway_adapter=self._broker_gateway_adapter,
         )
 
         self.masking_layer = MaskingLayer(
@@ -1020,6 +1107,11 @@ class SovereignHeartbeat:
                 for candidate in self._capability_candidates
             ],
             "primary_symbol": self._primary_symbol,
+            "market_data_venue": self._primary_feed_venue,
+            "execution_broker": self._execution_broker,
+            "execution_primary_exchange": self._execution_primary_exchange,
+            "execution_adapter": self._execution_adapter_id,
+            "order_router": self.order_router.get_ghost_status(),
         }
 
 

@@ -71,6 +71,8 @@ import app.utils.enums as _pb_enums
 
 logger = logging.getLogger(__name__)
 
+INTERNAL_PAPER_EXECUTION_BROKER = "internal_paper"
+
 
 _STATUS_EVIDENCE_OPEN_OR_PENDING = {
     "open",
@@ -157,6 +159,7 @@ class OrderRouter:
         state_store: Optional[StateStore] = None,
         reservation_lifecycle_coordinator: Optional[Any] = None,
         reservation_lifecycle_enabled: bool = False,
+        execution_broker: str = INTERNAL_PAPER_EXECUTION_BROKER,
         broker_gateway_adapter: Optional[Any] = None,
     ):
         self.primary_exchange = primary_exchange
@@ -175,7 +178,12 @@ class OrderRouter:
         self._state_store = state_store
         self._reservation_lifecycle_coordinator = reservation_lifecycle_coordinator
         self._reservation_lifecycle_enabled = bool(reservation_lifecycle_enabled)
+        self.execution_broker = str(execution_broker or INTERNAL_PAPER_EXECUTION_BROKER).strip().lower()
         self._broker_gateway_adapter = broker_gateway_adapter
+        self._external_paper_broker_requested = bool(
+            self.paper_mode and self.execution_broker != INTERNAL_PAPER_EXECUTION_BROKER
+        )
+        self._validate_execution_broker_selection()
         self._gateway_responses_by_client_order_id: Dict[str, BrokerGatewayResponse] = {}
         self._reservation_lifecycle_ack_open_results: List[Dict[str, Any]] = []
         self._reservation_lifecycle_partial_fill_results: List[Dict[str, Any]] = []
@@ -183,7 +191,7 @@ class OrderRouter:
         self._reservation_lifecycle_terminal_non_fill_results: List[Dict[str, Any]] = []
 
         self._paper_broker: Optional[_SovereignPaperBroker] = None
-        if paper_mode:
+        if paper_mode and not self._external_paper_broker_requested:
             self._paper_broker = _SovereignPaperBroker(
                 fee_model=_FeeModel(),
                 slippage_model=_SlippageModel(),
@@ -191,6 +199,8 @@ class OrderRouter:
                 config=_PaperBrokerConfig(enable_short_selling=True),
             )
             logger.info("SovereignPaperBroker (app/execution/paper_broker.py) wired on live paper path")
+        elif self._external_paper_broker_requested:
+            logger.info("Internal SovereignPaperBroker not wired: external paper broker gateway selected")
 
         self._websocket_connected = False
         self._last_websocket_ping_ns = 0
@@ -216,6 +226,13 @@ class OrderRouter:
         if telemetry_store:
             self._fill_recorder = FillRecorder(telemetry_store)
             logger.info("FillRecorder wired for telemetry")
+        logger.info(
+            "OrderRouter execution route: paper_mode=%s execution_broker=%s primary_exchange=%s broker_gateway_adapter=%s",
+            self.paper_mode,
+            self.execution_broker,
+            self.primary_exchange,
+            getattr(getattr(self._broker_gateway_adapter, "identity", None), "adapter_id", None),
+        )
 
         self._endpoints = {
             "kraken": {
@@ -243,6 +260,25 @@ class OrderRouter:
 
         self._session = requests.Session()
         self._lock = threading.Lock()
+
+    def _validate_execution_broker_selection(self) -> None:
+        """Fail closed when an external paper broker request cannot route to a gateway."""
+        if not self.paper_mode and self.execution_broker != INTERNAL_PAPER_EXECUTION_BROKER:
+            raise ValueError("external_execution_broker_requires_paper_mode")
+        if not self._external_paper_broker_requested:
+            return
+        if self._broker_gateway_adapter is None:
+            raise ValueError("external_paper_broker_requires_broker_gateway_adapter")
+
+        identity = getattr(self._broker_gateway_adapter, "identity", None)
+        if identity is None:
+            raise ValueError("broker_gateway_adapter_identity_missing")
+        if getattr(identity, "environment", None) != "paper":
+            raise ValueError("broker_gateway_adapter_environment_not_paper")
+        if getattr(identity, "live_blocked", None) is not True:
+            raise ValueError("broker_gateway_adapter_live_endpoint_not_blocked")
+        if getattr(identity, "venue_id", None) != self.primary_exchange:
+            raise ValueError("broker_gateway_adapter_primary_exchange_mismatch")
 
     def _record_fill_telemetry(
         self,
@@ -2586,7 +2622,15 @@ class OrderRouter:
         """Submit order to exchange or sovereign paper broker."""
         self._record_order_submission_telemetry(order)
         if self.paper_mode:
-            if self._should_use_external_paper_gateway():
+            if self._external_paper_broker_requested:
+                if not self._should_use_external_paper_gateway():
+                    logger.error(
+                        "External paper broker requested but gateway route is unavailable: execution_broker=%s primary_exchange=%s",
+                        self.execution_broker,
+                        self.primary_exchange,
+                    )
+                    self._record_rejection_telemetry(order, "external_paper_gateway_unavailable")
+                    return None
                 self._submit_order_gateway(order)
                 return None
             return self._submit_order_paper(order)
@@ -2729,7 +2773,7 @@ class OrderRouter:
     def _should_use_external_paper_gateway(self) -> bool:
         return (
             self.paper_mode
-            and self.primary_exchange == "alpaca"
+            and self._external_paper_broker_requested
             and self._broker_gateway_adapter is not None
         )
 
@@ -3623,6 +3667,10 @@ class OrderRouter:
             "current_latency_ms": self.measure_latency(),
             "websocket_rtt_ms": self.get_websocket_rtt_ms(),
             "paper_mode": self.paper_mode,
+            "execution_broker": self.execution_broker,
+            "external_paper_broker_requested": self._external_paper_broker_requested,
+            "broker_gateway_adapter": getattr(getattr(self._broker_gateway_adapter, "identity", None), "adapter_id", None),
+            "broker_gateway_route_available": self._should_use_external_paper_gateway(),
             "pending_orders_count": len(self._pending_orders),
             "paper_status_cache_size": len(self._order_status_cache) if self.paper_mode else 0,
         }
