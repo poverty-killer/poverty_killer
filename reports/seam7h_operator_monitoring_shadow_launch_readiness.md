@@ -157,3 +157,50 @@ Follow-up operator reset path status:
 - `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)` now provides the owner-side evidence-gated stale fuse reset path.
 - The real persisted fuse was not reset in that packet.
 - Launch readiness remains blocked by `PHYSICAL_FUSE_REQUIRES_OPERATOR_ACTION` until the operator reset is applied and a fresh bounded shadow-read-only run is clean.
+
+## Applied Physical Fuse Reset Follow-Up
+
+The operator reset was later applied through `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)` with Alpaca PAPER read-only reconciliation proof:
+
+- endpoint: `https://paper-api.alpaca.markets`
+- environment: `paper`
+- account read status: `read`
+- positions count: `7`
+- open orders count: `0`
+- request counts: `GET=3`, `POST=0`, `PATCH=0`, `DELETE=0`
+- no live endpoint
+- no broker mutation
+- shadow-read-only posture confirmed
+
+Physical fuse status after reset:
+
+- before: `PHYSICAL_FUSE_STALE`
+- after: `PHYSICAL_FUSE_CLEARED`
+- persisted `physical_fuse_triggered`: `false`
+- audit event: `PHYSICAL_FUSE_OPERATOR_RESET_APPLIED`
+
+Fresh bounded shadow-read-only run after reset:
+
+- command: `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+- result: external timeout exit `124`
+- paper mode and shadow-read-only mode confirmed
+- current-run physical fuse alert scan found no physical fuse alerts
+- current-run order mutation marker scan found no order submission or broker mutation markers
+- websocket feed ingress and fusion/dispatch diagnostics occurred
+- Kraken REST DNS failures remained degraded feed truth
+- crossed book snapshots were prevented
+- runtime triggered `LAG ABORT: infms > 200.0ms`
+- `ExecutionEngine` entered safe mode and later logged latency recovery
+
+Updated verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
+
+Reason: the physical fuse and Alpaca reconciliation blockers are cleared, but the fresh shadow run produced a separate `LAG_ABORT_ACTIVE` safety blocker. Autonomous PAPER remains blocked until latency/safe-mode readiness is clean.
+
+Applied reset verification:
+
+- compile: passed
+- focused test: `7 passed`
+- scoped regression: `57 passed`
+- no autonomous paper launch
+- no mutation approval flags
+- no broker mutation

@@ -130,3 +130,58 @@ The follow-up physical fuse operator reset packet added the owner-side evidence-
 - `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)`
 
 The real persisted fuse was not reset by this packet. Current verdict remains `NOT_READY_FOR_AUTONOMOUS_PAPER` until the operator applies the evidence-gated reset path and a fresh bounded shadow-read-only run proves clean health/no-mutation posture.
+
+## Applied Reset Follow-Up
+
+Current HEAD at reset application: `a663d86`.
+
+The follow-up operator reset packet applied the real persisted stale physical fuse reset through the owning `HybridRiskGuard` path. No report, monitoring, dashboard, or local state helper cleared the fuse.
+
+Reset evidence:
+
+- Alpaca PAPER endpoint: `https://paper-api.alpaca.markets`
+- account read status: `read`
+- positions count: `7`
+- open orders count: `0`
+- request counts: `GET=3`, `POST=0`, `PATCH=0`, `DELETE=0`
+- live endpoint used: `false`
+- broker mutation occurred: `false`
+- broker/local conflict: `false`
+- shadow-read-only posture: `true`
+
+Reset result:
+
+- before: `PHYSICAL_FUSE_STALE`
+- after: `PHYSICAL_FUSE_CLEARED`
+- audit event: `PHYSICAL_FUSE_OPERATOR_RESET_APPLIED`
+- persisted `physical_fuse_triggered`: `false`
+
+Fresh bounded shadow-read-only run:
+
+- command: `timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO`
+- result: exit `124` from external timeout
+- paper and shadow-read-only modes confirmed
+- current-run physical fuse alert scan found `0` physical fuse alerts
+- current-run order mutation marker scan found `0` matches for order submission/broker mutation markers
+- websocket feed ingress and fusion/dispatch diagnostics occurred
+- Kraken REST DNS failures continued
+- crossed websocket book snapshots were prevented, not accepted as truth
+- runtime triggered `LAG ABORT: infms > 200.0ms`
+- execution entered safe mode, then later logged latency recovery
+
+Updated blocker status:
+
+- Physical fuse blocker: cleared and audited.
+- Alpaca PAPER read-only reconciliation blocker: cleared by GET-only broker truth.
+- New remaining readiness blocker from fresh shadow: `LAG_ABORT_ACTIVE` / safe-mode event.
+
+Updated verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
+
+Applied reset verification:
+
+- compile: passed
+- focused test: `7 passed`
+- scoped regression: `57 passed`
+- no autonomous paper launch
+- no mutation approval flags
+- no broker mutation

@@ -161,3 +161,57 @@ Physical fuse operator reset packet update:
 - Real persisted state was not reset in this packet.
 - Current real fuse status remains `PHYSICAL_FUSE_STALE`.
 - Current final verdict remains `NOT_READY_FOR_AUTONOMOUS_PAPER` until the operator applies the evidence-gated reset path and a fresh bounded shadow-read-only run is clean.
+
+## Applied Physical Fuse Reset Update
+
+Current HEAD at reset application: `a663d86`.
+
+The physical fuse operator reset was applied through `HybridRiskGuard.reset_stale_physical_fuse_with_evidence(...)` using explicit operator approval and fresh sanitized Alpaca PAPER read-only evidence:
+
+- endpoint: `https://paper-api.alpaca.markets`
+- environment: `paper`
+- account status: `read`
+- positions count: `7`
+- open orders count: `0`
+- request counts: `GET=3`, `POST=0`, `PATCH=0`, `DELETE=0`
+- mutation occurred: `false`
+- live endpoint used: `false`
+
+Physical fuse result:
+
+- before: `PHYSICAL_FUSE_STALE`
+- after: `PHYSICAL_FUSE_CLEARED`
+- persisted `physical_fuse_triggered`: `false`
+- reset audit event: `PHYSICAL_FUSE_OPERATOR_RESET_APPLIED`
+
+Fresh bounded shadow command:
+
+```bash
+timeout 60s venv/Scripts/python.exe main.py --paper --shadow-read-only --log-level INFO
+```
+
+Fresh bounded shadow result:
+
+- exited `124` at the external 60-second timeout
+- paper mode confirmed
+- shadow-read-only confirmed
+- Kraken websocket connected
+- feed ingress and fusion/dispatch diagnostics occurred
+- current-run physical fuse alert scan found no physical fuse alerts
+- current-run broker mutation marker scan found no order submission or broker mutation markers
+- Kraken REST DNS failures continued for candle/order-book polling
+- websocket crossed-book validation prevented invalid book snapshots
+- runtime triggered `LAG ABORT: infms > 200.0ms`
+- `ExecutionEngine` entered safe mode and later logged latency recovery
+
+Current verdict: `NOT_READY_FOR_AUTONOMOUS_PAPER`.
+
+The physical fuse and Alpaca PAPER reconciliation launch blockers are cleared. The fresh shadow run exposed a separate safety blocker, `LAG_ABORT_ACTIVE`, so autonomous PAPER launch remains blocked until latency/safe-mode readiness is clean in a new bounded shadow run.
+
+Applied reset verification:
+
+- compile: passed
+- focused test: `7 passed`
+- scoped regression: `57 passed`
+- no mutation approval flags were set
+- no autonomous PAPER launch was run
