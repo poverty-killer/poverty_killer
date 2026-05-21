@@ -54,7 +54,8 @@ class KrakenWebSocketClient:
         reconnect_base_delay: float = 1.0,
         reconnect_max_delay: float = 30.0,
         sentinel: Optional[Any] = None,
-        on_health: Optional[Callable[[int, int], None]] = None
+        on_health: Optional[Callable[[int, int], None]] = None,
+        book_depth: int = 10,
     ):
         """
         Initialize Kraken WebSocket client.
@@ -85,6 +86,7 @@ class KrakenWebSocketClient:
         self.reconnect_max_delay = reconnect_max_delay
         self.sentinel = sentinel
         self.on_health = on_health
+        self.book_depth = max(1, int(book_depth))
         
         # Kraken WebSocket endpoint
         self.ws_url = "wss://ws.kraken.com/v2"
@@ -110,11 +112,15 @@ class KrakenWebSocketClient:
         # Per-symbol accumulated order book state
         self._book_bids_by_symbol: Dict[str, Dict[float, float]] = {}
         self._book_asks_by_symbol: Dict[str, Dict[float, float]] = {}
+        self._book_quality_by_symbol: Dict[str, Dict[str, Any]] = {}
+        self._book_crossed_rejections_by_symbol: Dict[str, int] = {}
 
         # Monotonic timestamp tracking per symbol for Kraken delta stream emission.
         # Raw exchange timestamps may arrive out of order or with coarse resolution;
         # emitted internal snapshots must remain strictly monotonic per symbol.
         self._last_emitted_ts_ns_by_symbol: Dict[str, int] = {}
+        self._last_candle_ts_ns_by_symbol: Dict[str, int] = {}
+        self._candle_duplicate_rejections_by_symbol: Dict[str, int] = {}
 
         # Statistics
         self._messages_received = 0
@@ -122,6 +128,7 @@ class KrakenWebSocketClient:
         self._messages_processed = 0
         
         logger.info(f"KrakenWebSocketClient initialized: {len(symbols)} symbols")
+        logger.info("  BOOK TRUTH: local L2 book truncates to subscribed depth=%d after every update", self.book_depth)
         logger.info("  TIMESTAMP TRUTH: Strict authoritative path — messages without lawful nested exchange timestamp are REJECTED")
     
     # ============================================
@@ -239,7 +246,7 @@ class KrakenWebSocketClient:
             "params": {
                 "channel": "book",
                 "symbol": self.symbols,
-                "depth": 10
+                "depth": self.book_depth
             }
         }
         await self._websocket.send(json.dumps(book_msg))
@@ -496,6 +503,69 @@ class KrakenWebSocketClient:
         logger.warning(f"Missing nested exchange timestamp in {channel_type} payload — rejecting")
         self._messages_rejected_no_timestamp += 1
         return None
+
+    def _replace_book_side(self, side_map: Dict[float, float], entries: List[Any]) -> None:
+        side_map.clear()
+        for entry in entries:
+            price_f, qty_f = self._parse_book_level(entry)
+            if price_f is None or qty_f is None or price_f <= 0 or qty_f <= 0:
+                continue
+            side_map[price_f] = qty_f
+
+    def _apply_book_side_updates(self, side_map: Dict[float, float], entries: List[Any]) -> None:
+        for entry in entries:
+            price_f, qty_f = self._parse_book_level(entry)
+            if price_f is None or qty_f is None or price_f <= 0:
+                continue
+            if qty_f <= 0:
+                side_map.pop(price_f, None)
+            else:
+                side_map[price_f] = qty_f
+
+    def _parse_book_level(self, entry: Any) -> Tuple[Optional[float], Optional[float]]:
+        try:
+            if isinstance(entry, dict):
+                return float(entry.get("price", 0)), float(entry.get("qty", 0))
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                return float(entry[0]), float(entry[1])
+        except Exception:
+            return None, None
+        return None, None
+
+    def _truncate_book_to_depth(self, bid_map: Dict[float, float], ask_map: Dict[float, float]) -> None:
+        if len(bid_map) > self.book_depth:
+            keep_bids = {price for price, _ in sorted(bid_map.items(), key=lambda x: x[0], reverse=True)[:self.book_depth]}
+            for price in list(bid_map):
+                if price not in keep_bids:
+                    bid_map.pop(price, None)
+
+        if len(ask_map) > self.book_depth:
+            keep_asks = {price for price, _ in sorted(ask_map.items(), key=lambda x: x[0])[:self.book_depth]}
+            for price in list(ask_map):
+                if price not in keep_asks:
+                    ask_map.pop(price, None)
+
+    def _record_book_quality(
+        self,
+        symbol: str,
+        *,
+        status: str,
+        reason: str,
+        source: str,
+        exchange_ts_ns: int,
+        best_bid: Optional[float] = None,
+        best_ask: Optional[float] = None,
+    ) -> None:
+        self._book_quality_by_symbol[symbol] = {
+            "status": status,
+            "reason": reason,
+            "source": source,
+            "exchange_ts_ns": exchange_ts_ns,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "subscribed_depth": self.book_depth,
+            "timestamp_ns": now_ns(),
+        }
     
     async def _parse_order_book(self, data: Dict, receive_ts_ns: int) -> None:
         """
@@ -537,33 +607,18 @@ class KrakenWebSocketClient:
                 bid_map = self._book_bids_by_symbol[symbol]
                 ask_map = self._book_asks_by_symbol[symbol]
 
-                # Apply bid updates: qty <= 0 removes level, qty > 0 sets level
-                for bid in book_data.get("bids", []):
-                    try:
-                        price_f = float(bid.get("price", 0))
-                        qty_f = float(bid.get("qty", 0))
-                        if price_f <= 0:
-                            continue
-                        if qty_f <= 0:
-                            bid_map.pop(price_f, None)
-                        else:
-                            bid_map[price_f] = qty_f
-                    except Exception:
-                        continue
+                source_type = str(data.get("type") or book_data.get("type") or "update")
+                if source_type == "snapshot":
+                    self._replace_book_side(bid_map, book_data.get("bids", []))
+                    self._replace_book_side(ask_map, book_data.get("asks", []))
+                else:
+                    self._apply_book_side_updates(bid_map, book_data.get("bids", []))
+                    self._apply_book_side_updates(ask_map, book_data.get("asks", []))
 
-                # Apply ask updates: qty <= 0 removes level, qty > 0 sets level
-                for ask in book_data.get("asks", []):
-                    try:
-                        price_f = float(ask.get("price", 0))
-                        qty_f = float(ask.get("qty", 0))
-                        if price_f <= 0:
-                            continue
-                        if qty_f <= 0:
-                            ask_map.pop(price_f, None)
-                        else:
-                            ask_map[price_f] = qty_f
-                    except Exception:
-                        continue
+                # Kraken's L2 book contract requires truncating to the subscribed
+                # depth after every update because fallen-out levels may not be
+                # sent back as qty=0 deletes.
+                self._truncate_book_to_depth(bid_map, ask_map)
 
                 # Emit only when accumulated book has both sides
                 if not bid_map or not ask_map:
@@ -575,9 +630,9 @@ class KrakenWebSocketClient:
                     )
                     continue
 
-                # Sort bids descending, asks ascending; cap at 50 levels
-                sorted_bids = sorted(bid_map.items(), key=lambda x: x[0], reverse=True)[:50]
-                sorted_asks = sorted(ask_map.items(), key=lambda x: x[0])[:50]
+                # Sort bids descending, asks ascending; cap at subscribed depth.
+                sorted_bids = sorted(bid_map.items(), key=lambda x: x[0], reverse=True)[:self.book_depth]
+                sorted_asks = sorted(ask_map.items(), key=lambda x: x[0])[:self.book_depth]
 
                 # Do not emit one-sided books. They are not valid internal market snapshots.
                 if not sorted_bids or not sorted_asks:
@@ -590,21 +645,38 @@ class KrakenWebSocketClient:
                         )
                     continue
 
-                # Do not emit crossed or inverted books. Preserve accumulator state and
-                # wait for the next delta to restore a valid market view.
+                # Do not emit crossed or inverted books. Quarantine the local
+                # accumulator because one side may contain stale depth that fell
+                # out of scope. A later clean snapshot/update must rebuild truth.
                 best_bid = sorted_bids[0][0]
                 best_ask = sorted_asks[0][0]
                 if best_bid >= best_ask:
-                    if self._messages_processed % 100 == 0:
-                        logger.warning(
-                            "[BOOK_DIAG] CROSSED_BOOK_PREVENTED symbol=%s best_bid=%.8f best_ask=%.8f spread=%.8f bids=%d asks=%d",
-                            symbol,
-                            best_bid,
-                            best_ask,
-                            best_ask - best_bid,
-                            len(sorted_bids),
-                            len(sorted_asks),
-                        )
+                    self._book_crossed_rejections_by_symbol[symbol] = (
+                        self._book_crossed_rejections_by_symbol.get(symbol, 0) + 1
+                    )
+                    self._record_book_quality(
+                        symbol,
+                        status="BOOK_QUARANTINED",
+                        reason="CROSSED_BOOK_PREVENTED",
+                        source=source_type,
+                        exchange_ts_ns=exchange_ts_ns,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                    )
+                    logger.warning(
+                        "[BOOK_DIAG] CROSSED_BOOK_PREVENTED symbol=%s source=%s best_bid=%.8f best_ask=%.8f spread=%.8f bids=%d asks=%d subscribed_depth=%d quarantined_count=%d",
+                        symbol,
+                        source_type,
+                        best_bid,
+                        best_ask,
+                        best_ask - best_bid,
+                        len(sorted_bids),
+                        len(sorted_asks),
+                        self.book_depth,
+                        self._book_crossed_rejections_by_symbol[symbol],
+                    )
+                    bid_map.clear()
+                    ask_map.clear()
                     continue
 
                 # Enforce strictly monotonic internal snapshot timestamps per symbol.
@@ -623,6 +695,15 @@ class KrakenWebSocketClient:
                     )
 
                 self._last_emitted_ts_ns_by_symbol[symbol] = effective_ts_ns
+                self._record_book_quality(
+                    symbol,
+                    status="BOOK_ACTIVE",
+                    reason="CLEAN_BOOK_EMITTED",
+                    source=source_type,
+                    exchange_ts_ns=effective_ts_ns,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                )
 
                 snapshot = OrderBookSnapshot(
                     symbol=symbol,
@@ -750,6 +831,26 @@ class KrakenWebSocketClient:
                 if exchange_ts_ns is None:
                     continue
 
+                last_candle_ts_ns = self._last_candle_ts_ns_by_symbol.get(symbol, 0)
+                if exchange_ts_ns <= last_candle_ts_ns:
+                    reason = (
+                        "CANDLE_DUPLICATE_QUARANTINED"
+                        if exchange_ts_ns == last_candle_ts_ns
+                        else "CANDLE_STALE_QUARANTINED"
+                    )
+                    self._candle_duplicate_rejections_by_symbol[symbol] = (
+                        self._candle_duplicate_rejections_by_symbol.get(symbol, 0) + 1
+                    )
+                    logger.info(
+                        "%s: symbol=%s ts_ns=%d last_ts_ns=%d source=kraken_ws_ohlc total_duplicates=%d",
+                        reason,
+                        symbol,
+                        exchange_ts_ns,
+                        last_candle_ts_ns,
+                        self._candle_duplicate_rejections_by_symbol[symbol],
+                    )
+                    continue
+
                 try:
                     candle = Candle(
                         symbol=symbol,
@@ -766,6 +867,7 @@ class KrakenWebSocketClient:
                     continue
                 
                 self._messages_processed += 1
+                self._last_candle_ts_ns_by_symbol[symbol] = exchange_ts_ns
                 
                 if self.on_candle:
                     if asyncio.iscoroutinefunction(self.on_candle):
@@ -804,7 +906,13 @@ class KrakenWebSocketClient:
             "subscriptions": self._subscriptions,
             "messages_received": self._messages_received,
             "messages_rejected_no_timestamp": self._messages_rejected_no_timestamp,
-            "messages_processed": self._messages_processed
+            "messages_processed": self._messages_processed,
+            "book_quality_by_symbol": {
+                symbol: dict(status)
+                for symbol, status in self._book_quality_by_symbol.items()
+            },
+            "book_crossed_rejections_by_symbol": dict(self._book_crossed_rejections_by_symbol),
+            "candle_duplicate_rejections_by_symbol": dict(self._candle_duplicate_rejections_by_symbol),
         }
 
     def get_feed_truth_status(self) -> Dict[str, Any]:
@@ -818,6 +926,12 @@ class KrakenWebSocketClient:
             "last_message_time_ns": self._last_message_time_ns,
             "messages_processed": self._messages_processed,
             "messages_rejected_no_timestamp": self._messages_rejected_no_timestamp,
+            "book_quality_by_symbol": {
+                symbol: dict(status)
+                for symbol, status in self._book_quality_by_symbol.items()
+            },
+            "book_crossed_rejections_by_symbol": dict(self._book_crossed_rejections_by_symbol),
+            "candle_duplicate_rejections_by_symbol": dict(self._candle_duplicate_rejections_by_symbol),
         }
     
     async def start(self) -> None:
