@@ -340,6 +340,26 @@ class Config(BaseSettings):
         default="kraken",
         description="Primary market data feed venue. Currently: kraken only."
     )
+    market_data_providers: List[str] = Field(
+        default=["kraken_public", "coinbase_public", "binance_us_public"],
+        description="Ordered market-data provider candidates for router selection.",
+    )
+    crypto_market_data_providers: List[str] = Field(
+        default=["kraken_public", "coinbase_public", "binance_us_public"],
+        description="Ordered executable crypto market-data provider candidates.",
+    )
+    equity_market_data_providers: List[str] = Field(
+        default=["alpaca_market_data"],
+        description="Ordered executable equity/ETF market-data provider candidates.",
+    )
+    event_providers: List[str] = Field(
+        default=["sec_edgar", "official_company_press_releases", "official_calendars"],
+        description="Ordered advisory event provider candidates.",
+    )
+    reference_data_providers: List[str] = Field(
+        default=["coingecko_reference"],
+        description="Ordered reference market-data provider candidates.",
+    )
 
     # Active market classes — user-controlled declaration of which markets are live.
     # Symbols in symbol_universe whose asset class is NOT in this list are explicitly
@@ -368,6 +388,20 @@ class Config(BaseSettings):
     def parse_enabled_trading_portals(cls, v):
         if isinstance(v, str):
             return json.loads(v) if v.startswith("[") else [v]
+        return v
+
+    @field_validator(
+        "market_data_providers",
+        "crypto_market_data_providers",
+        "equity_market_data_providers",
+        "event_providers",
+        "reference_data_providers",
+        mode="before",
+    )
+    @classmethod
+    def parse_provider_lists(cls, v):
+        if isinstance(v, str):
+            return json.loads(v) if v.startswith("[") else [item.strip() for item in v.split(",") if item.strip()]
         return v
 
     @field_validator("capability_discovery_asset_classes", mode="before")

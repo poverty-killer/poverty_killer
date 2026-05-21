@@ -62,6 +62,12 @@ from app.brain.whale_flow_engine import WhaleFlowEngine
 from app.commander import Commander
 from app.config import Config
 from app.core.whole_bot_attribution import build_startup_attribution
+from app.data.feed_provider_router import (
+    FeedProviderHealth,
+    FeedProviderRequest,
+    ProviderRuntimeStatus,
+    build_feed_provider_router,
+)
 from app.data.polling_client import PollingClient
 from app.data.websocket_client import KrakenWebSocketClient
 from app.execution.alpaca_paper_adapter import AlpacaPaperBrokerAdapter
@@ -112,6 +118,17 @@ SUPPORTED_EXECUTION_BROKERS = frozenset(
         ALPACA_PAPER_EXECUTION_BROKER,
     }
 )
+
+_FEED_PROVIDER_TO_VENUE = {
+    "kraken_public": "kraken",
+}
+
+_REST_FEED_FAILURE_REASON_MAP = {
+    "DNS_FAILURE_RECORDED": "DNS_FAILURE",
+    "REST_POLLING_FAILED": "REST_UNAVAILABLE",
+    "MISSING_CANDLE_TRUTH": "CANDLE_STALE",
+    "MISSING_ORDER_BOOK_TRUTH": "ORDER_BOOK_STALE",
+}
 
 
 class ExecutionBrokerSelectionError(RuntimeError):
@@ -256,6 +273,15 @@ def get_active_capability_candidates(
         for candidate in candidates
         if candidate.portal_name in enabled_portals or f"{candidate.venue_id}_{candidate.environment}" in enabled_portals
     )
+
+
+def get_configured_market_data_providers(config: Config, asset_class: str) -> tuple[str, ...]:
+    normalized = str(asset_class or "").strip().lower()
+    if normalized == "crypto":
+        return tuple(getattr(config, "crypto_market_data_providers", ()) or getattr(config, "market_data_providers", ()))
+    if normalized in {"equity", "us_equity", "etf"}:
+        return tuple(getattr(config, "equity_market_data_providers", ()) or getattr(config, "market_data_providers", ()))
+    return tuple(getattr(config, "market_data_providers", ()))
 
 
 def resolve_runtime_portal(
@@ -441,6 +467,40 @@ class SovereignHeartbeat:
                 "XBT/USD",
             )
         )
+        primary_asset_class = InstrumentRegistry.get_asset_class(self._primary_symbol)
+        primary_asset_class_value = primary_asset_class.value if primary_asset_class else "crypto"
+        self._configured_market_data_providers = get_configured_market_data_providers(
+            config,
+            primary_asset_class_value,
+        )
+        self._feed_provider_router = build_feed_provider_router(
+            configured_provider_ids=self._configured_market_data_providers,
+            env=os.environ,
+        )
+        self._market_data_provider_selection = self._feed_provider_router.select_provider(
+            FeedProviderRequest(
+                symbol=self._primary_symbol,
+                asset_class=primary_asset_class_value,
+                required_data_type="order_book",
+                execution_required=True,
+            )
+        )
+        selected_market_data_provider = self._market_data_provider_selection.selected_provider_id
+        selected_feed_venue = _FEED_PROVIDER_TO_VENUE.get(str(selected_market_data_provider or ""))
+        logger.info(
+            "Market-data provider resolved: %s",
+            self._market_data_provider_selection.to_telemetry(),
+        )
+        if selected_feed_venue and selected_feed_venue != self._primary_feed_venue:
+            raise RuntimeError(
+                "selected_market_data_provider_venue_mismatch:"
+                f"{selected_market_data_provider}:{selected_feed_venue}!={self._primary_feed_venue}"
+            )
+        if selected_market_data_provider != "kraken_public":
+            raise RuntimeError(
+                "selected_market_data_provider_transport_not_implemented:"
+                f"{selected_market_data_provider or self._market_data_provider_selection.reason}"
+            )
 
         # Get active symbols set for multi-symbol support
         self._active_symbols: Set[str] = get_active_symbols(config)
@@ -886,6 +946,40 @@ class SovereignHeartbeat:
         except Exception as exc:
             logger.exception("_on_candle error: %s", exc)
 
+    def _on_feed_truth(self, feed_truth: dict) -> None:
+        """
+        Feed-truth callback for provider-router telemetry only.
+
+        This records deterministic failover selection metadata without treating
+        an unstarted fallback provider as market truth.
+        """
+        status = str(feed_truth.get("status", ""))
+        reason_code = _REST_FEED_FAILURE_REASON_MAP.get(status, status or "REST_UNAVAILABLE")
+        provider_status = ProviderRuntimeStatus(
+            provider_id="kraken_public",
+            health=FeedProviderHealth.FAILED.value if reason_code == "DNS_FAILURE" else FeedProviderHealth.DEGRADED.value,
+            reason_codes=(reason_code,),
+            last_error=str(feed_truth.get("exception_type", "")) or None,
+        )
+        selection = self._feed_provider_router.select_provider(
+            FeedProviderRequest(
+                symbol=str(feed_truth.get("symbol") or self._primary_symbol),
+                asset_class="crypto",
+                required_data_type=str(feed_truth.get("feed_type") or "order_book"),
+                execution_required=True,
+            ),
+            provider_status={"kraken_public": provider_status},
+        )
+        logger.info(
+            "Market-data provider failover telemetry: %s",
+            selection.to_telemetry(),
+        )
+        if selection.selected_provider_id and selection.selected_provider_id != "kraken_public":
+            logger.warning(
+                "Market-data fallback candidate selected but transport adapter is not active in this packet: %s",
+                selection.selected_provider_id,
+            )
+
     def _start_whale_websocket(self) -> None:
         """
         Launch venue WebSocket client in a background asyncio daemon thread.
@@ -988,6 +1082,7 @@ class SovereignHeartbeat:
                 interval=1.0,
                 on_order_book=running_ref._on_order_book,
                 on_candle=running_ref._on_candle,
+                on_feed_truth=running_ref._on_feed_truth,
                 exchange=running_ref._primary_feed_venue,
             )
             try:

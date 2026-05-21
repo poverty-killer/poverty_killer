@@ -20,6 +20,10 @@ from app.data.rolling_window import RollingWindow
 from app.data.validators import DataValidator
 from app.data.websocket_client import KrakenWebSocketClient
 from app.data.polling_client import PollingClient
+from app.data.feed_provider_router import (
+    FeedProviderRequest,
+    build_feed_provider_router,
+)
 from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,17 @@ class MarketFeeds:
             "exchange": "kraken",
         }
         self._rest_truth_by_symbol_feed: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.feed_provider_router = build_feed_provider_router(
+            configured_provider_ids=getattr(config, "crypto_market_data_providers", ("kraken_public",))
+        )
+        self._feed_provider_selection = self.feed_provider_router.select_provider(
+            FeedProviderRequest(
+                symbol=self.symbols[0] if self.symbols else "",
+                asset_class="crypto",
+                required_data_type="order_book",
+                execution_required=True,
+            )
+        )
 
         # Callbacks
         self._candle_callbacks: List[Callable] = []
@@ -74,6 +89,16 @@ class MarketFeeds:
     async def start(self) -> None:
         """Start all market data feeds."""
         logger.info("Starting market feeds...")
+        selected_provider_id = self._feed_provider_selection.selected_provider_id
+        logger.info(
+            "Market-data provider selected: %s",
+            self._feed_provider_selection.to_telemetry(),
+        )
+        if selected_provider_id != "kraken_public":
+            raise RuntimeError(
+                "selected_market_data_provider_transport_not_implemented:"
+                f"{selected_provider_id or self._feed_provider_selection.reason}"
+            )
 
         # Initialize WebSocket client
         self.websocket_client = KrakenWebSocketClient(
@@ -444,6 +469,7 @@ class MarketFeeds:
                 "latest_failure": latest_rest_failure,
                 "failures_by_symbol_feed": rest_failures,
             },
+            "provider_selection": self._feed_provider_selection.to_telemetry(),
             "missing_truth": tuple(sorted(set(missing_truth))),
             "order_book_symbols": tuple(sorted(self.order_books.keys())),
             "timestamp_ns": now_ns(),
