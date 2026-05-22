@@ -417,6 +417,73 @@ class DataContinuityValidator:
 
         return True
 
+    def health_snapshot(
+        self,
+        symbol: str,
+        *,
+        current_ns: Optional[int] = None,
+        latest_book_ts_ns: Optional[int] = None,
+        latest_candle_ts_ns: Optional[int] = None,
+        source_type: str = "unknown",
+        observed_symbol: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Return machine-readable data-health evidence without mutating state.
+
+        Execution admission uses this stricter snapshot so missing timestamp
+        truth cannot be converted into implicit health.
+        """
+        current_ns = int(current_ns or now_ns())
+        source = str(source_type or "unknown").lower()
+        snapshot: Dict[str, Any] = {
+            "symbol": symbol,
+            "gap_detected": None,
+            "last_valid_data_ns": None,
+            "last_valid_data_age_ms": None,
+            "max_stale_age_ms": self.max_stale_age_ns / 1_000_000.0,
+            "latest_book_ts_ns": latest_book_ts_ns,
+            "latest_candle_ts_ns": latest_candle_ts_ns,
+            "data_source_type": source,
+            "data_health_reason_code": "DATA_HEALTH_UNKNOWN",
+            "data_healthy": False,
+        }
+
+        if observed_symbol is not None and str(observed_symbol) != str(symbol):
+            snapshot["observed_symbol"] = observed_symbol
+            snapshot["data_health_reason_code"] = "DATA_SYMBOL_MISMATCH"
+            return snapshot
+
+        if source in {"backfill", "replay", "synthetic", "observe_only"}:
+            snapshot["data_health_reason_code"] = "DATA_BACKFILL_OBSERVE_ONLY"
+            return snapshot
+
+        try:
+            state = self._get_state(symbol)
+        except ValueError:
+            snapshot["data_health_reason_code"] = "DATA_SYMBOL_MISMATCH"
+            return snapshot
+
+        snapshot["gap_detected"] = bool(state.gap_detected)
+        snapshot["last_valid_data_ns"] = state.last_valid_data_ns
+
+        if state.gap_detected:
+            snapshot["data_health_reason_code"] = "DATA_GAP_ACTIVE"
+            return snapshot
+
+        if state.last_valid_data_ns is None:
+            snapshot["data_health_reason_code"] = "DATA_TIMESTAMP_MISSING"
+            return snapshot
+
+        age_ns = max(0, current_ns - state.last_valid_data_ns)
+        snapshot["last_valid_data_age_ms"] = age_ns / 1_000_000.0
+        if age_ns > self.max_stale_age_ns:
+            snapshot["data_health_reason_code"] = "DATA_STALE"
+            return snapshot
+
+        snapshot["data_health_reason_code"] = "DATA_HEALTHY"
+        snapshot["data_healthy"] = True
+        return snapshot
+
     def validate(
         self,
         symbol: str,

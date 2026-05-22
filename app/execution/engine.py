@@ -61,6 +61,9 @@ class ExecutionState:
     """Current execution state."""
     is_running: bool = False
     is_in_safe_mode: bool = False
+    safe_mode_entered_at_ns: int = 0
+    last_latency_ok_at_ns: int = 0
+    safe_mode_recovery_state: str = "normal"
     is_in_recalibration: bool = False
     recalibration_until_ns: int = 0
     last_latency_ms: float = 0.0
@@ -98,6 +101,7 @@ class ExecutionSpineResult:
     gateway_response: Optional[Any] = None
     decision_artifact: Optional[Dict[str, Any]] = None
     pre_trade_guardrail_verdict: Optional[Dict[str, Any]] = None
+    block_evidence: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +352,7 @@ class ExecutionEngine:
                 message="ExecutionEngine safe-mode gate blocked signal admission.",
                 decision_artifact=decision_artifact,
                 guardrail_verdict=guardrail_verdict,
+                block_evidence=self._safe_mode_block_evidence(),
             )
 
         if not self.risk_guard.can_trade():
@@ -370,7 +375,8 @@ class ExecutionEngine:
                 guardrail_verdict=guardrail_verdict,
             )
 
-        if self.data_validator and not self.data_validator.is_data_healthy(signal.symbol):
+        data_health_evidence = self._data_health_block_evidence(signal, current_ns=current_ns)
+        if data_health_evidence and data_health_evidence.get("data_healthy") is not True:
             return self._record_admission_block(
                 signal=signal,
                 decision_uuid=resolved_decision_uuid,
@@ -378,6 +384,7 @@ class ExecutionEngine:
                 message="Data validator blocked signal admission.",
                 decision_artifact=decision_artifact,
                 guardrail_verdict=guardrail_verdict,
+                block_evidence=data_health_evidence,
             )
 
         if not self._is_signal_economically_admissible(signal):
@@ -558,6 +565,9 @@ class ExecutionEngine:
             return {
                 "is_running": self._state.is_running,
                 "is_in_safe_mode": self._state.is_in_safe_mode,
+                "safe_mode_entered_at_ns": self._state.safe_mode_entered_at_ns,
+                "last_latency_ok_at_ns": self._state.last_latency_ok_at_ns,
+                "safe_mode_recovery_state": self._state.safe_mode_recovery_state,
                 "is_in_recalibration": self._state.is_in_recalibration,
                 "recalibration_until_ns": self._state.recalibration_until_ns,
                 "last_latency_ms": self._state.last_latency_ms,
@@ -757,8 +767,11 @@ class ExecutionEngine:
 
         if latency_truth.status == "LATENCY_OK":
             self.risk_guard.update_latency(latency_truth.latency_ms or 0.0)
+            self._state.last_latency_ok_at_ns = now_ns()
+            self._state.safe_mode_recovery_state = "LATENCY_OK_CONFIRMED"
             if self._state.is_in_safe_mode:
                 self._state.is_in_safe_mode = False
+                self._state.safe_mode_entered_at_ns = 0
                 logger.info(
                     "Latency recovered: %.1fms, exiting safe mode",
                     latency_truth.latency_ms or 0.0,
@@ -767,6 +780,7 @@ class ExecutionEngine:
 
         if latency_truth.status == "LAG_ABORT_ACTIVE":
             self.risk_guard.update_latency(latency_truth.latency_ms or 0.0)
+            self._state.safe_mode_recovery_state = "LAG_ABORT_ACTIVE"
             return
 
         if not self._state.is_in_safe_mode:
@@ -778,7 +792,9 @@ class ExecutionEngine:
                 latency_truth.missing_source,
                 latency_truth.threshold_ms,
             )
+            self._state.safe_mode_entered_at_ns = now_ns()
         self._state.is_in_safe_mode = True
+        self._state.safe_mode_recovery_state = latency_truth.status
 
     def _record_admission_block(
         self,
@@ -789,6 +805,7 @@ class ExecutionEngine:
         message: str,
         decision_artifact: Optional[Dict[str, Any]],
         guardrail_verdict: Optional[Dict[str, Any]],
+        block_evidence: Optional[Dict[str, Any]] = None,
     ) -> bool:
         self._last_admission_block_result = ExecutionSpineResult(
             decision_uuid=decision_uuid,
@@ -800,15 +817,78 @@ class ExecutionEngine:
             message=message,
             decision_artifact=decision_artifact,
             pre_trade_guardrail_verdict=guardrail_verdict,
+            block_evidence=block_evidence,
         )
         logger.info(
-            "[EXEC_DIAG] SIGNAL_ADMISSION_BLOCKED: symbol=%s side=%s decision_uuid=%s reason_code=%s",
+            "[EXEC_DIAG] SIGNAL_ADMISSION_BLOCKED: symbol=%s side=%s decision_uuid=%s reason_code=%s block_evidence=%s",
             getattr(signal, "symbol", None),
             getattr(signal, "side", None),
             decision_uuid,
             reason_code,
+            block_evidence or {},
         )
         return False
+
+    def _safe_mode_block_evidence(self) -> Dict[str, Any]:
+        latency_truth = dict(self._state.last_latency_truth)
+        return {
+            "latency_truth_status": latency_truth.get("status"),
+            "latency_truth_reason_code": latency_truth.get("reason_code"),
+            "latency_ms": latency_truth.get("latency_ms"),
+            "threshold_ms": latency_truth.get("threshold_ms", self.lag_threshold_ms),
+            "latency_source": latency_truth.get("source"),
+            "safe_mode_entered_at_ns": self._state.safe_mode_entered_at_ns,
+            "last_latency_ok_at_ns": self._state.last_latency_ok_at_ns,
+            "safe_mode_recovery_state": self._state.safe_mode_recovery_state,
+        }
+
+    def _data_health_block_evidence(
+        self,
+        signal: StrategySignal,
+        *,
+        current_ns: int,
+    ) -> Dict[str, Any]:
+        if self.data_validator is None:
+            return {}
+
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        market_truth = metadata.get("execution_market_truth")
+        market_truth = dict(market_truth) if isinstance(market_truth, dict) else {}
+        source_type = (
+            market_truth.get("data_source_type")
+            or metadata.get("data_source_type")
+            or "unknown"
+        )
+        latest_book_ts_ns = market_truth.get("latest_book_ts_ns")
+        latest_candle_ts_ns = market_truth.get("latest_candle_ts_ns")
+        observed_symbol = market_truth.get("symbol") or metadata.get("market_truth_symbol")
+
+        snapshot_fn = getattr(self.data_validator, "health_snapshot", None)
+        if callable(snapshot_fn):
+            return snapshot_fn(
+                signal.symbol,
+                current_ns=current_ns,
+                latest_book_ts_ns=latest_book_ts_ns,
+                latest_candle_ts_ns=latest_candle_ts_ns,
+                source_type=str(source_type),
+                observed_symbol=observed_symbol,
+            )
+
+        healthy = bool(self.data_validator.is_data_healthy(signal.symbol))
+        return {
+            "symbol": signal.symbol,
+            "gap_detected": None,
+            "last_valid_data_ns": None,
+            "last_valid_data_age_ms": None,
+            "max_stale_age_ms": None,
+            "latest_book_ts_ns": latest_book_ts_ns,
+            "latest_candle_ts_ns": latest_candle_ts_ns,
+            "data_health_reason_code": (
+                "DATA_HEALTHY" if healthy else "DATA_HEALTH_UNKNOWN"
+            ),
+            "data_source_type": str(source_type),
+            "data_healthy": healthy,
+        }
 
     def _record_shadow_read_only_block(
         self,
@@ -1017,8 +1097,9 @@ class ExecutionEngine:
                 if severe:
                     return False, f"regime_changed:{queued.enqueue_regime}->{self._state.last_regime}"
 
-        if self.data_validator and not self.data_validator.is_data_healthy(queued.signal.symbol):
-            return False, "data_unhealthy"
+        data_health_evidence = self._data_health_block_evidence(queued.signal, current_ns=current_ns)
+        if data_health_evidence and data_health_evidence.get("data_healthy") is not True:
+            return False, f"data_unhealthy:{data_health_evidence.get('data_health_reason_code')}"
 
         return True, "ok"
 
@@ -1434,7 +1515,10 @@ class ExecutionEngine:
     def _on_lag_detected(self) -> None:
         """Handle lag detection."""
         logger.warning("LAG DETECTED: Entering safe mode")
+        if not self._state.is_in_safe_mode or self._state.safe_mode_entered_at_ns <= 0:
+            self._state.safe_mode_entered_at_ns = now_ns()
         self._state.is_in_safe_mode = True
+        self._state.safe_mode_recovery_state = "LAG_DETECTED"
 
     def _on_vol_fuse(self) -> None:
         """Handle VoL fuse trigger - fire-and-forget."""

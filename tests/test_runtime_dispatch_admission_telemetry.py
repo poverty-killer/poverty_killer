@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import threading
 import types
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -10,6 +11,7 @@ import app.main_loop as main_loop_module
 from app.config import Config
 from app.commander import Commander
 from app.main_loop import MainLoop, _log_dispatch_diag
+from app.brain.data_validator import DataContinuityValidator
 from app.models import Candle
 from app.models.enums import SleeveType
 
@@ -542,6 +544,149 @@ def test_submitted_false_diag_includes_status_code_and_execution_block(caplog):
     assert "submitted': False" in caplog.text
     assert "decision_compiler_status_code': 'EXECUTION_ADMISSION_BLOCKED'" in caplog.text
     assert "execution_admission_reason_code': 'SAFE_MODE_ACTIVE'" in caplog.text
+
+
+def test_submitted_false_diag_includes_execution_block_evidence(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop()
+    loop.execution_engine.submit_signal.return_value = False
+    loop.execution_engine.get_last_admission_block_result.return_value = types.SimpleNamespace(
+        normalized_status="blocked",
+        route="execution_engine",
+        reason_code="DATA_UNHEALTHY",
+        message="Data validator blocked signal admission.",
+        block_evidence={
+            "symbol": "ETH/USD",
+            "data_health_reason_code": "DATA_STALE",
+            "latest_candle_ts_ns": T0_NS,
+            "data_source_type": "runtime",
+        },
+    )
+    signal = _signal()
+    vote = _vote()
+
+    _dispatch(loop, _runtime(sector_signal=signal, sector_vote=vote))
+
+    assert "execution_admission_reason_code': 'DATA_UNHEALTHY'" in caplog.text
+    assert "execution_admission_block_evidence" in caplog.text
+    assert "data_health_reason_code': 'DATA_STALE'" in caplog.text
+
+
+def test_stale_backfill_candle_does_not_reach_executable_dispatch(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = types.SimpleNamespace()
+    loop._running = True
+    loop.active_symbols = {"ETH/USD"}
+    loop._lock = threading.Lock()
+    loop._last_admitted_candle_ts_ns = {}
+    loop._metrics = types.SimpleNamespace(
+        candle_duplicates_rejected=0,
+        candle_stale_rejected=0,
+        iteration_count=0,
+        last_candle_exchange_ts_ns=0,
+        last_risk_assessment_ns=0,
+        last_health_log_iteration=0,
+        consecutive_errors=0,
+    )
+    loop._last_equity = 1000.0
+    loop.health_log_interval_iterations = 999
+    loop.symbol = "ETH/USD"
+    loop._primary_runtime = types.SimpleNamespace(last_tpe_signal=None)
+    loop._shans_gate_last_log_ts = {}
+    loop.data_validator = DataContinuityValidator(max_stale_age_sec=5.0)
+    loop.signal_fusion = MagicMock()
+    loop.signal_fusion.fuse = MagicMock(return_value=types.SimpleNamespace())
+    loop.entropy_decoder = MagicMock()
+    loop.entropy_decoder.update.return_value = 0.0
+    loop.insider_engine = MagicMock()
+    loop.insider_engine.get_or_default_snapshot.return_value = "insider"
+    loop.commander = MagicMock()
+    loop.risk_guard = MagicMock()
+    loop.risk_guard.assess_state.return_value = "risk-state"
+    loop.execution_engine = MagicMock()
+    loop.execution_engine.process_events = MagicMock()
+    loop._advance_recalibration = MagicMock()
+    loop._log_health = MagicMock()
+    loop._sync_legacy_references = MagicMock()
+    loop._compute_volatility = MainLoop._compute_volatility.__get__(loop, MainLoop)
+    loop._observe_sector_rotation = MagicMock()
+    loop._update_physical_freshness = MagicMock()
+    loop._dispatch_fusion = MagicMock()
+
+    runtime = _runtime()
+    runtime.update_candle = MagicMock()
+    runtime.current_volatility = 0.20
+    runtime.last_whale_alert = None
+    runtime.toxicity_engine = MagicMock()
+    runtime.toxicity_engine.update_toxicity.return_value = "tox"
+    runtime.update_toxicity_multiplier_from_alert = MagicMock()
+    runtime.shans_curve = MagicMock()
+    runtime.shans_curve.is_ready.return_value = True
+    runtime.update_sentiment_engine = MagicMock()
+    loop._ensure_runtime = MagicMock(return_value=runtime)
+
+    MainLoop.on_candle.__get__(loop, MainLoop)(_candle(exchange_ts_ns=T0_NS))
+
+    loop._observe_sector_rotation.assert_called_once()
+    loop.signal_fusion.fuse.assert_not_called()
+    loop._dispatch_fusion.assert_not_called()
+    loop._update_physical_freshness.assert_not_called()
+    assert "reason_code=DATA_BACKFILL_OBSERVE_ONLY" in caplog.text
+    assert "decision_compiler_called': False" in caplog.text
+    assert "submit_signal_called': False" in caplog.text
+
+
+def test_sell_without_broker_position_classifies_missing_authority():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["SOL/USD"],
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+    )
+    signal = _signal(symbol="SOL/USD")
+    signal.side = "sell"
+    runtime = _runtime()
+
+    verdict = main_loop_module._build_pre_trade_guardrail_verdict(
+        config=config,
+        symbol="SOL/USD",
+        signal=signal,
+        runtime=runtime,
+        is_attack=False,
+    )
+
+    assert signal.metadata["sell_intent_classification"] == "SELL_AUTHORITY_MISSING"
+    assert "SELL_AUTHORITY_MISSING" in verdict["reason_codes"]
+    assert "ACTION_UNSUPPORTED" in verdict["reason_codes"]
+    assert verdict["route_permitted"] is False
+
+
+def test_sell_with_broker_position_classifies_exit_without_enabling_sell():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["SOL/USD"],
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+    )
+    signal = _signal(symbol="SOL/USD")
+    signal.side = "sell"
+    signal.metadata["existing_positions"] = ({"symbol": "SOL/USD", "quantity": "1.0"},)
+    runtime = _runtime()
+
+    verdict = main_loop_module._build_pre_trade_guardrail_verdict(
+        config=config,
+        symbol="SOL/USD",
+        signal=signal,
+        runtime=runtime,
+        is_attack=False,
+    )
+
+    assert signal.metadata["sell_intent_classification"] == "SELL_EXIT_EXISTING_BROKER_POSITION"
+    assert "SELL_AUTHORITY_MISSING" not in verdict["reason_codes"]
+    assert "ACTION_UNSUPPORTED" in verdict["reason_codes"]
+    assert verdict["route_permitted"] is False
 
 
 def test_main_loop_does_not_import_broker_adapter():

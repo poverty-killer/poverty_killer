@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock
 
 from app.commander import Commander
 from app.core.decision_compiler import DecisionCompiler
+from app.brain.data_validator import DataContinuityValidator
 from app.execution.alpaca_paper_adapter import AlpacaPaperBrokerAdapter, AlpacaPaperCredentials
 from app.execution.engine import ExecutionEngine
 from app.execution.order_router import OrderRouter
@@ -35,6 +37,7 @@ from app.risk.pre_trade_guardrails import (
     PreTradeGuardrailRequest,
     evaluate_pre_trade_guardrails,
 )
+from app.utils.time_utils import now_ns
 
 
 T0_NS = 1_777_948_800_000_000_000
@@ -201,6 +204,10 @@ def _engine(router: OrderRouter, *, size: Decimal):
     engine._state.is_running = True
     engine._state.last_regime = "neutral"
     return engine
+
+
+def _ns_datetime(ns: int) -> datetime:
+    return datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
 
 
 def test_alpaca_paper_crypto_internal_five_dollar_cap_blocks_before_broker_minimum():
@@ -373,6 +380,197 @@ def test_execution_engine_blocks_guardrail_denial_before_order_router_submit():
 
     assert admitted is False
     router.submit_order.assert_not_called()
+
+
+def test_data_unhealthy_block_emits_causal_evidence_before_router_submit():
+    router = MagicMock()
+    router.get_mid_price.return_value = Decimal("2500.00")
+    validator = DataContinuityValidator(max_stale_age_sec=5.0)
+    validator.record_data("ETH/USD", _ns_datetime(T0_NS))
+    engine = ExecutionEngine(
+        commander=Commander(),
+        risk_guard=_risk_guard(),
+        order_router=router,
+        masking_layer=_masking_layer(Decimal("0.01")),
+        data_validator=validator,
+        signal_ttl_ms=1000.0,
+    )
+    engine._state.is_running = True
+    signal = _signal(
+        "ETH/USD",
+        Decimal("0.01"),
+        {
+            "execution_market_truth": {
+                "symbol": "ETH/USD",
+                "latest_book_ts_ns": None,
+                "latest_candle_ts_ns": T0_NS,
+                "data_source_type": "runtime",
+            }
+        },
+    )
+
+    admitted = engine.submit_signal(
+        signal,
+        current_price=Decimal("2500.00"),
+        is_attack=False,
+    )
+
+    block = engine.get_last_admission_block_result()
+    evidence = block.block_evidence
+    assert admitted is False
+    assert block.reason_code == "DATA_UNHEALTHY"
+    assert evidence["symbol"] == "ETH/USD"
+    assert evidence["gap_detected"] is False
+    assert evidence["last_valid_data_ns"] == T0_NS
+    assert evidence["last_valid_data_age_ms"] > evidence["max_stale_age_ms"]
+    assert evidence["max_stale_age_ms"] == 5000.0
+    assert evidence["latest_book_ts_ns"] is None
+    assert evidence["latest_candle_ts_ns"] == T0_NS
+    assert evidence["data_health_reason_code"] == "DATA_STALE"
+    assert evidence["data_source_type"] == "runtime"
+    router.submit_order.assert_not_called()
+
+
+def test_backfill_observe_only_signal_is_blocked_as_data_unhealthy():
+    router = MagicMock()
+    validator = DataContinuityValidator(max_stale_age_sec=5.0)
+    fresh_ns = now_ns()
+    validator.record_data("ETH/USD", _ns_datetime(fresh_ns))
+    engine = ExecutionEngine(
+        commander=Commander(),
+        risk_guard=_risk_guard(),
+        order_router=router,
+        masking_layer=_masking_layer(Decimal("0.01")),
+        data_validator=validator,
+        signal_ttl_ms=1000.0,
+    )
+    engine._state.is_running = True
+    signal = _signal(
+        "ETH/USD",
+        Decimal("0.01"),
+        {
+            "execution_market_truth": {
+                "symbol": "ETH/USD",
+                "latest_candle_ts_ns": fresh_ns,
+                "data_source_type": "backfill",
+            }
+        },
+    )
+
+    admitted = engine.submit_signal(
+        signal,
+        current_price=Decimal("2500.00"),
+        is_attack=False,
+    )
+
+    block = engine.get_last_admission_block_result()
+    assert admitted is False
+    assert block.reason_code == "DATA_UNHEALTHY"
+    assert block.block_evidence["data_health_reason_code"] == "DATA_BACKFILL_OBSERVE_ONLY"
+    assert block.block_evidence["data_source_type"] == "backfill"
+    router.submit_order.assert_not_called()
+
+
+def test_fresh_same_symbol_market_truth_passes_to_non_mutating_queue_boundary():
+    router = MagicMock()
+    validator = DataContinuityValidator(max_stale_age_sec=5.0)
+    fresh_ns = now_ns()
+    validator.record_data("ETH/USD", _ns_datetime(fresh_ns))
+    engine = ExecutionEngine(
+        commander=Commander(),
+        risk_guard=_risk_guard(),
+        order_router=router,
+        masking_layer=_masking_layer(Decimal("0.01")),
+        data_validator=validator,
+        signal_ttl_ms=1000.0,
+    )
+    engine._state.is_running = True
+    signal = _signal(
+        "ETH/USD",
+        Decimal("0.01"),
+        {
+            "execution_market_truth": {
+                "symbol": "ETH/USD",
+                "latest_candle_ts_ns": fresh_ns,
+                "data_source_type": "runtime",
+            }
+        },
+    )
+
+    admitted = engine.submit_signal(
+        signal,
+        current_price=Decimal("2500.00"),
+        is_attack=False,
+    )
+
+    assert admitted is True
+    assert engine.get_last_admission_block_result() is None
+    assert engine.get_status()["execution_queue_size"] == 1
+    router.submit_order.assert_not_called()
+
+
+def test_safe_mode_active_block_emits_latency_recovery_evidence():
+    router = MagicMock()
+    engine = _engine(router, size=Decimal("0.01"))
+    engine._state.is_in_safe_mode = True
+    engine._state.safe_mode_entered_at_ns = T0_NS
+    engine._state.last_latency_ok_at_ns = T0_NS - 10_000_000
+    engine._state.safe_mode_recovery_state = "LAG_ABORT_ACTIVE"
+    engine._state.last_latency_truth = {
+        "status": "LAG_ABORT_ACTIVE",
+        "reason_code": "LATENCY_THRESHOLD_EXCEEDED",
+        "latency_ms": 250.0,
+        "threshold_ms": 200.0,
+        "source": "order_router.websocket_rtt",
+    }
+
+    admitted = engine.submit_signal(
+        _signal("ETH/USD", Decimal("0.01"), {}),
+        current_price=Decimal("2500.00"),
+        is_attack=False,
+    )
+
+    block = engine.get_last_admission_block_result()
+    evidence = block.block_evidence
+    assert admitted is False
+    assert block.reason_code == "SAFE_MODE_ACTIVE"
+    assert evidence["latency_truth_status"] == "LAG_ABORT_ACTIVE"
+    assert evidence["latency_truth_reason_code"] == "LATENCY_THRESHOLD_EXCEEDED"
+    assert evidence["latency_ms"] == 250.0
+    assert evidence["threshold_ms"] == 200.0
+    assert evidence["latency_source"] == "order_router.websocket_rtt"
+    assert evidence["safe_mode_entered_at_ns"] == T0_NS
+    assert evidence["last_latency_ok_at_ns"] == T0_NS - 10_000_000
+    assert evidence["safe_mode_recovery_state"] == "LAG_ABORT_ACTIVE"
+    router.submit_order.assert_not_called()
+
+
+def test_safe_mode_recovery_clears_only_with_latency_ok_truth():
+    router = MagicMock()
+    engine = _engine(router, size=Decimal("0.01"))
+    engine._state.is_in_safe_mode = True
+    engine._state.safe_mode_entered_at_ns = T0_NS
+    stale_truth = engine._classify_latency_truth(
+        {"latency_ms": 9.0, "pong_ns": T0_NS - 40_000_000_000},
+        current_ns=T0_NS,
+    )
+    engine._apply_latency_truth(stale_truth)
+    assert engine.get_status()["is_in_safe_mode"] is True
+
+    ok_truth = engine._classify_latency_truth(
+        {
+            "latency_ms": 9.0,
+            "ping_ns": T0_NS - 9_000_000,
+            "pong_ns": T0_NS,
+        },
+        current_ns=T0_NS,
+    )
+    engine._apply_latency_truth(ok_truth)
+    status = engine.get_status()
+    assert ok_truth.status == "LATENCY_OK"
+    assert status["is_in_safe_mode"] is False
+    assert status["safe_mode_recovery_state"] == "LATENCY_OK_CONFIRMED"
+    assert status["safe_mode_entered_at_ns"] == 0
 
 
 def test_execution_engine_uses_guardrail_order_shape_for_alpaca_crypto_non_attack():

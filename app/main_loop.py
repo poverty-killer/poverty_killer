@@ -94,6 +94,7 @@ from app.strategies.strategy_vote_adapters import (
     adapt_liquidity_void_to_vote,
     adapt_sector_rotation_to_vote,
 )
+from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,62 @@ def _log_dispatch_diag(reason_code: str, **fields: Any) -> None:
     )
 
 
+def _runtime_market_truth_fields(
+    symbol: str,
+    runtime: Any,
+    consumer_exchange_ts_ns: int,
+    *,
+    data_source_type: str = "runtime",
+) -> Dict[str, Any]:
+    latest_book = getattr(runtime, "last_order_book", None)
+    latest_candle = getattr(runtime, "last_candle", None)
+    return {
+        "symbol": symbol,
+        "consumer_exchange_ts_ns": consumer_exchange_ts_ns,
+        "latest_book_ts_ns": getattr(latest_book, "exchange_ts_ns", None),
+        "latest_candle_ts_ns": getattr(latest_candle, "exchange_ts_ns", None),
+        "data_source_type": data_source_type,
+    }
+
+
+def _classify_candle_execution_truth(
+    *,
+    symbol: str,
+    runtime: Any,
+    exchange_ts_ns: int,
+    max_stale_age_ns: int,
+    current_ns: Optional[int] = None,
+) -> Dict[str, Any]:
+    current_ns = int(current_ns or now_ns())
+    age_ns = max(0, current_ns - int(exchange_ts_ns or 0))
+    detail = _runtime_market_truth_fields(
+        symbol,
+        runtime,
+        exchange_ts_ns,
+        data_source_type="runtime",
+    )
+    detail.update(
+        {
+            "consumer_timestamp_ns": exchange_ts_ns,
+            "consumer_age_ms": age_ns / 1_000_000.0,
+            "max_stale_age_ms": max_stale_age_ns / 1_000_000.0,
+            "executable_market_truth": False,
+            "data_health_reason_code": "DATA_HEALTH_UNKNOWN",
+        }
+    )
+    if exchange_ts_ns <= 0:
+        detail["data_health_reason_code"] = "DATA_TIMESTAMP_MISSING"
+        detail["data_source_type"] = "unknown"
+        return detail
+    if age_ns > max_stale_age_ns:
+        detail["data_health_reason_code"] = "DATA_BACKFILL_OBSERVE_ONLY"
+        detail["data_source_type"] = "backfill"
+        return detail
+    detail["data_health_reason_code"] = "DATA_HEALTHY"
+    detail["executable_market_truth"] = True
+    return detail
+
+
 def _as_mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -137,6 +194,9 @@ def _execution_admission_block_fields(block_result: Any) -> Dict[str, Any]:
         "execution_admission_reason_code": reason_code,
         "execution_admission_message": getattr(block_result, "message", None),
     }
+    block_evidence = getattr(block_result, "block_evidence", None)
+    if isinstance(block_evidence, dict):
+        fields["execution_admission_block_evidence"] = dict(block_evidence)
     return {key: value for key, value in fields.items() if value is not None}
 
 
@@ -195,6 +255,38 @@ def _to_decimal_or_none(value: Any) -> Optional[Decimal]:
         return Decimal(str(value))
     except Exception:
         return None
+
+
+def _matching_positive_position(symbol: str, positions: Tuple[Dict[str, Any], ...]) -> bool:
+    expected = str(symbol or "").upper()
+    for position in positions:
+        if str(position.get("symbol", "")).upper() != expected:
+            continue
+        quantity = _to_decimal_or_none(position.get("quantity", position.get("qty", "0")))
+        if quantity is not None and quantity > Decimal("0"):
+            return True
+    return False
+
+
+def _classify_sell_intent(
+    *,
+    symbol: str,
+    side: str,
+    metadata: Dict[str, Any],
+    existing_positions: Tuple[Dict[str, Any], ...],
+) -> Optional[str]:
+    if str(side or "").lower() != "sell":
+        return None
+    if _matching_positive_position(symbol, existing_positions):
+        return "SELL_EXIT_EXISTING_BROKER_POSITION"
+    local_position = metadata.get("local_sim_position") or metadata.get("sim_position")
+    if isinstance(local_position, dict):
+        local_qty = _to_decimal_or_none(local_position.get("quantity", local_position.get("qty", "0")))
+        if local_qty is not None and local_qty > Decimal("0"):
+            return "SELL_EXIT_LOCAL_SIM_ONLY"
+    if metadata.get("short_intent") is True:
+        return "SELL_SHORT_UNSUPPORTED"
+    return "SELL_AUTHORITY_MISSING"
 
 
 def _infer_asset_class_for_guardrail(symbol: str, metadata: Dict[str, Any]) -> str:
@@ -314,11 +406,30 @@ def _build_pre_trade_guardrail_verdict(
     if requested_notional is None and current_price is not None and quantity > Decimal("0"):
         requested_notional = abs(quantity * current_price)
     internal_max_notional = _to_decimal_or_none(metadata.get("internal_max_notional")) or requested_notional
+    existing_positions = _metadata_sequence(metadata.get("existing_positions"))
+    side = str(getattr(signal, "side", "buy")).lower()
+    protective_context = metadata.get("protective_context")
+    protective_context = dict(protective_context) if isinstance(protective_context, dict) else {}
+    sell_intent_classification = _classify_sell_intent(
+        symbol=symbol,
+        side=side,
+        metadata=metadata,
+        existing_positions=existing_positions,
+    )
+    if sell_intent_classification:
+        metadata["sell_intent_classification"] = sell_intent_classification
+        protective_context["sell_intent_classification"] = sell_intent_classification
+        if sell_intent_classification in {
+            "SELL_AUTHORITY_MISSING",
+            "SELL_EXIT_LOCAL_SIM_ONLY",
+            "SELL_SHORT_UNSUPPORTED",
+        }:
+            protective_context.setdefault("block_reason", "SELL_AUTHORITY_MISSING")
 
     verdict = evaluate_pre_trade_guardrails(
         PreTradeGuardrailRequest(
             symbol=symbol,
-            side=str(getattr(signal, "side", "buy")).lower(),
+            side=side,
             order_type=str(order_type).lower(),
             time_in_force=time_in_force,
             quantity=quantity,
@@ -328,12 +439,12 @@ def _build_pre_trade_guardrail_verdict(
             capability=capability,
             portal_selection_result=portal_result,
             quote_classification=quote_classification,
-            existing_positions=_metadata_sequence(metadata.get("existing_positions")),
+            existing_positions=existing_positions,
             open_orders=_metadata_sequence(metadata.get("open_orders")),
             reservations=_metadata_sequence(metadata.get("reservations")),
             add_on_allowed=bool(metadata.get("add_on_allowed", False)),
             approval_present=bool(metadata.get("approval_present", False)),
-            protective_context=metadata.get("protective_context"),
+            protective_context=protective_context or None,
             economics_context=metadata.get("economics_context"),
             strategy_context=metadata.get("strategy_context"),
             source="main_loop_dispatch",
@@ -1322,6 +1433,17 @@ class MainLoop:
         # ================================================================
         self._observe_sector_rotation(symbol, runtime, candle)
 
+        max_stale_age_ns = int(getattr(self.data_validator, "max_stale_age_ns", 5_000_000_000))
+        candle_execution_truth = _classify_candle_execution_truth(
+            symbol=symbol,
+            runtime=runtime,
+            exchange_ts_ns=exchange_ts_ns,
+            max_stale_age_ns=max_stale_age_ns,
+        )
+        if candle_execution_truth.get("executable_market_truth") is True:
+            self.data_validator.record_data(symbol, _ns_to_datetime(exchange_ts_ns))
+            self.data_validator.mark_good(symbol)
+
         # ================================================================
         # LIVE GATE — Per-symbol Shans readiness
         # Enforces correct temporal authority: Shans state → Fusion → Dispatch.
@@ -1355,29 +1477,38 @@ class MainLoop:
                 )
                 self._shans_gate_last_log_ts[symbol] = _gate_now
         else:
-            # Refresh critical physical evidence on the admitted candle clock
-            # before Fusion evaluates physical freshness against this same
-            # dispatch timestamp. This preserves hard stale-physical vetoes
-            # while preventing active admitted candles from comparing against
-            # an older order-book event timestamp.
-            self._update_physical_freshness(symbol, exchange_ts_ns)
-
-            # Fuse signals (global — LIMIT: single cache, called per-symbol)
-            fusion = self.signal_fusion.fuse(exchange_ts_ns)
-            self._last_fusion = fusion
-
-            # Dispatch per-symbol (DIAGNOSTIC: trace dispatch entry)
-            if fusion is None:
-                logger.info("[DISPATCH] %s: fusion is None", symbol)
-            else:
-                logger.info(
-                    "[DISPATCH] %s: fusion advisory_attack_mode=%s, preferred_sleeve=%s",
-                    symbol,
-                    getattr(fusion, 'attack_mode', '<missing>'),
-                    getattr(fusion, 'preferred_sleeve', '<missing>'),
+            if candle_execution_truth.get("executable_market_truth") is not True:
+                _log_dispatch_diag(
+                    "DATA_BACKFILL_OBSERVE_ONLY",
+                    exchange_ts_ns=exchange_ts_ns,
+                    submit_signal_called=False,
+                    decision_compiler_called=False,
+                    **candle_execution_truth,
                 )
+            else:
+                # Refresh critical physical evidence on the admitted candle clock
+                # before Fusion evaluates physical freshness against this same
+                # dispatch timestamp. This preserves hard stale-physical vetoes
+                # while preventing active admitted candles from comparing against
+                # an older order-book event timestamp.
+                self._update_physical_freshness(symbol, exchange_ts_ns)
 
-            self._dispatch_fusion(symbol, runtime, fusion, exchange_ts_ns)
+                # Fuse signals (global — LIMIT: single cache, called per-symbol)
+                fusion = self.signal_fusion.fuse(exchange_ts_ns)
+                self._last_fusion = fusion
+
+                # Dispatch per-symbol (DIAGNOSTIC: trace dispatch entry)
+                if fusion is None:
+                    logger.info("[DISPATCH] %s: fusion is None", symbol)
+                else:
+                    logger.info(
+                        "[DISPATCH] %s: fusion advisory_attack_mode=%s, preferred_sleeve=%s",
+                        symbol,
+                        getattr(fusion, 'attack_mode', '<missing>'),
+                        getattr(fusion, 'preferred_sleeve', '<missing>'),
+                    )
+
+                self._dispatch_fusion(symbol, runtime, fusion, exchange_ts_ns)
 
         self._metrics.iteration_count += 1
         self._metrics.last_candle_exchange_ts_ns = exchange_ts_ns
@@ -1769,6 +1900,12 @@ class MainLoop:
                 aggression_contract_metadata
             )
             signal_metadata["aggression_replay_proof"] = aggression_replay_proof
+            signal_metadata["execution_market_truth"] = _runtime_market_truth_fields(
+                symbol,
+                runtime,
+                exchange_ts_ns,
+                data_source_type="runtime",
+            )
 
         truth_frame = self._build_truth_frame(exchange_ts_ns)
         pre_trade_guardrail_verdict = _build_pre_trade_guardrail_verdict(
