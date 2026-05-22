@@ -7,6 +7,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 import app.main_loop as main_loop_module
+from app.config import Config
 from app.commander import Commander
 from app.main_loop import MainLoop, _log_dispatch_diag
 from app.models import Candle
@@ -403,6 +404,57 @@ def test_submit_signal_called_diag_preserves_success_behavior(caplog):
     assert "reason_code=decision_compile_attempted" in caplog.text
     assert "reason_code=submit_signal_called" in caplog.text
     assert "submitted': True" in caplog.text
+    assert "decision_compiler_status_code': 'SUBMITTED_TO_EXECUTION'" in caplog.text
+
+
+def test_pre_trade_guardrail_uses_alpaca_crypto_default_limit_gtc_for_non_attack():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["ETH/USD"],
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+    )
+    signal = _signal(symbol="ETH/USD")
+    runtime = _runtime()
+
+    verdict = main_loop_module._build_pre_trade_guardrail_verdict(
+        config=config,
+        symbol="ETH/USD",
+        signal=signal,
+        runtime=runtime,
+        is_attack=False,
+    )
+
+    assert verdict["route_permitted"] is True
+    assert verdict["order_type"] == "limit"
+    assert verdict["time_in_force"] == "GTC"
+    assert verdict["capability_identity"]["execution_adapter"] == "alpaca_paper_rest"
+    assert verdict["reason_codes"] == ("PRE_TRADE_GUARDRAILS_ALLOW",)
+
+
+def test_submitted_false_diag_includes_status_code_and_execution_block(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop()
+    loop.execution_engine.submit_signal.return_value = False
+    loop.execution_engine.get_last_admission_block_result.return_value = types.SimpleNamespace(
+        normalized_status="blocked",
+        route="execution_engine",
+        reason_code="SAFE_MODE_ACTIVE",
+        message="ExecutionEngine safe-mode gate blocked signal admission.",
+    )
+    signal = _signal()
+    vote = _vote()
+
+    _dispatch(loop, _runtime(sector_signal=signal, sector_vote=vote))
+
+    loop.decision_compiler.compile.assert_called_once()
+    loop.execution_engine.submit_signal.assert_called_once()
+    assert loop._metrics.orders_rejected == 1
+    assert "reason_code=submit_signal_called" in caplog.text
+    assert "submitted': False" in caplog.text
+    assert "decision_compiler_status_code': 'EXECUTION_ADMISSION_BLOCKED'" in caplog.text
+    assert "execution_admission_reason_code': 'SAFE_MODE_ACTIVE'" in caplog.text
 
 
 def test_main_loop_does_not_import_broker_adapter():

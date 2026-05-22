@@ -262,6 +262,10 @@ class ExecutionEngine:
         with self._lock:
             return dict(self._shadow_broker_mutation_counts)
 
+    def get_last_admission_block_result(self) -> Optional[ExecutionSpineResult]:
+        """Return the last pre-router signal admission block, if any."""
+        return self._last_admission_block_result
+
     def update_equity(self, current_equity: float) -> None:
         """Update current equity for risk tracking."""
         with self._lock:
@@ -287,32 +291,6 @@ class ExecutionEngine:
         Queue admission uses canonical now_ns() and explicit state gating.
         """
         self._last_admission_block_result = None
-        if not self._state.is_running:
-            return False
-
-        current_ns = now_ns()
-
-        if self._state.is_in_recalibration:
-            if self._state.recalibration_until_ns > 0 and current_ns < self._state.recalibration_until_ns:
-                return False
-            self._state.is_in_recalibration = False
-            self._state.recalibration_until_ns = 0
-
-        if self._state.is_in_safe_mode:
-            return False
-
-        if not self.risk_guard.can_trade():
-            return False
-
-        if self.risk_guard.is_vol_fuse_triggered():
-            return False
-
-        if self.data_validator and not self.data_validator.is_data_healthy(signal.symbol):
-            return False
-
-        if not self._is_signal_economically_admissible(signal):
-            return False
-
         resolved_decision_uuid = decision_uuid
         if resolved_decision_uuid is None and isinstance(signal.metadata, dict):
             candidate = signal.metadata.get("decision_uuid")
@@ -330,7 +308,88 @@ class ExecutionEngine:
             if guardrail_verdict is not None:
                 signal.metadata.setdefault("pre_trade_guardrail_verdict", guardrail_verdict)
 
+        decision_artifact = (
+            self._decision_artifact_summary(decision_record)
+            if decision_record is not None
+            else None
+        )
         guardrail_verdict = self._normalized_pre_trade_guardrail_verdict(signal)
+
+        if not self._state.is_running:
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="EXECUTION_ENGINE_NOT_RUNNING",
+                message="ExecutionEngine is not running.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+            )
+
+        current_ns = now_ns()
+
+        if self._state.is_in_recalibration:
+            if self._state.recalibration_until_ns > 0 and current_ns < self._state.recalibration_until_ns:
+                return self._record_admission_block(
+                    signal=signal,
+                    decision_uuid=resolved_decision_uuid,
+                    reason_code="RECALIBRATION_ACTIVE",
+                    message="ExecutionEngine recalibration gate blocked signal admission.",
+                    decision_artifact=decision_artifact,
+                    guardrail_verdict=guardrail_verdict,
+                )
+            self._state.is_in_recalibration = False
+            self._state.recalibration_until_ns = 0
+
+        if self._state.is_in_safe_mode:
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="SAFE_MODE_ACTIVE",
+                message="ExecutionEngine safe-mode gate blocked signal admission.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+            )
+
+        if not self.risk_guard.can_trade():
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="RISK_GUARD_BLOCKED",
+                message="Risk guard blocked signal admission.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+            )
+
+        if self.risk_guard.is_vol_fuse_triggered():
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="VOL_FUSE_TRIGGERED",
+                message="Volatility fuse blocked signal admission.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+            )
+
+        if self.data_validator and not self.data_validator.is_data_healthy(signal.symbol):
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="DATA_UNHEALTHY",
+                message="Data validator blocked signal admission.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+            )
+
+        if not self._is_signal_economically_admissible(signal):
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="ECONOMIC_ADMISSIBILITY_BLOCKED",
+                message="Execution economic admissibility gate blocked signal admission.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+            )
+
         if guardrail_verdict is not None and guardrail_verdict.get("route_permitted") is not True:
             logger.info(
                 "[EXEC_DIAG] PRE_TRADE_GUARDRAIL_BLOCKED: symbol=%s verdict=%s reasons=%s",
@@ -338,7 +397,14 @@ class ExecutionEngine:
                 guardrail_verdict.get("verdict"),
                 guardrail_verdict.get("reason_codes"),
             )
-            return False
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="PRE_TRADE_GUARDRAIL_BLOCKED",
+                message="Pre-trade guardrail blocked signal admission before OrderRouter.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+            )
 
         signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         if (
@@ -714,6 +780,36 @@ class ExecutionEngine:
             )
         self._state.is_in_safe_mode = True
 
+    def _record_admission_block(
+        self,
+        *,
+        signal: StrategySignal,
+        decision_uuid: Optional[str],
+        reason_code: str,
+        message: str,
+        decision_artifact: Optional[Dict[str, Any]],
+        guardrail_verdict: Optional[Dict[str, Any]],
+    ) -> bool:
+        self._last_admission_block_result = ExecutionSpineResult(
+            decision_uuid=decision_uuid,
+            client_order_id=None,
+            broker_order_id=None,
+            normalized_status="blocked",
+            route="execution_engine",
+            reason_code=reason_code,
+            message=message,
+            decision_artifact=decision_artifact,
+            pre_trade_guardrail_verdict=guardrail_verdict,
+        )
+        logger.info(
+            "[EXEC_DIAG] SIGNAL_ADMISSION_BLOCKED: symbol=%s side=%s decision_uuid=%s reason_code=%s",
+            getattr(signal, "symbol", None),
+            getattr(signal, "side", None),
+            decision_uuid,
+            reason_code,
+        )
+        return False
+
     def _record_shadow_read_only_block(
         self,
         *,
@@ -980,13 +1076,26 @@ class ExecutionEngine:
             )
 
         masked = self.masking_layer.mask_order(signal.quantity)
+        resolved_order_type = str(
+            signal_metadata.get("order_type")
+            or (guardrail_verdict or {}).get("order_type")
+            or ("limit" if is_attack else "market")
+        ).lower()
 
-        if is_attack:
+        if resolved_order_type == "limit":
             if current_price > Decimal("0"):
                 if signal.side == "buy":
-                    limit_price_for_order = current_price * (Decimal("1") - self.maker_offset_pct)
+                    limit_price_for_order = (
+                        current_price * (Decimal("1") - self.maker_offset_pct)
+                        if is_attack
+                        else current_price
+                    )
                 else:
-                    limit_price_for_order = current_price * (Decimal("1") + self.maker_offset_pct)
+                    limit_price_for_order = (
+                        current_price * (Decimal("1") + self.maker_offset_pct)
+                        if is_attack
+                        else current_price
+                    )
             elif signal.price is not None:
                 limit_price_for_order = Decimal(str(signal.price))
             else:
@@ -1034,6 +1143,24 @@ class ExecutionEngine:
         ):
             if key in signal_metadata:
                 order_metadata[key] = signal_metadata[key]
+        if isinstance(guardrail_verdict, dict):
+            capability_identity = guardrail_verdict.get("capability_identity")
+            if isinstance(capability_identity, dict):
+                for key in (
+                    "asset_class",
+                    "venue_id",
+                    "portal_name",
+                    "environment",
+                    "execution_adapter",
+                    "reconciliation_adapter",
+                    "capability_key",
+                ):
+                    if key not in order_metadata and capability_identity.get(key) is not None:
+                        order_metadata[key] = capability_identity[key]
+            if "time_in_force" not in order_metadata and guardrail_verdict.get("time_in_force"):
+                order_metadata["time_in_force"] = str(guardrail_verdict["time_in_force"]).lower()
+            if "order_type" not in order_metadata and guardrail_verdict.get("order_type"):
+                order_metadata["order_type"] = str(guardrail_verdict["order_type"]).lower()
         aggression_contract_metadata = signal_metadata.get(
             "canonical_aggression_contract"
         )
@@ -1076,7 +1203,7 @@ class ExecutionEngine:
             symbol=signal.symbol,
             side=signal.side,
             quantity=Decimal(str(masked.masked_size)),
-            order_type="limit" if is_attack else "market",
+            order_type=resolved_order_type,
             limit_price=limit_price_for_order,
             strategy=signal.strategy,
             confidence=signal.confidence,

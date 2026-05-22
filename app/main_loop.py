@@ -121,6 +121,71 @@ def _log_dispatch_diag(reason_code: str, **fields: Any) -> None:
     )
 
 
+def _as_mapping(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _execution_admission_block_fields(block_result: Any) -> Dict[str, Any]:
+    if block_result is None:
+        return {}
+    reason_code = getattr(block_result, "reason_code", None)
+    if not isinstance(reason_code, str) or not reason_code:
+        return {}
+    fields: Dict[str, Any] = {
+        "execution_admission_status": getattr(block_result, "normalized_status", None),
+        "execution_admission_route": getattr(block_result, "route", None),
+        "execution_admission_reason_code": reason_code,
+        "execution_admission_message": getattr(block_result, "message", None),
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _decision_compiler_status_fields(
+    *,
+    decision_record: Any,
+    signal_metadata: Dict[str, Any],
+    submitted: bool,
+    execution_admission_block: Any = None,
+) -> Dict[str, Any]:
+    outputs = _as_mapping(getattr(decision_record, "outputs", None))
+    metadata = _as_mapping(getattr(decision_record, "metadata", None))
+    additional = _as_mapping(outputs.get("additional"))
+    guardrail = _as_mapping(
+        additional.get("pre_trade_guardrail_verdict")
+        or signal_metadata.get("pre_trade_guardrail_verdict")
+    )
+    aggression_contract = _as_mapping(
+        additional.get("canonical_aggression_contract")
+        or signal_metadata.get("canonical_aggression_contract")
+    )
+    reason_codes = tuple(str(code) for code in guardrail.get("reason_codes", ()) if str(code))
+    route_permitted = guardrail.get("route_permitted")
+    mutation_permitted = guardrail.get("mutation_permitted")
+    if submitted:
+        status_code = "SUBMITTED_TO_EXECUTION"
+    elif guardrail and route_permitted is not True:
+        status_code = "PRE_TRADE_GUARDRAIL_BLOCKED"
+    else:
+        status_code = "EXECUTION_ADMISSION_BLOCKED"
+
+    fields: Dict[str, Any] = {
+        "decision_compiler_status_code": status_code,
+        "decision_compiler_reason_codes": reason_codes,
+        "pre_trade_verdict": guardrail.get("verdict"),
+        "pre_trade_route_permitted": route_permitted,
+        "pre_trade_mutation_permitted": mutation_permitted,
+        "truth_status": outputs.get("truth_status") or metadata.get("truth_status"),
+        "canonical_aggression_mode": aggression_contract.get("mode"),
+        "canonical_aggression_veto_reasons": tuple(
+            str(reason)
+            for reason in aggression_contract.get("veto_reasons", ())
+            if str(reason)
+        ),
+    }
+    fields.update(_execution_admission_block_fields(execution_admission_block))
+    return {key: value for key, value in fields.items() if value not in (None, (), [])}
+
+
 def _to_decimal_or_none(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
@@ -183,7 +248,8 @@ def _build_pre_trade_guardrail_verdict(
     current_price = _to_decimal_or_none(getattr(runtime, "last_price", None))
     quantity = _to_decimal_or_none(getattr(signal, "quantity", None)) or Decimal("0")
     asset_class = _infer_asset_class_for_guardrail(symbol, metadata)
-    order_type = str(metadata.get("order_type") or ("limit" if is_attack else "market")).lower()
+    preselected_order_type = metadata.get("order_type")
+    order_type = str(preselected_order_type).lower() if preselected_order_type else None
 
     registry = build_default_capability_registry()
     preferred_portal = _preferred_portal_for_guardrail(config, symbol)
@@ -206,13 +272,19 @@ def _build_pre_trade_guardrail_verdict(
     )
     portal_result = registry.resolve(portal_request)
     capability = portal_result.selected
+    if order_type is None:
+        order_type = (
+            capability.default_order_type
+            if capability is not None and capability.default_order_type
+            else ("limit" if is_attack else "market")
+        )
     time_in_force = (
         str(preselected_time_in_force).upper()
         if preselected_time_in_force
         else (capability.default_time_in_force if capability is not None else None)
     )
 
-    if capability is not None and preselected_time_in_force is None and time_in_force:
+    if capability is not None and (preselected_order_type is None or preselected_time_in_force is None) and time_in_force:
         portal_request = PortalSelectionRequest(
             symbol=symbol,
             asset_class=asset_class,
@@ -247,10 +319,10 @@ def _build_pre_trade_guardrail_verdict(
         PreTradeGuardrailRequest(
             symbol=symbol,
             side=str(getattr(signal, "side", "buy")).lower(),
-            order_type=order_type,
+            order_type=str(order_type).lower(),
             time_in_force=time_in_force,
             quantity=quantity,
-            limit_price=current_price if order_type == "limit" else None,
+            limit_price=current_price if str(order_type).lower() == "limit" else None,
             current_price=current_price,
             internal_max_notional=internal_max_notional,
             capability=capability,
@@ -1655,6 +1727,14 @@ class MainLoop:
             is_attack=aggression_contract.execution_is_attack,
             decision_record=decision_record,
         )
+        execution_admission_block = None
+        get_last_admission_block = getattr(
+            self.execution_engine,
+            "get_last_admission_block_result",
+            None,
+        )
+        if callable(get_last_admission_block):
+            execution_admission_block = get_last_admission_block()
         _log_dispatch_diag(
             "submit_signal_called",
             symbol=symbol,
@@ -1663,6 +1743,12 @@ class MainLoop:
             decision_uuid=getattr(decision_record, "decision_uuid", None),
             submitted=submitted,
             submit_signal_called=True,
+            **_decision_compiler_status_fields(
+                decision_record=decision_record,
+                signal_metadata=signal_metadata if isinstance(signal_metadata, dict) else {},
+                submitted=bool(submitted),
+                execution_admission_block=execution_admission_block,
+            ),
         )
         if submitted:
             self._metrics.orders_submitted += 1

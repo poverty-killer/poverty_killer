@@ -375,6 +375,46 @@ def test_execution_engine_blocks_guardrail_denial_before_order_router_submit():
     router.submit_order.assert_not_called()
 
 
+def test_execution_engine_uses_guardrail_order_shape_for_alpaca_crypto_non_attack():
+    router = MagicMock()
+    router.get_mid_price.return_value = Decimal("77064.20")
+    router.submit_order.return_value = None
+    router.get_gateway_response.return_value = None
+    engine = _engine(router, size=Decimal("0.0002"))
+    verdict = _verdict(
+        symbol="BTC/USD",
+        asset_class="crypto",
+        qty=Decimal("0.0002"),
+        price=Decimal("77064.20"),
+        tif="GTC",
+        internal_max=Decimal("20.00"),
+    ).to_dict()
+
+    result = engine.execute_compiled_decision(
+        _decision(verdict),
+        _signal(
+            "BTC/USD",
+            Decimal("0.0002"),
+            {
+                "asset_class": "crypto",
+                "venue_id": "alpaca",
+                "portal_name": "alpaca_paper",
+                "environment": "paper",
+                "execution_adapter": "alpaca_paper_rest",
+            },
+        ),
+        current_price=Decimal("77064.20"),
+        is_attack=False,
+    )
+
+    assert result.normalized_status == "pending"
+    order = router.submit_order.call_args.args[0]
+    assert order.order_type == "limit"
+    assert order.limit_price == Decimal("77064.20")
+    assert order.metadata["time_in_force"] == "gtc"
+    assert order.metadata["execution_adapter"] == "alpaca_paper_rest"
+
+
 def test_execution_spine_passes_allowed_guardrail_to_gateway_without_fake_fill():
     transport = StubTransport((200, {"id": "broker-seam4-open", "status": "open", "symbol": "AAPL"}))
     adapter = AlpacaPaperBrokerAdapter(
@@ -385,7 +425,12 @@ def test_execution_spine_passes_allowed_guardrail_to_gateway_without_fake_fill()
         ),
         transport=transport,
     )
-    router = OrderRouter(primary_exchange="alpaca", paper_mode=True, broker_gateway_adapter=adapter)
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        broker_gateway_adapter=adapter,
+        execution_broker="alpaca_paper",
+    )
     router.update_market_mid("AAPL", 150.00, T0_NS)
     engine = _engine(router, size=Decimal("0.10"))
     verdict = _verdict(
