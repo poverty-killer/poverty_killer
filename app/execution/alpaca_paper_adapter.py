@@ -6,10 +6,11 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from app.execution.broker_gateway import (
     BrokerAdapterIdentity,
@@ -24,6 +25,7 @@ from app.execution.broker_gateway import (
 
 EXPECTED_ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 FORBIDDEN_ALPACA_LIVE_BASE_URL = "https://api.alpaca.markets"
+ALPACA_PAPER_CREDENTIAL_KEYS = ("APCA_API_BASE_URL", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
 
 
 class AlpacaTransport(Protocol):
@@ -79,6 +81,40 @@ class AlpacaPaperCredentials:
 
 
 @dataclass(frozen=True)
+class AlpacaPaperCredentialAuthorityProof:
+    status: str
+    reason_codes: tuple[str, ...]
+    endpoint: str
+    credential_status: str
+    credential_source: str
+    fallback_path: str
+    fallback_file_exists: bool
+    process_env_present: dict[str, bool]
+    fallback_file_present: dict[str, bool]
+    process_env_fingerprints: dict[str, dict[str, Any]]
+    fallback_file_fingerprints: dict[str, dict[str, Any]]
+    effective_fingerprints: dict[str, dict[str, Any]]
+    live_endpoint_used: bool = False
+
+    def to_sanitized_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason_codes": self.reason_codes,
+            "endpoint": self.endpoint,
+            "credential_status": self.credential_status,
+            "credential_source": self.credential_source,
+            "fallback_path": self.fallback_path,
+            "fallback_file_exists": self.fallback_file_exists,
+            "process_env_present": dict(self.process_env_present),
+            "fallback_file_present": dict(self.fallback_file_present),
+            "process_env_fingerprints": dict(self.process_env_fingerprints),
+            "fallback_file_fingerprints": dict(self.fallback_file_fingerprints),
+            "effective_fingerprints": dict(self.effective_fingerprints),
+            "live_endpoint_used": self.live_endpoint_used,
+        }
+
+
+@dataclass(frozen=True)
 class AlpacaPaperReadOnlyReconciliationProof:
     status: str
     reason_codes: tuple[str, ...]
@@ -108,10 +144,29 @@ class AlpacaPaperReadOnlyReconciliationProof:
         }
 
 
-def load_alpaca_paper_credentials(path: Path | None = None) -> AlpacaPaperCredentials:
-    values: dict[str, str] = {}
+@dataclass(frozen=True)
+class AlpacaPaperReadOnlyPreflightProof:
+    status: str
+    reason_codes: tuple[str, ...]
+    credential_authority: AlpacaPaperCredentialAuthorityProof
+    reconciliation: AlpacaPaperReadOnlyReconciliationProof | None
+
+    def to_sanitized_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason_codes": self.reason_codes,
+            "credential_authority": self.credential_authority.to_sanitized_dict(),
+            "reconciliation": self.reconciliation.to_sanitized_dict() if self.reconciliation else None,
+        }
+
+
+def _default_alpaca_paper_env_path() -> Path:
     configured_path = os.environ.get("POVERTY_KILLER_ALPACA_PAPER_ENV_PATH")
-    env_path = path or (Path(configured_path) if configured_path else Path.home() / ".poverty_killer_alpaca_paper_env")
+    return Path(configured_path) if configured_path else Path.home() / ".poverty_killer_alpaca_paper_env"
+
+
+def _read_alpaca_paper_env_file(env_path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
     if env_path.exists():
         for raw in env_path.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
@@ -119,8 +174,92 @@ def load_alpaca_paper_credentials(path: Path | None = None) -> AlpacaPaperCreden
                 continue
             key, value = line.split("=", 1)
             key = key.strip().removeprefix("export ").strip()
-            if key in {"APCA_API_BASE_URL", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY"}:
+            if key in ALPACA_PAPER_CREDENTIAL_KEYS:
                 values[key] = value.strip().strip("'").strip('"')
+    return values
+
+
+def _credential_fingerprint(value: str) -> dict[str, Any]:
+    return {
+        "present": bool(value),
+        "length": len(value),
+        "sha256_12": hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else "missing",
+        "has_leading_or_trailing_space": value != value.strip(),
+        "has_quote_chars": "'" in value or '"' in value,
+        "has_newline": "\n" in value or "\r" in value,
+    }
+
+
+def validate_alpaca_paper_credential_authority(
+    path: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> AlpacaPaperCredentialAuthorityProof:
+    env_path = path or _default_alpaca_paper_env_path()
+    env_values = {key: (env or os.environ).get(key, "") or "" for key in ALPACA_PAPER_CREDENTIAL_KEYS}
+    file_values = _read_alpaca_paper_env_file(env_path)
+    effective_values = {
+        key: env_values.get(key) or file_values.get(key, "")
+        for key in ALPACA_PAPER_CREDENTIAL_KEYS
+    }
+
+    reasons: list[str] = []
+    missing = [key for key in ALPACA_PAPER_CREDENTIAL_KEYS if not effective_values.get(key)]
+    if missing:
+        reasons.append("CREDENTIALS_MISSING")
+
+    endpoint = (effective_values.get("APCA_API_BASE_URL") or "").rstrip("/")
+    if endpoint == FORBIDDEN_ALPACA_LIVE_BASE_URL:
+        reasons.append("LIVE_ENDPOINT_BLOCKED")
+    elif endpoint != EXPECTED_ALPACA_PAPER_BASE_URL:
+        reasons.append("ALPACA_PAPER_ENDPOINT_REQUIRED")
+
+    conflict_keys = [
+        key for key in ALPACA_PAPER_CREDENTIAL_KEYS
+        if env_values.get(key) and file_values.get(key) and env_values[key] != file_values[key]
+    ]
+    if conflict_keys:
+        if any(key in conflict_keys for key in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")):
+            reasons.append("STALE_PROCESS_ENV_CREDENTIALS")
+        reasons.append("CREDENTIAL_AUTHORITY_CONFLICT")
+
+    process_present = {key: bool(env_values.get(key)) for key in ALPACA_PAPER_CREDENTIAL_KEYS}
+    fallback_present = {key: bool(file_values.get(key)) for key in ALPACA_PAPER_CREDENTIAL_KEYS}
+    credential_source = "process_env" if any(process_present.values()) else "fallback_file"
+    credentials = AlpacaPaperCredentials(
+        base_url=endpoint,
+        key_id=effective_values.get("APCA_API_KEY_ID", ""),
+        secret_key=effective_values.get("APCA_API_SECRET_KEY", ""),
+    )
+    status = "CREDENTIAL_AUTHORITY_OK" if not reasons else "FAILED_CLOSED"
+    return AlpacaPaperCredentialAuthorityProof(
+        status=status,
+        reason_codes=tuple(dict.fromkeys(reasons or ["CREDENTIAL_AUTHORITY_OK"])),
+        endpoint=endpoint,
+        credential_status=credentials.status,
+        credential_source=credential_source,
+        fallback_path=str(env_path),
+        fallback_file_exists=env_path.exists(),
+        process_env_present=process_present,
+        fallback_file_present=fallback_present,
+        process_env_fingerprints={key: _credential_fingerprint(env_values.get(key, "")) for key in ALPACA_PAPER_CREDENTIAL_KEYS},
+        fallback_file_fingerprints={
+            key: _credential_fingerprint(file_values.get(key, "")) for key in ALPACA_PAPER_CREDENTIAL_KEYS
+        },
+        effective_fingerprints={
+            key: _credential_fingerprint(effective_values.get(key, "")) for key in ALPACA_PAPER_CREDENTIAL_KEYS
+        },
+        live_endpoint_used=endpoint == FORBIDDEN_ALPACA_LIVE_BASE_URL,
+    )
+
+
+def load_alpaca_paper_credentials(path: Path | None = None, *, enforce_authority: bool = True) -> AlpacaPaperCredentials:
+    env_path = path or _default_alpaca_paper_env_path()
+    if enforce_authority:
+        proof = validate_alpaca_paper_credential_authority(env_path)
+        if proof.status != "CREDENTIAL_AUTHORITY_OK":
+            raise BrokerGatewayError("credential_authority_blocked", message=",".join(proof.reason_codes))
+    values = _read_alpaca_paper_env_file(env_path)
     return AlpacaPaperCredentials(
         base_url=(os.environ.get("APCA_API_BASE_URL") or values.get("APCA_API_BASE_URL") or "").rstrip("/"),
         key_id=os.environ.get("APCA_API_KEY_ID") or values.get("APCA_API_KEY_ID") or "",
@@ -153,8 +292,14 @@ class AlpacaPaperBrokerAdapter:
         self._validate_credentials()
 
     @classmethod
-    def from_env(cls, *, transport: AlpacaTransport | None = None, timeout: float = 10.0) -> "AlpacaPaperBrokerAdapter":
-        return cls(load_alpaca_paper_credentials(), transport=transport, timeout=timeout)
+    def from_env(
+        cls,
+        *,
+        transport: AlpacaTransport | None = None,
+        timeout: float = 10.0,
+        credential_path: Path | None = None,
+    ) -> "AlpacaPaperBrokerAdapter":
+        return cls(load_alpaca_paper_credentials(credential_path), transport=transport, timeout=timeout)
 
     @property
     def identity(self) -> BrokerAdapterIdentity:
@@ -411,6 +556,65 @@ def collect_alpaca_paper_read_only_reconciliation_truth(
         broker_truth=broker_truth,
         mutation_occurred=any(response.mutation_occurred for response in responses),
         live_endpoint_used=identity.base_url == FORBIDDEN_ALPACA_LIVE_BASE_URL,
+    )
+
+
+def collect_alpaca_paper_read_only_preflight_truth(
+    *,
+    credential_path: Path | None = None,
+    transport: AlpacaTransport | None = None,
+    timeout: float = 10.0,
+) -> AlpacaPaperReadOnlyPreflightProof:
+    """
+    Validate Alpaca PAPER credential authority, then perform GET-only broker preflight.
+
+    This preflight is intentionally non-mutating. It blocks stale process env
+    credentials before constructing the adapter, then collects account,
+    positions, and open-order truth through the existing read-only helper.
+    """
+    authority = validate_alpaca_paper_credential_authority(credential_path)
+    if authority.status != "CREDENTIAL_AUTHORITY_OK":
+        return AlpacaPaperReadOnlyPreflightProof(
+            status="FAILED_CLOSED",
+            reason_codes=authority.reason_codes,
+            credential_authority=authority,
+            reconciliation=None,
+        )
+
+    try:
+        adapter = AlpacaPaperBrokerAdapter.from_env(
+            transport=transport,
+            timeout=timeout,
+            credential_path=credential_path,
+        )
+    except BrokerGatewayError as exc:
+        return AlpacaPaperReadOnlyPreflightProof(
+            status="FAILED_CLOSED",
+            reason_codes=tuple(dict.fromkeys([*authority.reason_codes, exc.reason_code])),
+            credential_authority=authority,
+            reconciliation=None,
+        )
+
+    reconciliation = collect_alpaca_paper_read_only_reconciliation_truth(adapter)
+    reasons = list(authority.reason_codes)
+    if reconciliation.status != "BROKER_READ_ONLY_RECONCILED":
+        reasons.extend(reconciliation.reason_codes)
+    if reconciliation.request_counts.get("POST", 0) != 0:
+        reasons.append("POST_COUNT_NONZERO")
+    if reconciliation.mutation_occurred:
+        reasons.append("BROKER_READ_ONLY_MUTATION_OCCURRED")
+    if reconciliation.live_endpoint_used:
+        reasons.append("LIVE_ENDPOINT_USED")
+    status = "PAPER_READ_ONLY_PREFLIGHT_PASSED" if reconciliation.status == "BROKER_READ_ONLY_RECONCILED" and not (
+        reconciliation.request_counts.get("POST", 0)
+        or reconciliation.mutation_occurred
+        or reconciliation.live_endpoint_used
+    ) else "FAILED_CLOSED"
+    return AlpacaPaperReadOnlyPreflightProof(
+        status=status,
+        reason_codes=tuple(dict.fromkeys(reasons)),
+        credential_authority=authority,
+        reconciliation=reconciliation,
     )
 
 
