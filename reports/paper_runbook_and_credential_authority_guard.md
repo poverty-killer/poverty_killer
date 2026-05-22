@@ -157,6 +157,22 @@ timeout 300s venv/Scripts/python.exe main.py --paper --log-level INFO
 
 This command is PAPER broker-mutation capable. Do not run it without a separate approval packet.
 
+Windows PowerShell is now the preferred launch authority for Windows venv runtime runs:
+
+```powershell
+.\scripts\run_bounded_paper.ps1
+```
+
+Default mode is preflight-only.
+
+Bounded autonomous PAPER requires a separate approval packet and explicit launcher flags:
+
+```powershell
+.\scripts\run_bounded_paper.ps1 -Run -ApproveAutonomousPaper -DurationSeconds 1200 -Watchlist "BTC/USD,ETH/USD,SOL/USD"
+```
+
+Do not launch autonomous PAPER through WSL-to-Windows env inheritance. WSL remains acceptable for code edits, reports, static checks, and Git, but Windows PowerShell is the runtime authority for `venv\Scripts\python.exe`.
+
 Valid outcomes:
 
 - zero orders, truthfully explained by guardrails/signals/market truth/risk/economics
