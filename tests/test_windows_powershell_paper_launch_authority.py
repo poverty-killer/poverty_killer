@@ -53,6 +53,22 @@ def test_launcher_uses_get_only_preflight_before_bounded_run():
     assert "LIVE_ENDPOINT_USED" in text
 
 
+def test_launcher_runs_preflight_from_temp_python_file_not_python_dash_c():
+    text = _script_text()
+
+    preflight_index = text.index("Running Alpaca PAPER launch preflight...")
+    fail_closed_index = text.index('Fail-Closed "PAPER_PREFLIGHT_FAILED"')
+    preflight_block = text[preflight_index:fail_closed_index]
+
+    assert "& $PythonPath -c $preflightCode" not in text
+    assert '$tempPreflightPath = Join-Path ([System.IO.Path]::GetTempPath())' in preflight_block
+    assert "poverty_killer_preflight_{0}.py" in preflight_block
+    assert "[System.IO.File]::WriteAllText($tempPreflightPath, $preflightCode" in preflight_block
+    assert "& $PythonPath $tempPreflightPath" in preflight_block
+    assert "Remove-Item -LiteralPath $tempPreflightPath" in preflight_block
+    assert "sys.path.insert(0, os.getcwd())" in text
+
+
 def test_launcher_does_not_print_or_embed_raw_secret_values():
     text = _script_text().lower()
 

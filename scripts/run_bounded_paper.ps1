@@ -111,7 +111,10 @@ Require-NonEmptyEnv "POVERTY_KILLER_CRYPTO_MARKET_DATA_PROVIDERS"
 
 $preflightCode = @'
 import json
+import os
 import sys
+
+sys.path.insert(0, os.getcwd())
 
 from app.config import Config
 from app.data.feed_provider_router import select_configured_market_data_provider
@@ -128,7 +131,7 @@ broker, primary_exchange, adapter, adapter_id = main.resolve_execution_broker_ga
 universe = main.resolve_runtime_universe(config)
 providers = main.get_configured_market_data_providers(config, "crypto")
 selection = select_configured_market_data_provider(
-    symbol=universe.symbols[0] if universe.symbols else "",
+    symbol=universe.symbols[0] if universe.symbols else None,
     asset_class="crypto",
     required_data_type="order_book",
     configured_provider_ids=providers,
@@ -188,8 +191,19 @@ if failures:
 '@
 
 Write-Host "Running Alpaca PAPER launch preflight..."
-& $PythonPath -c $preflightCode
-if ($LASTEXITCODE -ne 0) {
+$tempPreflightPath = Join-Path ([System.IO.Path]::GetTempPath()) ("poverty_killer_preflight_{0}.py" -f [guid]::NewGuid().ToString("N"))
+$preflightExitCode = 1
+try {
+    [System.IO.File]::WriteAllText($tempPreflightPath, $preflightCode, [System.Text.UTF8Encoding]::new($false))
+    & $PythonPath $tempPreflightPath
+    $preflightExitCode = $LASTEXITCODE
+}
+finally {
+    if (Test-Path -LiteralPath $tempPreflightPath) {
+        Remove-Item -LiteralPath $tempPreflightPath -Force -ErrorAction SilentlyContinue
+    }
+}
+if ($preflightExitCode -ne 0) {
     Fail-Closed "PAPER_PREFLIGHT_FAILED"
 }
 
