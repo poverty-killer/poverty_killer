@@ -10,7 +10,12 @@ from unittest.mock import MagicMock
 import app.main_loop as main_loop_module
 from app.config import Config
 from app.commander import Commander
-from app.main_loop import MainLoop, _classify_candle_execution_truth, _log_dispatch_diag
+from app.main_loop import (
+    MainLoop,
+    _classify_candle_execution_truth,
+    _emit_candidate_scorecard_diag,
+    _log_dispatch_diag,
+)
 from app.brain.data_validator import DataContinuityValidator
 from app.models import Candle
 from app.models.enums import SleeveType
@@ -321,6 +326,28 @@ def test_dispatch_diag_helper_emits_shans_not_ready_reason(caplog):
     assert "submit_signal_called" in caplog.text
 
 
+def test_early_scorecard_emits_shans_not_ready_without_compiler(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+
+    _emit_candidate_scorecard_diag(
+        "shans_not_ready",
+        symbol="ETH/USD",
+        exchange_ts_ns=T0_NS,
+        source_sleeve="ShansCurve",
+        shans_ready=False,
+        shans_buffer=0,
+        shans_required=60,
+    )
+
+    assert "reason_code=shans_not_ready" in caplog.text
+    assert "candidate_lifecycle" in caplog.text
+    assert "opportunity_scorecard" in caplog.text
+    assert "decision_compiler_called': False" in caplog.text
+    assert "submit_signal_called': False" in caplog.text
+    assert "execution_verdict': 'BLOCKED'" in caplog.text
+    assert "broker_post': False" in caplog.text
+
+
 def test_preferred_sleeve_missing_diag_does_not_submit(caplog):
     caplog.set_level(logging.INFO, logger=LOGGER_NAME)
     loop = _loop(preferred=None)
@@ -386,6 +413,11 @@ def test_observed_pair_stale_diag_does_not_submit(caplog):
     assert "reason_code=OBSERVED_PAIR_STALE" in caplog.text
     assert "stale_cleared': True" in caplog.text
     assert "stale_age_ns" in caplog.text
+    assert "candidate_lifecycle" in caplog.text
+    assert "opportunity_scorecard" in caplog.text
+    assert "raw_opportunity_score': 0.9" in caplog.text
+    assert "execution_verdict': 'BLOCKED'" in caplog.text
+    assert "broker_post': False" in caplog.text
     assert runtime.last_sector_rotation_observed_signal is None
     assert runtime.last_sector_rotation_observed_vote is None
     assert "reason_code=strategy_signal_missing" not in caplog.text
@@ -455,6 +487,10 @@ def test_shadowfront_whale_decline_diag_does_not_submit(caplog):
     loop.decision_compiler.compile.assert_not_called()
     assert "reason_code=shadowfront_declined_whale_condition" in caplog.text
     assert "eligibility_only': True" in caplog.text
+    assert "candidate_lifecycle" in caplog.text
+    assert "opportunity_scorecard" in caplog.text
+    assert "execution_verdict': 'BLOCKED'" in caplog.text
+    assert "broker_post': False" in caplog.text
     assert "reason_code=strategy_signal_missing" not in caplog.text
 
 
@@ -638,8 +674,13 @@ def test_stale_backfill_candle_does_not_reach_executable_dispatch(caplog):
     loop._dispatch_fusion.assert_not_called()
     loop._update_physical_freshness.assert_not_called()
     assert "reason_code=CANDLE_FRESHNESS_POLICY_MISSING" in caplog.text
+    assert "candidate_lifecycle" in caplog.text
+    assert "opportunity_scorecard" in caplog.text
+    assert "gate_trace" in caplog.text
     assert "decision_compiler_called': False" in caplog.text
     assert "submit_signal_called': False" in caplog.text
+    assert "execution_verdict': 'BLOCKED'" in caplog.text
+    assert "broker_post': False" in caplog.text
 
 
 def test_latest_rest_candle_within_provider_policy_can_be_executable():
@@ -663,7 +704,8 @@ def test_latest_rest_candle_within_provider_policy_can_be_executable():
     assert detail["candle_freshness_reason_code"] == "CANDLE_RUNTIME_FRESH"
     assert detail["data_health_reason_code"] == "DATA_HEALTHY"
     assert detail["latest_batch_candle"] is True
-    assert detail["candle_age_ms"] == 26_000.0
+    assert detail["candle_age_ms"] == 0.0
+    assert detail["candle_age_from_close_ms"] == 0.0
     assert detail["candle_freshness_policy_ms"] == 60_000.0
 
 
@@ -703,7 +745,7 @@ def test_rest_candle_older_than_provider_budget_stays_observe_only():
         runtime=runtime,
         candle=candle,
         exchange_ts_ns=T0_NS,
-        current_ns=T0_NS + 61_000_000_000,
+        current_ns=T0_NS + 121_000_000_000,
     )
 
     assert detail["executable_market_truth"] is False

@@ -18,6 +18,7 @@ import threading
 import math
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Optional, Dict, Any, List, Tuple, Set
 
 from app.config import Config
@@ -38,6 +39,13 @@ from app.execution.engine import ExecutionEngine
 from app.strategies.strategy_router import StrategyRouter
 from app.strategies.shadow_front import ShadowFrontStrategy
 from app.core.decision_compiler import DecisionCompiler
+from app.core.candidate_lifecycle import (
+    build_candidate_lifecycle,
+    lifecycle_to_dict,
+    opportunity_scorecard_from_lifecycle,
+    record_decision_compiler_result,
+    record_execution_result,
+)
 from app.core.truth_reconciler import TruthReconciler
 from app.core.whole_bot_attribution import build_runtime_edge_attribution
 from app.models import (
@@ -122,6 +130,151 @@ def _log_dispatch_diag(reason_code: str, **fields: Any) -> None:
     )
 
 
+def _last_latency_truth(execution_engine: Any) -> Dict[str, Any]:
+    get_status = getattr(execution_engine, "get_status", None)
+    if not callable(get_status):
+        return {}
+    status = get_status()
+    if not isinstance(status, dict):
+        return {}
+    latency_truth = status.get("last_latency_truth")
+    return dict(latency_truth) if isinstance(latency_truth, dict) else {}
+
+
+def _latest_runtime_advisory_pair(
+    runtime: Any,
+) -> Tuple[Optional[Any], Optional[Any], str]:
+    advisory_sources = (
+        (
+            "last_sector_rotation_observed_signal",
+            "last_sector_rotation_observed_vote",
+            repr(SleeveType.SECTOR_ROTATION),
+        ),
+        (
+            "last_liquidity_void_observed_signal",
+            "last_liquidity_void_observed_vote",
+            repr(SleeveType.FLV),
+        ),
+    )
+    for signal_attr, vote_attr, sleeve in advisory_sources:
+        signal = getattr(runtime, signal_attr, None)
+        vote = getattr(runtime, vote_attr, None)
+        if signal is not None or vote is not None:
+            return signal, vote, sleeve
+    return None, None, "RuntimeDispatch"
+
+
+def _emit_candidate_scorecard_diag(
+    reason_code: str,
+    *,
+    symbol: str,
+    exchange_ts_ns: int,
+    source_sleeve: str,
+    side: Optional[str] = None,
+    signal: Any = None,
+    strategy_vote: Any = None,
+    fusion: Any = None,
+    market_truth: Optional[Dict[str, Any]] = None,
+    candle_truth: Optional[Dict[str, Any]] = None,
+    latency_truth: Optional[Dict[str, Any]] = None,
+    dispatch_evidence: Tuple[Dict[str, Any], ...] = (),
+    **fields: Any,
+) -> Dict[str, Any]:
+    """Log a non-executable advisory scorecard before compiler/submission."""
+    clean_fields = {key: value for key, value in fields.items() if value is not None}
+    side_value = str(
+        side
+        or getattr(signal, "side", None)
+        or clean_fields.get("side")
+        or "unknown"
+    ).lower()
+    blocker_evidence = {
+        "module": source_sleeve,
+        "sleeve": source_sleeve,
+        "status": "BLOCK",
+        "reason_code": reason_code,
+        "evidence": dict(clean_fields),
+    }
+    lifecycle = build_candidate_lifecycle(
+        candidate_id=f"{symbol}:{side_value}:{exchange_ts_ns}:{source_sleeve}:{reason_code}",
+        symbol=symbol,
+        side=side_value,
+        source_sleeve=source_sleeve,
+        timestamp_ns=exchange_ts_ns,
+        signal=signal,
+        strategy_vote=strategy_vote,
+        fusion=fusion,
+        market_truth=market_truth or {},
+        candle_truth=candle_truth or {},
+        latency_truth=latency_truth or {},
+        dispatch_evidence=(*dispatch_evidence, blocker_evidence),
+    )
+    lifecycle = record_execution_result(
+        lifecycle,
+        submitted=False,
+        execution_result=SimpleNamespace(
+            normalized_status="blocked",
+            route=None,
+            reason_code=reason_code,
+            message="pre_submit_advisory_scorecard_non_executable",
+            block_evidence={
+                **dict(clean_fields),
+                "submit_signal_called": False,
+                "decision_compiler_called": False,
+                "broker_post": False,
+            },
+        ),
+    )
+    candidate_lifecycle = lifecycle_to_dict(lifecycle)
+    opportunity_scorecard = opportunity_scorecard_from_lifecycle(candidate_lifecycle)
+    log_fields = {
+        **dict(clean_fields),
+        "symbol": symbol,
+        "exchange_ts_ns": exchange_ts_ns,
+        "source_sleeve": source_sleeve,
+        "side": side_value,
+        "submit_signal_called": False,
+        "decision_compiler_called": False,
+        "candidate_lifecycle": candidate_lifecycle,
+        "opportunity_scorecard": opportunity_scorecard,
+        "candidate_id": opportunity_scorecard.get("candidate_id"),
+        "module_contributions": opportunity_scorecard.get("module_contributions"),
+        "penalties": opportunity_scorecard.get("penalties"),
+        "gate_trace": opportunity_scorecard.get("gate_trace"),
+        "raw_opportunity_score": opportunity_scorecard.get("raw_opportunity_score"),
+        "final_opportunity_score": opportunity_scorecard.get("final_opportunity_score"),
+        "opportunity_verdict": opportunity_scorecard.get("opportunity_verdict"),
+        "execution_verdict": opportunity_scorecard.get("execution_verdict"),
+        "execution_blocker_reason_codes": opportunity_scorecard.get("execution_blocker_reason_codes"),
+        "broker_boundary_result": opportunity_scorecard.get("broker_boundary_result"),
+        "broker_post": False,
+    }
+    _log_dispatch_diag(reason_code, **log_fields)
+    return candidate_lifecycle
+
+
+def _timeframe_to_ns(timeframe: Any) -> Optional[int]:
+    text = str(timeframe or "").strip().lower()
+    if not text:
+        return None
+    units = {
+        "s": 1_000_000_000,
+        "m": 60_000_000_000,
+        "h": 3_600_000_000_000,
+        "d": 86_400_000_000_000,
+    }
+    suffix = text[-1]
+    if suffix not in units:
+        return None
+    try:
+        count = int(text[:-1] or "1")
+    except ValueError:
+        return None
+    if count <= 0:
+        return None
+    return count * units[suffix]
+
+
 def _runtime_market_truth_fields(
     symbol: str,
     runtime: Any,
@@ -149,7 +302,10 @@ def _classify_candle_execution_truth(
     current_ns: Optional[int] = None,
 ) -> Dict[str, Any]:
     current_ns = int(current_ns or now_ns())
-    age_ns = max(0, current_ns - int(exchange_ts_ns or 0))
+    candle_start_ns = int(exchange_ts_ns or 0)
+    timeframe_ns = _timeframe_to_ns(getattr(candle, "timeframe", None))
+    candle_close_ns = candle_start_ns + timeframe_ns if candle_start_ns > 0 and timeframe_ns else candle_start_ns
+    age_ns = max(0, current_ns - candle_close_ns)
     policy_ms = getattr(candle, "candle_freshness_policy_ms", None)
     latest_batch_candle = getattr(candle, "latest_batch_candle", None)
     source_type = str(getattr(candle, "data_source_type", "unknown") or "unknown")
@@ -163,6 +319,9 @@ def _classify_candle_execution_truth(
         {
             "consumer_timestamp_ns": exchange_ts_ns,
             "candle_age_ms": age_ns / 1_000_000.0,
+            "candle_start_ts_ns": candle_start_ns,
+            "candle_close_ts_ns": candle_close_ns,
+            "candle_age_from_close_ms": age_ns / 1_000_000.0,
             "consumer_age_ms": age_ns / 1_000_000.0,
             "candle_freshness_policy_ms": policy_ms,
             "candle_timeframe": getattr(candle, "timeframe", None),
@@ -224,6 +383,11 @@ def _execution_admission_block_fields(block_result: Any) -> Dict[str, Any]:
     block_evidence = getattr(block_result, "block_evidence", None)
     if isinstance(block_evidence, dict):
         fields["execution_admission_block_evidence"] = dict(block_evidence)
+    candidate_lifecycle = getattr(block_result, "candidate_lifecycle", None)
+    if isinstance(candidate_lifecycle, dict):
+        fields["execution_admission_candidate_lifecycle"] = dict(candidate_lifecycle)
+        fields["execution_admission_opportunity_verdict"] = candidate_lifecycle.get("opportunity_verdict")
+        fields["execution_admission_final_opportunity_score"] = candidate_lifecycle.get("final_opportunity_score")
     return {key: value for key, value in fields.items() if value is not None}
 
 
@@ -244,6 +408,14 @@ def _decision_compiler_status_fields(
     aggression_contract = _as_mapping(
         additional.get("canonical_aggression_contract")
         or signal_metadata.get("canonical_aggression_contract")
+    )
+    scorecard = _as_mapping(
+        additional.get("opportunity_scorecard")
+        or signal_metadata.get("opportunity_scorecard")
+    )
+    candidate_lifecycle = _as_mapping(
+        signal_metadata.get("candidate_lifecycle")
+        or additional.get("candidate_lifecycle")
     )
     reason_codes = tuple(str(code) for code in guardrail.get("reason_codes", ()) if str(code))
     route_permitted = guardrail.get("route_permitted")
@@ -268,6 +440,10 @@ def _decision_compiler_status_fields(
             for reason in aggression_contract.get("veto_reasons", ())
             if str(reason)
         ),
+        "candidate_id": candidate_lifecycle.get("candidate_id"),
+        "raw_opportunity_score": scorecard.get("raw_opportunity_score"),
+        "final_opportunity_score": scorecard.get("final_opportunity_score"),
+        "opportunity_verdict": scorecard.get("opportunity_verdict") or candidate_lifecycle.get("opportunity_verdict"),
     }
     fields.update(_execution_admission_block_fields(execution_admission_block))
     return {key: value for key, value in fields.items() if value not in (None, (), [])}
@@ -1492,27 +1668,42 @@ class MainLoop:
                     "[LIVE_GATE] BLOCK_FUSION symbol=%s reason=SHANS_NOT_READY buffer=%d required=%d",
                     symbol, _buf_len, _buf_req,
                 )
-                _log_dispatch_diag(
+                advisory_signal, advisory_vote, _advisory_sleeve = _latest_runtime_advisory_pair(runtime)
+                _emit_candidate_scorecard_diag(
                     "shans_not_ready",
                     symbol=symbol,
                     exchange_ts_ns=exchange_ts_ns,
+                    source_sleeve="ShansCurve",
+                    signal=advisory_signal,
+                    strategy_vote=advisory_vote,
+                    candle_truth=candle_execution_truth,
+                    latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                     shans_ready=False,
                     shans_buffer=_buf_len,
                     shans_required=_buf_req,
-                    submit_signal_called=False,
                 )
                 self._shans_gate_last_log_ts[symbol] = _gate_now
         else:
             if candle_execution_truth.get("executable_market_truth") is not True:
-                _log_dispatch_diag(
+                advisory_signal, advisory_vote, advisory_sleeve = _latest_runtime_advisory_pair(runtime)
+                candle_diag_fields = {
+                    key: value
+                    for key, value in candle_execution_truth.items()
+                    if key != "symbol"
+                }
+                _emit_candidate_scorecard_diag(
                     str(
                         candle_execution_truth.get("candle_freshness_reason_code")
                         or "DATA_BACKFILL_OBSERVE_ONLY"
                     ),
                     exchange_ts_ns=exchange_ts_ns,
-                    submit_signal_called=False,
-                    decision_compiler_called=False,
-                    **candle_execution_truth,
+                    symbol=symbol,
+                    source_sleeve=advisory_sleeve if advisory_signal is not None or advisory_vote is not None else "MarketDataCandle",
+                    signal=advisory_signal,
+                    strategy_vote=advisory_vote,
+                    candle_truth=candle_execution_truth,
+                    latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    **candle_diag_fields,
                 )
             else:
                 # Refresh critical physical evidence on the admitted candle clock
@@ -1537,7 +1728,13 @@ class MainLoop:
                         getattr(fusion, 'preferred_sleeve', '<missing>'),
                     )
 
-                self._dispatch_fusion(symbol, runtime, fusion, exchange_ts_ns)
+                self._dispatch_fusion(
+                    symbol,
+                    runtime,
+                    fusion,
+                    exchange_ts_ns,
+                    candle_execution_truth=candle_execution_truth,
+                )
 
         self._metrics.iteration_count += 1
         self._metrics.last_candle_exchange_ts_ns = exchange_ts_ns
@@ -1662,7 +1859,15 @@ class MainLoop:
     # BUNDLE 1 REDO REPAIR: DISPATCH (NOW PER-SYMBOL WITH DIAGNOSTICS)
     # =========================================================================
 
-    def _dispatch_fusion(self, symbol: str, runtime: SymbolRuntime, fusion: FusionDecision, exchange_ts_ns: int) -> None:
+    def _dispatch_fusion(
+        self,
+        symbol: str,
+        runtime: SymbolRuntime,
+        fusion: FusionDecision,
+        exchange_ts_ns: int,
+        *,
+        candle_execution_truth: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
         Lawful dispatch: FusionDecision → StrategyRouter → per-symbol StrategyVote
         → DecisionCompiler → ExecutionEngine.submit_signal().
@@ -1674,12 +1879,15 @@ class MainLoop:
         """
         if fusion is None:
             logger.info("[DISPATCH] %s: fusion is None → returning", symbol)
-            _log_dispatch_diag(
+            _emit_candidate_scorecard_diag(
                 "fusion_not_actionable",
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
+                source_sleeve="SignalFusion",
+                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                candle_truth=candle_execution_truth or {},
+                latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                 fusion_present=False,
-                submit_signal_called=False,
             )
             return
 
@@ -1690,13 +1898,17 @@ class MainLoop:
 
         if preferred is None:
             logger.info("[DISPATCH] %s: no preferred strategy -> returning", symbol)
-            _log_dispatch_diag(
+            _emit_candidate_scorecard_diag(
                 "preferred_sleeve_missing",
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
+                source_sleeve="StrategyRouter",
+                fusion=fusion,
+                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                candle_truth=candle_execution_truth or {},
+                latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                 fusion_present=True,
                 preferred_sleeve=None,
-                submit_signal_called=False,
             )
             return
 
@@ -1732,14 +1944,18 @@ class MainLoop:
                 "[DISPATCH] %s: no_registered_candidates eligible=%s → returning",
                 symbol, eligible_repr,
             )
-            _log_dispatch_diag(
+            _emit_candidate_scorecard_diag(
                 "sleeve_blocked",
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
+                source_sleeve=repr(preferred),
+                fusion=fusion,
+                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                candle_truth=candle_execution_truth or {},
+                latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                 preferred_sleeve=repr(preferred),
                 eligible_sleeves=eligible_repr,
                 candidates=[],
-                submit_signal_called=False,
             )
             return
 
@@ -1757,9 +1973,21 @@ class MainLoop:
         terminal_reason_code = None
         terminal_reason_fields: Dict[str, object] = {}
         terminal_reason_logged = False
+        terminal_signal_for_score = None
+        terminal_vote_for_score = None
+        terminal_sleeve_for_score = None
+        dispatch_evidence: List[Dict[str, Any]] = []
 
         for sleeve in candidates:
             logger.info("[DISPATCH] %s: evaluating sleeve=%s", symbol, repr(sleeve))
+            sig = None
+            vote = None
+            sleeve_evidence: Dict[str, Any] = {
+                "module": repr(sleeve),
+                "sleeve": repr(sleeve),
+                "status": "NOT_REACHED",
+                "reason_code": "NOT_EVALUATED",
+            }
 
             if sleeve == SleeveType.SHADOW_FRONT:
                 logger.info("[DISPATCH] %s: SHADOW_FRONT branch entered", symbol)
@@ -1775,12 +2003,26 @@ class MainLoop:
                         runtime.shadow_front_strategy,
                         exchange_ts_ns,
                     )
+                    sleeve_evidence.update(
+                        {
+                            "status": "DECLINED",
+                            "reason_code": reason_code,
+                            "evidence": dict(reason_fields),
+                        }
+                    )
                     terminal_reason_code = reason_code
                     terminal_reason_fields = dict(reason_fields)
 
             elif sleeve == SleeveType.GAMMA_FRONT:
                 logger.info("[DISPATCH] %s: GAMMA_FRONT branch entered", symbol)
                 sig, vote = self._generate_signal_and_vote_gamma_front(symbol, runtime, exchange_ts_ns)
+                if sig is None:
+                    sleeve_evidence.update(
+                        {
+                            "status": "DECLINED",
+                            "reason_code": "GAMMA_FRONT_SIGNAL_MISSING",
+                        }
+                    )
 
             elif sleeve == SleeveType.SECTOR_ROTATION:
                 # STAGE 2-D1: Paper-only active vote admission for SectorRotation.
@@ -1795,13 +2037,25 @@ class MainLoop:
                     runtime,
                     exchange_ts_ns,
                 )
+                observed_signal_for_score = runtime.last_sector_rotation_observed_signal
+                observed_vote_for_score = runtime.last_sector_rotation_observed_vote
                 sig, vote = self._consume_observed_pair_sector_rotation(
                     symbol, runtime, exchange_ts_ns,
                 )
                 if sig is None and reason_code != "OBSERVED_PAIR_READY":
+                    sleeve_evidence.update(
+                        {
+                            "status": "DECLINED",
+                            "reason_code": reason_code,
+                            "evidence": dict(reason_fields),
+                        }
+                    )
                     terminal_reason_code = reason_code
                     terminal_reason_fields = dict(reason_fields)
                     terminal_reason_logged = True
+                    terminal_signal_for_score = observed_signal_for_score
+                    terminal_vote_for_score = observed_vote_for_score
+                    terminal_sleeve_for_score = repr(sleeve)
 
             elif sleeve == SleeveType.FLV:
                 # STAGE 2-D3 (Option C): Paper-only active vote admission for
@@ -1815,18 +2069,40 @@ class MainLoop:
                 sig, vote = self._consume_observed_pair_liquidity_void(
                     symbol, runtime, exchange_ts_ns,
                 )
+                if sig is None:
+                    sleeve_evidence.update(
+                        {
+                            "status": "DECLINED",
+                            "reason_code": "LIQUIDITY_VOID_OBSERVED_PAIR_MISSING",
+                        }
+                    )
 
             else:
                 logger.info("[DISPATCH] %s: sleeve=%s no_dispatch_branch → skip", symbol, repr(sleeve))
+                sleeve_evidence.update(
+                    {
+                        "status": "DECLINED",
+                        "reason_code": "NO_DISPATCH_BRANCH",
+                    }
+                )
+                dispatch_evidence.append(sleeve_evidence)
                 continue
 
             if sig is not None:
+                sleeve_evidence.update(
+                    {
+                        "status": "PASS",
+                        "reason_code": "STRATEGY_SIGNAL_PRESENT",
+                    }
+                )
+                dispatch_evidence.append(sleeve_evidence)
                 signal = sig
                 strategy_vote = vote
                 winning_sleeve = sleeve
                 logger.info("[DISPATCH] %s: sleeve=%s produced_signal → selected", symbol, repr(sleeve))
                 break
 
+            dispatch_evidence.append(sleeve_evidence)
             logger.info("[DISPATCH] strategy_signal_none sleeve=%s → trying_fallback", repr(sleeve))
 
         if signal is None:
@@ -1834,44 +2110,74 @@ class MainLoop:
                 "[DISPATCH] %s: all_sleeves_declined candidates=%s",
                 symbol, [repr(s) for s in candidates],
             )
+            terminal_source_sleeve = terminal_sleeve_for_score or repr(preferred)
+            terminal_scorecard_fields = {
+                "preferred_sleeve": repr(preferred),
+                "eligible_sleeves": eligible_repr,
+                "candidates": [repr(s) for s in candidates],
+                "eligibility_only": True,
+                "executable_signal_present": False,
+            }
+            terminal_scorecard_fields.update(dict(terminal_reason_fields))
             if terminal_reason_code is None:
-                _log_dispatch_diag(
+                _emit_candidate_scorecard_diag(
                     "strategy_signal_missing",
                     symbol=symbol,
                     exchange_ts_ns=exchange_ts_ns,
-                    preferred_sleeve=repr(preferred),
-                    eligible_sleeves=eligible_repr,
-                    candidates=[repr(s) for s in candidates],
-                    eligibility_only=True,
-                    executable_signal_present=False,
-                    submit_signal_called=False,
+                    source_sleeve=terminal_source_sleeve,
+                    fusion=fusion,
+                    market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                    candle_truth=candle_execution_truth or {},
+                    latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    dispatch_evidence=tuple(dispatch_evidence),
+                    **terminal_scorecard_fields,
                 )
             elif terminal_reason_logged:
-                pass
-            else:
-                _log_dispatch_diag(
+                _emit_candidate_scorecard_diag(
                     terminal_reason_code,
                     symbol=symbol,
                     exchange_ts_ns=exchange_ts_ns,
-                    preferred_sleeve=repr(preferred),
-                    eligible_sleeves=eligible_repr,
-                    candidates=[repr(s) for s in candidates],
-                    eligibility_only=True,
-                    executable_signal_present=False,
+                    source_sleeve=terminal_source_sleeve,
+                    signal=terminal_signal_for_score,
+                    strategy_vote=terminal_vote_for_score,
+                    fusion=fusion,
+                    market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                    candle_truth=candle_execution_truth or {},
+                    latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    dispatch_evidence=tuple(dispatch_evidence),
                     terminal_dispatch_reason=True,
-                    submit_signal_called=False,
-                    **terminal_reason_fields,
+                    **terminal_scorecard_fields,
+                )
+            else:
+                _emit_candidate_scorecard_diag(
+                    terminal_reason_code,
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    source_sleeve=terminal_source_sleeve,
+                    fusion=fusion,
+                    market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                    candle_truth=candle_execution_truth or {},
+                    latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    dispatch_evidence=tuple(dispatch_evidence),
+                    terminal_dispatch_reason=True,
+                    **terminal_scorecard_fields,
                 )
             return
         if strategy_vote is None:
             logger.info("[DISPATCH] %s: strategy_vote=None signal_present sleeve=%s", symbol, repr(winning_sleeve))
-            _log_dispatch_diag(
+            _emit_candidate_scorecard_diag(
                 "strategy_vote_missing",
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
+                source_sleeve=repr(winning_sleeve),
+                signal=signal,
+                fusion=fusion,
+                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                candle_truth=candle_execution_truth or {},
+                latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                dispatch_evidence=tuple(dispatch_evidence),
                 winning_sleeve=repr(winning_sleeve),
                 signal_present=True,
-                submit_signal_called=False,
             )
             return
 
@@ -1974,12 +2280,53 @@ class MainLoop:
         if isinstance(signal_metadata, dict):
             signal_metadata["edge_attribution"] = edge_attribution
 
+        execution_status: Dict[str, Any] = {}
+        get_execution_status = getattr(execution_engine, "get_status", None)
+        if callable(get_execution_status):
+            status_candidate = get_execution_status()
+            if isinstance(status_candidate, dict):
+                execution_status = status_candidate
+        candidate_id = (
+            getattr(strategy_vote, "decision_uuid", None)
+            or (signal_metadata.get("decision_uuid") if isinstance(signal_metadata, dict) else None)
+            or f"{symbol}:{str(getattr(signal, 'side', '')).lower()}:{exchange_ts_ns}:{repr(winning_sleeve)}"
+        )
+        candidate_lifecycle = build_candidate_lifecycle(
+            candidate_id=str(candidate_id),
+            symbol=symbol,
+            side=str(getattr(signal, "side", "")).lower(),
+            source_sleeve=repr(winning_sleeve),
+            timestamp_ns=exchange_ts_ns,
+            signal=signal,
+            strategy_vote=strategy_vote,
+            fusion=fusion,
+            market_truth=(
+                signal_metadata.get("execution_market_truth", {})
+                if isinstance(signal_metadata, dict)
+                else {}
+            ),
+            candle_truth=candle_execution_truth or {},
+            edge_attribution=edge_attribution,
+            guardrail_verdict=pre_trade_guardrail_verdict,
+            latency_truth=execution_status.get("last_latency_truth", {}),
+            dispatch_evidence=tuple(dispatch_evidence),
+        )
+        candidate_lifecycle_dict = lifecycle_to_dict(candidate_lifecycle)
+        opportunity_scorecard = opportunity_scorecard_from_lifecycle(candidate_lifecycle_dict)
+        if isinstance(signal_metadata, dict):
+            signal_metadata["candidate_lifecycle"] = candidate_lifecycle_dict
+            signal_metadata["opportunity_scorecard"] = opportunity_scorecard
+
         _log_dispatch_diag(
             "decision_compile_attempted",
             symbol=symbol,
             exchange_ts_ns=exchange_ts_ns,
             winning_sleeve=repr(winning_sleeve),
             strategy_vote_present=True,
+            candidate_id=candidate_lifecycle_dict["candidate_id"],
+            raw_opportunity_score=opportunity_scorecard["raw_opportunity_score"],
+            final_opportunity_score=opportunity_scorecard["final_opportunity_score"],
+            opportunity_verdict=opportunity_scorecard["opportunity_verdict"],
         )
         decision_record = self.decision_compiler.compile(
             truth_frame,
@@ -1989,8 +2336,19 @@ class MainLoop:
                 "aggression_replay_proof": aggression_replay_proof,
                 "pre_trade_guardrail_verdict": pre_trade_guardrail_verdict,
                 "edge_attribution": edge_attribution,
+                "candidate_lifecycle": candidate_lifecycle_dict,
+                "opportunity_scorecard": opportunity_scorecard,
             },
         )
+        candidate_lifecycle = record_decision_compiler_result(
+            candidate_lifecycle,
+            decision_record=decision_record,
+        )
+        candidate_lifecycle_dict = lifecycle_to_dict(candidate_lifecycle)
+        opportunity_scorecard = opportunity_scorecard_from_lifecycle(candidate_lifecycle_dict)
+        if isinstance(signal_metadata, dict):
+            signal_metadata["candidate_lifecycle"] = candidate_lifecycle_dict
+            signal_metadata["opportunity_scorecard"] = opportunity_scorecard
         self._metrics.compilation_cycles += 1
         logger.info(
             "[DISPATCH] %s: DecisionRecord compiled: uuid=%s type=%s",
@@ -2018,6 +2376,16 @@ class MainLoop:
         )
         if callable(get_last_admission_block):
             execution_admission_block = get_last_admission_block()
+        candidate_lifecycle = record_execution_result(
+            candidate_lifecycle,
+            submitted=bool(submitted),
+            execution_result=execution_admission_block,
+        )
+        candidate_lifecycle_dict = lifecycle_to_dict(candidate_lifecycle)
+        opportunity_scorecard = opportunity_scorecard_from_lifecycle(candidate_lifecycle_dict)
+        if isinstance(signal_metadata, dict):
+            signal_metadata["candidate_lifecycle"] = candidate_lifecycle_dict
+            signal_metadata["opportunity_scorecard"] = opportunity_scorecard
         _log_dispatch_diag(
             "submit_signal_called",
             symbol=symbol,
@@ -2026,6 +2394,8 @@ class MainLoop:
             decision_uuid=getattr(decision_record, "decision_uuid", None),
             submitted=submitted,
             submit_signal_called=True,
+            candidate_lifecycle=candidate_lifecycle_dict,
+            broker_post=opportunity_scorecard["broker_post"],
             **_decision_compiler_status_fields(
                 decision_record=decision_record,
                 signal_metadata=signal_metadata if isinstance(signal_metadata, dict) else {},

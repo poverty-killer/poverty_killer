@@ -102,6 +102,7 @@ class ExecutionSpineResult:
     decision_artifact: Optional[Dict[str, Any]] = None
     pre_trade_guardrail_verdict: Optional[Dict[str, Any]] = None
     block_evidence: Optional[Dict[str, Any]] = None
+    candidate_lifecycle: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,7 @@ class LatencyTruthResult:
     safe_mode_required: bool
     missing_source: Optional[str] = None
     staleness_ms: Optional[float] = None
+    source_scope: str = "unknown"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -127,7 +129,30 @@ class LatencyTruthResult:
             "safe_mode_required": self.safe_mode_required,
             "missing_source": self.missing_source,
             "staleness_ms": self.staleness_ms,
+            "source_scope": self.source_scope,
         }
+
+
+def _latency_source_scope(source: str, measurement: Dict[str, Any]) -> str:
+    normalized = str(source or "").strip().lower()
+    feed_type = str(measurement.get("feed_type") or "").strip().lower()
+    if normalized in {"market_data.candle_rtt", "market_data_candle_rtt"}:
+        return "market_data_candle_rtt"
+    if normalized in {"market_data.book_rtt", "market_data_book_rtt"}:
+        return "market_data_book_rtt"
+    if normalized == "market_data.rest_polling_rtt":
+        if "candle" in feed_type:
+            return "market_data_candle_rtt"
+        if "book" in feed_type:
+            return "market_data_book_rtt"
+        return "market_data_rest_polling_rtt"
+    if normalized in {"broker.order_rtt", "broker_order_rtt", "order_router.broker_order_rtt"}:
+        return "broker_order_rtt"
+    if normalized in {"system.loop_lag", "system_loop_lag"}:
+        return "system_loop_lag"
+    if normalized in {"order_router.websocket_rtt", "websocket_rtt"}:
+        return "websocket_rtt"
+    return normalized.replace(".", "_") or "unknown"
 
 
 class ExecutionEngine:
@@ -595,9 +620,18 @@ class ExecutionEngine:
         threshold = float(self.lag_threshold_ms)
         latency_measurement = latency_ms if isinstance(latency_ms, dict) else {}
         source = str(latency_measurement.get("source") or "order_router.websocket_rtt")
+        source_scope = _latency_source_scope(source, latency_measurement)
         current_ns = int(current_ns or now_ns())
 
-        if source == "market_data.rest_polling_rtt":
+        is_market_data_rest_latency = source in {
+            "market_data.rest_polling_rtt",
+            "market_data.candle_rtt",
+            "market_data.book_rtt",
+            "market_data_candle_rtt",
+            "market_data_book_rtt",
+        }
+
+        if is_market_data_rest_latency:
             request_start_ns = int(latency_measurement.get("request_start_ns") or 0)
             response_received_ns = int(latency_measurement.get("response_received_ns") or 0)
             latency_value_raw = latency_measurement.get("latency_ms")
@@ -621,9 +655,10 @@ class ExecutionEngine:
                 source=source,
                 safe_mode_required=True,
                 missing_source="order_router.get_latency_measurement",
+                source_scope=source_scope,
             )
 
-        if source == "market_data.rest_polling_rtt":
+        if is_market_data_rest_latency:
             if request_start_ns > 0 and response_received_ns > 0 and response_received_ns < request_start_ns:
                 return LatencyTruthResult(
                     status="CLOCK_DELTA_INVALID",
@@ -632,6 +667,7 @@ class ExecutionEngine:
                     threshold_ms=threshold,
                     source=source,
                     safe_mode_required=True,
+                    source_scope=source_scope,
                 )
 
             if not math.isfinite(latency_value):
@@ -644,8 +680,9 @@ class ExecutionEngine:
                     latency_ms=None,
                     threshold_ms=threshold,
                     source=source,
-                    safe_mode_required=True,
+                    safe_mode_required=False,
                     missing_source=missing,
+                    source_scope=source_scope,
                 )
 
             if latency_value < 0:
@@ -656,29 +693,32 @@ class ExecutionEngine:
                     threshold_ms=threshold,
                     source=source,
                     safe_mode_required=True,
+                    source_scope=source_scope,
                 )
 
             if response_received_ns > 0:
                 staleness_ms = max(0.0, (current_ns - response_received_ns) / NS_PER_MS)
                 if staleness_ms > 30_000.0:
                     return LatencyTruthResult(
-                        status="STALE_MARKET_TRUTH",
+                        status="STALE_MARKET_DATA_LATENCY_TRUTH",
                         reason_code="REST_RTT_STALE",
                         latency_ms=latency_value,
                         threshold_ms=threshold,
                         source=source,
-                        safe_mode_required=True,
+                        safe_mode_required=False,
                         staleness_ms=staleness_ms,
+                        source_scope=source_scope,
                     )
 
             if latency_value > threshold:
                 return LatencyTruthResult(
-                    status="LAG_ABORT_ACTIVE",
-                    reason_code="LATENCY_THRESHOLD_EXCEEDED",
+                    status="MARKET_DATA_LATENCY_DEGRADED",
+                    reason_code="REST_LATENCY_THRESHOLD_EXCEEDED",
                     latency_ms=latency_value,
                     threshold_ms=threshold,
                     source=source,
-                    safe_mode_required=True,
+                    safe_mode_required=False,
+                    source_scope=source_scope,
                 )
 
             return LatencyTruthResult(
@@ -688,6 +728,7 @@ class ExecutionEngine:
                 threshold_ms=threshold,
                 source=source,
                 safe_mode_required=False,
+                source_scope=source_scope,
             )
 
         if ping_ns > 0 and pong_ns > 0 and pong_ns < ping_ns:
@@ -698,6 +739,7 @@ class ExecutionEngine:
                 threshold_ms=threshold,
                 source=source,
                 safe_mode_required=True,
+                source_scope=source_scope,
             )
 
         if not math.isfinite(latency_value):
@@ -712,6 +754,7 @@ class ExecutionEngine:
                 source=source,
                 safe_mode_required=True,
                 missing_source=missing,
+                source_scope=source_scope,
             )
 
         if latency_value < 0:
@@ -722,6 +765,7 @@ class ExecutionEngine:
                 threshold_ms=threshold,
                 source=source,
                 safe_mode_required=True,
+                source_scope=source_scope,
             )
 
         if pong_ns > 0:
@@ -735,6 +779,7 @@ class ExecutionEngine:
                     source=source,
                     safe_mode_required=True,
                     staleness_ms=staleness_ms,
+                    source_scope=source_scope,
                 )
 
         if latency_value > threshold:
@@ -745,6 +790,7 @@ class ExecutionEngine:
                 threshold_ms=threshold,
                 source=source,
                 safe_mode_required=True,
+                source_scope=source_scope,
             )
 
         return LatencyTruthResult(
@@ -754,6 +800,7 @@ class ExecutionEngine:
             threshold_ms=threshold,
             source=source,
             safe_mode_required=False,
+            source_scope=source_scope,
         )
 
     def _apply_latency_truth(self, latency_truth: LatencyTruthResult) -> None:
@@ -776,6 +823,19 @@ class ExecutionEngine:
                     "Latency recovered: %.1fms, exiting safe mode",
                     latency_truth.latency_ms or 0.0,
                 )
+            return
+
+        if latency_truth.safe_mode_required is not True:
+            self._state.safe_mode_recovery_state = latency_truth.status
+            logger.info(
+                "LATENCY EVIDENCE ONLY: status=%s reason=%s source=%s scope=%s latency_ms=%s threshold=%.1fms",
+                latency_truth.status,
+                latency_truth.reason_code,
+                latency_truth.source,
+                latency_truth.source_scope,
+                latency_truth.latency_ms,
+                latency_truth.threshold_ms,
+            )
             return
 
         if latency_truth.status == "LAG_ABORT_ACTIVE":
@@ -807,6 +867,9 @@ class ExecutionEngine:
         guardrail_verdict: Optional[Dict[str, Any]],
         block_evidence: Optional[Dict[str, Any]] = None,
     ) -> bool:
+        signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        candidate_lifecycle = signal_metadata.get("candidate_lifecycle")
+        candidate_lifecycle = dict(candidate_lifecycle) if isinstance(candidate_lifecycle, dict) else None
         self._last_admission_block_result = ExecutionSpineResult(
             decision_uuid=decision_uuid,
             client_order_id=None,
@@ -818,13 +881,15 @@ class ExecutionEngine:
             decision_artifact=decision_artifact,
             pre_trade_guardrail_verdict=guardrail_verdict,
             block_evidence=block_evidence,
+            candidate_lifecycle=candidate_lifecycle,
         )
         logger.info(
-            "[EXEC_DIAG] SIGNAL_ADMISSION_BLOCKED: symbol=%s side=%s decision_uuid=%s reason_code=%s block_evidence=%s",
+            "[EXEC_DIAG] SIGNAL_ADMISSION_BLOCKED: symbol=%s side=%s decision_uuid=%s reason_code=%s opportunity_verdict=%s block_evidence=%s",
             getattr(signal, "symbol", None),
             getattr(signal, "side", None),
             decision_uuid,
             reason_code,
+            (candidate_lifecycle or {}).get("opportunity_verdict"),
             block_evidence or {},
         )
         return False
@@ -837,6 +902,7 @@ class ExecutionEngine:
             "latency_ms": latency_truth.get("latency_ms"),
             "threshold_ms": latency_truth.get("threshold_ms", self.lag_threshold_ms),
             "latency_source": latency_truth.get("source"),
+            "latency_source_scope": latency_truth.get("source_scope"),
             "safe_mode_entered_at_ns": self._state.safe_mode_entered_at_ns,
             "last_latency_ok_at_ns": self._state.last_latency_ok_at_ns,
             "safe_mode_recovery_state": self._state.safe_mode_recovery_state,
@@ -916,6 +982,10 @@ class ExecutionEngine:
                 edge_attribution = metadata.get("edge_attribution")
         if not isinstance(edge_attribution, dict):
             edge_attribution = {}
+        candidate_lifecycle = signal_metadata.get("candidate_lifecycle")
+        candidate_lifecycle = dict(candidate_lifecycle) if isinstance(candidate_lifecycle, dict) else {}
+        opportunity_scorecard = signal_metadata.get("opportunity_scorecard")
+        opportunity_scorecard = dict(opportunity_scorecard) if isinstance(opportunity_scorecard, dict) else {}
 
         guardrail = guardrail_verdict if isinstance(guardrail_verdict, dict) else {}
         asset_class = (
@@ -943,6 +1013,8 @@ class ExecutionEngine:
             "current_price": str(current_price),
             "guardrail_verdict": guardrail_verdict,
             "edge_attribution": edge_attribution,
+            "candidate_lifecycle": candidate_lifecycle,
+            "opportunity_scorecard": opportunity_scorecard,
             "reason": "SHADOW_READ_ONLY_BLOCKED_BROKER_MUTATION",
             "shadow_read_only": True,
             "broker_post_patch_delete_count": 0,
@@ -986,6 +1058,7 @@ class ExecutionEngine:
             message="Shadow read-only runtime blocked broker mutation before OrderRouter.",
             decision_artifact=decision_artifact,
             pre_trade_guardrail_verdict=guardrail_verdict,
+            candidate_lifecycle=candidate_lifecycle or None,
         )
 
     def _is_signal_economically_admissible(self, signal: StrategySignal) -> bool:
@@ -1108,6 +1181,8 @@ class ExecutionEngine:
         signal = queued.signal
         is_attack = queued.is_attack
         signal_metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        candidate_lifecycle = signal_metadata.get("candidate_lifecycle")
+        candidate_lifecycle = dict(candidate_lifecycle) if isinstance(candidate_lifecycle, dict) else None
         decision_artifact = signal_metadata.get("compiled_decision_artifact")
         if not isinstance(decision_artifact, dict):
             decision_artifact = None
@@ -1123,6 +1198,7 @@ class ExecutionEngine:
                 message="External Alpaca PAPER route requires a pre-trade guardrail verdict before OrderRouter.",
                 decision_artifact=decision_artifact,
                 pre_trade_guardrail_verdict=None,
+                candidate_lifecycle=candidate_lifecycle,
             )
         current_price = self.order_router.get_mid_price(signal.symbol)
 
@@ -1144,6 +1220,7 @@ class ExecutionEngine:
                 reason_code=reason,
                 decision_artifact=decision_artifact,
                 pre_trade_guardrail_verdict=guardrail_verdict,
+                candidate_lifecycle=candidate_lifecycle,
             )
 
         if self.shadow_read_only:
@@ -1194,6 +1271,7 @@ class ExecutionEngine:
                     reason_code="limit_order_no_price",
                     decision_artifact=decision_artifact,
                     pre_trade_guardrail_verdict=guardrail_verdict,
+                    candidate_lifecycle=candidate_lifecycle,
                 )
         else:
             limit_price_for_order = None
@@ -1221,6 +1299,8 @@ class ExecutionEngine:
             "compiled_decision_artifact",
             "pre_trade_guardrail_verdict",
             "edge_attribution",
+            "candidate_lifecycle",
+            "opportunity_scorecard",
         ):
             if key in signal_metadata:
                 order_metadata[key] = signal_metadata[key]
@@ -1336,6 +1416,7 @@ class ExecutionEngine:
                     gateway_response=None,
                     decision_artifact=decision_artifact,
                     pre_trade_guardrail_verdict=guardrail_verdict,
+                    candidate_lifecycle=candidate_lifecycle,
                 )
 
             if gateway_response is not None:
@@ -1355,6 +1436,7 @@ class ExecutionEngine:
                     gateway_response=gateway_response,
                     decision_artifact=decision_artifact,
                     pre_trade_guardrail_verdict=guardrail_verdict,
+                    candidate_lifecycle=candidate_lifecycle,
                 )
 
             else:
@@ -1370,6 +1452,7 @@ class ExecutionEngine:
                     gateway_response=None,
                     decision_artifact=decision_artifact,
                     pre_trade_guardrail_verdict=guardrail_verdict,
+                    candidate_lifecycle=candidate_lifecycle,
                 )
         except Exception as e:
             logger.error("Order submission failed: %s", e)
@@ -1383,6 +1466,7 @@ class ExecutionEngine:
                 message=str(e),
                 decision_artifact=decision_artifact,
                 pre_trade_guardrail_verdict=guardrail_verdict,
+                candidate_lifecycle=candidate_lifecycle,
             )
 
     # ============================================
