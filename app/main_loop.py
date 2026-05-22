@@ -144,36 +144,63 @@ def _classify_candle_execution_truth(
     *,
     symbol: str,
     runtime: Any,
+    candle: Candle,
     exchange_ts_ns: int,
-    max_stale_age_ns: int,
     current_ns: Optional[int] = None,
 ) -> Dict[str, Any]:
     current_ns = int(current_ns or now_ns())
     age_ns = max(0, current_ns - int(exchange_ts_ns or 0))
+    policy_ms = getattr(candle, "candle_freshness_policy_ms", None)
+    latest_batch_candle = getattr(candle, "latest_batch_candle", None)
+    source_type = str(getattr(candle, "data_source_type", "unknown") or "unknown")
     detail = _runtime_market_truth_fields(
         symbol,
         runtime,
         exchange_ts_ns,
-        data_source_type="runtime",
+        data_source_type=source_type,
     )
     detail.update(
         {
             "consumer_timestamp_ns": exchange_ts_ns,
+            "candle_age_ms": age_ns / 1_000_000.0,
             "consumer_age_ms": age_ns / 1_000_000.0,
-            "max_stale_age_ms": max_stale_age_ns / 1_000_000.0,
+            "candle_freshness_policy_ms": policy_ms,
+            "candle_timeframe": getattr(candle, "timeframe", None),
+            "latest_batch_candle": latest_batch_candle,
             "executable_market_truth": False,
             "data_health_reason_code": "DATA_HEALTH_UNKNOWN",
+            "candle_freshness_reason_code": "CANDLE_FRESHNESS_POLICY_MISSING",
         }
     )
     if exchange_ts_ns <= 0:
         detail["data_health_reason_code"] = "DATA_TIMESTAMP_MISSING"
+        detail["candle_freshness_reason_code"] = "CANDLE_TIMESTAMP_MISSING"
         detail["data_source_type"] = "unknown"
         return detail
-    if age_ns > max_stale_age_ns:
+    if source_type in {"backfill", "replay", "synthetic", "observe_only"}:
         detail["data_health_reason_code"] = "DATA_BACKFILL_OBSERVE_ONLY"
-        detail["data_source_type"] = "backfill"
+        detail["candle_freshness_reason_code"] = "CANDLE_BATCH_BACKFILL_OBSERVE_ONLY"
+        return detail
+    try:
+        policy_ms_float = float(policy_ms)
+    except (TypeError, ValueError):
+        detail["data_health_reason_code"] = "DATA_HEALTH_UNKNOWN"
+        detail["candle_freshness_reason_code"] = "CANDLE_FRESHNESS_POLICY_MISSING"
+        return detail
+    if policy_ms_float <= 0:
+        detail["data_health_reason_code"] = "DATA_HEALTH_UNKNOWN"
+        detail["candle_freshness_reason_code"] = "CANDLE_FRESHNESS_POLICY_MISSING"
+        return detail
+    if latest_batch_candle is not True:
+        detail["data_health_reason_code"] = "DATA_BACKFILL_OBSERVE_ONLY"
+        detail["candle_freshness_reason_code"] = "CANDLE_BATCH_BACKFILL_OBSERVE_ONLY"
+        return detail
+    if (age_ns / 1_000_000.0) > policy_ms_float:
+        detail["data_health_reason_code"] = "DATA_BACKFILL_OBSERVE_ONLY"
+        detail["candle_freshness_reason_code"] = "CANDLE_STALE"
         return detail
     detail["data_health_reason_code"] = "DATA_HEALTHY"
+    detail["candle_freshness_reason_code"] = "CANDLE_RUNTIME_FRESH"
     detail["executable_market_truth"] = True
     return detail
 
@@ -1433,12 +1460,11 @@ class MainLoop:
         # ================================================================
         self._observe_sector_rotation(symbol, runtime, candle)
 
-        max_stale_age_ns = int(getattr(self.data_validator, "max_stale_age_ns", 5_000_000_000))
         candle_execution_truth = _classify_candle_execution_truth(
             symbol=symbol,
             runtime=runtime,
+            candle=candle,
             exchange_ts_ns=exchange_ts_ns,
-            max_stale_age_ns=max_stale_age_ns,
         )
         if candle_execution_truth.get("executable_market_truth") is True:
             self.data_validator.record_data(symbol, _ns_to_datetime(exchange_ts_ns))
@@ -1479,7 +1505,10 @@ class MainLoop:
         else:
             if candle_execution_truth.get("executable_market_truth") is not True:
                 _log_dispatch_diag(
-                    "DATA_BACKFILL_OBSERVE_ONLY",
+                    str(
+                        candle_execution_truth.get("candle_freshness_reason_code")
+                        or "DATA_BACKFILL_OBSERVE_ONLY"
+                    ),
                     exchange_ts_ns=exchange_ts_ns,
                     submit_signal_called=False,
                     decision_compiler_called=False,

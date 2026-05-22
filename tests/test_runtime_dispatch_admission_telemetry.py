@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import app.main_loop as main_loop_module
 from app.config import Config
 from app.commander import Commander
-from app.main_loop import MainLoop, _log_dispatch_diag
+from app.main_loop import MainLoop, _classify_candle_execution_truth, _log_dispatch_diag
 from app.brain.data_validator import DataContinuityValidator
 from app.models import Candle
 from app.models.enums import SleeveType
@@ -70,6 +70,9 @@ def _candle(
     symbol: str = "ETH/USD",
     close: float = 2500.0,
     volume: float = 100.0,
+    latest_batch_candle: bool | None = None,
+    candle_freshness_policy_ms: float | None = None,
+    data_source_type: str = "runtime",
 ) -> Candle:
     return Candle(
         symbol=symbol,
@@ -80,6 +83,9 @@ def _candle(
         close=close,
         volume=volume,
         timeframe="1m",
+        latest_batch_candle=latest_batch_candle,
+        candle_freshness_policy_ms=candle_freshness_policy_ms,
+        data_source_type=data_source_type,
     )
 
 
@@ -631,9 +637,120 @@ def test_stale_backfill_candle_does_not_reach_executable_dispatch(caplog):
     loop.signal_fusion.fuse.assert_not_called()
     loop._dispatch_fusion.assert_not_called()
     loop._update_physical_freshness.assert_not_called()
-    assert "reason_code=DATA_BACKFILL_OBSERVE_ONLY" in caplog.text
+    assert "reason_code=CANDLE_FRESHNESS_POLICY_MISSING" in caplog.text
     assert "decision_compiler_called': False" in caplog.text
     assert "submit_signal_called': False" in caplog.text
+
+
+def test_latest_rest_candle_within_provider_policy_can_be_executable():
+    candle = _candle(
+        exchange_ts_ns=T0_NS,
+        latest_batch_candle=True,
+        candle_freshness_policy_ms=60_000.0,
+    )
+    runtime = _runtime()
+    runtime.last_candle = candle
+
+    detail = _classify_candle_execution_truth(
+        symbol="ETH/USD",
+        runtime=runtime,
+        candle=candle,
+        exchange_ts_ns=T0_NS,
+        current_ns=T0_NS + 26_000_000_000,
+    )
+
+    assert detail["executable_market_truth"] is True
+    assert detail["candle_freshness_reason_code"] == "CANDLE_RUNTIME_FRESH"
+    assert detail["data_health_reason_code"] == "DATA_HEALTHY"
+    assert detail["latest_batch_candle"] is True
+    assert detail["candle_age_ms"] == 26_000.0
+    assert detail["candle_freshness_policy_ms"] == 60_000.0
+
+
+def test_older_rest_batch_candle_stays_observe_only():
+    candle = _candle(
+        exchange_ts_ns=T0_NS,
+        latest_batch_candle=False,
+        candle_freshness_policy_ms=60_000.0,
+    )
+    runtime = _runtime()
+    runtime.last_candle = candle
+
+    detail = _classify_candle_execution_truth(
+        symbol="ETH/USD",
+        runtime=runtime,
+        candle=candle,
+        exchange_ts_ns=T0_NS,
+        current_ns=T0_NS + 26_000_000_000,
+    )
+
+    assert detail["executable_market_truth"] is False
+    assert detail["candle_freshness_reason_code"] == "CANDLE_BATCH_BACKFILL_OBSERVE_ONLY"
+    assert detail["data_health_reason_code"] == "DATA_BACKFILL_OBSERVE_ONLY"
+
+
+def test_rest_candle_older_than_provider_budget_stays_observe_only():
+    candle = _candle(
+        exchange_ts_ns=T0_NS,
+        latest_batch_candle=True,
+        candle_freshness_policy_ms=60_000.0,
+    )
+    runtime = _runtime()
+    runtime.last_candle = candle
+
+    detail = _classify_candle_execution_truth(
+        symbol="ETH/USD",
+        runtime=runtime,
+        candle=candle,
+        exchange_ts_ns=T0_NS,
+        current_ns=T0_NS + 61_000_000_000,
+    )
+
+    assert detail["executable_market_truth"] is False
+    assert detail["candle_freshness_reason_code"] == "CANDLE_STALE"
+    assert detail["data_health_reason_code"] == "DATA_BACKFILL_OBSERVE_ONLY"
+
+
+def test_missing_provider_candle_policy_fails_closed():
+    candle = _candle(exchange_ts_ns=T0_NS, latest_batch_candle=True)
+    runtime = _runtime()
+    runtime.last_candle = candle
+
+    detail = _classify_candle_execution_truth(
+        symbol="ETH/USD",
+        runtime=runtime,
+        candle=candle,
+        exchange_ts_ns=T0_NS,
+        current_ns=T0_NS + 1_000_000_000,
+    )
+
+    assert detail["executable_market_truth"] is False
+    assert detail["candle_freshness_reason_code"] == "CANDLE_FRESHNESS_POLICY_MISSING"
+    assert detail["data_health_reason_code"] == "DATA_HEALTH_UNKNOWN"
+
+
+def test_replay_or_synthetic_candle_cannot_be_executable():
+    for source_type in ("backfill", "replay", "synthetic"):
+        candle = _candle(
+            exchange_ts_ns=T0_NS,
+            latest_batch_candle=True,
+            candle_freshness_policy_ms=60_000.0,
+            data_source_type=source_type,
+        )
+        runtime = _runtime()
+        runtime.last_candle = candle
+
+        detail = _classify_candle_execution_truth(
+            symbol="ETH/USD",
+            runtime=runtime,
+            candle=candle,
+            exchange_ts_ns=T0_NS,
+            current_ns=T0_NS + 1_000_000_000,
+        )
+
+        assert detail["executable_market_truth"] is False
+        assert detail["candle_freshness_reason_code"] == "CANDLE_BATCH_BACKFILL_OBSERVE_ONLY"
+        assert detail["data_health_reason_code"] == "DATA_BACKFILL_OBSERVE_ONLY"
 
 
 def test_sell_without_broker_position_classifies_missing_authority():

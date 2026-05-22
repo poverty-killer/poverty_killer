@@ -431,6 +431,24 @@ def test_data_unhealthy_block_emits_causal_evidence_before_router_submit():
     router.submit_order.assert_not_called()
 
 
+def test_data_continuity_validator_packet_health_remains_strict_at_five_seconds():
+    validator = DataContinuityValidator(max_stale_age_sec=5.0)
+    validator.record_data("ETH/USD", _ns_datetime(T0_NS))
+
+    snapshot = validator.health_snapshot(
+        "ETH/USD",
+        current_ns=T0_NS + 6_000_000_000,
+        latest_candle_ts_ns=T0_NS,
+        source_type="runtime",
+    )
+
+    assert validator.max_stale_age_ns == 5_000_000_000
+    assert snapshot["data_healthy"] is False
+    assert snapshot["data_health_reason_code"] == "DATA_STALE"
+    assert snapshot["last_valid_data_age_ms"] == 6000.0
+    assert snapshot["max_stale_age_ms"] == 5000.0
+
+
 def test_backfill_observe_only_signal_is_blocked_as_data_unhealthy():
     router = MagicMock()
     validator = DataContinuityValidator(max_stale_age_sec=5.0)

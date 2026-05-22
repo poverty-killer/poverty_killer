@@ -52,6 +52,11 @@ class Candle(BaseModel):
     volume: float
     timeframe: str = "1m"
     exchange_latency_ns: Optional[int] = Field(default=None, description="NIC to processing latency")
+    data_source_type: str = "runtime"
+    provider_id: Optional[str] = None
+    latest_batch_candle: Optional[bool] = None
+    candle_batch_received_ns: Optional[int] = None
+    candle_freshness_policy_ms: Optional[float] = None
 
     @property
     def exchange_ts_sec(self) -> float:

@@ -122,6 +122,7 @@ class MarketFeeds:
             await self.websocket_client.start()
 
         # Initialize polling client as fallback
+        selected_provider = self._feed_provider_selection.selected_provider
         self.polling_client = PollingClient(
             symbols=self.symbols,
             interval=self.config.data.polling_interval_seconds,
@@ -129,6 +130,12 @@ class MarketFeeds:
             on_order_book=self._on_order_book,
             on_feed_truth=self._on_rest_feed_truth,
             exchange=selected_exchange,
+            provider_id=selected_provider_id,
+            freshness_policy=(
+                selected_provider.freshness_policy
+                if selected_provider is not None
+                else None
+            ),
         )
         await self.polling_client.start()
 

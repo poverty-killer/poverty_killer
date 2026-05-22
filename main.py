@@ -1168,6 +1168,7 @@ class SovereignHeartbeat:
         running_ref = self
 
         async def _poll_run() -> None:
+            selected_provider = running_ref._market_data_provider_selection.selected_provider
             client = PollingClient(
                 symbols=poll_symbols,
                 interval=1.0,
@@ -1176,6 +1177,12 @@ class SovereignHeartbeat:
                 on_feed_truth=running_ref._on_feed_truth,
                 on_rest_latency=running_ref._on_rest_latency,
                 exchange=running_ref._primary_feed_venue,
+                provider_id=running_ref._selected_market_data_provider_id,
+                freshness_policy=(
+                    selected_provider.freshness_policy
+                    if selected_provider is not None
+                    else None
+                ),
             )
             try:
                 await client.start()

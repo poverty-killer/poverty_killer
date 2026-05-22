@@ -350,6 +350,38 @@ def test_coinbase_public_parses_documented_candles_in_time_order():
     assert candles[0].volume == 2.5
 
 
+def test_rest_polling_marks_only_latest_batch_candle_executable_candidate():
+    client = PollingClient(
+        symbols=["BTC/USD"],
+        exchange="coinbase",
+        provider_id="coinbase_public",
+        freshness_policy={"candle_stale_seconds": 60},
+    )
+    candles = client._parse_candles(
+        [
+            [1613092223, "6200.0", "6300.0", "6250.0", "6260.0", "1.5"],
+            [1613092163, "6100.0", "6200.0", "6150.0", "6160.0", "2.5"],
+        ],
+        "BTC/USD",
+    )
+    latest_ts = max(candle.exchange_ts_ns for candle in candles)
+    annotated = [
+        client._with_candle_runtime_metadata(
+            candle,
+            latest_batch_ts_ns=latest_ts,
+            response_received_ns=latest_ts + 1_000,
+            candle_policy_ms=client._candle_freshness_policy_ms(),
+        )
+        for candle in candles
+    ]
+
+    assert annotated[0].latest_batch_candle is False
+    assert annotated[1].latest_batch_candle is True
+    assert all(candle.data_source_type == "runtime" for candle in annotated)
+    assert all(candle.provider_id == "coinbase_public" for candle in annotated)
+    assert all(candle.candle_freshness_policy_ms == 60_000.0 for candle in annotated)
+
+
 def test_equity_missing_entitlement_is_explicit_and_limited_iex_is_labeled():
     result = _router(("alpaca_market_data", "alpaca_iex_limited")).select_provider(
         FeedProviderRequest(

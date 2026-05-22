@@ -13,7 +13,7 @@ import asyncio
 import calendar
 import logging
 import time
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Mapping
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -44,6 +44,8 @@ class PollingClient:
         on_rest_latency: Optional[Callable[[Dict[str, Any]], None]] = None,
         exchange: str = "kraken",
         dns_backoff_seconds: float = 15.0,
+        provider_id: Optional[str] = None,
+        freshness_policy: Optional[Mapping[str, Any]] = None,
     ):
         """
         Initialize polling client.
@@ -64,6 +66,8 @@ class PollingClient:
         self.on_rest_latency = on_rest_latency
         self.exchange = exchange
         self.dns_backoff_seconds = max(1.0, float(dns_backoff_seconds))
+        self.provider_id = provider_id or self._default_provider_id(exchange)
+        self.freshness_policy = dict(freshness_policy or {})
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -197,6 +201,11 @@ class PollingClient:
                     data = await response.json()
                     response_received_ns = now_ns()
                     candles = self._parse_candles(data, symbol)
+                    latest_batch_ts_ns = max(
+                        (candle.exchange_ts_ns for candle in candles),
+                        default=0,
+                    )
+                    candle_policy_ms = self._candle_freshness_policy_ms()
 
                     for candle in candles:
                         # Check for duplicate
@@ -205,6 +214,12 @@ class PollingClient:
                             continue
 
                         self._last_candle_timestamps_ns[symbol] = candle.exchange_ts_ns
+                        candle = self._with_candle_runtime_metadata(
+                            candle,
+                            latest_batch_ts_ns=latest_batch_ts_ns,
+                            response_received_ns=response_received_ns,
+                            candle_policy_ms=candle_policy_ms,
+                        )
 
                         if self.on_candle:
                             await self._safe_callback(self.on_candle, candle)
@@ -319,6 +334,44 @@ class PollingClient:
             base = _KRAKEN_BASE_MAP.get(base, base)
             return f"{base}{quote}"
         return symbol
+
+    def _default_provider_id(self, exchange: str) -> str:
+        if exchange == "coinbase":
+            return "coinbase_public"
+        if exchange == "kraken":
+            return "kraken_public"
+        return f"{exchange}_public"
+
+    def _candle_freshness_policy_ms(self) -> Optional[float]:
+        raw_seconds = self.freshness_policy.get("candle_stale_seconds")
+        if raw_seconds is None:
+            if self.exchange in {"coinbase", "kraken"}:
+                raw_seconds = 60
+        try:
+            seconds = float(raw_seconds)
+        except (TypeError, ValueError):
+            return None
+        if seconds <= 0:
+            return None
+        return seconds * 1000.0
+
+    def _with_candle_runtime_metadata(
+        self,
+        candle: Candle,
+        *,
+        latest_batch_ts_ns: int,
+        response_received_ns: int,
+        candle_policy_ms: Optional[float],
+    ) -> Candle:
+        return candle.model_copy(
+            update={
+                "data_source_type": "runtime",
+                "provider_id": self.provider_id,
+                "latest_batch_candle": candle.exchange_ts_ns == latest_batch_ts_ns,
+                "candle_batch_received_ns": response_received_ns,
+                "candle_freshness_policy_ms": candle_policy_ms,
+            }
+        )
 
     def _resolve_endpoint(self, feed_type: str, formatted_symbol: str) -> Optional[str]:
         endpoint = self._endpoints.get(self.exchange, {}).get(feed_type)
