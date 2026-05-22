@@ -130,7 +130,7 @@ Credential environment checks:
 - Live endpoint used: false
 - Credential values were not printed
 
-Helper result:
+Initial helper result before credential authority correction:
 
 - Reconciliation status: `FAILED_CLOSED`
 - Reason codes: `BROKER_READ_ONLY_GET_FAILED`
@@ -151,20 +151,41 @@ Order history count:
 
 - Not checked through the existing helper. The current adapter helper supports account, positions, and open-order GETs only; its safety contract restricts `/v2/orders` to `status=open`, so an all-order history query is not supported by that path.
 
-Therefore post-run broker reconciliation is not proven. Pre-run broker reconciliation was successful, and runtime/local evidence shows no order submission path was reached, but broker truth is canonical and the post-run broker GETs still failed authorization from this environment.
+Final credential authority finding:
+
+- Root cause: stale inherited Codex process environment credentials overrode the valid fallback credential file.
+- Fix applied for reconciliation proof only: stale `APCA_API_BASE_URL`, `APCA_API_KEY_ID`, and `APCA_API_SECRET_KEY` process values were cleared in the same shell, then `/home/shahn/.poverty_killer_alpaca_paper_env` was explicitly sourced before constructing `AlpacaPaperBrokerAdapter.from_env()`.
+- No production code was changed.
+- No autonomous run was launched.
+- No broker mutation was performed.
+
+Final helper result after clearing stale inherited process env and explicitly sourcing the valid fallback file:
+
+- Reconciliation status: `BROKER_READ_ONLY_RECONCILED`
+- Reason codes: `BROKER_READ_ONLY_GETS_SUCCEEDED`
+- Endpoint: `https://paper-api.alpaca.markets`
+- Environment: `paper`
+- Account status: `ACTIVE`
+- Positions count: 7
+- Open orders count: 0
+- Request counts: GET 3, POST 0
+- Live endpoint used: false
+- Mutation occurred: false
+
+Therefore post-run account, positions, and open-order reconciliation is now proven through the repository helper path from a valid credential environment. Broker truth remains canonical, and the corrected proof agrees with the runtime/local evidence that no order submission path was reached.
 
 ## Post-Run Counts
 
 - Positions before run: 7
-- Positions after run: unavailable from broker because helper-based post-run Alpaca GETs returned `HTTP_401 unauthorized`
+- Positions after run: 7
 - Open orders before run: 0
-- Open orders after run: unavailable from broker because helper-based post-run Alpaca GETs returned `HTTP_401 unauthorized`
+- Open orders after run: 0
 - Submitted orders: 0 observed in runtime logs/local state
 - Filled orders: 0 observed in runtime logs/local state
 - Open orders: 0 observed in runtime logs/local state
 - Rejected orders: 0 observed in runtime logs/local state
 - Canceled orders: 0 observed in runtime logs/local state
-- Broker POST count during helper-based post-run reconciliation attempt: 0
+- Broker POST count during final helper-based post-run reconciliation proof: 0
 - Broker POST/order-submission markers in logs: 0
 
 ## Safety Verdict
@@ -182,8 +203,10 @@ Therefore post-run broker reconciliation is not proven. Pre-run broker reconcili
 
 ## Final Verdict
 
-CONDITIONAL.
+PASS.
 
 The bounded autonomous external PAPER runtime completed safely enough to prove the REST feed connectivity and REST latency truth fix improved executable market-data readiness: Coinbase public REST was selected, order books were processed for all configured symbols, finite REST latency recovered, and the ExecutionEngine exited safe mode. The bot still submitted zero orders because the normal strategy/fusion/dispatch path lawfully declined to produce an executable order.
 
-The verdict is conditional rather than pass because helper-based post-run Alpaca PAPER reconciliation from this environment failed with `HTTP_401 unauthorized` despite regenerated credentials being present and the endpoint remaining `https://paper-api.alpaca.markets`. Broker truth is canonical, so positions-after, open-orders-after, and broker order-history-after cannot be claimed as proven until read-only Alpaca reconciliation succeeds from a valid credential environment.
+The earlier `HTTP_401 unauthorized` helper result was traced to stale inherited Codex process environment credentials overriding the valid fallback file. After clearing those stale process values and explicitly sourcing `/home/shahn/.poverty_killer_alpaca_paper_env`, the same repository helper reconciled Alpaca PAPER successfully with account status `ACTIVE`, positions count 7, open orders count 0, GET count 3, POST count 0, `live_endpoint_used=false`, and `mutation_occurred=false`.
+
+Final verdict is PASS because the bounded autonomous external PAPER run completed safely, no live endpoint or real-money mode appeared, no broker mutation/order submission occurred, market-data and REST latency truth recovered, and post-run Alpaca PAPER account/positions/open-orders reconciliation is now proven through the helper from a valid credential environment.
