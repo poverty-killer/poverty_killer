@@ -287,6 +287,7 @@ def test_sector_rotation_observed_pair_storage_remains_unchanged(caplog):
     assert runtime.last_sector_rotation_observed_vote is not None
     assert runtime.last_sector_rotation_observed_vote.timestamp_ns == T0_NS
     assert "reason_code=observed_pair_stored" in caplog.text
+    assert "reason=OBSERVED_PAIR_READY" in caplog.text
 
 
 def test_sector_rotation_vote_adapter_failure_does_not_create_half_pair(monkeypatch, caplog):
@@ -374,6 +375,10 @@ def test_observed_pair_missing_diag_does_not_submit(caplog):
     assert "reason_code=OBSERVED_SIGNAL_MISSING" in caplog.text
     assert "observed_signal_present': False" in caplog.text
     assert "observed_vote_present': False" in caplog.text
+    assert "candidate_lifecycle" in caplog.text
+    assert "opportunity_scorecard" in caplog.text
+    assert "execution_verdict': 'BLOCKED'" in caplog.text
+    assert "broker_post': False" in caplog.text
     assert "reason_code=strategy_signal_missing" not in caplog.text
 
 
@@ -538,6 +543,71 @@ def test_submit_signal_called_diag_preserves_success_behavior(caplog):
     assert "decision_compiler_status_code': 'SUBMITTED_TO_EXECUTION'" in caplog.text
 
 
+def test_fresh_executable_sector_rotation_same_candle_reaches_compiler_with_scorecard(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop(
+        preferred=SleeveType.SECTOR_ROTATION,
+        eligible=[SleeveType.SECTOR_ROTATION],
+    )
+    loop.execution_engine.submit_signal.return_value = False
+    loop.execution_engine.get_status.return_value = {
+        "last_latency_truth": {
+            "status": "MARKET_DATA_LATENCY_DEGRADED",
+            "reason_code": "REST_LATENCY_THRESHOLD_EXCEEDED",
+            "latency_ms": 350.0,
+            "threshold_ms": 200.0,
+            "source": "market_data.rest_polling_rtt",
+            "source_scope": "market_data_candle_rtt",
+            "safe_mode_required": False,
+        }
+    }
+    loop.execution_engine.get_last_admission_block_result.return_value = types.SimpleNamespace(
+        normalized_status="blocked",
+        route="execution_engine",
+        reason_code="QUOTE_SESSION_TRUTH_MISSING",
+        message="Quote/session truth missing.",
+    )
+    signal = _signal(exchange_ts_ns=T0_NS)
+    vote = _vote(timestamp_ns=T0_NS)
+    runtime = _runtime(sector_signal=signal, sector_vote=vote)
+    candle = _candle(
+        exchange_ts_ns=T0_NS,
+        latest_batch_candle=True,
+        candle_freshness_policy_ms=60_000.0,
+    )
+    runtime.last_candle = candle
+    runtime.last_order_book = types.SimpleNamespace(exchange_ts_ns=T0_NS)
+    candle_truth = _classify_candle_execution_truth(
+        symbol="ETH/USD",
+        runtime=runtime,
+        candle=candle,
+        exchange_ts_ns=T0_NS,
+        current_ns=T0_NS + 61_000_000_000,
+    )
+
+    assert candle_truth["executable_market_truth"] is True
+
+    MainLoop._dispatch_fusion.__get__(loop, MainLoop)(
+        "ETH/USD",
+        runtime,
+        fusion=_fusion(),
+        exchange_ts_ns=T0_NS,
+        candle_execution_truth=candle_truth,
+    )
+
+    loop.decision_compiler.compile.assert_called_once()
+    loop.execution_engine.submit_signal.assert_called_once()
+    assert "reason_code=OBSERVED_PAIR_READY" in caplog.text
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "reason_code=submit_signal_called" in caplog.text
+    assert "candidate_lifecycle" in caplog.text
+    assert "opportunity_scorecard" in caplog.text
+    assert "latency_penalty" in caplog.text
+    assert "market_data.rest_polling_rtt" in caplog.text
+    assert "submitted': False" in caplog.text
+    assert "broker_post': False" in caplog.text
+
+
 def test_pre_trade_guardrail_uses_alpaca_crypto_default_limit_gtc_for_non_attack():
     config = Config(
         broker_mode="paper",
@@ -697,16 +767,39 @@ def test_latest_rest_candle_within_provider_policy_can_be_executable():
         runtime=runtime,
         candle=candle,
         exchange_ts_ns=T0_NS,
-        current_ns=T0_NS + 26_000_000_000,
+        current_ns=T0_NS + 86_000_000_000,
     )
 
     assert detail["executable_market_truth"] is True
     assert detail["candle_freshness_reason_code"] == "CANDLE_RUNTIME_FRESH"
     assert detail["data_health_reason_code"] == "DATA_HEALTHY"
     assert detail["latest_batch_candle"] is True
-    assert detail["candle_age_ms"] == 0.0
-    assert detail["candle_age_from_close_ms"] == 0.0
+    assert detail["candle_age_ms"] == 26_000.0
+    assert detail["candle_age_from_close_ms"] == 26_000.0
     assert detail["candle_freshness_policy_ms"] == 60_000.0
+
+
+def test_open_runtime_candle_cannot_be_executable_before_close():
+    candle = _candle(
+        exchange_ts_ns=T0_NS,
+        latest_batch_candle=True,
+        candle_freshness_policy_ms=60_000.0,
+    )
+    runtime = _runtime()
+    runtime.last_candle = candle
+
+    detail = _classify_candle_execution_truth(
+        symbol="ETH/USD",
+        runtime=runtime,
+        candle=candle,
+        exchange_ts_ns=T0_NS,
+        current_ns=T0_NS + 26_000_000_000,
+    )
+
+    assert detail["executable_market_truth"] is False
+    assert detail["candle_freshness_reason_code"] == "CANDLE_NOT_CLOSED"
+    assert detail["data_health_reason_code"] == "DATA_RUNTIME_CANDLE_IN_PROGRESS"
+    assert detail["candle_age_from_close_ms"] == -34_000.0
 
 
 def test_older_rest_batch_candle_stays_observe_only():
@@ -723,7 +816,7 @@ def test_older_rest_batch_candle_stays_observe_only():
         runtime=runtime,
         candle=candle,
         exchange_ts_ns=T0_NS,
-        current_ns=T0_NS + 26_000_000_000,
+        current_ns=T0_NS + 86_000_000_000,
     )
 
     assert detail["executable_market_truth"] is False
@@ -763,7 +856,7 @@ def test_missing_provider_candle_policy_fails_closed():
         runtime=runtime,
         candle=candle,
         exchange_ts_ns=T0_NS,
-        current_ns=T0_NS + 1_000_000_000,
+        current_ns=T0_NS + 61_000_000_000,
     )
 
     assert detail["executable_market_truth"] is False

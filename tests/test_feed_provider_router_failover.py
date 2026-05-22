@@ -350,7 +350,7 @@ def test_coinbase_public_parses_documented_candles_in_time_order():
     assert candles[0].volume == 2.5
 
 
-def test_rest_polling_marks_only_latest_batch_candle_executable_candidate():
+def test_rest_polling_marks_latest_closed_candle_executable_not_open_batch_head():
     client = PollingClient(
         symbols=["BTC/USD"],
         exchange="coinbase",
@@ -364,22 +364,49 @@ def test_rest_polling_marks_only_latest_batch_candle_executable_candidate():
         ],
         "BTC/USD",
     )
-    latest_ts = max(candle.exchange_ts_ns for candle in candles)
+    provider_head_ts = max(candle.exchange_ts_ns for candle in candles)
+    response_received_ns = provider_head_ts + 1_000
+    latest_ts = client._latest_executable_batch_ts_ns(
+        candles,
+        response_received_ns=response_received_ns,
+    )
     annotated = [
         client._with_candle_runtime_metadata(
             candle,
             latest_batch_ts_ns=latest_ts,
-            response_received_ns=latest_ts + 1_000,
+            provider_batch_head_ts_ns=provider_head_ts,
+            response_received_ns=response_received_ns,
             candle_policy_ms=client._candle_freshness_policy_ms(),
         )
         for candle in candles
     ]
 
-    assert annotated[0].latest_batch_candle is False
-    assert annotated[1].latest_batch_candle is True
+    assert latest_ts == annotated[0].exchange_ts_ns
+    assert annotated[0].latest_batch_candle is True
+    assert annotated[0].latest_closed_batch_candle is True
+    assert annotated[0].candle_closed_at_receive is True
+    assert annotated[1].latest_batch_candle is False
+    assert annotated[1].latest_provider_batch_candle is True
+    assert annotated[1].latest_closed_batch_candle is False
+    assert annotated[1].candle_closed_at_receive is False
     assert all(candle.data_source_type == "runtime" for candle in annotated)
     assert all(candle.provider_id == "coinbase_public" for candle in annotated)
     assert all(candle.candle_freshness_policy_ms == 60_000.0 for candle in annotated)
+
+
+def test_rest_polling_has_no_executable_candle_when_batch_head_is_not_closed():
+    client = PollingClient(symbols=["BTC/USD"], exchange="coinbase")
+    candles = client._parse_candles(
+        [[1613092223, "6200.0", "6300.0", "6250.0", "6260.0", "1.5"]],
+        "BTC/USD",
+    )
+
+    latest_ts = client._latest_executable_batch_ts_ns(
+        candles,
+        response_received_ns=1613092224 * 1_000_000_000,
+    )
+
+    assert latest_ts == 0
 
 
 def test_equity_missing_entitlement_is_explicit_and_limited_iex_is_labeled():

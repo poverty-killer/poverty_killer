@@ -304,8 +304,14 @@ def _classify_candle_execution_truth(
     current_ns = int(current_ns or now_ns())
     candle_start_ns = int(exchange_ts_ns or 0)
     timeframe_ns = _timeframe_to_ns(getattr(candle, "timeframe", None))
-    candle_close_ns = candle_start_ns + timeframe_ns if candle_start_ns > 0 and timeframe_ns else candle_start_ns
-    age_ns = max(0, current_ns - candle_close_ns)
+    recorded_close_ns = getattr(candle, "candle_close_ts_ns", None)
+    try:
+        candle_close_ns = int(recorded_close_ns) if recorded_close_ns else 0
+    except (TypeError, ValueError):
+        candle_close_ns = 0
+    if candle_close_ns <= 0:
+        candle_close_ns = candle_start_ns + timeframe_ns if candle_start_ns > 0 and timeframe_ns else candle_start_ns
+    age_ns = current_ns - candle_close_ns
     policy_ms = getattr(candle, "candle_freshness_policy_ms", None)
     latest_batch_candle = getattr(candle, "latest_batch_candle", None)
     source_type = str(getattr(candle, "data_source_type", "unknown") or "unknown")
@@ -325,7 +331,12 @@ def _classify_candle_execution_truth(
             "consumer_age_ms": age_ns / 1_000_000.0,
             "candle_freshness_policy_ms": policy_ms,
             "candle_timeframe": getattr(candle, "timeframe", None),
+            "provider_id": getattr(candle, "provider_id", None),
             "latest_batch_candle": latest_batch_candle,
+            "latest_provider_batch_candle": getattr(candle, "latest_provider_batch_candle", None),
+            "latest_closed_batch_candle": getattr(candle, "latest_closed_batch_candle", None),
+            "provider_batch_head_ts_ns": getattr(candle, "provider_batch_head_ts_ns", None),
+            "candle_closed_at_receive": getattr(candle, "candle_closed_at_receive", None),
             "executable_market_truth": False,
             "data_health_reason_code": "DATA_HEALTH_UNKNOWN",
             "candle_freshness_reason_code": "CANDLE_FRESHNESS_POLICY_MISSING",
@@ -339,6 +350,13 @@ def _classify_candle_execution_truth(
     if source_type in {"backfill", "replay", "synthetic", "observe_only"}:
         detail["data_health_reason_code"] = "DATA_BACKFILL_OBSERVE_ONLY"
         detail["candle_freshness_reason_code"] = "CANDLE_BATCH_BACKFILL_OBSERVE_ONLY"
+        return detail
+    if age_ns < 0:
+        detail["data_health_reason_code"] = "DATA_RUNTIME_CANDLE_IN_PROGRESS"
+        detail["candle_freshness_reason_code"] = "CANDLE_NOT_CLOSED"
+        detail["candle_age_ms"] = age_ns / 1_000_000.0
+        detail["candle_age_from_close_ms"] = age_ns / 1_000_000.0
+        detail["consumer_age_ms"] = age_ns / 1_000_000.0
         return detail
     try:
         policy_ms_float = float(policy_ms)

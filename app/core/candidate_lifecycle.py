@@ -83,6 +83,8 @@ _DATA_TRUTH_REASON_CODES = frozenset(
         "CANDLE_STALE",
         "DATA_BACKFILL_OBSERVE_ONLY",
         "CANDLE_BATCH_BACKFILL_OBSERVE_ONLY",
+        "CANDLE_NOT_CLOSED",
+        "DATA_RUNTIME_CANDLE_IN_PROGRESS",
         "DATA_TIMESTAMP_MISSING",
         "CANDLE_TIMESTAMP_MISSING",
         "CANDLE_FRESHNESS_POLICY_MISSING",
@@ -513,6 +515,13 @@ def _build_penalties(
             "evidence": _json_ready(market_truth),
         }
     elif candle_code in {"CANDLE_BATCH_BACKFILL_OBSERVE_ONLY"} or data_code in {"DATA_BACKFILL_OBSERVE_ONLY"}:
+        penalties["freshness_penalty"] = {
+            "status": PENALTY,
+            "score_delta": Decimal("-0.15"),
+            "reason_code": candle_code or data_code,
+            "evidence": _json_ready(market_truth),
+        }
+    elif candle_code in {"CANDLE_NOT_CLOSED"} or data_code in {"DATA_RUNTIME_CANDLE_IN_PROGRESS"}:
         penalties["freshness_penalty"] = {
             "status": PENALTY,
             "score_delta": Decimal("-0.15"),

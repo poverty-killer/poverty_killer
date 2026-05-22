@@ -55,6 +55,11 @@ class Candle(BaseModel):
     data_source_type: str = "runtime"
     provider_id: Optional[str] = None
     latest_batch_candle: Optional[bool] = None
+    latest_provider_batch_candle: Optional[bool] = None
+    latest_closed_batch_candle: Optional[bool] = None
+    provider_batch_head_ts_ns: Optional[int] = None
+    candle_close_ts_ns: Optional[int] = None
+    candle_closed_at_receive: Optional[bool] = None
     candle_batch_received_ns: Optional[int] = None
     candle_freshness_policy_ms: Optional[float] = None
 

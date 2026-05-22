@@ -201,13 +201,21 @@ class PollingClient:
                     data = await response.json()
                     response_received_ns = now_ns()
                     candles = self._parse_candles(data, symbol)
-                    latest_batch_ts_ns = max(
+                    provider_batch_head_ts_ns = max(
                         (candle.exchange_ts_ns for candle in candles),
                         default=0,
+                    )
+                    latest_batch_ts_ns = self._latest_executable_batch_ts_ns(
+                        candles,
+                        response_received_ns=response_received_ns,
                     )
                     candle_policy_ms = self._candle_freshness_policy_ms()
 
                     for candle in candles:
+                        if latest_batch_ts_ns <= 0:
+                            continue
+                        if candle.exchange_ts_ns != latest_batch_ts_ns:
+                            continue
                         # Check for duplicate
                         last_ts_ns = self._last_candle_timestamps_ns.get(symbol)
                         if last_ts_ns and candle.exchange_ts_ns <= last_ts_ns:
@@ -217,6 +225,7 @@ class PollingClient:
                         candle = self._with_candle_runtime_metadata(
                             candle,
                             latest_batch_ts_ns=latest_batch_ts_ns,
+                            provider_batch_head_ts_ns=provider_batch_head_ts_ns,
                             response_received_ns=response_received_ns,
                             candle_policy_ms=candle_policy_ms,
                         )
@@ -355,19 +364,72 @@ class PollingClient:
             return None
         return seconds * 1000.0
 
+    def _candle_timeframe_ns(self, candle: Candle) -> Optional[int]:
+        timeframe = str(getattr(candle, "timeframe", "") or "").strip().lower()
+        if not timeframe:
+            return None
+        units = {
+            "s": 1_000_000_000,
+            "m": 60_000_000_000,
+            "h": 3_600_000_000_000,
+            "d": 86_400_000_000_000,
+        }
+        suffix = timeframe[-1]
+        if suffix not in units:
+            return None
+        try:
+            count = int(timeframe[:-1] or "1")
+        except ValueError:
+            return None
+        if count <= 0:
+            return None
+        return count * units[suffix]
+
+    def _candle_close_ts_ns(self, candle: Candle) -> int:
+        timeframe_ns = self._candle_timeframe_ns(candle)
+        start_ns = int(candle.exchange_ts_ns or 0)
+        return start_ns + timeframe_ns if start_ns > 0 and timeframe_ns else start_ns
+
+    def _latest_executable_batch_ts_ns(
+        self,
+        candles: List[Candle],
+        *,
+        response_received_ns: int,
+    ) -> int:
+        closed = [
+            int(candle.exchange_ts_ns)
+            for candle in candles
+            if self._candle_close_ts_ns(candle) <= int(response_received_ns)
+        ]
+        return max(closed, default=0)
+
     def _with_candle_runtime_metadata(
         self,
         candle: Candle,
         *,
         latest_batch_ts_ns: int,
+        provider_batch_head_ts_ns: Optional[int] = None,
         response_received_ns: int,
         candle_policy_ms: Optional[float],
     ) -> Candle:
+        provider_head_ts_ns = int(provider_batch_head_ts_ns or latest_batch_ts_ns or 0)
+        candle_close_ts_ns = self._candle_close_ts_ns(candle)
+        closed_at_receive = candle_close_ts_ns <= int(response_received_ns)
+        latest_closed_batch_candle = (
+            closed_at_receive
+            and int(candle.exchange_ts_ns) == int(latest_batch_ts_ns or 0)
+            and latest_batch_ts_ns > 0
+        )
         return candle.model_copy(
             update={
                 "data_source_type": "runtime",
                 "provider_id": self.provider_id,
-                "latest_batch_candle": candle.exchange_ts_ns == latest_batch_ts_ns,
+                "latest_batch_candle": latest_closed_batch_candle,
+                "latest_provider_batch_candle": candle.exchange_ts_ns == provider_head_ts_ns,
+                "latest_closed_batch_candle": latest_closed_batch_candle,
+                "provider_batch_head_ts_ns": provider_head_ts_ns or None,
+                "candle_close_ts_ns": candle_close_ts_ns,
+                "candle_closed_at_receive": closed_at_receive,
                 "candle_batch_received_ns": response_received_ns,
                 "candle_freshness_policy_ms": candle_policy_ms,
             }
