@@ -40,6 +40,7 @@ def _vote(
     *,
     timestamp_ns: int = T0_NS,
     decision_uuid: str = "dispatch-diag-vote",
+    symbol: str = "ETH/USD",
 ) -> types.SimpleNamespace:
     return types.SimpleNamespace(
         decision_uuid=decision_uuid,
@@ -47,7 +48,7 @@ def _vote(
         confidence=Decimal("0.9"),
         risk_appetite=Decimal("0.5"),
         signal="buy",
-        metadata={},
+        metadata={"symbol": symbol},
     )
 
 
@@ -275,6 +276,29 @@ def test_sector_rotation_observed_pair_storage_remains_unchanged(caplog):
     assert "reason_code=observed_pair_stored" in caplog.text
 
 
+def test_sector_rotation_vote_adapter_failure_does_not_create_half_pair(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    signal = _signal(exchange_ts_ns=T0_NS)
+    loop = _observe_loop()
+    runtime = _observe_runtime(_SignalSectorRotation(signal))
+
+    def raise_adapter(*args, **kwargs):
+        raise ValueError("adapter failed")
+
+    monkeypatch.setattr(
+        main_loop_module,
+        "adapt_sector_rotation_to_vote",
+        raise_adapter,
+    )
+
+    loop._observe_sector_rotation("ETH/USD", runtime, _candle())
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    assert runtime.last_sector_rotation_observed_signal is None
+    assert runtime.last_sector_rotation_observed_vote is None
+    assert "reason_code=vote_adaptation_failed" in caplog.text
+
+
 def test_dispatch_diag_helper_emits_shans_not_ready_reason(caplog):
     caplog.set_level(logging.INFO, logger=LOGGER_NAME)
 
@@ -312,7 +336,27 @@ def test_observed_pair_missing_diag_does_not_submit(caplog):
 
     loop.execution_engine.submit_signal.assert_not_called()
     loop.decision_compiler.compile.assert_not_called()
-    assert "reason_code=observed_pair_missing" in caplog.text
+    assert "reason_code=OBSERVED_SIGNAL_MISSING" in caplog.text
+    assert "observed_signal_present': False" in caplog.text
+    assert "observed_vote_present': False" in caplog.text
+    assert "reason_code=strategy_signal_missing" not in caplog.text
+
+
+def test_observed_vote_missing_diag_does_not_submit(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop(
+        preferred=SleeveType.SECTOR_ROTATION,
+        eligible=[SleeveType.SECTOR_ROTATION],
+    )
+    runtime = _runtime(sector_signal=_signal(exchange_ts_ns=T0_NS))
+
+    _dispatch(loop, runtime)
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    loop.decision_compiler.compile.assert_not_called()
+    assert "reason_code=OBSERVED_VOTE_MISSING" in caplog.text
+    assert "observed_signal_present': True" in caplog.text
+    assert "observed_vote_present': False" in caplog.text
     assert "reason_code=strategy_signal_missing" not in caplog.text
 
 
@@ -331,10 +375,53 @@ def test_observed_pair_stale_diag_does_not_submit(caplog):
 
     loop.execution_engine.submit_signal.assert_not_called()
     loop.decision_compiler.compile.assert_not_called()
-    assert "reason_code=observed_pair_stale" in caplog.text
+    assert "reason_code=OBSERVED_PAIR_STALE" in caplog.text
     assert "stale_cleared': True" in caplog.text
+    assert "stale_age_ns" in caplog.text
     assert runtime.last_sector_rotation_observed_signal is None
     assert runtime.last_sector_rotation_observed_vote is None
+    assert "reason_code=strategy_signal_missing" not in caplog.text
+
+
+def test_observed_pair_candle_mismatch_diag_does_not_submit(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop(
+        preferred=SleeveType.SECTOR_ROTATION,
+        eligible=[SleeveType.SECTOR_ROTATION],
+    )
+    runtime = _runtime(
+        sector_signal=_signal(exchange_ts_ns=T0_NS),
+        sector_vote=_vote(timestamp_ns=T0_NS - 1),
+    )
+
+    _dispatch(loop, runtime)
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    loop.decision_compiler.compile.assert_not_called()
+    assert "reason_code=OBSERVED_PAIR_CANDLE_MISMATCH" in caplog.text
+    assert "signal_candle_id" in caplog.text
+    assert "vote_candle_id" in caplog.text
+    assert "reason_code=strategy_signal_missing" not in caplog.text
+
+
+def test_observed_pair_symbol_mismatch_diag_does_not_submit(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    loop = _loop(
+        preferred=SleeveType.SECTOR_ROTATION,
+        eligible=[SleeveType.SECTOR_ROTATION],
+    )
+    runtime = _runtime(
+        sector_signal=_signal(exchange_ts_ns=T0_NS, symbol="BTC/USD"),
+        sector_vote=_vote(timestamp_ns=T0_NS, symbol="BTC/USD"),
+    )
+
+    _dispatch(loop, runtime)
+
+    loop.execution_engine.submit_signal.assert_not_called()
+    loop.decision_compiler.compile.assert_not_called()
+    assert "reason_code=OBSERVED_PAIR_SYMBOL_MISMATCH" in caplog.text
+    assert "consumer_symbol': 'ETH/USD'" in caplog.text
+    assert "signal_symbol': 'BTC/USD'" in caplog.text
     assert "reason_code=strategy_signal_missing" not in caplog.text
 
 

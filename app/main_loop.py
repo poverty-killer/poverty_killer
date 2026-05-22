@@ -373,6 +373,89 @@ def _log_sector_rotation_diag(
     )
 
 
+def _observed_pair_candle_id(timestamp_ns: Any) -> Any:
+    if isinstance(timestamp_ns, int):
+        return timestamp_ns
+    return "not_present"
+
+
+def _observed_pair_stale_age_ns(pair_ts_ns: Any, consumer_ts_ns: int) -> Any:
+    if isinstance(pair_ts_ns, int) and isinstance(consumer_ts_ns, int):
+        return max(0, consumer_ts_ns - pair_ts_ns)
+    return "not_present"
+
+
+def _normalized_observed_pair_symbol(symbol: Any) -> Optional[str]:
+    if symbol is None:
+        return None
+    normalized = str(symbol).strip().upper()
+    return normalized or None
+
+
+def _observed_pair_vote_symbol(vote: Any) -> Optional[str]:
+    direct = _normalized_observed_pair_symbol(getattr(vote, "symbol", None))
+    if direct is not None:
+        return direct
+    metadata = getattr(vote, "metadata", None)
+    if isinstance(metadata, dict):
+        return _normalized_observed_pair_symbol(metadata.get("symbol"))
+    return None
+
+
+def _sector_rotation_observed_pair_detail(
+    *,
+    symbol: str,
+    observed_signal: Any,
+    observed_vote: Any,
+    consumer_timestamp_ns: int,
+) -> Dict[str, Any]:
+    signal_timestamp = (
+        getattr(observed_signal, "exchange_ts_ns", None)
+        if observed_signal is not None
+        else None
+    )
+    vote_timestamp = (
+        getattr(observed_vote, "timestamp_ns", None)
+        if observed_vote is not None
+        else None
+    )
+    signal_candle_id = _observed_pair_candle_id(signal_timestamp)
+    vote_candle_id = _observed_pair_candle_id(vote_timestamp)
+    consumer_candle_id = _observed_pair_candle_id(consumer_timestamp_ns)
+    pair_ts_candidates = [
+        ts for ts in (signal_timestamp, vote_timestamp) if isinstance(ts, int)
+    ]
+    freshest_pair_ts = max(pair_ts_candidates) if pair_ts_candidates else None
+    consumer_symbol = _normalized_observed_pair_symbol(symbol)
+    signal_symbol = (
+        _normalized_observed_pair_symbol(getattr(observed_signal, "symbol", None))
+        if observed_signal is not None
+        else None
+    )
+    vote_symbol = (
+        _observed_pair_vote_symbol(observed_vote)
+        if observed_vote is not None
+        else None
+    )
+    return {
+        "observed_signal_present": observed_signal is not None,
+        "observed_vote_present": observed_vote is not None,
+        "signal_timestamp": signal_timestamp if signal_timestamp is not None else "not_present",
+        "vote_timestamp": vote_timestamp if vote_timestamp is not None else "not_present",
+        "consumer_timestamp": consumer_timestamp_ns,
+        "signal_candle_id": signal_candle_id,
+        "vote_candle_id": vote_candle_id,
+        "consumer_candle_id": consumer_candle_id,
+        "stale_age_ns": _observed_pair_stale_age_ns(
+            freshest_pair_ts,
+            consumer_timestamp_ns,
+        ),
+        "consumer_symbol": consumer_symbol or "not_present",
+        "signal_symbol": signal_symbol or "not_present",
+        "vote_symbol": vote_symbol or "not_present",
+    }
+
+
 # =========================================================================
 # BUNDLE 2A — FACTORY FUNCTION FOR MAINLOOP ASSEMBLY
 # =========================================================================
@@ -803,31 +886,64 @@ class MainLoop:
 
     def _classify_sector_rotation_observed_pair(
         self,
+        symbol: str,
         runtime: SymbolRuntime,
         exchange_ts_ns: int,
     ) -> Tuple[str, Dict[str, object]]:
         """Classify SectorRotation observed-pair readiness without mutation."""
         observed_signal = runtime.last_sector_rotation_observed_signal
         observed_vote = runtime.last_sector_rotation_observed_vote
-        if observed_signal is None or observed_vote is None:
-            return (
-                "observed_pair_missing",
-                {
-                    "observed_signal_present": observed_signal is not None,
-                    "observed_vote_present": observed_vote is not None,
-                },
-            )
+        detail = _sector_rotation_observed_pair_detail(
+            symbol=symbol,
+            observed_signal=observed_signal,
+            observed_vote=observed_vote,
+            consumer_timestamp_ns=exchange_ts_ns,
+        )
+        if observed_signal is None:
+            return ("OBSERVED_SIGNAL_MISSING", detail)
+        if observed_vote is None:
+            return ("OBSERVED_VOTE_MISSING", detail)
+
+        consumer_symbol = detail["consumer_symbol"]
+        signal_symbol = detail["signal_symbol"]
+        vote_symbol = detail["vote_symbol"]
+        if (
+            signal_symbol != "not_present"
+            and consumer_symbol != "not_present"
+            and signal_symbol != consumer_symbol
+        ) or (
+            vote_symbol != "not_present"
+            and consumer_symbol != "not_present"
+            and vote_symbol != consumer_symbol
+        ):
+            return ("OBSERVED_PAIR_SYMBOL_MISMATCH", detail)
 
         vote_ts = getattr(observed_vote, "timestamp_ns", None)
         signal_ts = getattr(observed_signal, "exchange_ts_ns", None)
-        fresh = (vote_ts == exchange_ts_ns) or (signal_ts == exchange_ts_ns)
-        if not fresh:
+        signal_candle_id = detail["signal_candle_id"]
+        vote_candle_id = detail["vote_candle_id"]
+        consumer_candle_id = detail["consumer_candle_id"]
+        if (
+            signal_candle_id == "not_present"
+            or vote_candle_id == "not_present"
+            or signal_candle_id != vote_candle_id
+        ):
+            return ("OBSERVED_PAIR_CANDLE_MISMATCH", detail)
+
+        if signal_candle_id != consumer_candle_id:
+            if (
+                isinstance(signal_ts, int)
+                and isinstance(vote_ts, int)
+                and signal_ts < exchange_ts_ns
+                and vote_ts < exchange_ts_ns
+            ):
+                return ("OBSERVED_PAIR_STALE", detail)
             return (
-                "observed_pair_stale",
-                {"vote_ts": vote_ts, "signal_ts": signal_ts},
+                "OBSERVED_PAIR_CANDLE_MISMATCH",
+                detail,
             )
 
-        return "observed_pair_fresh", {"vote_ts": vote_ts, "signal_ts": signal_ts}
+        return "OBSERVED_PAIR_READY", detail
 
     def _clear_stale_sector_rotation_observed_pair(
         self,
@@ -1515,13 +1631,14 @@ class MainLoop:
                 # so this equality holds when a fresh signal exists.
                 logger.info("[DISPATCH] %s: SECTOR_ROTATION branch entered (paper-only)", symbol)
                 reason_code, reason_fields = self._classify_sector_rotation_observed_pair(
+                    symbol,
                     runtime,
                     exchange_ts_ns,
                 )
                 sig, vote = self._consume_observed_pair_sector_rotation(
                     symbol, runtime, exchange_ts_ns,
                 )
-                if sig is None and reason_code != "observed_pair_fresh":
+                if sig is None and reason_code != "OBSERVED_PAIR_READY":
                     terminal_reason_code = reason_code
                     terminal_reason_fields = dict(reason_fields)
                     terminal_reason_logged = True
@@ -1980,8 +2097,10 @@ class MainLoop:
         Hard gates (in order):
           1. broker_mode == "paper"  (paper-only proving lane)
           2. observed signal AND vote both present
-          3. vote.timestamp_ns == exchange_ts_ns  (same-candle freshness)
-             OR signal.exchange_ts_ns == exchange_ts_ns  (fallback)
+          3. observed signal/vote symbols must match the consumer symbol when
+             symbol evidence is present
+          4. observed signal and vote must share the same candle timestamp
+          5. observed pair candle timestamp must equal the consumer candle
         """
         if self.config.broker_mode != "paper":
             logger.info(
@@ -2000,62 +2119,58 @@ class MainLoop:
             )
             return None, None
 
+        reason_code, reason_fields = self._classify_sector_rotation_observed_pair(
+            symbol,
+            runtime,
+            exchange_ts_ns,
+        )
         observed_signal = runtime.last_sector_rotation_observed_signal
         observed_vote = runtime.last_sector_rotation_observed_vote
-
-        if observed_signal is None or observed_vote is None:
+        if reason_code != "OBSERVED_PAIR_READY":
+            stale_cleared = False
+            if reason_code == "OBSERVED_PAIR_STALE":
+                stale_cleared = self._clear_stale_sector_rotation_observed_pair(
+                    runtime,
+                    exchange_ts_ns,
+                )
+                reason_fields = dict(reason_fields)
+                reason_fields["stale_cleared"] = stale_cleared
             logger.info(
-                "[PAPER_DISPATCH_SECTOR_ROTATION] %s: blocked — observed pair missing "
-                "(signal=%s vote=%s)",
+                "[PAPER_DISPATCH_SECTOR_ROTATION] %s: blocked — %s "
+                "(signal_present=%s vote_present=%s signal_candle_id=%s "
+                "vote_candle_id=%s consumer_candle_id=%s stale_cleared=%s)",
                 symbol,
-                "present" if observed_signal is not None else "None",
-                "present" if observed_vote is not None else "None",
+                reason_code,
+                reason_fields.get("observed_signal_present"),
+                reason_fields.get("observed_vote_present"),
+                reason_fields.get("signal_candle_id"),
+                reason_fields.get("vote_candle_id"),
+                reason_fields.get("consumer_candle_id"),
+                stale_cleared,
             )
             _log_dispatch_diag(
-                "observed_pair_missing",
-                symbol=symbol,
-                exchange_ts_ns=exchange_ts_ns,
+                reason_code,
                 sleeve=repr(SleeveType.SECTOR_ROTATION),
-                observed_signal_present=observed_signal is not None,
-                observed_vote_present=observed_vote is not None,
                 submit_signal_called=False,
-            )
-            return None, None
-
-        vote_ts = getattr(observed_vote, "timestamp_ns", None)
-        signal_ts = getattr(observed_signal, "exchange_ts_ns", None)
-        fresh = (vote_ts == exchange_ts_ns) or (signal_ts == exchange_ts_ns)
-
-        if not fresh:
-            stale_cleared = self._clear_stale_sector_rotation_observed_pair(
-                runtime,
-                exchange_ts_ns,
-            )
-            logger.info(
-                "[PAPER_DISPATCH_SECTOR_ROTATION] %s: blocked — freshness fail "
-                "(vote_ts=%s signal_ts=%s exchange_ts_ns=%s stale_cleared=%s)",
-                symbol, vote_ts, signal_ts, exchange_ts_ns, stale_cleared,
-            )
-            _log_dispatch_diag(
-                "observed_pair_stale",
-                symbol=symbol,
-                exchange_ts_ns=exchange_ts_ns,
-                sleeve=repr(SleeveType.SECTOR_ROTATION),
-                vote_ts=vote_ts,
-                signal_ts=signal_ts,
-                stale_cleared=stale_cleared,
-                submit_signal_called=False,
+                **reason_fields,
             )
             return None, None
 
         logger.info(
             "[PAPER_DISPATCH_SECTOR_ROTATION] %s: admitted decision_uuid=%s "
-            "side=%s confidence=%s risk_appetite=%s",
+            "side=%s confidence=%s risk_appetite=%s reason_code=%s",
             symbol,
             getattr(observed_vote, "decision_uuid", "<missing>"),
             getattr(observed_signal, "side", "<missing>"),
             getattr(observed_vote, "confidence", "<missing>"),
             getattr(observed_vote, "risk_appetite", "<missing>"),
+            reason_code,
+        )
+        _log_dispatch_diag(
+            reason_code,
+            sleeve=repr(SleeveType.SECTOR_ROTATION),
+            observed_pair_admitted=True,
+            **reason_fields,
         )
         return observed_signal, observed_vote
 
@@ -2402,9 +2517,6 @@ class MainLoop:
         for signal in (entry_signal, exit_signal):
             if signal is None:
                 continue
-            runtime.record_observed_signal("sector_rotation", signal)
-            self._log_observed_signal(symbol, "sector_rotation", signal)
-
             # OBSERVE-ONLY (Stage 2-C): synthesize a StrategyVote via the
             # approved adapter for telemetry/inspection ONLY. This vote is
             # NOT passed to DecisionCompiler, NOT inserted into any active
@@ -2428,13 +2540,32 @@ class MainLoop:
                 )
                 continue
 
+            runtime.record_observed_signal("sector_rotation", signal)
+            self._log_observed_signal(symbol, "sector_rotation", signal)
             runtime.record_observed_vote("sector_rotation", vote)
             self._log_observed_vote(symbol, "sector_rotation", vote)
+            signal_ts = getattr(signal, "exchange_ts_ns", None)
+            vote_ts = getattr(vote, "timestamp_ns", None)
             _log_sector_rotation_diag(
                 symbol,
                 "observed_pair_stored",
                 candle.exchange_ts_ns,
-                {"signal_ts_ns": getattr(signal, "exchange_ts_ns", None)},
+                {
+                    "observed_signal_present": True,
+                    "observed_vote_present": True,
+                    "signal_timestamp": signal_ts,
+                    "vote_timestamp": vote_ts,
+                    "consumer_timestamp": candle.exchange_ts_ns,
+                    "signal_candle_id": _observed_pair_candle_id(signal_ts),
+                    "vote_candle_id": _observed_pair_candle_id(vote_ts),
+                    "consumer_candle_id": _observed_pair_candle_id(
+                        candle.exchange_ts_ns
+                    ),
+                    "symbol": symbol,
+                    "reason": "OBSERVED_PAIR_READY"
+                    if signal_ts == vote_ts == candle.exchange_ts_ns
+                    else "OBSERVED_PAIR_CANDLE_MISMATCH",
+                },
             )
 
     # =========================================================================

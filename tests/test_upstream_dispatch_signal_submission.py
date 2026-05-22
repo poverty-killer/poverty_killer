@@ -79,7 +79,12 @@ def _make_signal(
     )
 
 
-def _make_vote(*, timestamp_ns: int, decision_uuid: str = "uuid-test"):
+def _make_vote(
+    *,
+    timestamp_ns: int,
+    decision_uuid: str = "uuid-test",
+    symbol: str = "ETH/USD",
+):
     """Stand-in for app.models.contracts.StrategyVote (duck-typed)."""
     return types.SimpleNamespace(
         decision_uuid=decision_uuid,
@@ -87,7 +92,7 @@ def _make_vote(*, timestamp_ns: int, decision_uuid: str = "uuid-test"):
         confidence=Decimal("0.75"),
         risk_appetite=Decimal("0.5"),
         signal="buy",
-        metadata={},
+        metadata={"symbol": symbol},
     )
 
 
@@ -241,7 +246,8 @@ class TestConsumeObservedPairSectorRotation:
     Direct unit tests over the production method. Mirrors the four hard gates:
         1. broker_mode == "paper"
         2. observed signal AND vote both present
-        3. vote.timestamp_ns == exchange_ts_ns OR signal.exchange_ts_ns == exchange_ts_ns
+        3. signal/vote symbols match the consumer symbol when present
+        4. signal/vote/consumer candle IDs all match
     """
 
     def test_blocks_when_broker_mode_is_not_paper(self):
@@ -322,7 +328,7 @@ class TestConsumeObservedPairSectorRotation:
         assert sig is observed_sig
         assert vote is observed_vote
 
-    def test_admits_when_only_vote_ts_matches(self):
+    def test_blocks_when_only_vote_ts_matches(self):
         loop = _make_test_loop()
         ts = 2_000_000_000_000
         observed_sig = _make_signal(exchange_ts_ns=ts - 7)  # signal_ts mismatched
@@ -330,9 +336,9 @@ class TestConsumeObservedPairSectorRotation:
         rt = _make_runtime(sector_signal=observed_sig, sector_vote=observed_vote)
         consume = _bind(loop, "_consume_observed_pair_sector_rotation")
         sig, vote = consume("ETH/USD", rt, ts)
-        assert sig is observed_sig and vote is observed_vote
+        assert sig is None and vote is None
 
-    def test_admits_when_only_signal_ts_matches(self):
+    def test_blocks_when_only_signal_ts_matches(self):
         loop = _make_test_loop()
         ts = 3_000_000_000_000
         observed_sig = _make_signal(exchange_ts_ns=ts)            # signal_ts matches
@@ -340,7 +346,18 @@ class TestConsumeObservedPairSectorRotation:
         rt = _make_runtime(sector_signal=observed_sig, sector_vote=observed_vote)
         consume = _bind(loop, "_consume_observed_pair_sector_rotation")
         sig, vote = consume("ETH/USD", rt, ts)
-        assert sig is observed_sig and vote is observed_vote
+        assert sig is None and vote is None
+
+    def test_blocks_on_symbol_mismatch(self):
+        loop = _make_test_loop()
+        ts = 4_000_000_000_000
+        rt = _make_runtime(
+            sector_signal=_make_signal(exchange_ts_ns=ts, symbol="BTC/USD"),
+            sector_vote=_make_vote(timestamp_ns=ts, symbol="BTC/USD"),
+        )
+        consume = _bind(loop, "_consume_observed_pair_sector_rotation")
+        sig, vote = consume("ETH/USD", rt, ts)
+        assert sig is None and vote is None
 
 
 # =============================================================================
