@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.brain.data_validator import DataContinuityValidator
 from app.commander import Commander
+from app.core.market_snapshot import validate_market_snapshot_for_execution
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
 from app.models import OrderFill, OrderRequest, StrategySignal
@@ -914,24 +915,41 @@ class ExecutionEngine:
         *,
         current_ns: int,
     ) -> Dict[str, Any]:
-        if self.data_validator is None:
-            return {}
-
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         market_truth = metadata.get("execution_market_truth")
         market_truth = dict(market_truth) if isinstance(market_truth, dict) else {}
+        snapshot = (
+            metadata.get("market_truth_snapshot")
+            or metadata.get("candidate_market_snapshot")
+            or market_truth.get("market_truth_snapshot")
+        )
+        snapshot = dict(snapshot) if isinstance(snapshot, dict) else {}
+        requires_snapshot = metadata.get("requires_canonical_market_snapshot") is True
         source_type = (
-            market_truth.get("data_source_type")
+            snapshot.get("source_type")
+            or market_truth.get("data_source_type")
             or metadata.get("data_source_type")
             or "unknown"
         )
-        latest_book_ts_ns = market_truth.get("latest_book_ts_ns")
-        latest_candle_ts_ns = market_truth.get("latest_candle_ts_ns")
-        observed_symbol = market_truth.get("symbol") or metadata.get("market_truth_symbol")
+        latest_book_ts_ns = snapshot.get("book_ts_ns") or market_truth.get("latest_book_ts_ns")
+        latest_candle_ts_ns = snapshot.get("candle_id") or market_truth.get("latest_candle_ts_ns")
+        observed_symbol = snapshot.get("symbol") or market_truth.get("symbol") or metadata.get("market_truth_symbol")
 
+        if self.data_validator is None:
+            if snapshot or requires_snapshot:
+                return validate_market_snapshot_for_execution(
+                    snapshot or None,
+                    signal_symbol=signal.symbol,
+                    signal_exchange_ts_ns=getattr(signal, "exchange_ts_ns", None),
+                    current_ns=current_ns,
+                    monitor_evidence=None,
+                )
+            return {}
+
+        monitor_evidence: Dict[str, Any] = {}
         snapshot_fn = getattr(self.data_validator, "health_snapshot", None)
         if callable(snapshot_fn):
-            return snapshot_fn(
+            monitor_evidence = snapshot_fn(
                 signal.symbol,
                 current_ns=current_ns,
                 latest_book_ts_ns=latest_book_ts_ns,
@@ -939,9 +957,18 @@ class ExecutionEngine:
                 source_type=str(source_type),
                 observed_symbol=observed_symbol,
             )
+            if snapshot or requires_snapshot:
+                return validate_market_snapshot_for_execution(
+                    snapshot or None,
+                    signal_symbol=signal.symbol,
+                    signal_exchange_ts_ns=getattr(signal, "exchange_ts_ns", None),
+                    current_ns=current_ns,
+                    monitor_evidence=monitor_evidence,
+                )
+            return monitor_evidence
 
         healthy = bool(self.data_validator.is_data_healthy(signal.symbol))
-        return {
+        legacy_evidence = {
             "symbol": signal.symbol,
             "gap_detected": None,
             "last_valid_data_ns": None,
@@ -955,6 +982,15 @@ class ExecutionEngine:
             "data_source_type": str(source_type),
             "data_healthy": healthy,
         }
+        if snapshot or requires_snapshot:
+            return validate_market_snapshot_for_execution(
+                snapshot or None,
+                signal_symbol=signal.symbol,
+                signal_exchange_ts_ns=getattr(signal, "exchange_ts_ns", None),
+                current_ns=current_ns,
+                monitor_evidence=legacy_evidence,
+            )
+        return legacy_evidence
 
     def _record_shadow_read_only_block(
         self,
@@ -1301,6 +1337,11 @@ class ExecutionEngine:
             "edge_attribution",
             "candidate_lifecycle",
             "opportunity_scorecard",
+            "market_truth_snapshot",
+            "candidate_market_snapshot",
+            "requires_canonical_market_snapshot",
+            "snapshot_id",
+            "candle_id",
         ):
             if key in signal_metadata:
                 order_metadata[key] = signal_metadata[key]

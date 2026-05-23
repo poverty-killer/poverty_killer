@@ -597,9 +597,19 @@ def test_fresh_executable_sector_rotation_same_candle_reaches_compiler_with_scor
 
     loop.decision_compiler.compile.assert_called_once()
     loop.execution_engine.submit_signal.assert_called_once()
+    additional_inputs = loop.decision_compiler.compile.call_args.kwargs["additional_inputs"]
+    compiled_snapshot = additional_inputs["market_truth_snapshot"]
+    submitted_signal = loop.execution_engine.submit_signal.call_args.kwargs["signal"]
+    assert compiled_snapshot["snapshot_id"]
+    assert compiled_snapshot["snapshot_status"] == "PASS"
+    assert submitted_signal.metadata["market_truth_snapshot"]["snapshot_id"] == compiled_snapshot["snapshot_id"]
+    assert submitted_signal.metadata["requires_canonical_market_snapshot"] is True
+    assert submitted_signal.metadata["strategy_evidence_candle_id"] == T0_NS
+    assert vote.metadata["strategy_evidence_snapshot_id"] == compiled_snapshot["snapshot_id"]
     assert "reason_code=OBSERVED_PAIR_READY" in caplog.text
     assert "reason_code=decision_compile_attempted" in caplog.text
     assert "reason_code=submit_signal_called" in caplog.text
+    assert "snapshot_id" in caplog.text
     assert "candidate_lifecycle" in caplog.text
     assert "opportunity_scorecard" in caplog.text
     assert "latency_penalty" in caplog.text

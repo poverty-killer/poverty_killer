@@ -226,6 +226,8 @@ class DecisionCompiler:
                 "opportunity_ranking_summary",
                 "risk_economic_summary",
                 "market_truth_summary",
+                "market_truth_snapshot",
+                "candidate_market_snapshot",
                 "missing_truth_summary",
                 "degraded_fallback_summary",
                 "blocked_or_abstained_summary",
@@ -268,6 +270,16 @@ class DecisionCompiler:
                     )
                 ),
             )
+        if isinstance(additional_inputs, dict):
+            snapshot = (
+                additional_inputs.get("market_truth_snapshot")
+                or additional_inputs.get("candidate_market_snapshot")
+            )
+            if isinstance(snapshot, dict):
+                metadata["snapshot_id"] = snapshot.get("snapshot_id")
+                metadata["snapshot_status"] = snapshot.get("snapshot_status")
+                metadata["snapshot_reason_codes"] = snapshot.get("snapshot_reason_codes")
+                metadata["snapshot_authority"] = snapshot.get("snapshot_authority")
         metadata.update(attribution_sections)
         
         record = DecisionRecord(

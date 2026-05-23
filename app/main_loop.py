@@ -46,6 +46,7 @@ from app.core.candidate_lifecycle import (
     record_decision_compiler_result,
     record_execution_result,
 )
+from app.core.market_snapshot import build_market_truth_snapshot
 from app.core.truth_reconciler import TruthReconciler
 from app.core.whole_bot_attribution import build_runtime_edge_attribution
 from app.models import (
@@ -227,6 +228,11 @@ def _emit_candidate_scorecard_diag(
     )
     candidate_lifecycle = lifecycle_to_dict(lifecycle)
     opportunity_scorecard = opportunity_scorecard_from_lifecycle(candidate_lifecycle)
+    snapshot = {}
+    if isinstance(market_truth, dict):
+        snapshot_candidate = market_truth.get("market_truth_snapshot")
+        if isinstance(snapshot_candidate, dict):
+            snapshot = snapshot_candidate
     log_fields = {
         **dict(clean_fields),
         "symbol": symbol,
@@ -248,6 +254,10 @@ def _emit_candidate_scorecard_diag(
         "execution_blocker_reason_codes": opportunity_scorecard.get("execution_blocker_reason_codes"),
         "broker_boundary_result": opportunity_scorecard.get("broker_boundary_result"),
         "broker_post": False,
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "snapshot_status": snapshot.get("snapshot_status"),
+        "snapshot_reason_codes": snapshot.get("snapshot_reason_codes"),
+        "snapshot_authority": snapshot.get("snapshot_authority"),
     }
     _log_dispatch_diag(reason_code, **log_fields)
     return candidate_lifecycle
@@ -293,6 +303,48 @@ def _runtime_market_truth_fields(
     }
 
 
+def _candidate_market_truth_snapshot_fields(
+    symbol: str,
+    runtime: Any,
+    consumer_exchange_ts_ns: int,
+    *,
+    candle_truth: Optional[Dict[str, Any]] = None,
+    data_source_type: str = "runtime",
+    current_ns: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Build candidate-local market truth plus canonical snapshot evidence."""
+    candle_truth = dict(candle_truth or {})
+    source_type = str(candle_truth.get("data_source_type") or data_source_type or "runtime")
+    snapshot_current_ns = (
+        current_ns
+        or candle_truth.get("receive_ts_ns")
+        or candle_truth.get("candle_batch_received_ns")
+        or now_ns()
+    )
+    market_truth = _runtime_market_truth_fields(
+        symbol,
+        runtime,
+        consumer_exchange_ts_ns,
+        data_source_type=source_type,
+    )
+    snapshot = build_market_truth_snapshot(
+        symbol=symbol,
+        market_truth=market_truth,
+        candle_truth=candle_truth,
+        current_ns=int(snapshot_current_ns),
+    )
+    market_truth.update(
+        {
+            "market_truth_snapshot": snapshot,
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "snapshot_status": snapshot.get("snapshot_status"),
+            "snapshot_reason_codes": snapshot.get("snapshot_reason_codes"),
+            "snapshot_authority": snapshot.get("snapshot_authority"),
+        }
+    )
+    return market_truth
+
+
 def _classify_candle_execution_truth(
     *,
     symbol: str,
@@ -324,6 +376,7 @@ def _classify_candle_execution_truth(
     detail.update(
         {
             "consumer_timestamp_ns": exchange_ts_ns,
+            "candle_id": exchange_ts_ns,
             "candle_age_ms": age_ns / 1_000_000.0,
             "candle_start_ts_ns": candle_start_ns,
             "candle_close_ts_ns": candle_close_ns,
@@ -336,6 +389,8 @@ def _classify_candle_execution_truth(
             "latest_provider_batch_candle": getattr(candle, "latest_provider_batch_candle", None),
             "latest_closed_batch_candle": getattr(candle, "latest_closed_batch_candle", None),
             "provider_batch_head_ts_ns": getattr(candle, "provider_batch_head_ts_ns", None),
+            "candle_batch_received_ns": getattr(candle, "candle_batch_received_ns", None),
+            "receive_ts_ns": getattr(candle, "candle_batch_received_ns", None) or current_ns,
             "candle_closed_at_receive": getattr(candle, "candle_closed_at_receive", None),
             "executable_market_truth": False,
             "data_health_reason_code": "DATA_HEALTH_UNKNOWN",
@@ -435,6 +490,11 @@ def _decision_compiler_status_fields(
         signal_metadata.get("candidate_lifecycle")
         or additional.get("candidate_lifecycle")
     )
+    market_snapshot = _as_mapping(
+        additional.get("market_truth_snapshot")
+        or signal_metadata.get("market_truth_snapshot")
+        or signal_metadata.get("candidate_market_snapshot")
+    )
     reason_codes = tuple(str(code) for code in guardrail.get("reason_codes", ()) if str(code))
     route_permitted = guardrail.get("route_permitted")
     mutation_permitted = guardrail.get("mutation_permitted")
@@ -462,6 +522,10 @@ def _decision_compiler_status_fields(
         "raw_opportunity_score": scorecard.get("raw_opportunity_score"),
         "final_opportunity_score": scorecard.get("final_opportunity_score"),
         "opportunity_verdict": scorecard.get("opportunity_verdict") or candidate_lifecycle.get("opportunity_verdict"),
+        "snapshot_id": market_snapshot.get("snapshot_id"),
+        "snapshot_status": market_snapshot.get("snapshot_status"),
+        "snapshot_reason_codes": market_snapshot.get("snapshot_reason_codes"),
+        "snapshot_authority": market_snapshot.get("snapshot_authority"),
     }
     fields.update(_execution_admission_block_fields(execution_admission_block))
     return {key: value for key, value in fields.items() if value not in (None, (), [])}
@@ -1902,7 +1966,12 @@ class MainLoop:
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
                 source_sleeve="SignalFusion",
-                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                market_truth=_candidate_market_truth_snapshot_fields(
+                    symbol,
+                    runtime,
+                    exchange_ts_ns,
+                    candle_truth=candle_execution_truth or {},
+                ),
                 candle_truth=candle_execution_truth or {},
                 latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                 fusion_present=False,
@@ -1922,7 +1991,12 @@ class MainLoop:
                 exchange_ts_ns=exchange_ts_ns,
                 source_sleeve="StrategyRouter",
                 fusion=fusion,
-                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                market_truth=_candidate_market_truth_snapshot_fields(
+                    symbol,
+                    runtime,
+                    exchange_ts_ns,
+                    candle_truth=candle_execution_truth or {},
+                ),
                 candle_truth=candle_execution_truth or {},
                 latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                 fusion_present=True,
@@ -1968,7 +2042,12 @@ class MainLoop:
                 exchange_ts_ns=exchange_ts_ns,
                 source_sleeve=repr(preferred),
                 fusion=fusion,
-                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                market_truth=_candidate_market_truth_snapshot_fields(
+                    symbol,
+                    runtime,
+                    exchange_ts_ns,
+                    candle_truth=candle_execution_truth or {},
+                ),
                 candle_truth=candle_execution_truth or {},
                 latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                 preferred_sleeve=repr(preferred),
@@ -2144,7 +2223,12 @@ class MainLoop:
                     exchange_ts_ns=exchange_ts_ns,
                     source_sleeve=terminal_source_sleeve,
                     fusion=fusion,
-                    market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                    market_truth=_candidate_market_truth_snapshot_fields(
+                        symbol,
+                        runtime,
+                        exchange_ts_ns,
+                        candle_truth=candle_execution_truth or {},
+                    ),
                     candle_truth=candle_execution_truth or {},
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                     dispatch_evidence=tuple(dispatch_evidence),
@@ -2159,7 +2243,12 @@ class MainLoop:
                     signal=terminal_signal_for_score,
                     strategy_vote=terminal_vote_for_score,
                     fusion=fusion,
-                    market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                    market_truth=_candidate_market_truth_snapshot_fields(
+                        symbol,
+                        runtime,
+                        exchange_ts_ns,
+                        candle_truth=candle_execution_truth or {},
+                    ),
                     candle_truth=candle_execution_truth or {},
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                     dispatch_evidence=tuple(dispatch_evidence),
@@ -2173,7 +2262,12 @@ class MainLoop:
                     exchange_ts_ns=exchange_ts_ns,
                     source_sleeve=terminal_source_sleeve,
                     fusion=fusion,
-                    market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                    market_truth=_candidate_market_truth_snapshot_fields(
+                        symbol,
+                        runtime,
+                        exchange_ts_ns,
+                        candle_truth=candle_execution_truth or {},
+                    ),
                     candle_truth=candle_execution_truth or {},
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                     dispatch_evidence=tuple(dispatch_evidence),
@@ -2190,7 +2284,12 @@ class MainLoop:
                 source_sleeve=repr(winning_sleeve),
                 signal=signal,
                 fusion=fusion,
-                market_truth=_runtime_market_truth_fields(symbol, runtime, exchange_ts_ns),
+                market_truth=_candidate_market_truth_snapshot_fields(
+                    symbol,
+                    runtime,
+                    exchange_ts_ns,
+                    candle_truth=candle_execution_truth or {},
+                ),
                 candle_truth=candle_execution_truth or {},
                 latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
                 dispatch_evidence=tuple(dispatch_evidence),
@@ -2248,17 +2347,32 @@ class MainLoop:
                 aggression_contract_metadata["dormant_governors_active"]
             ),
         }
+        execution_market_truth = _candidate_market_truth_snapshot_fields(
+            symbol,
+            runtime,
+            exchange_ts_ns,
+            candle_truth=candle_execution_truth or {},
+        )
+        candidate_market_snapshot = dict(
+            execution_market_truth.get("market_truth_snapshot") or {}
+        )
         if isinstance(signal_metadata, dict):
             signal_metadata["canonical_aggression_contract"] = (
                 aggression_contract_metadata
             )
             signal_metadata["aggression_replay_proof"] = aggression_replay_proof
-            signal_metadata["execution_market_truth"] = _runtime_market_truth_fields(
-                symbol,
-                runtime,
-                exchange_ts_ns,
-                data_source_type="runtime",
-            )
+            signal_metadata["execution_market_truth"] = execution_market_truth
+            signal_metadata["market_truth_snapshot"] = candidate_market_snapshot
+            signal_metadata["candidate_market_snapshot"] = candidate_market_snapshot
+            signal_metadata["requires_canonical_market_snapshot"] = True
+            signal_metadata["snapshot_id"] = candidate_market_snapshot.get("snapshot_id")
+            signal_metadata["candle_id"] = candidate_market_snapshot.get("candle_id")
+            signal_metadata["strategy_evidence_snapshot_id"] = candidate_market_snapshot.get("snapshot_id")
+            signal_metadata["strategy_evidence_candle_id"] = candidate_market_snapshot.get("candle_id")
+        vote_metadata = getattr(strategy_vote, "metadata", None)
+        if isinstance(vote_metadata, dict):
+            vote_metadata["strategy_evidence_snapshot_id"] = candidate_market_snapshot.get("snapshot_id")
+            vote_metadata["strategy_evidence_candle_id"] = candidate_market_snapshot.get("candle_id")
 
         truth_frame = self._build_truth_frame(exchange_ts_ns)
         pre_trade_guardrail_verdict = _build_pre_trade_guardrail_verdict(
@@ -2345,6 +2459,10 @@ class MainLoop:
             raw_opportunity_score=opportunity_scorecard["raw_opportunity_score"],
             final_opportunity_score=opportunity_scorecard["final_opportunity_score"],
             opportunity_verdict=opportunity_scorecard["opportunity_verdict"],
+            snapshot_id=candidate_market_snapshot.get("snapshot_id"),
+            snapshot_status=candidate_market_snapshot.get("snapshot_status"),
+            snapshot_reason_codes=candidate_market_snapshot.get("snapshot_reason_codes"),
+            snapshot_authority=candidate_market_snapshot.get("snapshot_authority"),
         )
         decision_record = self.decision_compiler.compile(
             truth_frame,
@@ -2356,6 +2474,8 @@ class MainLoop:
                 "edge_attribution": edge_attribution,
                 "candidate_lifecycle": candidate_lifecycle_dict,
                 "opportunity_scorecard": opportunity_scorecard,
+                "market_truth_snapshot": candidate_market_snapshot,
+                "candidate_market_snapshot": candidate_market_snapshot,
             },
         )
         candidate_lifecycle = record_decision_compiler_result(

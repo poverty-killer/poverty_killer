@@ -88,6 +88,14 @@ _DATA_TRUTH_REASON_CODES = frozenset(
         "DATA_TIMESTAMP_MISSING",
         "CANDLE_TIMESTAMP_MISSING",
         "CANDLE_FRESHNESS_POLICY_MISSING",
+        "MARKET_TRUTH_SNAPSHOT_MISSING",
+        "MARKET_TRUTH_SNAPSHOT_NOT_EXECUTABLE",
+        "CANDIDATE_SNAPSHOT_STALE",
+        "MARKET_TRUTH_CONFLICT",
+        "SNAPSHOT_SYMBOL_MISMATCH",
+        "SNAPSHOT_SOURCE_UNEXECUTABLE",
+        "SNAPSHOT_TIMESTAMP_MISMATCH",
+        "STALE_MONITOR_EVIDENCE_IGNORED",
     }
 )
 
@@ -560,7 +568,20 @@ def _build_penalties(
 def _market_truth_gate(market_truth: Mapping[str, Any]) -> CandidateGate:
     candle_code = str(market_truth.get("candle_freshness_reason_code") or "")
     data_code = str(market_truth.get("data_health_reason_code") or "")
-    reason_codes = tuple(code for code in (data_code, candle_code) if code)
+    snapshot_codes = market_truth.get("snapshot_reason_codes") or ()
+    if isinstance(snapshot_codes, str):
+        snapshot_codes = (snapshot_codes,)
+    reason_codes = tuple(
+        dict.fromkeys(
+            code
+            for code in (
+                data_code,
+                candle_code,
+                *(str(code) for code in snapshot_codes if str(code)),
+            )
+            if code
+        )
+    )
     if market_truth.get("executable_market_truth") is True:
         status = PASS
         classification = "market_truth_snapshot"
@@ -650,6 +671,10 @@ def _execution_reason_codes(execution_result: Any) -> tuple[str, ...]:
         for key in ("latency_truth_reason_code", "data_health_reason_code", "candle_freshness_reason_code"):
             if evidence.get(key):
                 codes.append(str(evidence[key]))
+        snapshot_codes = evidence.get("snapshot_reason_codes") or ()
+        if isinstance(snapshot_codes, str):
+            snapshot_codes = (snapshot_codes,)
+        codes.extend(str(code) for code in snapshot_codes if str(code))
     return tuple(dict.fromkeys(codes))
 
 
@@ -680,6 +705,10 @@ def _collect_reason_codes(
     for key in ("data_health_reason_code", "candle_freshness_reason_code"):
         if market_truth.get(key):
             codes.append(str(market_truth[key]))
+    snapshot_codes = market_truth.get("snapshot_reason_codes") or ()
+    if isinstance(snapshot_codes, str):
+        snapshot_codes = (snapshot_codes,)
+    codes.extend(str(code) for code in snapshot_codes if str(code))
     for key in ("reason_code", "status"):
         if latency_truth.get(key):
             codes.append(str(latency_truth[key]))
