@@ -304,7 +304,7 @@ def test_full_spine_preserves_min_notional_rejection_without_fake_fill_or_pendin
     )
 
     assert result.normalized_status == "blocked"
-    assert result.reason_code == "execution_admission_blocked"
+    assert result.reason_code == "PRE_TRADE_GUARDRAIL_BLOCKED"
     assert "RISK_MAX_BELOW_BROKER_MIN" in result.pre_trade_guardrail_verdict["reason_codes"]
     assert result.fill is None
     assert result.broker_order_id is None
@@ -328,12 +328,14 @@ def test_full_spine_blocks_unsupported_sell_before_gateway_post():
         is_attack=True,
     )
 
-    assert result.normalized_status == "rejected"
-    assert result.reason_code == "invalid_order_request"
+    assert result.normalized_status == "blocked"
+    assert result.reason_code == "PRE_TRADE_GUARDRAIL_SIGNAL_MISMATCH"
     assert result.fill is None
-    assert result.gateway_response.reconciliation_metadata["blocked_before_submit"] is True
+    assert result.gateway_response is None
+    assert result.block_evidence["blocked_before_order_router"] is True
+    assert "PRE_TRADE_GUARDRAIL_SIDE_MISMATCH" in result.block_evidence["reason_codes"]
     assert transport.calls == []
-    assert router.cancel_order(result.client_order_id) is False
+    assert result.client_order_id is None
     assert not hasattr(router, "replace_order")
     assert not hasattr(router, "rebalance")
 

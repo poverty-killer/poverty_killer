@@ -115,6 +115,7 @@ def test_rest_latency_ok_does_not_create_websocket_rtt_blocker(tmp_path):
     assert truth.status == "LATENCY_OK"
     assert truth.reason_code == "REST_LATENCY_WITHIN_THRESHOLD"
     assert truth.source == "market_data.rest_polling_rtt"
+    assert truth.source_scope == "market_data_book_rtt"
     assert truth.latency_ms == 11.0
     assert truth.safe_mode_required is False
 
@@ -153,10 +154,36 @@ def test_missing_rest_latency_truth_is_truthful_without_websocket_reason(tmp_pat
     assert truth.reason_code == "REST_RTT_NOT_READY"
     assert truth.source == "market_data.rest_polling_rtt"
     assert truth.missing_source == "rest_request_or_response_timestamp"
-    assert truth.safe_mode_required is True
+    assert truth.safe_mode_required is False
 
 
-def test_stale_rest_latency_fails_closed_as_stale_market_truth(tmp_path):
+def test_slow_rest_candle_latency_is_evidence_not_global_safe_mode(tmp_path):
+    router = OrderRouter(paper_mode=True)
+    router.set_market_data_latency_source("rest_polling")
+    router.update_rest_market_data_latency(
+        request_start_ns=45 * NS_PER_SECOND,
+        response_received_ns=45 * NS_PER_SECOND + 437 * NS_PER_MS,
+        exchange="coinbase",
+        provider_id="coinbase_public",
+        symbol="SOL/USD",
+        feed_type="candle",
+    )
+    engine = _engine(tmp_path, router)
+
+    truth = engine._classify_latency_truth(
+        router.get_latency_measurement(),
+        current_ns=46 * NS_PER_SECOND,
+    )
+    engine._apply_latency_truth(truth)
+
+    assert truth.status == "MARKET_DATA_LATENCY_DEGRADED"
+    assert truth.reason_code == "REST_LATENCY_THRESHOLD_EXCEEDED"
+    assert truth.source_scope == "market_data_candle_rtt"
+    assert truth.safe_mode_required is False
+    assert engine.get_status()["is_in_safe_mode"] is False
+
+
+def test_stale_rest_latency_is_market_data_evidence_not_global_safe_mode(tmp_path):
     router = OrderRouter(paper_mode=True)
     router.set_market_data_latency_source("rest_polling")
     router.update_rest_market_data_latency(
@@ -174,6 +201,7 @@ def test_stale_rest_latency_fails_closed_as_stale_market_truth(tmp_path):
         current_ns=81 * NS_PER_SECOND,
     )
 
-    assert truth.status == "STALE_MARKET_TRUTH"
+    assert truth.status == "STALE_MARKET_DATA_LATENCY_TRUTH"
     assert truth.reason_code == "REST_RTT_STALE"
-    assert truth.safe_mode_required is True
+    assert truth.source_scope == "market_data_candle_rtt"
+    assert truth.safe_mode_required is False

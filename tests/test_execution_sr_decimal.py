@@ -73,6 +73,7 @@ def _make_signal(side="buy", price=None, strategy="sector_rotation"):
         price=price,
         exchange_ts_ns=now_ns(),
         reason="test",
+        metadata={"expected_move": "0.02"},
     )
 
 
@@ -675,6 +676,7 @@ def test_execution_engine_paper_fill_telemetry_e2e_with_decision_uuid(tmp_path):
         reason="bundle3a e2e telemetry guardrail",
         metadata={
             "decision_uuid": decision_uuid,
+            "expected_move": "0.02",
             "portfolio_replay_context": portfolio_replay_context,
             "exposure_snapshot_replay_context": exposure_snapshot_replay_context,
             **replay_metadata,
