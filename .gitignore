@@ -5,3 +5,11 @@ __pycache__/
 *.log
 .DS_Store
 logs/
+.aider*
+.secrets/
+_repo_quarantine/
+.pytest_cache/
+data/*.db*
+state/*.tmp
+state/*.json.*.tmp
+reports/*.tmp
