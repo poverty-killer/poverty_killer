@@ -30,10 +30,10 @@ BUNDLE DIAGNOSTIC VISIBILITY — FUSION BREAKDOWN TRACE (PP7B, 2026-04-29)
 FUSION LANE REPAIR — KELLY REMOVED FROM FUSION (PP6D, 2026-04-29)
     - Removed kelly_calibration_curve() from Fusion confidence path
     - Toxicity: bounded piecewise modulation replaces exponential steepness=3.5
-      [0,0.30]→1.0 | (0.30,0.60]→1.0..0.70 | (0.60,0.88]→0.70..0.40
+      [0,0.30]->1.0 | (0.30,0.60]->1.0..0.70 | (0.60,0.88]->0.70..0.40
     - Entropy: explicit entropy_neutralized flag; ent_multiplier=1.0 when dynamic_entropy<=0
       Positive branch: max(0.70, 1.0 - dynamic_entropy*0.30) — floor raised, slope reduced
-    - Resonance bonus: non-resonant 0.85 → 1.0 (neutral, not penalty)
+    - Resonance bonus: non-resonant 0.85 -> 1.0 (neutral, not penalty)
     - final_confidence = clamp(pre_kelly_value, 0.0, 1.0)
     - kelly_calibration_curve() preserved intact in QuantMath for downstream PositionSizing
     - [FUSION_BREAKDOWN] updated to expose all new fields + kelly_removed_from_fusion=True
@@ -415,7 +415,7 @@ class SignalFusion:
                     reason=f"MISSING_CRITICAL_SIGNAL:{sig}",
                     timestamp_ns=current_ts_ns,
                 )
-                logger.info("[FUSION_DIAG] Missing CRITICAL signal: %s → veto", sig)
+                logger.info("[FUSION_DIAG] Missing CRITICAL signal: %s -> veto", sig)
                 return self._issue_hard_veto(current_ts_ns, f"Missing critical signal [{sig}]")
             _, ts = self._cache[sig]
             age_ns = current_ts_ns - ts
@@ -429,7 +429,7 @@ class SignalFusion:
                     reason=f"STALE_CRITICAL_SIGNAL:{sig}",
                     timestamp_ns=current_ts_ns,
                 )
-                logger.info("[FUSION_DIAG] Stale CRITICAL signal: %s age=%.1fs ttl=%.1fs → veto",
+                logger.info("[FUSION_DIAG] Stale CRITICAL signal: %s age=%.1fs ttl=%.1fs -> veto",
                             sig, age_ns/1e9, ttl/1e9)
                 return self._issue_hard_veto(current_ts_ns, f"Stale critical signal [{sig}] (Age: {age_ns/1e9:.2f}s)")
             self._record_fusion_attribution(
@@ -457,7 +457,7 @@ class SignalFusion:
                     reason=f"MISSING_NONCRITICAL_SIGNAL:{sig}",
                     timestamp_ns=current_ts_ns,
                 )
-                logger.info("[FUSION_DIAG] Missing non-critical signal: %s → neutral default with penalty", sig)
+                logger.info("[FUSION_DIAG] Missing non-critical signal: %s -> neutral default with penalty", sig)
                 continue
             _, ts = st
             age_ns = current_ts_ns - ts
@@ -472,7 +472,7 @@ class SignalFusion:
                     reason=f"STALE_NONCRITICAL_SIGNAL:{sig}",
                     timestamp_ns=current_ts_ns,
                 )
-                logger.info("[FUSION_DIAG] Stale non-critical signal: %s age=%.1fs ttl=%.1fs → neutral default with penalty",
+                logger.info("[FUSION_DIAG] Stale non-critical signal: %s age=%.1fs ttl=%.1fs -> neutral default with penalty",
                             sig, age_ns/1e9, ttl/1e9)
             else:
                 missing_or_stale_noncrit[sig] = False
@@ -531,7 +531,7 @@ class SignalFusion:
             whale_payload, whale_ts = self._cache["whale_flow"]
             if not hasattr(whale_payload, "direction") or not hasattr(whale_payload, "confidence"):
                 logger.error(
-                    "[FUSION_ERROR] INVALID_WHALE_PAYLOAD type=%s missing required fields direction/confidence → veto",
+                    "[FUSION_ERROR] INVALID_WHALE_PAYLOAD type=%s missing required fields direction/confidence -> veto",
                     type(whale_payload).__name__,
                 )
                 return self._issue_hard_veto(current_ts_ns, "Invalid Whale Payload Type")
@@ -540,7 +540,7 @@ class SignalFusion:
                 whale_conf_raw = float(whale_payload.confidence)
             except Exception as exc:
                 logger.error(
-                    "[FUSION_ERROR] WHALE_PAYLOAD_PARSE_FAILED type=%s error=%s → veto",
+                    "[FUSION_ERROR] WHALE_PAYLOAD_PARSE_FAILED type=%s error=%s -> veto",
                     type(whale_payload).__name__,
                     str(exc),
                 )
@@ -602,7 +602,7 @@ class SignalFusion:
         # PHASE 3: CRITICAL HAZARD GATING (Absolute Boundaries)
         # ---------------------------------------------------------
         if whale_dir == 0:
-            logger.info("[FUSION_DIAG] whale_dir=0 (NEUTRAL) → continuing with neutral whale contribution")
+            logger.info("[FUSION_DIAG] whale_dir=0 (NEUTRAL) -> continuing with neutral whale contribution")
             
         if tox_is_toxic or tox_score >= 0.88:
             logger.info("[FUSION_DIAG] veto: tox_is_toxic=%s or tox_score=%.3f >= 0.88", tox_is_toxic, tox_score)
@@ -731,7 +731,7 @@ class SignalFusion:
             sector_rotation_eligible = True
             preferred_sleeve = SleeveType.SECTOR_ROTATION.value
             deprioritized_sleeves = [SleeveType.SHADOW_FRONT.value, SleeveType.GAMMA_FRONT.value]
-            logger.info("[FUSION_DIAG] Regime TRENDING → preferred_sleeve=SECTOR_ROTATION")
+            logger.info("[FUSION_DIAG] Regime TRENDING -> preferred_sleeve=SECTOR_ROTATION")
             
         elif regime_type == RegimeType.RANGING:
             shadow_front_eligible = True
@@ -740,23 +740,23 @@ class SignalFusion:
             if sr_ranging:
                 sector_rotation_eligible = True
                 deprioritized_sleeves = [SleeveType.GAMMA_FRONT.value]
-                logger.info("[FUSION_DIAG] Regime RANGING (sr_ranging=True) → preferred_sleeve=SHADOW_FRONT, SR=secondary")
+                logger.info("[FUSION_DIAG] Regime RANGING (sr_ranging=True) -> preferred_sleeve=SHADOW_FRONT, SR=secondary")
             else:
                 deprioritized_sleeves = [SleeveType.GAMMA_FRONT.value, SleeveType.SECTOR_ROTATION.value]
-                logger.info("[FUSION_DIAG] Regime RANGING → preferred_sleeve=SHADOW_FRONT")
+                logger.info("[FUSION_DIAG] Regime RANGING -> preferred_sleeve=SHADOW_FRONT")
             
         elif regime_type == RegimeType.CRISIS:
             gamma_front_eligible = True
             preferred_sleeve = SleeveType.GAMMA_FRONT.value
             deprioritized_sleeves = [SleeveType.SECTOR_ROTATION.value, SleeveType.SHADOW_FRONT.value]
-            logger.info("[FUSION_DIAG] Regime CRISIS → preferred_sleeve=GAMMA_FRONT")
+            logger.info("[FUSION_DIAG] Regime CRISIS -> preferred_sleeve=GAMMA_FRONT")
             
         elif regime_type == RegimeType.UNKNOWN:
             preferred_sleeve = SleeveType.FLV.value
             liquidity_void_eligible = True   # STAGE 2-D2: align eligibility with preferred_sleeve=FLV
-            logger.info("[FUSION_DIAG] Regime UNKNOWN → preferred_sleeve=FLV")
+            logger.info("[FUSION_DIAG] Regime UNKNOWN -> preferred_sleeve=FLV")
         else:
-            logger.info("[FUSION_DIAG] Regime UNHANDLED: %s → preferred_sleeve=None", regime_type)
+            logger.info("[FUSION_DIAG] Regime UNHANDLED: %s -> preferred_sleeve=None", regime_type)
 
         # DIAGNOSTIC: Log final preferred_sleeve
         logger.info("[FUSION_DIAG] Final: attack_mode=%s, preferred_sleeve=%s, confidence=%.4f",

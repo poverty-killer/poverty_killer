@@ -41,7 +41,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional, Set
 
@@ -1322,7 +1322,7 @@ class SovereignHeartbeat:
     def _perform_health_check(self) -> None:
         """Perform system health check."""
         status = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "heartbeat": self._running,
             "execution_engine": self.execution_engine.get_status(),
             "risk_guard": self.risk_guard.get_status(),

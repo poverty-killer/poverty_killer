@@ -3174,8 +3174,8 @@ class MainLoop:
         pre_frame_evidence: Tuple[Dict[str, Any], ...] = (),
     ) -> None:
         """
-        Lawful dispatch: FusionDecision → StrategyRouter → per-symbol StrategyVote
-        → DecisionCompiler → ExecutionEngine.submit_signal().
+        Lawful dispatch: FusionDecision -> StrategyRouter -> per-symbol StrategyVote
+        -> DecisionCompiler -> ExecutionEngine.submit_signal().
 
         HYBRID ARCHITECTURE (6G-A): preferred sleeve evaluated first. If it lawfully
         declines, remaining eligible+registered fallback sleeves are evaluated in
@@ -3184,7 +3184,7 @@ class MainLoop:
         """
         active_threshold_profile = resolve_active_threshold_profile(getattr(self, "config", None))
         if fusion is None:
-            logger.info("[DISPATCH] %s: fusion is None → returning", symbol)
+            logger.info("[DISPATCH] %s: fusion is None -> returning", symbol)
             _emit_candidate_scorecard_diag(
                 "fusion_not_actionable",
                 symbol=symbol,
@@ -3287,7 +3287,7 @@ class MainLoop:
 
         if not candidates:
             logger.info(
-                "[DISPATCH] %s: no_registered_candidates eligible=%s → returning",
+                "[DISPATCH] %s: no_registered_candidates eligible=%s -> returning",
                 symbol, eligible_repr,
             )
             _emit_candidate_scorecard_diag(
@@ -3450,7 +3450,7 @@ class MainLoop:
                     )
 
             else:
-                logger.info("[DISPATCH] %s: sleeve=%s no_dispatch_branch → skip", symbol, repr(sleeve))
+                logger.info("[DISPATCH] %s: sleeve=%s no_dispatch_branch -> skip", symbol, repr(sleeve))
                 sleeve_evidence.update(
                     {
                         "status": "DECLINED",
@@ -3473,11 +3473,11 @@ class MainLoop:
                 signal = sig
                 strategy_vote = vote
                 winning_sleeve = sleeve
-                logger.info("[DISPATCH] %s: sleeve=%s produced_signal → selected", symbol, repr(sleeve))
+                logger.info("[DISPATCH] %s: sleeve=%s produced_signal -> selected", symbol, repr(sleeve))
                 break
 
             dispatch_evidence.append(sleeve_evidence)
-            logger.info("[DISPATCH] strategy_signal_none sleeve=%s → trying_fallback", repr(sleeve))
+            logger.info("[DISPATCH] strategy_signal_none sleeve=%s -> trying_fallback", repr(sleeve))
 
         if signal is None:
             logger.info(
@@ -4013,7 +4013,7 @@ class MainLoop:
         """
         current_price = runtime.last_price
         if current_price <= 0.0:
-            logger.info("[SIGNAL_GEN] %s: current_price=%.4f <= 0 → returning None", symbol, current_price)
+            logger.info("[SIGNAL_GEN] %s: current_price=%.4f <= 0 -> returning None", symbol, current_price)
             return None, None
 
         capital_usd = Decimal(str(self._last_equity))
@@ -4022,7 +4022,7 @@ class MainLoop:
         volatility = Decimal(str(runtime.current_volatility))
 
         if not runtime.shadow_front_strategy:
-            logger.info("[SIGNAL_GEN] %s: no shadow_front_strategy → returning None", symbol)
+            logger.info("[SIGNAL_GEN] %s: no shadow_front_strategy -> returning None", symbol)
             return None, None
 
         # Inject position sizing engine into per-symbol strategy if not already set

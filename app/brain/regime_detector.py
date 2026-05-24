@@ -72,10 +72,16 @@ class RegimeDetector:
     - Confidence is truthfully degraded when established regimes are threatened
     """
 
-    def __init__(self, config: Optional[Union[Dict[str, Any], Any]] = None):
+    def __init__(
+        self,
+        config: Optional[Union[Dict[str, Any], Any]] = None,
+        symbol: Optional[str] = None,
+    ):
         """
         Initialize regime detector with optional configuration.
         """
+        self.symbol = symbol
+
         # Configuration with bounded defaults
         self.hysteresis_bars = DEFAULT_HYSTERESIS_BARS
         self.min_history_bars = DEFAULT_MIN_HISTORY_BARS
