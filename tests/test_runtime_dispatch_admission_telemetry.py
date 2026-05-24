@@ -177,6 +177,7 @@ def _loop(
 
     loop.execution_engine = MagicMock()
     loop.execution_engine.submit_signal = MagicMock(return_value=True)
+    loop.execution_engine.get_status.return_value = {"last_latency_truth": {}}
 
     loop._build_truth_frame = MagicMock(return_value="truth-frame-stub")
     loop._update_shadow_front_overlays = MagicMock()
@@ -188,7 +189,12 @@ def _loop(
         compilation_cycles=0,
     )
     loop.insider_engine = MagicMock()
+    loop.signal_fusion = MagicMock()
+    loop.signal_fusion._telemetry = {}
 
+    loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(
+        loop, MainLoop
+    )
     loop._consume_observed_pair_sector_rotation = (
         MainLoop._consume_observed_pair_sector_rotation.__get__(loop, MainLoop)
     )
@@ -203,6 +209,16 @@ def _loop(
     )
     loop._clear_stale_sector_rotation_observed_pair = (
         MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._runtime_module_frame_evidence = (
+        MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    )
+    loop._apply_signal_economic_metadata = (
+        MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    )
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = (
+        MainLoop._compile_scorecard_frame_no_submit.__get__(loop, MainLoop)
     )
     return loop
 
@@ -371,7 +387,9 @@ def test_observed_pair_missing_diag_does_not_submit(caplog):
     _dispatch(loop, _runtime())
 
     loop.execution_engine.submit_signal.assert_not_called()
-    loop.decision_compiler.compile.assert_not_called()
+    loop.decision_compiler.compile.assert_called_once()
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "decision_frame" in caplog.text
     assert "reason_code=OBSERVED_SIGNAL_MISSING" in caplog.text
     assert "observed_signal_present': False" in caplog.text
     assert "observed_vote_present': False" in caplog.text
@@ -393,7 +411,9 @@ def test_observed_vote_missing_diag_does_not_submit(caplog):
     _dispatch(loop, runtime)
 
     loop.execution_engine.submit_signal.assert_not_called()
-    loop.decision_compiler.compile.assert_not_called()
+    loop.decision_compiler.compile.assert_called_once()
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "decision_frame" in caplog.text
     assert "reason_code=OBSERVED_VOTE_MISSING" in caplog.text
     assert "observed_signal_present': True" in caplog.text
     assert "observed_vote_present': False" in caplog.text
@@ -414,7 +434,9 @@ def test_observed_pair_stale_diag_does_not_submit(caplog):
     _dispatch(loop, runtime)
 
     loop.execution_engine.submit_signal.assert_not_called()
-    loop.decision_compiler.compile.assert_not_called()
+    loop.decision_compiler.compile.assert_called_once()
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "decision_frame" in caplog.text
     assert "reason_code=OBSERVED_PAIR_STALE" in caplog.text
     assert "stale_cleared': True" in caplog.text
     assert "stale_age_ns" in caplog.text
@@ -442,7 +464,9 @@ def test_observed_pair_candle_mismatch_diag_does_not_submit(caplog):
     _dispatch(loop, runtime)
 
     loop.execution_engine.submit_signal.assert_not_called()
-    loop.decision_compiler.compile.assert_not_called()
+    loop.decision_compiler.compile.assert_called_once()
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "decision_frame" in caplog.text
     assert "reason_code=OBSERVED_PAIR_CANDLE_MISMATCH" in caplog.text
     assert "signal_candle_id" in caplog.text
     assert "vote_candle_id" in caplog.text
@@ -463,7 +487,9 @@ def test_observed_pair_symbol_mismatch_diag_does_not_submit(caplog):
     _dispatch(loop, runtime)
 
     loop.execution_engine.submit_signal.assert_not_called()
-    loop.decision_compiler.compile.assert_not_called()
+    loop.decision_compiler.compile.assert_called_once()
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "decision_frame" in caplog.text
     assert "reason_code=OBSERVED_PAIR_SYMBOL_MISMATCH" in caplog.text
     assert "consumer_symbol': 'ETH/USD'" in caplog.text
     assert "signal_symbol': 'BTC/USD'" in caplog.text
@@ -489,7 +515,9 @@ def test_shadowfront_whale_decline_diag_does_not_submit(caplog):
     _dispatch(loop, runtime)
 
     loop.execution_engine.submit_signal.assert_not_called()
-    loop.decision_compiler.compile.assert_not_called()
+    loop.decision_compiler.compile.assert_called_once()
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "decision_frame" in caplog.text
     assert "reason_code=shadowfront_declined_whale_condition" in caplog.text
     assert "eligibility_only': True" in caplog.text
     assert "candidate_lifecycle" in caplog.text
@@ -518,7 +546,9 @@ def test_shadowfront_sentiment_decline_diag_does_not_submit(caplog):
     _dispatch(loop, runtime)
 
     loop.execution_engine.submit_signal.assert_not_called()
-    loop.decision_compiler.compile.assert_not_called()
+    loop.decision_compiler.compile.assert_called_once()
+    assert "reason_code=decision_compile_attempted" in caplog.text
+    assert "decision_frame" in caplog.text
     assert "reason_code=shadowfront_declined_sentiment_condition" in caplog.text
     assert "executable_signal_present': False" in caplog.text
     assert "reason_code=strategy_signal_missing" not in caplog.text
@@ -734,6 +764,18 @@ def test_stale_backfill_candle_does_not_reach_executable_dispatch(caplog):
     loop._observe_sector_rotation = MagicMock()
     loop._update_physical_freshness = MagicMock()
     loop._dispatch_fusion = MagicMock()
+    loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(
+        loop, MainLoop
+    )
+    loop._classify_shadow_front_decline = (
+        MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
+    )
+    loop._classify_sector_rotation_observed_pair = (
+        MainLoop._classify_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._runtime_module_frame_evidence = (
+        MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    )
 
     runtime = _runtime()
     runtime.update_candle = MagicMock()
@@ -898,7 +940,7 @@ def test_replay_or_synthetic_candle_cannot_be_executable():
         assert detail["data_health_reason_code"] == "DATA_BACKFILL_OBSERVE_ONLY"
 
 
-def test_sell_without_broker_position_classifies_missing_authority():
+def test_flat_bearish_crypto_sell_becomes_no_long_telemetry_without_broker_intent():
     config = Config(
         broker_mode="paper",
         active_markets=["crypto"],
@@ -918,13 +960,18 @@ def test_sell_without_broker_position_classifies_missing_authority():
         is_attack=False,
     )
 
-    assert signal.metadata["sell_intent_classification"] == "SELL_AUTHORITY_MISSING"
-    assert "SELL_AUTHORITY_MISSING" in verdict["reason_codes"]
-    assert "ACTION_UNSUPPORTED" in verdict["reason_codes"]
+    assert signal.metadata["sell_intent_classification"] == "BEARISH_NO_LONG"
+    assert signal.metadata["execution_action"] is None
+    assert signal.metadata["broker_intent"] is False
+    assert "BEARISH_NO_LONG" in verdict["reason_codes"]
+    assert "SHORT_UNAVAILABLE" in verdict["reason_codes"]
+    assert "ACTION_UNSUPPORTED" not in verdict["reason_codes"]
+    assert "QUOTE_SESSION_TRUTH_MISSING" not in verdict["reason_codes"]
+    assert verdict["broker_intent"] is False
     assert verdict["route_permitted"] is False
 
 
-def test_sell_with_broker_position_classifies_exit_without_enabling_sell():
+def test_sell_to_close_requires_broker_position_backed_inventory():
     config = Config(
         broker_mode="paper",
         active_markets=["crypto"],
@@ -946,9 +993,75 @@ def test_sell_with_broker_position_classifies_exit_without_enabling_sell():
     )
 
     assert signal.metadata["sell_intent_classification"] == "SELL_EXIT_EXISTING_BROKER_POSITION"
+    assert signal.metadata["execution_action"] == "sell_to_close"
     assert "SELL_AUTHORITY_MISSING" not in verdict["reason_codes"]
+    assert "ACTION_UNSUPPORTED" not in verdict["reason_codes"]
+    assert verdict["action"] == "sell_to_close"
+    assert verdict["route_permitted"] is True
+
+
+def test_alpaca_crypto_sell_short_is_unsupported_by_capability():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["SOL/USD"],
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+    )
+    signal = _signal(symbol="SOL/USD")
+    signal.side = "sell"
+    signal.metadata["short_intent"] = True
+    signal.metadata["short_authority"] = True
+    runtime = _runtime()
+
+    verdict = main_loop_module._build_pre_trade_guardrail_verdict(
+        config=config,
+        symbol="SOL/USD",
+        signal=signal,
+        runtime=runtime,
+        is_attack=False,
+    )
+
+    assert signal.metadata["sell_intent_classification"] == "SELL_SHORT_AUTHORIZED"
+    assert signal.metadata["execution_action"] == "sell_short"
     assert "ACTION_UNSUPPORTED" in verdict["reason_codes"]
     assert verdict["route_permitted"] is False
+
+
+def test_buy_path_still_selects_capability_when_lawful():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["SOL/USD"],
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+    )
+    signal = _signal(symbol="SOL/USD")
+    runtime = _runtime()
+
+    verdict = main_loop_module._build_pre_trade_guardrail_verdict(
+        config=config,
+        symbol="SOL/USD",
+        signal=signal,
+        runtime=runtime,
+        is_attack=False,
+    )
+
+    assert signal.metadata["execution_action"] == "buy"
+    assert "ACTION_UNSUPPORTED" not in verdict["reason_codes"]
+    assert verdict["action"] == "buy"
+    assert verdict["route_permitted"] is True
+
+
+def test_sell_taxonomy_does_not_depend_on_runtime_crypto_symbol_allowlist():
+    classification = main_loop_module._classify_sell_intent(
+        symbol="DOGE/USD",
+        side="sell",
+        metadata={},
+        existing_positions=(),
+    )
+
+    assert classification == "BEARISH_NO_LONG"
 
 
 def test_main_loop_does_not_import_broker_adapter():

@@ -315,6 +315,19 @@ class Config(BaseSettings):
         default=False,
         description="Enable paper-only reservation lifecycle mutation. Ignored unless broker_mode is paper.",
     )
+    paper_exploration_alpha_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable PAPER-only alpha/selectivity relaxation for exploration data. "
+            "Never valid with live broker mode or non-paper Alpaca routing."
+        ),
+    )
+    decision_frame_timeout_ms: int = Field(
+        default=60_000,
+        ge=1_000,
+        le=300_000,
+        description="DecisionFrame collection timeout, bounded by the runtime candle freshness policy.",
+    )
     portal_selection_policy: Literal["explicit_preferred_venue", "capability_first", "fail_closed"] = Field(
         default="explicit_preferred_venue",
         description="How the venue capability registry resolves multiple matching portals.",
@@ -438,6 +451,12 @@ class Config(BaseSettings):
     def validate_shadow_read_only_no_live_mode(self):
         if self.shadow_read_only and self.broker_mode != "paper":
             raise ValueError("shadow_read_only requires broker_mode='paper'; live mode is forbidden")
+        if self.paper_exploration_alpha_enabled and (
+            self.broker_mode != "paper" or self.alpaca_paper is not True
+        ):
+            raise ValueError(
+                "paper_exploration_alpha_enabled requires broker_mode='paper' and alpaca_paper=True"
+            )
         return self
 
     # Kraken (Crypto)
@@ -501,8 +520,17 @@ class Config(BaseSettings):
             "shadow_read_only": _env_bool(
                 os.environ.get("POVERTY_KILLER_SHADOW_READ_ONLY"),
                 default=False,
-            )
+            ),
+            "paper_exploration_alpha_enabled": _env_bool(
+                os.environ.get("POVERTY_KILLER_PAPER_EXPLORATION_ALPHA")
+                or os.environ.get("PAPER_EXPLORATION_ALPHA"),
+                default=False,
+            ),
         }
+        if os.environ.get("POVERTY_KILLER_DECISION_FRAME_TIMEOUT_MS"):
+            overrides["decision_frame_timeout_ms"] = int(
+                os.environ["POVERTY_KILLER_DECISION_FRAME_TIMEOUT_MS"]
+            )
         env_to_field = {
             "POVERTY_KILLER_RUNTIME_WATCHLIST": "runtime_watchlist",
             "POVERTY_KILLER_MARKET_DATA_PROVIDERS": "market_data_providers",

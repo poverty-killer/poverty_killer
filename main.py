@@ -179,7 +179,13 @@ def resolve_execution_broker_gateway(config: Config) -> tuple[str, str, Any | No
         try:
             adapter = AlpacaPaperBrokerAdapter.from_env()
         except BrokerGatewayError as exc:
-            raise ExecutionBrokerSelectionError(f"alpaca_paper_adapter_blocked:{exc.reason_code}") from exc
+            detail = str(exc.reason_code)
+            message = str(getattr(exc, "message", "") or "").strip().lower()
+            if message and message != detail:
+                detail = f"{detail}:{message}"
+            if "live_endpoint_blocked" in message and "live_or_nonpaper_endpoint_blocked" not in detail:
+                detail = f"{detail}:live_or_nonpaper_endpoint_blocked"
+            raise ExecutionBrokerSelectionError(f"alpaca_paper_adapter_blocked:{detail}") from exc
 
         identity = adapter.identity
         reasons: list[str] = []
@@ -247,6 +253,13 @@ def get_active_symbols(config: Config) -> Set[str]:
     return set(resolve_runtime_universe(config).symbols)
 
 
+def _active_market_values(config: Config) -> set[str] | None:
+    active_markets = getattr(config, "active_markets", None)
+    if active_markets is None:
+        return None
+    return {str(market).strip().lower() for market in active_markets if str(market).strip()}
+
+
 def resolve_runtime_universe(config: Config) -> RuntimeUniverseResolution:
     watchlist = tuple(str(symbol).strip().upper() for symbol in getattr(config, "runtime_watchlist", ()) if str(symbol).strip())
     if watchlist:
@@ -262,7 +275,26 @@ def resolve_runtime_universe(config: Config) -> RuntimeUniverseResolution:
     unknown = tuple(symbol for symbol in symbols if InstrumentRegistry.get_asset_class(symbol) is None)
     if unknown:
         return RuntimeUniverseResolution((), source, "UNKNOWN_SYMBOLS:" + ",".join(unknown))
-    return RuntimeUniverseResolution(tuple(dict.fromkeys(symbols)), source, "UNIVERSE_READY")
+    active_markets = _active_market_values(config)
+    if active_markets is None:
+        return RuntimeUniverseResolution(tuple(dict.fromkeys(symbols)), source, "UNIVERSE_READY")
+    allowed_symbols = tuple(
+        symbol
+        for symbol in symbols
+        if (asset_class := InstrumentRegistry.get_asset_class(symbol)) is not None
+        and asset_class.value in active_markets
+    )
+    if not allowed_symbols:
+        blocked_assets = tuple(
+            dict.fromkeys(
+                str(InstrumentRegistry.get_asset_class(symbol).value)
+                for symbol in symbols
+                if InstrumentRegistry.get_asset_class(symbol) is not None
+            )
+        )
+        suffix = ":" + ",".join(blocked_assets) if blocked_assets else ""
+        return RuntimeUniverseResolution((), source, "NO_ACTIVE_MARKET_SYMBOLS" + suffix)
+    return RuntimeUniverseResolution(tuple(dict.fromkeys(allowed_symbols)), source, "UNIVERSE_READY")
 
 
 def get_active_capability_candidates(

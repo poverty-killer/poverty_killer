@@ -47,6 +47,11 @@ from app.core.candidate_lifecycle import (
     record_execution_result,
 )
 from app.core.market_snapshot import build_market_truth_snapshot
+from app.core.decision_frame import (
+    build_decision_frame_from_runtime,
+    decision_frame_timeout_ns,
+    resolve_active_threshold_profile,
+)
 from app.core.truth_reconciler import TruthReconciler
 from app.core.whole_bot_attribution import build_runtime_edge_attribution
 from app.models import (
@@ -165,12 +170,120 @@ def _latest_runtime_advisory_pair(
     return None, None, "RuntimeDispatch"
 
 
+def _threshold_profile_value(profile: Dict[str, Any], threshold_name: str, default: Any = None) -> Any:
+    by_name = profile.get("thresholds_by_name")
+    if isinstance(by_name, dict):
+        item = by_name.get(threshold_name)
+        if isinstance(item, dict) and "exploration_value" in item:
+            return item["exploration_value"]
+    return default
+
+
+def _sleeve_module_name(sleeve: Any) -> str:
+    if sleeve == SleeveType.SHADOW_FRONT:
+        return "ShadowFront"
+    if sleeve == SleeveType.SECTOR_ROTATION:
+        return "SectorRotation"
+    if sleeve == SleeveType.GAMMA_FRONT:
+        return "GammaFront"
+    if sleeve == SleeveType.FLV:
+        return "LiquidityVoid"
+    if sleeve == SleeveType.ENTROPY_DECODER:
+        return "EntropyDecoder"
+    return str(getattr(sleeve, "value", sleeve) or "UnknownSleeve")
+
+
+def _dispatch_signal_text(signal_or_side: Any) -> str:
+    side = getattr(signal_or_side, "side", signal_or_side)
+    text = str(side or "").strip().lower()
+    if text == "buy":
+        return "BUY"
+    if text == "sell":
+        return "SELL"
+    return "NONE"
+
+
+def _alpha_evidence_status(reason_code: str, default: str = "DECLINED") -> str:
+    reason = str(reason_code or "")
+    if reason in {"shans_not_ready", "OBSERVED_SIGNAL_MISSING", "OBSERVED_VOTE_MISSING"}:
+        return "MISSING_TRUTH"
+    if reason in {"OBSERVED_PAIR_STALE"}:
+        return "STALE"
+    if reason in {
+        "low_sentiment",
+        "low_volume_zscore",
+        "weak_regime_match",
+        "optional_module_absent",
+    }:
+        return "PENALTY"
+    if reason.startswith("shadowfront_declined"):
+        return "DECLINED"
+    return default
+
+
+def _runtime_order_book_spread_bps(runtime: Any) -> Optional[float]:
+    book = getattr(runtime, "last_order_book", None)
+    if book is None:
+        return None
+    try:
+        spread_bps = float(getattr(book, "spread_bps"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not math.isfinite(spread_bps) or spread_bps < 0:
+        return None
+    return spread_bps
+
+
+def _vote_decimal(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _build_runtime_decision_frame(
+    *,
+    config: Any,
+    symbol: str,
+    exchange_ts_ns: int,
+    market_truth: Optional[Dict[str, Any]] = None,
+    signal: Any = None,
+    strategy_vote: Any = None,
+    fusion: Any = None,
+    dispatch_evidence: Tuple[Dict[str, Any], ...] = (),
+    edge_attribution: Optional[Dict[str, Any]] = None,
+    guardrail_verdict: Optional[Dict[str, Any]] = None,
+    active_threshold_profile: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    market = dict(market_truth or {})
+    snapshot = dict(market.get("market_truth_snapshot") or {})
+    profile = dict(active_threshold_profile or resolve_active_threshold_profile(config))
+    timeout_ns = decision_frame_timeout_ns(config, snapshot)
+    created_at_ns = int(snapshot.get("snapshot_created_ns") or exchange_ts_ns)
+    return build_decision_frame_from_runtime(
+        symbol=symbol,
+        snapshot=snapshot,
+        created_at_ns=created_at_ns,
+        timeout_ns=timeout_ns,
+        active_threshold_profile=profile,
+        signal=signal,
+        strategy_vote=strategy_vote,
+        fusion=fusion,
+        dispatch_evidence=dispatch_evidence,
+        edge_attribution=edge_attribution or {},
+        guardrail_verdict=guardrail_verdict,
+    )
+
+
 def _emit_candidate_scorecard_diag(
     reason_code: str,
     *,
     symbol: str,
     exchange_ts_ns: int,
     source_sleeve: str,
+    config: Any = None,
     side: Optional[str] = None,
     signal: Any = None,
     strategy_vote: Any = None,
@@ -178,6 +291,7 @@ def _emit_candidate_scorecard_diag(
     market_truth: Optional[Dict[str, Any]] = None,
     candle_truth: Optional[Dict[str, Any]] = None,
     latency_truth: Optional[Dict[str, Any]] = None,
+    active_threshold_profile: Optional[Dict[str, Any]] = None,
     dispatch_evidence: Tuple[Dict[str, Any], ...] = (),
     **fields: Any,
 ) -> Dict[str, Any]:
@@ -192,10 +306,22 @@ def _emit_candidate_scorecard_diag(
     blocker_evidence = {
         "module": source_sleeve,
         "sleeve": source_sleeve,
-        "status": "BLOCK",
+        "status": _alpha_evidence_status(reason_code, default="BLOCK"),
         "reason_code": reason_code,
         "evidence": dict(clean_fields),
     }
+    profile = dict(active_threshold_profile or resolve_active_threshold_profile(config))
+    frame = _build_runtime_decision_frame(
+        config=config,
+        symbol=symbol,
+        exchange_ts_ns=exchange_ts_ns,
+        market_truth=market_truth or {},
+        signal=signal,
+        strategy_vote=strategy_vote,
+        fusion=fusion,
+        dispatch_evidence=(*dispatch_evidence, blocker_evidence),
+        active_threshold_profile=profile,
+    )
     lifecycle = build_candidate_lifecycle(
         candidate_id=f"{symbol}:{side_value}:{exchange_ts_ns}:{source_sleeve}:{reason_code}",
         symbol=symbol,
@@ -208,6 +334,8 @@ def _emit_candidate_scorecard_diag(
         market_truth=market_truth or {},
         candle_truth=candle_truth or {},
         latency_truth=latency_truth or {},
+        active_threshold_profile=profile,
+        decision_frame=frame,
         dispatch_evidence=(*dispatch_evidence, blocker_evidence),
     )
     lifecycle = record_execution_result(
@@ -254,6 +382,12 @@ def _emit_candidate_scorecard_diag(
         "execution_blocker_reason_codes": opportunity_scorecard.get("execution_blocker_reason_codes"),
         "broker_boundary_result": opportunity_scorecard.get("broker_boundary_result"),
         "broker_post": False,
+        "active_threshold_profile": opportunity_scorecard.get("active_threshold_profile"),
+        "decision_frame": opportunity_scorecard.get("decision_frame"),
+        "frame_id": opportunity_scorecard.get("frame_id"),
+        "frame_output": opportunity_scorecard.get("frame_output"),
+        "frame_status": opportunity_scorecard.get("frame_status"),
+        "frame_reason_codes": opportunity_scorecard.get("frame_reason_codes"),
         "snapshot_id": snapshot.get("snapshot_id"),
         "snapshot_status": snapshot.get("snapshot_status"),
         "snapshot_reason_codes": snapshot.get("snapshot_reason_codes"),
@@ -486,6 +620,15 @@ def _decision_compiler_status_fields(
         additional.get("opportunity_scorecard")
         or signal_metadata.get("opportunity_scorecard")
     )
+    decision_frame = _as_mapping(
+        additional.get("decision_frame")
+        or signal_metadata.get("decision_frame")
+    )
+    active_threshold_profile = _as_mapping(
+        additional.get("active_threshold_profile")
+        or signal_metadata.get("active_threshold_profile")
+        or decision_frame.get("active_threshold_profile")
+    )
     candidate_lifecycle = _as_mapping(
         signal_metadata.get("candidate_lifecycle")
         or additional.get("candidate_lifecycle")
@@ -526,6 +669,11 @@ def _decision_compiler_status_fields(
         "snapshot_status": market_snapshot.get("snapshot_status"),
         "snapshot_reason_codes": market_snapshot.get("snapshot_reason_codes"),
         "snapshot_authority": market_snapshot.get("snapshot_authority"),
+        "active_threshold_profile": active_threshold_profile,
+        "frame_id": decision_frame.get("frame_id"),
+        "frame_output": decision_frame.get("frame_output"),
+        "frame_status": decision_frame.get("frame_status"),
+        "frame_reason_codes": decision_frame.get("frame_reason_codes"),
     }
     fields.update(_execution_admission_block_fields(execution_admission_block))
     return {key: value for key, value in fields.items() if value not in (None, (), [])}
@@ -553,6 +701,24 @@ def _matching_positive_position(symbol: str, positions: Tuple[Dict[str, Any], ..
     return False
 
 
+def _metadata_has_short_intent(metadata: Dict[str, Any]) -> bool:
+    action = str(
+        metadata.get("execution_action")
+        or metadata.get("order_action")
+        or metadata.get("broker_action")
+        or ""
+    ).lower()
+    return metadata.get("short_intent") is True or action in {"sell_short", "short"}
+
+
+def _metadata_has_short_authority(metadata: Dict[str, Any]) -> bool:
+    return bool(
+        metadata.get("short_authority") is True
+        or metadata.get("broker_short_authority") is True
+        or metadata.get("borrow_authority") is True
+    )
+
+
 def _classify_sell_intent(
     *,
     symbol: str,
@@ -569,9 +735,82 @@ def _classify_sell_intent(
         local_qty = _to_decimal_or_none(local_position.get("quantity", local_position.get("qty", "0")))
         if local_qty is not None and local_qty > Decimal("0"):
             return "SELL_EXIT_LOCAL_SIM_ONLY"
-    if metadata.get("short_intent") is True:
-        return "SELL_SHORT_UNSUPPORTED"
-    return "SELL_AUTHORITY_MISSING"
+    if _metadata_has_short_intent(metadata):
+        if _metadata_has_short_authority(metadata):
+            return "SELL_SHORT_AUTHORIZED"
+        return "SELL_SHORT_AUTHORITY_MISSING"
+    return "BEARISH_NO_LONG"
+
+
+def _execution_action_for_signal(side: str, sell_intent_classification: Optional[str]) -> Optional[str]:
+    normalized_side = str(side or "").lower()
+    if normalized_side == "buy":
+        return "buy"
+    if normalized_side != "sell":
+        return normalized_side or None
+    if sell_intent_classification == "SELL_EXIT_EXISTING_BROKER_POSITION":
+        return "sell_to_close"
+    if sell_intent_classification == "SELL_SHORT_AUTHORIZED":
+        return "sell_short"
+    return None
+
+
+def _decimal_or_none_string(value: Optional[Decimal]) -> Optional[str]:
+    return None if value is None else str(value)
+
+
+def _no_broker_intent_guardrail_verdict(
+    *,
+    symbol: str,
+    side: str,
+    order_type: str,
+    time_in_force: Optional[str],
+    requested_notional: Optional[Decimal],
+    internal_max_notional: Optional[Decimal],
+    sell_intent_classification: str,
+) -> Dict[str, Any]:
+    if sell_intent_classification == "BEARISH_NO_LONG":
+        reason_codes = ("BEARISH_NO_LONG", "SHORT_UNAVAILABLE")
+        summary = "Bearish alpha while flat is telemetry/no-long evidence, not a broker sell intent."
+    elif sell_intent_classification == "SELL_SHORT_AUTHORITY_MISSING":
+        reason_codes = ("SHORT_AUTHORITY_MISSING", "SHORT_UNAVAILABLE")
+        summary = "Short intent was requested without explicit short authority."
+    elif sell_intent_classification == "SELL_EXIT_LOCAL_SIM_ONLY":
+        reason_codes = ("SELL_AUTHORITY_MISSING", "SELL_EXIT_LOCAL_SIM_ONLY")
+        summary = "Local simulated inventory is not broker-position-backed sell authority."
+    else:
+        reason_codes = ("SELL_AUTHORITY_MISSING",)
+        summary = "No broker-position-backed sell authority was supplied."
+    return {
+        "verdict": "BLOCK",
+        "route_permitted": False,
+        "mutation_permitted": False,
+        "reason_codes": reason_codes,
+        "symbol": symbol,
+        "side": side,
+        "action": None,
+        "order_type": str(order_type).lower(),
+        "time_in_force": time_in_force,
+        "requested_notional": _decimal_or_none_string(requested_notional),
+        "internal_max_notional": _decimal_or_none_string(internal_max_notional),
+        "broker_min_notional": None,
+        "capability_identity": {},
+        "broker_intent": False,
+        "sell_intent_classification": sell_intent_classification,
+        "module_evidence": [
+            {
+                "module": "sell_action_taxonomy",
+                "status": "CONTRIBUTED_BLOCK",
+                "reason_code": reason_codes[0],
+                "summary": summary,
+                "details": {
+                    "broker_intent": False,
+                    "sell_intent_classification": sell_intent_classification,
+                    "execution_action": None,
+                },
+            }
+        ],
+    }
 
 
 def _infer_asset_class_for_guardrail(symbol: str, metadata: Dict[str, Any]) -> str:
@@ -627,6 +866,36 @@ def _build_pre_trade_guardrail_verdict(
     asset_class = _infer_asset_class_for_guardrail(symbol, metadata)
     preselected_order_type = metadata.get("order_type")
     order_type = str(preselected_order_type).lower() if preselected_order_type else None
+    requested_notional = _to_decimal_or_none(metadata.get("requested_notional"))
+    if requested_notional is None and current_price is not None and quantity > Decimal("0"):
+        requested_notional = abs(quantity * current_price)
+    internal_max_notional = _to_decimal_or_none(metadata.get("internal_max_notional")) or requested_notional
+    existing_positions = _metadata_sequence(metadata.get("existing_positions"))
+    side = str(getattr(signal, "side", "buy")).lower()
+    protective_context = metadata.get("protective_context")
+    protective_context = dict(protective_context) if isinstance(protective_context, dict) else {}
+    sell_intent_classification = _classify_sell_intent(
+        symbol=symbol,
+        side=side,
+        metadata=metadata,
+        existing_positions=existing_positions,
+    )
+    execution_action = _execution_action_for_signal(side, sell_intent_classification)
+    if sell_intent_classification:
+        metadata["sell_intent_classification"] = sell_intent_classification
+        protective_context["sell_intent_classification"] = sell_intent_classification
+    metadata["execution_action"] = execution_action
+    metadata["broker_intent"] = execution_action is not None
+    if side == "sell" and execution_action is None:
+        return _no_broker_intent_guardrail_verdict(
+            symbol=symbol,
+            side=side,
+            order_type=order_type or ("limit" if is_attack else "market"),
+            time_in_force=None,
+            requested_notional=requested_notional,
+            internal_max_notional=internal_max_notional,
+            sell_intent_classification=sell_intent_classification or "SELL_AUTHORITY_MISSING",
+        )
 
     registry = build_default_capability_registry()
     preferred_portal = _preferred_portal_for_guardrail(config, symbol)
@@ -640,7 +909,7 @@ def _build_pre_trade_guardrail_verdict(
         symbol=symbol,
         asset_class=asset_class,
         environment=environment,
-        action=str(getattr(signal, "side", "buy")).lower(),
+        action=execution_action or side,
         order_type=order_type,
         time_in_force=str(preselected_time_in_force).upper() if preselected_time_in_force else None,
         policy_mode=str(policy_mode),
@@ -666,7 +935,7 @@ def _build_pre_trade_guardrail_verdict(
             symbol=symbol,
             asset_class=asset_class,
             environment=environment,
-            action=str(getattr(signal, "side", "buy")).lower(),
+            action=execution_action or side,
             order_type=order_type,
             time_in_force=time_in_force,
             policy_mode=str(policy_mode),
@@ -687,34 +956,11 @@ def _build_pre_trade_guardrail_verdict(
             spread_bps=_to_decimal_or_none(metadata.get("spread_bps")),
         )
 
-    requested_notional = _to_decimal_or_none(metadata.get("requested_notional"))
-    if requested_notional is None and current_price is not None and quantity > Decimal("0"):
-        requested_notional = abs(quantity * current_price)
-    internal_max_notional = _to_decimal_or_none(metadata.get("internal_max_notional")) or requested_notional
-    existing_positions = _metadata_sequence(metadata.get("existing_positions"))
-    side = str(getattr(signal, "side", "buy")).lower()
-    protective_context = metadata.get("protective_context")
-    protective_context = dict(protective_context) if isinstance(protective_context, dict) else {}
-    sell_intent_classification = _classify_sell_intent(
-        symbol=symbol,
-        side=side,
-        metadata=metadata,
-        existing_positions=existing_positions,
-    )
-    if sell_intent_classification:
-        metadata["sell_intent_classification"] = sell_intent_classification
-        protective_context["sell_intent_classification"] = sell_intent_classification
-        if sell_intent_classification in {
-            "SELL_AUTHORITY_MISSING",
-            "SELL_EXIT_LOCAL_SIM_ONLY",
-            "SELL_SHORT_UNSUPPORTED",
-        }:
-            protective_context.setdefault("block_reason", "SELL_AUTHORITY_MISSING")
-
     verdict = evaluate_pre_trade_guardrails(
         PreTradeGuardrailRequest(
             symbol=symbol,
             side=side,
+            action=execution_action,
             order_type=str(order_type).lower(),
             time_in_force=time_in_force,
             quantity=quantity,
@@ -1082,6 +1328,7 @@ class MainLoop:
         for sym in self.active_symbols:
             runtime = SymbolRuntime(symbol=sym)
             runtime.initialize_engines(config=config, safety_gate=safety_gate)
+            self._apply_paper_exploration_alpha_profile(sym, runtime)
             # Inject Shans dependencies (global shared dependencies)
             runtime.set_shans_dependencies(
                 risk_guard=self.risk_guard,
@@ -1129,6 +1376,7 @@ class MainLoop:
 
         logger.info("MainLoop initialized: symbol=%s active_symbols=%s (Per-Symbol Shans Ownership)",
                    symbol, list(active_symbols))
+        self._log_runtime_profile_banner()
 
     def _get_runtime(self, symbol: str) -> Optional[SymbolRuntime]:
         """Get runtime container for a symbol."""
@@ -1144,6 +1392,7 @@ class MainLoop:
                 return None
             runtime = SymbolRuntime(symbol=symbol)
             runtime.initialize_engines(config=self.config, safety_gate=self.safety_gate)
+            self._apply_paper_exploration_alpha_profile(symbol, runtime)
             runtime.set_shans_dependencies(
                 risk_guard=self.risk_guard,
                 data_validator=self.data_validator,
@@ -1152,6 +1401,113 @@ class MainLoop:
             self._runtimes[symbol] = runtime
             logger.info(f"Defensively created SymbolRuntime for {symbol} with per-symbol ShansCurve")
         return runtime
+
+    def _active_threshold_profile(self) -> Dict[str, Any]:
+        return resolve_active_threshold_profile(self.config)
+
+    def _log_runtime_profile_banner(self) -> None:
+        profile = self._active_threshold_profile()
+        strategies = getattr(self.config, "strategies", None)
+        strategy_toggles = {}
+        if strategies is not None:
+            for name in (
+                "shadow_front_enabled",
+                "flv_enabled",
+                "gamma_front_enabled",
+                "sector_rotation_enabled",
+                "sector_rotation_ranging_eligible",
+            ):
+                strategy_toggles[name] = getattr(strategies, name, None)
+        _log_dispatch_diag(
+            "RUNTIME_PROFILE_BANNER",
+            active_threshold_profile=profile,
+            active_thresholds=profile.get("thresholds"),
+            broker_mode=getattr(self.config, "broker_mode", None),
+            alpaca_paper=getattr(self.config, "alpaca_paper", None),
+            endpoint=getattr(self.config, "alpaca_base_url", None),
+            strategy_toggles=strategy_toggles,
+            active_symbols=tuple(sorted(self.active_symbols)),
+        )
+
+    def _apply_paper_exploration_alpha_profile(self, symbol: str, runtime: SymbolRuntime) -> None:
+        profile = self._active_threshold_profile()
+        if profile.get("enabled") is not True:
+            return
+        if getattr(runtime, "_paper_exploration_alpha_profile_applied", False):
+            return
+
+        changes: List[Dict[str, Any]] = []
+
+        def _set_float(obj: Any, attr: str, threshold_name: str) -> None:
+            if obj is None or not hasattr(obj, attr):
+                return
+            current = getattr(obj, attr)
+            exploration = _threshold_profile_value(profile, threshold_name, current)
+            try:
+                current_float = float(current)
+                exploration_float = float(exploration)
+            except (TypeError, ValueError):
+                return
+            new_value = min(current_float, exploration_float)
+            if new_value != current_float:
+                setattr(obj, attr, new_value)
+            changes.append(
+                {
+                    "threshold_name": threshold_name,
+                    "runtime_attribute": attr,
+                    "default_value": current_float,
+                    "exploration_value": new_value,
+                    "profile_name": profile.get("profile_name"),
+                    "paper_only": True,
+                    "reason_code": "PAPER_EXPLORATION_ALPHA_THRESHOLD_APPLIED",
+                }
+            )
+
+        def _set_int(obj: Any, attr: str, threshold_name: str) -> None:
+            if obj is None or not hasattr(obj, attr):
+                return
+            current = getattr(obj, attr)
+            exploration = _threshold_profile_value(profile, threshold_name, current)
+            try:
+                current_int = int(current)
+                exploration_int = int(exploration)
+            except (TypeError, ValueError):
+                return
+            new_value = max(1, min(current_int, exploration_int))
+            if new_value != current_int:
+                setattr(obj, attr, new_value)
+            changes.append(
+                {
+                    "threshold_name": threshold_name,
+                    "runtime_attribute": attr,
+                    "default_value": current_int,
+                    "exploration_value": new_value,
+                    "profile_name": profile.get("profile_name"),
+                    "paper_only": True,
+                    "reason_code": "PAPER_EXPLORATION_ALPHA_THRESHOLD_APPLIED",
+                }
+            )
+
+        shadow_front = getattr(runtime, "shadow_front_strategy", None)
+        _set_float(shadow_front, "whale_threshold", "shadowfront_whale_threshold")
+        _set_float(shadow_front, "sentiment_threshold", "shadowfront_sentiment_velocity_threshold")
+        _set_float(shadow_front, "min_confidence", "shadowfront_min_confidence")
+
+        sector_rotation = getattr(runtime, "sector_rotation_strategy", None)
+        _set_float(sector_rotation, "_inflow_threshold", "sector_inflow_threshold")
+        _set_float(sector_rotation, "_min_confidence", "sector_rotation_min_confidence")
+        _set_int(sector_rotation, "_effective_min_candles", "sector_rotation_min_baseline_candles")
+
+        setattr(runtime, "_paper_exploration_alpha_profile_applied", True)
+        _log_dispatch_diag(
+            "PAPER_EXPLORATION_ALPHA_PROFILE_ACTIVE",
+            symbol=symbol,
+            active_threshold_profile=profile,
+            threshold_changes=tuple(changes),
+            paper_only=True,
+            broker_mode=getattr(self.config, "broker_mode", None),
+            alpaca_paper=getattr(self.config, "alpaca_paper", None),
+        )
     
     def _sync_legacy_references(self) -> None:
         """Sync legacy direct references with primary symbol's runtime."""
@@ -1371,6 +1727,257 @@ class MainLoop:
         runtime.last_sector_rotation_observed_signal = None
         runtime.last_sector_rotation_observed_vote = None
         return True
+
+    def _runtime_module_frame_evidence(
+        self,
+        symbol: str,
+        runtime: SymbolRuntime,
+        exchange_ts_ns: int,
+        *,
+        fusion: Optional[FusionDecision] = None,
+        preferred_sleeve: Optional[SleeveType] = None,
+        eligible_sleeves: Tuple[SleeveType, ...] = (),
+        active_threshold_profile: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], ...]:
+        """Collect complete frame evidence without granting execution authority."""
+        profile = active_threshold_profile or self._active_threshold_profile()
+        evidence: List[Dict[str, Any]] = []
+
+        shans_curve = getattr(runtime, "shans_curve", None)
+        shans_ready = bool(
+            shans_curve is not None
+            and shans_curve.is_ready()
+        )
+        shans_buffer = len(shans_curve._p) if shans_curve is not None else 0
+        shans_required = shans_curve.curvature_window if shans_curve is not None else 0
+        fusion_telemetry = getattr(getattr(self, "signal_fusion", None), "_telemetry", {})
+        shans_confidence = (
+            fusion_telemetry.get("shans_confidence")
+            if isinstance(fusion_telemetry, dict)
+            else None
+        )
+        evidence.append(
+            {
+                "module": "ShansCurve",
+                "authority_class": "ALPHA",
+                "status": "PASS" if shans_ready else "MISSING_TRUTH",
+                "reason_code": "SHANS_READY" if shans_ready else "shans_not_ready",
+                "confidence": shans_confidence,
+                "evidence": {
+                    "shans_ready": shans_ready,
+                    "shans_buffer": shans_buffer,
+                    "shans_required": shans_required,
+                },
+            }
+        )
+
+        shadow_reason, shadow_fields = self._classify_shadow_front_decline(
+            getattr(runtime, "shadow_front_strategy", None),
+            exchange_ts_ns,
+        )
+        evidence.append(
+            {
+                "module": "ShadowFront",
+                "authority_class": "ALPHA",
+                "status": _alpha_evidence_status(shadow_reason),
+                "reason_code": shadow_reason,
+                "score_delta": "-0.03" if shadow_reason.startswith("shadowfront_declined") else None,
+                "evidence": shadow_fields,
+            }
+        )
+
+        sector_reason, sector_fields = self._classify_sector_rotation_observed_pair(
+            symbol,
+            runtime,
+            exchange_ts_ns,
+        )
+        sector_signal = getattr(runtime, "last_sector_rotation_observed_signal", None)
+        sector_vote = getattr(runtime, "last_sector_rotation_observed_vote", None)
+        sector_conf = getattr(sector_vote, "confidence", None) or getattr(sector_signal, "confidence", None)
+        evidence.append(
+            {
+                "module": "SectorRotation",
+                "authority_class": "ALPHA",
+                "status": "PASS" if sector_reason == "OBSERVED_PAIR_READY" else _alpha_evidence_status(sector_reason),
+                "reason_code": sector_reason,
+                "signal": _dispatch_signal_text(sector_signal),
+                "confidence": sector_conf,
+                "score_delta": "-0.02" if sector_reason in {"OBSERVED_SIGNAL_MISSING", "OBSERVED_PAIR_STALE"} else None,
+                "evidence": sector_fields,
+            }
+        )
+
+        lv_signal = getattr(runtime, "last_liquidity_void_observed_signal", None)
+        lv_vote = getattr(runtime, "last_liquidity_void_observed_vote", None)
+        lv_status = "PASS" if lv_signal is not None and lv_vote is not None else "MISSING_TRUTH"
+        evidence.append(
+            {
+                "module": "LiquidityVoid",
+                "authority_class": "ALPHA",
+                "status": lv_status,
+                "reason_code": "OBSERVED_PAIR_READY" if lv_status == "PASS" else "LIQUIDITY_VOID_OBSERVED_PAIR_MISSING",
+                "signal": _dispatch_signal_text(lv_signal),
+                "confidence": getattr(lv_vote, "confidence", None) or getattr(lv_signal, "confidence", None),
+                "evidence": {
+                    "observed_signal_present": lv_signal is not None,
+                    "observed_vote_present": lv_vote is not None,
+                },
+            }
+        )
+
+        evidence.append(
+            {
+                "module": "GammaFront",
+                "authority_class": "ALPHA",
+                "status": "NOT_APPLICABLE" if getattr(runtime, "gamma_front_strategy", None) is None else "DECLINED",
+                "reason_code": "GAMMA_FRONT_NOT_CONFIGURED" if getattr(runtime, "gamma_front_strategy", None) is None else "GAMMA_FRONT_SIGNAL_MISSING",
+                "evidence": {"exit_only": True},
+            }
+        )
+
+        eligible_names = tuple(_sleeve_module_name(sleeve) for sleeve in eligible_sleeves)
+        preferred_name = _sleeve_module_name(preferred_sleeve) if preferred_sleeve is not None else None
+        if fusion is None:
+            router_status = "MISSING_TRUTH"
+            router_reason = "FUSION_MISSING"
+        elif profile.get("enabled") is True:
+            router_status = "PASS"
+            router_reason = "ROUTER_RANKING_ONLY_PROFILE_ACTIVE"
+        else:
+            router_status = "PASS"
+            router_reason = "ROUTER_RANKING_ONLY"
+        evidence.append(
+            {
+                "module": "StrategyRouter",
+                "authority_class": "ADVISORY",
+                "status": router_status,
+                "reason_code": router_reason,
+                "evidence": {
+                    "preferred_sleeve": preferred_name,
+                    "eligible_sleeves": eligible_names,
+                    "profile_name": profile.get("profile_name"),
+                    "router_authority": "ranking_only_no_execution",
+                },
+            }
+        )
+        return tuple(evidence)
+
+    def _apply_signal_economic_metadata(
+        self,
+        *,
+        symbol: str,
+        runtime: SymbolRuntime,
+        signal: StrategySignal,
+        strategy_vote: StrategyVote,
+        latency_truth: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        if not isinstance(signal.metadata, dict):
+            signal.metadata = metadata
+        expected_move_bps = _vote_decimal(getattr(strategy_vote, "expected_move_bps", None))
+        expected_duration_ns = getattr(strategy_vote, "expected_duration_ns", None)
+        if expected_move_bps is not None:
+            metadata.setdefault("expected_move_bps", str(expected_move_bps))
+        if expected_duration_ns is not None:
+            metadata.setdefault("expected_duration_ns", int(expected_duration_ns))
+            metadata.setdefault("valid_until_ns", int(getattr(signal, "exchange_ts_ns", 0) or 0) + int(expected_duration_ns))
+        spread_bps = _runtime_order_book_spread_bps(runtime)
+        if spread_bps is not None:
+            metadata.setdefault("spread_bps", spread_bps)
+        metadata.setdefault("latency_truth", dict(latency_truth or {}))
+        metadata.setdefault("sleeve", str(getattr(signal, "strategy", "") or "unknown"))
+        metadata.setdefault("symbol", symbol)
+
+        evaluator = getattr(self.execution_engine, "evaluate_signal_net_edge", None)
+        if not callable(evaluator):
+            return {
+                "status": "BLOCK",
+                "admissible": False,
+                "reason_code": "NET_EDGE_EVALUATOR_MISSING",
+            }
+        result = evaluator(signal, current_price=getattr(runtime, "last_price", None))
+        if not isinstance(result, dict):
+            return {
+                "status": "PASS",
+                "admissible": True,
+                "reason_code": "NET_EDGE_EVALUATION_MOCKED",
+                "source": "NetEdgeGovernor",
+            }
+        return result
+
+    @staticmethod
+    def _net_edge_frame_evidence(net_edge_evaluation: Dict[str, Any]) -> Dict[str, Any]:
+        reason = str(net_edge_evaluation.get("reason_code") or "NET_EDGE_UNKNOWN")
+        return {
+            "module": "NetEdgeGovernor",
+            "authority_class": "RISK",
+            "status": "PASS" if net_edge_evaluation.get("admissible") is True else "BLOCK",
+            "reason_code": reason,
+            "signal": "NO_ACTION",
+            "confidence": net_edge_evaluation.get("estimate_confidence"),
+            "evidence": dict(net_edge_evaluation),
+        }
+
+    def _compile_scorecard_frame_no_submit(
+        self,
+        *,
+        symbol: str,
+        exchange_ts_ns: int,
+        lifecycle: Dict[str, Any],
+        reason_code: str,
+    ) -> None:
+        """Compile a complete NO_TRADE/BLOCK frame without submitting execution."""
+        decision_frame = dict(lifecycle.get("decision_frame") or {})
+        if not decision_frame:
+            return
+        opportunity_scorecard = opportunity_scorecard_from_lifecycle(lifecycle)
+        try:
+            decision_record = self.decision_compiler.compile(
+                self._build_truth_frame(exchange_ts_ns),
+                strategy_votes=[],
+                additional_inputs={
+                    "candidate_lifecycle": lifecycle,
+                    "opportunity_scorecard": opportunity_scorecard,
+                    "decision_frame": decision_frame,
+                    "active_threshold_profile": decision_frame.get("active_threshold_profile"),
+                    "no_submit_reason_code": reason_code,
+                },
+            )
+        except Exception as exc:
+            _log_dispatch_diag(
+                "decision_frame_compile_failed",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                reason_code=reason_code,
+                error=exc.__class__.__name__,
+                submit_signal_called=False,
+            )
+            return
+        self._metrics.compilation_cycles += 1
+        _log_dispatch_diag(
+            "decision_compile_attempted",
+            symbol=symbol,
+            exchange_ts_ns=exchange_ts_ns,
+            candidate_id=lifecycle.get("candidate_id"),
+            decision_uuid=getattr(decision_record, "decision_uuid", None),
+            submitted=False,
+            submit_signal_called=False,
+            decision_frame=decision_frame,
+            frame_id=decision_frame.get("frame_id"),
+            frame_output=decision_frame.get("frame_output"),
+            frame_status=decision_frame.get("frame_status"),
+            frame_reason_codes=decision_frame.get("frame_reason_codes"),
+            raw_opportunity_score=opportunity_scorecard.get("raw_opportunity_score"),
+            final_opportunity_score=opportunity_scorecard.get("final_opportunity_score"),
+            opportunity_verdict=opportunity_scorecard.get("opportunity_verdict"),
+            no_submit_reason_code=reason_code,
+        )
+        logger.info(
+            "[DISPATCH] %s: DecisionRecord compiled: uuid=%s type=%s",
+            symbol,
+            getattr(decision_record, "decision_uuid", "<missing>"),
+            getattr(decision_record, "decision_type", "<missing>"),
+        )
 
     # =========================================================================
     # LIFECYCLE
@@ -1729,43 +2336,75 @@ class MainLoop:
             self.data_validator.mark_good(symbol)
 
         # ================================================================
-        # LIVE GATE — Per-symbol Shans readiness
-        # Enforces correct temporal authority: Shans state → Fusion → Dispatch.
-        # Fusion MUST NOT execute until per-symbol ShansCurve has a lawful
-        # ready state (buffer >= curvature_window AND validator has passed).
-        # All update_*() calls above continue regardless — they feed the state
-        # that fusion will consume once Shans is ready.
+        # LIVE GATE — Per-symbol Shans readiness.
+        # Default behavior remains fail-closed for execution. The explicit
+        # PAPER_EXPLORATION_ALPHA profile may continue to Fusion while recording
+        # Shans as missing/not-ready alpha evidence inside the DecisionFrame.
         # ================================================================
+        active_threshold_profile = resolve_active_threshold_profile(getattr(self, "config", None))
         _shans_ready = (
             runtime.shans_curve is not None
             and runtime.shans_curve.is_ready()
+        )
+        _buf_len = len(runtime.shans_curve._p) if runtime.shans_curve is not None else 0
+        _buf_req = runtime.shans_curve.curvature_window if runtime.shans_curve is not None else 0
+        runtime_frame_evidence = self._runtime_module_frame_evidence(
+            symbol,
+            runtime,
+            exchange_ts_ns,
+            active_threshold_profile=active_threshold_profile,
         )
         if not _shans_ready:
             _gate_now = time.time()
             _gate_last = self._shans_gate_last_log_ts.get(symbol, 0.0)
             if _gate_now - _gate_last >= 5.0:
-                _buf_len = len(runtime.shans_curve._p) if runtime.shans_curve is not None else 0
-                _buf_req = runtime.shans_curve.curvature_window if runtime.shans_curve is not None else 0
                 logger.info(
                     "[LIVE_GATE] BLOCK_FUSION symbol=%s reason=SHANS_NOT_READY buffer=%d required=%d",
                     symbol, _buf_len, _buf_req,
                 )
                 advisory_signal, advisory_vote, _advisory_sleeve = _latest_runtime_advisory_pair(runtime)
+                shans_market_truth = _candidate_market_truth_snapshot_fields(
+                    symbol,
+                    runtime,
+                    exchange_ts_ns,
+                    candle_truth=candle_execution_truth,
+                )
                 _emit_candidate_scorecard_diag(
                     "shans_not_ready",
                     symbol=symbol,
                     exchange_ts_ns=exchange_ts_ns,
                     source_sleeve="ShansCurve",
+                    config=getattr(self, "config", None),
                     signal=advisory_signal,
                     strategy_vote=advisory_vote,
+                    market_truth=shans_market_truth,
                     candle_truth=candle_execution_truth,
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    active_threshold_profile=active_threshold_profile,
                     shans_ready=False,
                     shans_buffer=_buf_len,
                     shans_required=_buf_req,
+                    dispatch_evidence=runtime_frame_evidence,
                 )
                 self._shans_gate_last_log_ts[symbol] = _gate_now
-        else:
+        shans_profile_continues = (
+            not _shans_ready
+            and active_threshold_profile.get("enabled") is True
+            and candle_execution_truth.get("executable_market_truth") is True
+        )
+        if shans_profile_continues:
+            _log_dispatch_diag(
+                "PAPER_EXPLORATION_SHANS_NOT_READY_CONTINUED",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                active_threshold_profile=active_threshold_profile,
+                shans_buffer=_buf_len,
+                shans_required=_buf_req,
+                broker_mode=getattr(getattr(self, "config", None), "broker_mode", None),
+                paper_only=True,
+            )
+
+        if _shans_ready or shans_profile_continues:
             if candle_execution_truth.get("executable_market_truth") is not True:
                 advisory_signal, advisory_vote, advisory_sleeve = _latest_runtime_advisory_pair(runtime)
                 candle_diag_fields = {
@@ -1773,6 +2412,12 @@ class MainLoop:
                     for key, value in candle_execution_truth.items()
                     if key != "symbol"
                 }
+                candle_market_truth = _candidate_market_truth_snapshot_fields(
+                    symbol,
+                    runtime,
+                    exchange_ts_ns,
+                    candle_truth=candle_execution_truth,
+                )
                 _emit_candidate_scorecard_diag(
                     str(
                         candle_execution_truth.get("candle_freshness_reason_code")
@@ -1781,10 +2426,14 @@ class MainLoop:
                     exchange_ts_ns=exchange_ts_ns,
                     symbol=symbol,
                     source_sleeve=advisory_sleeve if advisory_signal is not None or advisory_vote is not None else "MarketDataCandle",
+                    config=getattr(self, "config", None),
                     signal=advisory_signal,
                     strategy_vote=advisory_vote,
+                    market_truth=candle_market_truth,
                     candle_truth=candle_execution_truth,
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    active_threshold_profile=active_threshold_profile,
+                    dispatch_evidence=runtime_frame_evidence,
                     **candle_diag_fields,
                 )
             else:
@@ -1816,6 +2465,7 @@ class MainLoop:
                     fusion,
                     exchange_ts_ns,
                     candle_execution_truth=candle_execution_truth,
+                    pre_frame_evidence=runtime_frame_evidence,
                 )
 
         self._metrics.iteration_count += 1
@@ -1949,6 +2599,7 @@ class MainLoop:
         exchange_ts_ns: int,
         *,
         candle_execution_truth: Optional[Dict[str, Any]] = None,
+        pre_frame_evidence: Tuple[Dict[str, Any], ...] = (),
     ) -> None:
         """
         Lawful dispatch: FusionDecision → StrategyRouter → per-symbol StrategyVote
@@ -1959,6 +2610,7 @@ class MainLoop:
         StrategyRouter priority order. No-trade is preserved when all candidates decline.
         Each sleeve attempt and decline is logged explicitly.
         """
+        active_threshold_profile = resolve_active_threshold_profile(getattr(self, "config", None))
         if fusion is None:
             logger.info("[DISPATCH] %s: fusion is None → returning", symbol)
             _emit_candidate_scorecard_diag(
@@ -1966,6 +2618,7 @@ class MainLoop:
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
                 source_sleeve="SignalFusion",
+                config=getattr(self, "config", None),
                 market_truth=_candidate_market_truth_snapshot_fields(
                     symbol,
                     runtime,
@@ -1974,6 +2627,8 @@ class MainLoop:
                 ),
                 candle_truth=candle_execution_truth or {},
                 latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                active_threshold_profile=active_threshold_profile,
+                dispatch_evidence=pre_frame_evidence,
                 fusion_present=False,
             )
             return
@@ -1984,26 +2639,39 @@ class MainLoop:
         logger.info("[DISPATCH] %s: preferred_strategy=%s", symbol, repr(preferred) if preferred is not None else "None")
 
         if preferred is None:
-            logger.info("[DISPATCH] %s: no preferred strategy -> returning", symbol)
-            _emit_candidate_scorecard_diag(
-                "preferred_sleeve_missing",
-                symbol=symbol,
-                exchange_ts_ns=exchange_ts_ns,
-                source_sleeve="StrategyRouter",
-                fusion=fusion,
-                market_truth=_candidate_market_truth_snapshot_fields(
-                    symbol,
-                    runtime,
-                    exchange_ts_ns,
+            if active_threshold_profile.get("enabled") is True:
+                preferred = SleeveType.SHADOW_FRONT
+                _log_dispatch_diag(
+                    "ROUTER_PREFERRED_MISSING_PROFILE_CONTINUED",
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    preferred_sleeve=repr(preferred),
+                    active_threshold_profile=active_threshold_profile,
+                    router_authority="ranking_only_no_execution",
+                )
+            else:
+                logger.info("[DISPATCH] %s: no preferred strategy -> returning", symbol)
+                _emit_candidate_scorecard_diag(
+                    "preferred_sleeve_missing",
+                    symbol=symbol,
+                    exchange_ts_ns=exchange_ts_ns,
+                    source_sleeve="StrategyRouter",
+                    config=getattr(self, "config", None),
+                    fusion=fusion,
+                    market_truth=_candidate_market_truth_snapshot_fields(
+                        symbol,
+                        runtime,
+                        exchange_ts_ns,
+                        candle_truth=candle_execution_truth or {},
+                    ),
                     candle_truth=candle_execution_truth or {},
-                ),
-                candle_truth=candle_execution_truth or {},
-                latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
-                fusion_present=True,
-                preferred_sleeve=None,
-            )
-            return
-
+                    latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    active_threshold_profile=active_threshold_profile,
+                    dispatch_evidence=pre_frame_evidence,
+                    fusion_present=True,
+                    preferred_sleeve=None,
+                )
+                return
         sleeve_registry = {
             SleeveType.SHADOW_FRONT:    runtime.shadow_front_strategy,
             SleeveType.GAMMA_FRONT:     runtime.gamma_front_strategy,
@@ -2022,6 +2690,16 @@ class MainLoop:
         eligible_repr = [repr(s) for s in eligible_strategies]
         logger.info("[DISPATCH] %s: eligible_strategies=%s", symbol, eligible_repr)
 
+        runtime_frame_evidence = self._runtime_module_frame_evidence(
+            symbol,
+            runtime,
+            exchange_ts_ns,
+            fusion=fusion,
+            preferred_sleeve=preferred,
+            eligible_sleeves=tuple(eligible_strategies),
+            active_threshold_profile=active_threshold_profile,
+        )
+
         fallback_candidates = [
             s for s in eligible_strategies
             if s != preferred and s in sleeve_registry and sleeve_registry[s] is not None
@@ -2030,6 +2708,10 @@ class MainLoop:
         if preferred in sleeve_registry and sleeve_registry[preferred] is not None:
             candidates.append(preferred)
         candidates.extend(fallback_candidates)
+        if active_threshold_profile.get("enabled") is True:
+            for sleeve, strategy in sleeve_registry.items():
+                if strategy is not None and sleeve not in candidates:
+                    candidates.append(sleeve)
 
         if not candidates:
             logger.info(
@@ -2041,6 +2723,7 @@ class MainLoop:
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
                 source_sleeve=repr(preferred),
+                config=getattr(self, "config", None),
                 fusion=fusion,
                 market_truth=_candidate_market_truth_snapshot_fields(
                     symbol,
@@ -2050,6 +2733,8 @@ class MainLoop:
                 ),
                 candle_truth=candle_execution_truth or {},
                 latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                active_threshold_profile=active_threshold_profile,
+                dispatch_evidence=(*pre_frame_evidence, *runtime_frame_evidence),
                 preferred_sleeve=repr(preferred),
                 eligible_sleeves=eligible_repr,
                 candidates=[],
@@ -2073,15 +2758,17 @@ class MainLoop:
         terminal_signal_for_score = None
         terminal_vote_for_score = None
         terminal_sleeve_for_score = None
-        dispatch_evidence: List[Dict[str, Any]] = []
+        dispatch_evidence: List[Dict[str, Any]] = list((*pre_frame_evidence, *runtime_frame_evidence))
 
         for sleeve in candidates:
             logger.info("[DISPATCH] %s: evaluating sleeve=%s", symbol, repr(sleeve))
             sig = None
             vote = None
+            module_name = _sleeve_module_name(sleeve)
             sleeve_evidence: Dict[str, Any] = {
-                "module": repr(sleeve),
+                "module": module_name,
                 "sleeve": repr(sleeve),
+                "authority_class": "ALPHA",
                 "status": "NOT_REACHED",
                 "reason_code": "NOT_EVALUATED",
             }
@@ -2089,7 +2776,7 @@ class MainLoop:
             if sleeve == SleeveType.SHADOW_FRONT:
                 logger.info("[DISPATCH] %s: SHADOW_FRONT branch entered", symbol)
                 self._update_shadow_front_overlays(symbol, runtime, exchange_ts_ns)
-                is_eligible = sleeve in eligible_strategies
+                is_eligible = sleeve in eligible_strategies or active_threshold_profile.get("enabled") is True
                 if runtime.shadow_front_strategy:
                     runtime.shadow_front_strategy.update_from_fusion(is_eligible)
                     logger.info("[DISPATCH] %s: update_from_fusion(%s) called", symbol, is_eligible)
@@ -2152,7 +2839,7 @@ class MainLoop:
                     terminal_reason_logged = True
                     terminal_signal_for_score = observed_signal_for_score
                     terminal_vote_for_score = observed_vote_for_score
-                    terminal_sleeve_for_score = repr(sleeve)
+                    terminal_sleeve_for_score = module_name
 
             elif sleeve == SleeveType.FLV:
                 # STAGE 2-D3 (Option C): Paper-only active vote admission for
@@ -2190,6 +2877,8 @@ class MainLoop:
                     {
                         "status": "PASS",
                         "reason_code": "STRATEGY_SIGNAL_PRESENT",
+                        "signal": _dispatch_signal_text(sig),
+                        "confidence": getattr(vote, "confidence", None) or getattr(sig, "confidence", None),
                     }
                 )
                 dispatch_evidence.append(sleeve_evidence)
@@ -2216,12 +2905,14 @@ class MainLoop:
                 "executable_signal_present": False,
             }
             terminal_scorecard_fields.update(dict(terminal_reason_fields))
+            terminal_lifecycle: Dict[str, Any]
             if terminal_reason_code is None:
-                _emit_candidate_scorecard_diag(
+                terminal_lifecycle = _emit_candidate_scorecard_diag(
                     "strategy_signal_missing",
                     symbol=symbol,
                     exchange_ts_ns=exchange_ts_ns,
                     source_sleeve=terminal_source_sleeve,
+                    config=getattr(self, "config", None),
                     fusion=fusion,
                     market_truth=_candidate_market_truth_snapshot_fields(
                         symbol,
@@ -2231,15 +2922,18 @@ class MainLoop:
                     ),
                     candle_truth=candle_execution_truth or {},
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    active_threshold_profile=active_threshold_profile,
                     dispatch_evidence=tuple(dispatch_evidence),
                     **terminal_scorecard_fields,
                 )
+                terminal_compile_reason = "strategy_signal_missing"
             elif terminal_reason_logged:
-                _emit_candidate_scorecard_diag(
+                terminal_lifecycle = _emit_candidate_scorecard_diag(
                     terminal_reason_code,
                     symbol=symbol,
                     exchange_ts_ns=exchange_ts_ns,
                     source_sleeve=terminal_source_sleeve,
+                    config=getattr(self, "config", None),
                     signal=terminal_signal_for_score,
                     strategy_vote=terminal_vote_for_score,
                     fusion=fusion,
@@ -2251,16 +2945,19 @@ class MainLoop:
                     ),
                     candle_truth=candle_execution_truth or {},
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    active_threshold_profile=active_threshold_profile,
                     dispatch_evidence=tuple(dispatch_evidence),
                     terminal_dispatch_reason=True,
                     **terminal_scorecard_fields,
                 )
+                terminal_compile_reason = terminal_reason_code
             else:
-                _emit_candidate_scorecard_diag(
+                terminal_lifecycle = _emit_candidate_scorecard_diag(
                     terminal_reason_code,
                     symbol=symbol,
                     exchange_ts_ns=exchange_ts_ns,
                     source_sleeve=terminal_source_sleeve,
+                    config=getattr(self, "config", None),
                     fusion=fusion,
                     market_truth=_candidate_market_truth_snapshot_fields(
                         symbol,
@@ -2270,18 +2967,27 @@ class MainLoop:
                     ),
                     candle_truth=candle_execution_truth or {},
                     latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                    active_threshold_profile=active_threshold_profile,
                     dispatch_evidence=tuple(dispatch_evidence),
                     terminal_dispatch_reason=True,
                     **terminal_scorecard_fields,
                 )
+                terminal_compile_reason = terminal_reason_code
+            self._compile_scorecard_frame_no_submit(
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                lifecycle=terminal_lifecycle,
+                reason_code=str(terminal_compile_reason or "strategy_signal_missing"),
+            )
             return
         if strategy_vote is None:
             logger.info("[DISPATCH] %s: strategy_vote=None signal_present sleeve=%s", symbol, repr(winning_sleeve))
-            _emit_candidate_scorecard_diag(
+            vote_missing_lifecycle = _emit_candidate_scorecard_diag(
                 "strategy_vote_missing",
                 symbol=symbol,
                 exchange_ts_ns=exchange_ts_ns,
                 source_sleeve=repr(winning_sleeve),
+                config=getattr(self, "config", None),
                 signal=signal,
                 fusion=fusion,
                 market_truth=_candidate_market_truth_snapshot_fields(
@@ -2292,9 +2998,16 @@ class MainLoop:
                 ),
                 candle_truth=candle_execution_truth or {},
                 latency_truth=_last_latency_truth(getattr(self, "execution_engine", None)),
+                active_threshold_profile=active_threshold_profile,
                 dispatch_evidence=tuple(dispatch_evidence),
                 winning_sleeve=repr(winning_sleeve),
                 signal_present=True,
+            )
+            self._compile_scorecard_frame_no_submit(
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                lifecycle=vote_missing_lifecycle,
+                reason_code="strategy_vote_missing",
             )
             return
 
@@ -2353,6 +3066,7 @@ class MainLoop:
             exchange_ts_ns,
             candle_truth=candle_execution_truth or {},
         )
+        requires_canonical_snapshot = bool(candle_execution_truth)
         candidate_market_snapshot = dict(
             execution_market_truth.get("market_truth_snapshot") or {}
         )
@@ -2364,7 +3078,7 @@ class MainLoop:
             signal_metadata["execution_market_truth"] = execution_market_truth
             signal_metadata["market_truth_snapshot"] = candidate_market_snapshot
             signal_metadata["candidate_market_snapshot"] = candidate_market_snapshot
-            signal_metadata["requires_canonical_market_snapshot"] = True
+            signal_metadata["requires_canonical_market_snapshot"] = requires_canonical_snapshot
             signal_metadata["snapshot_id"] = candidate_market_snapshot.get("snapshot_id")
             signal_metadata["candle_id"] = candidate_market_snapshot.get("candle_id")
             signal_metadata["strategy_evidence_snapshot_id"] = candidate_market_snapshot.get("snapshot_id")
@@ -2373,6 +3087,24 @@ class MainLoop:
         if isinstance(vote_metadata, dict):
             vote_metadata["strategy_evidence_snapshot_id"] = candidate_market_snapshot.get("snapshot_id")
             vote_metadata["strategy_evidence_candle_id"] = candidate_market_snapshot.get("candle_id")
+
+        execution_status: Dict[str, Any] = {}
+        execution_engine = getattr(self, "execution_engine", None)
+        get_execution_status = getattr(execution_engine, "get_status", None)
+        if callable(get_execution_status):
+            status_candidate = get_execution_status()
+            if isinstance(status_candidate, dict):
+                execution_status = status_candidate
+        net_edge_evaluation: Dict[str, Any] = {}
+        if isinstance(signal_metadata, dict):
+            net_edge_evaluation = self._apply_signal_economic_metadata(
+                symbol=symbol,
+                runtime=runtime,
+                signal=signal,
+                strategy_vote=strategy_vote,
+                latency_truth=execution_status.get("last_latency_truth", {}),
+            )
+            signal_metadata["net_edge_evaluation"] = net_edge_evaluation
 
         truth_frame = self._build_truth_frame(exchange_ts_ns)
         pre_trade_guardrail_verdict = _build_pre_trade_guardrail_verdict(
@@ -2392,7 +3124,6 @@ class MainLoop:
             telemetry_candidate = get_fusion_telemetry()
             if isinstance(telemetry_candidate, dict):
                 fusion_telemetry = telemetry_candidate
-        execution_engine = getattr(self, "execution_engine", None)
         get_shadow_counts = getattr(execution_engine, "get_shadow_broker_mutation_counts", None)
         edge_attribution = build_runtime_edge_attribution(
             timestamp_ns=exchange_ts_ns,
@@ -2412,12 +3143,31 @@ class MainLoop:
         if isinstance(signal_metadata, dict):
             signal_metadata["edge_attribution"] = edge_attribution
 
-        execution_status: Dict[str, Any] = {}
-        get_execution_status = getattr(execution_engine, "get_status", None)
-        if callable(get_execution_status):
-            status_candidate = get_execution_status()
-            if isinstance(status_candidate, dict):
-                execution_status = status_candidate
+        if net_edge_evaluation:
+            dispatch_evidence.append(self._net_edge_frame_evidence(net_edge_evaluation))
+        decision_frame = _build_runtime_decision_frame(
+            config=getattr(self, "config", None),
+            symbol=symbol,
+            exchange_ts_ns=exchange_ts_ns,
+            market_truth=(
+                signal_metadata.get("execution_market_truth", {})
+                if isinstance(signal_metadata, dict)
+                else execution_market_truth
+            ),
+            signal=signal,
+            strategy_vote=strategy_vote,
+            fusion=fusion,
+            dispatch_evidence=tuple(dispatch_evidence),
+            edge_attribution=edge_attribution,
+            guardrail_verdict=pre_trade_guardrail_verdict,
+            active_threshold_profile=active_threshold_profile,
+        )
+        if isinstance(signal_metadata, dict):
+            signal_metadata["decision_frame"] = decision_frame
+            signal_metadata["active_threshold_profile"] = active_threshold_profile
+            signal_metadata["frame_id"] = decision_frame.get("frame_id")
+            signal_metadata["frame_output"] = decision_frame.get("frame_output")
+            signal_metadata["frame_status"] = decision_frame.get("frame_status")
         candidate_id = (
             getattr(strategy_vote, "decision_uuid", None)
             or (signal_metadata.get("decision_uuid") if isinstance(signal_metadata, dict) else None)
@@ -2441,6 +3191,8 @@ class MainLoop:
             edge_attribution=edge_attribution,
             guardrail_verdict=pre_trade_guardrail_verdict,
             latency_truth=execution_status.get("last_latency_truth", {}),
+            active_threshold_profile=active_threshold_profile,
+            decision_frame=decision_frame,
             dispatch_evidence=tuple(dispatch_evidence),
         )
         candidate_lifecycle_dict = lifecycle_to_dict(candidate_lifecycle)
@@ -2463,6 +3215,12 @@ class MainLoop:
             snapshot_status=candidate_market_snapshot.get("snapshot_status"),
             snapshot_reason_codes=candidate_market_snapshot.get("snapshot_reason_codes"),
             snapshot_authority=candidate_market_snapshot.get("snapshot_authority"),
+            active_threshold_profile=active_threshold_profile,
+            decision_frame=decision_frame,
+            frame_id=decision_frame.get("frame_id"),
+            frame_output=decision_frame.get("frame_output"),
+            frame_status=decision_frame.get("frame_status"),
+            frame_reason_codes=decision_frame.get("frame_reason_codes"),
         )
         decision_record = self.decision_compiler.compile(
             truth_frame,
@@ -2476,6 +3234,8 @@ class MainLoop:
                 "opportunity_scorecard": opportunity_scorecard,
                 "market_truth_snapshot": candidate_market_snapshot,
                 "candidate_market_snapshot": candidate_market_snapshot,
+                "decision_frame": decision_frame,
+                "active_threshold_profile": active_threshold_profile,
             },
         )
         candidate_lifecycle = record_decision_compiler_result(
@@ -2499,6 +3259,64 @@ class MainLoop:
         signal_metadata = getattr(signal, "metadata", None)
         if decision_uuid and isinstance(signal_metadata, dict):
             signal_metadata.setdefault("decision_uuid", decision_uuid)
+
+        frame_output = str(decision_frame.get("frame_output") or "")
+        frame_status = str(decision_frame.get("frame_status") or "")
+        frame_enforces_execution = bool(candle_execution_truth) or (
+            isinstance(signal_metadata, dict)
+            and signal_metadata.get("requires_canonical_market_snapshot") is True
+        )
+        if frame_enforces_execution and (frame_status == "BLOCK" or frame_output == "NO_TRADE"):
+            frame_reason = "DECISION_FRAME_BLOCKED" if frame_status == "BLOCK" else "DECISION_FRAME_NO_TRADE"
+            candidate_lifecycle = record_execution_result(
+                candidate_lifecycle,
+                submitted=False,
+                execution_result=SimpleNamespace(
+                    normalized_status="blocked",
+                    route="decision_compiler",
+                    reason_code=frame_reason,
+                    message="DecisionFrame emitted no executable trade intent.",
+                    block_evidence={
+                        "decision_frame": decision_frame,
+                        "frame_id": decision_frame.get("frame_id"),
+                        "frame_output": frame_output,
+                        "frame_status": frame_status,
+                        "frame_reason_codes": decision_frame.get("frame_reason_codes"),
+                        "broker_post": False,
+                    },
+                ),
+            )
+            candidate_lifecycle_dict = lifecycle_to_dict(candidate_lifecycle)
+            opportunity_scorecard = opportunity_scorecard_from_lifecycle(candidate_lifecycle_dict)
+            if isinstance(signal_metadata, dict):
+                signal_metadata["candidate_lifecycle"] = candidate_lifecycle_dict
+                signal_metadata["opportunity_scorecard"] = opportunity_scorecard
+            self._metrics.orders_rejected += 1
+            _log_dispatch_diag(
+                "decision_frame_no_trade",
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                winning_sleeve=repr(winning_sleeve),
+                decision_uuid=getattr(decision_record, "decision_uuid", None),
+                submitted=False,
+                submit_signal_called=False,
+                candidate_lifecycle=candidate_lifecycle_dict,
+                broker_post=False,
+                active_threshold_profile=active_threshold_profile,
+                decision_frame=decision_frame,
+                frame_id=decision_frame.get("frame_id"),
+                frame_output=frame_output,
+                frame_status=frame_status,
+                frame_reason_codes=decision_frame.get("frame_reason_codes"),
+            )
+            logger.info(
+                "[DISPATCH] %s: DecisionFrame blocked submission: decision_uuid=%s frame_output=%s frame_status=%s",
+                symbol,
+                getattr(decision_record, "decision_uuid", "<missing>"),
+                frame_output,
+                frame_status,
+            )
+            return
 
         submitted = self.execution_engine.submit_signal(
             signal=signal,

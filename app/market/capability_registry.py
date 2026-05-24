@@ -201,6 +201,7 @@ def _alpaca_crypto_capability(symbol: str) -> VenueCapability:
         market_data_available=True,
         tradability_source="static_capability_fixture",
         supported_order_types=frozenset({"limit"}),
+        supported_actions=frozenset({"buy", "sell_to_close"}),
         supported_time_in_force=frozenset({"GTC", "IOC"}),
         default_order_type="limit",
         default_time_in_force="GTC",

@@ -85,6 +85,7 @@ class PreTradeGuardrailRequest:
     economics_context: Mapping[str, Any] | None = None
     strategy_context: Mapping[str, Any] | None = None
     source: str = "pre_trade_guardrails"
+    action: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,7 @@ class PreTradeGuardrailVerdict:
     reason_codes: tuple[str, ...]
     symbol: str
     side: str
+    action: str | None
     order_type: str
     time_in_force: str | None
     requested_notional: Decimal | None
@@ -111,6 +113,7 @@ class PreTradeGuardrailVerdict:
             "reason_codes": self.reason_codes,
             "symbol": self.symbol,
             "side": self.side,
+            "action": self.action,
             "order_type": self.order_type,
             "time_in_force": self.time_in_force,
             "requested_notional": _decimal_to_string(self.requested_notional),
@@ -369,6 +372,7 @@ def evaluate_pre_trade_guardrails(request: PreTradeGuardrailRequest) -> PreTrade
         reason_codes=unique_reasons,
         symbol=request.symbol,
         side=request.side.lower(),
+        action=_request_action(request),
         order_type=request.order_type.lower(),
         time_in_force=request.time_in_force.upper() if request.time_in_force else None,
         requested_notional=requested_notional,
@@ -410,7 +414,7 @@ def _capability_block_reasons(capability: VenueCapability, request: PreTradeGuar
         reasons.append(capability.disabled_reason)
     if capability.unavailable_reason:
         reasons.append(capability.unavailable_reason)
-    if request.side.lower() not in capability.supported_actions:
+    if _request_action(request) not in capability.supported_actions:
         reasons.append("ACTION_UNSUPPORTED")
     if request.order_type.lower() not in capability.supported_order_types:
         reasons.append("ORDER_TYPE_UNSUPPORTED")
@@ -452,6 +456,8 @@ def _requested_notional(request: PreTradeGuardrailRequest) -> Decimal | None:
 
 
 def _exposure_reason(request: PreTradeGuardrailRequest) -> str | None:
+    if _request_action(request) == "sell_to_close":
+        return None
     symbol = request.symbol.upper()
     for position in request.existing_positions:
         position_symbol = str(position.get("symbol", "")).upper()
@@ -599,6 +605,7 @@ def _capability_identity(capability: VenueCapability | None) -> dict[str, Any]:
         "reconciliation_adapter": capability.reconciliation_adapter,
         "capability_key": capability.capability_key,
         "supported_order_types": sorted(capability.supported_order_types),
+        "supported_actions": sorted(capability.supported_actions),
         "supported_time_in_force": sorted(capability.supported_time_in_force),
         "default_order_type": capability.default_order_type,
         "default_time_in_force": capability.default_time_in_force,
@@ -615,6 +622,10 @@ def _to_decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def _request_action(request: PreTradeGuardrailRequest) -> str:
+    return str(request.action or request.side or "").lower()
 
 
 def _decimal_to_string(value: Decimal | None) -> str | None:

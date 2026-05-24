@@ -3,7 +3,12 @@ from __future__ import annotations
 from app.config import Config
 from app.market.capability_registry import build_default_capability_registry
 from app.market.venue_capabilities import PortalSelectionRequest, classify_quote_session
-from main import get_active_capability_candidates, get_active_symbols, resolve_runtime_portal
+from main import (
+    get_active_capability_candidates,
+    get_active_symbols,
+    resolve_runtime_portal,
+    resolve_runtime_universe,
+)
 
 
 def test_kraken_crypto_preservation_for_current_runtime_symbols():
@@ -46,7 +51,7 @@ def test_legacy_crypto_only_capability_discovery_mode_preserves_old_surface():
     assert ("alpaca", "etf", "SPY") not in identities
 
 
-def test_registry_discovery_exposes_mixed_capability_universe_despite_legacy_active_markets():
+def test_registry_discovery_obeys_active_market_universe_filter():
     config = Config(
         broker_mode="paper",
         active_markets=["crypto"],
@@ -60,8 +65,41 @@ def test_registry_discovery_exposes_mixed_capability_universe_despite_legacy_act
 
     assert ("kraken", "crypto", "BTC/USD") in identities
     assert ("alpaca", "crypto", "BTC/USD") in identities
+    assert ("alpaca", "equity", "AAPL") not in identities
+    assert ("alpaca", "etf", "SPY") not in identities
+    assert get_active_symbols(config) == {"BTC/USD"}
+
+
+def test_multi_market_config_allows_authorized_symbols_from_included_markets():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto", "equity", "etf"],
+        symbol_universe=["BTC/USD", "AAPL", "SPY"],
+        capability_discovery_mode="registry",
+        capability_discovery_asset_classes=["crypto", "equity", "etf"],
+    )
+
+    candidates = get_active_capability_candidates(config)
+    identities = {(candidate.venue_id, candidate.asset_class, candidate.normalized_symbol) for candidate in candidates}
+
+    assert get_active_symbols(config) == {"BTC/USD", "AAPL", "SPY"}
+    assert ("kraken", "crypto", "BTC/USD") in identities
+    assert ("alpaca", "crypto", "BTC/USD") in identities
     assert ("alpaca", "equity", "AAPL") in identities
     assert ("alpaca", "etf", "SPY") in identities
+
+
+def test_explicit_watchlist_cannot_leak_disallowed_asset_classes():
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        runtime_watchlist=["BTC/USD", "AAPL", "SPY"],
+        symbol_universe=["BTC/USD", "AAPL", "SPY"],
+    )
+
+    resolution = resolve_runtime_universe(config)
+
+    assert resolution.symbols == ("BTC/USD",)
     assert get_active_symbols(config) == {"BTC/USD"}
 
 
@@ -116,6 +154,7 @@ def test_alpaca_paper_crypto_capability_is_represented():
     assert alpaca_crypto[0].quote_source == "alpaca_data_crypto_latest_quote"
     assert alpaca_crypto[0].execution_adapter == "alpaca_paper_rest"
     assert alpaca_crypto[0].supported_order_types == frozenset({"limit"})
+    assert alpaca_crypto[0].supported_actions == frozenset({"buy", "sell_to_close"})
     assert alpaca_crypto[0].supported_time_in_force == frozenset({"GTC", "IOC"})
     assert alpaca_crypto[0].default_order_type == "limit"
     assert alpaca_crypto[0].default_time_in_force == "GTC"
@@ -124,10 +163,42 @@ def test_alpaca_paper_crypto_capability_is_represented():
     assert alpaca_crypto[0].order_constraint_source == "alpaca_crypto_orders_support_gtc_ioc_not_day"
 
 
+def test_alpaca_crypto_supports_sell_to_close_but_not_sell_short():
+    registry = build_default_capability_registry()
+    sell_to_close = registry.resolve(
+        PortalSelectionRequest(
+            symbol="ETH/USD",
+            asset_class="crypto",
+            action="sell_to_close",
+            order_type="limit",
+            time_in_force="GTC",
+            policy_mode="explicit_preferred_venue",
+            preferred_venue="alpaca_paper",
+        )
+    )
+    sell_short = registry.resolve(
+        PortalSelectionRequest(
+            symbol="ETH/USD",
+            asset_class="crypto",
+            action="sell_short",
+            order_type="limit",
+            time_in_force="GTC",
+            policy_mode="explicit_preferred_venue",
+            preferred_venue="alpaca_paper",
+        )
+    )
+
+    assert sell_to_close.ready is True
+    assert sell_to_close.selected is not None
+    assert sell_to_close.selected.portal_name == "alpaca_paper"
+    assert sell_short.ready is False
+    assert any("ACTION_UNSUPPORTED" in reasons for reasons in sell_short.rejected.values())
+
+
 def test_session_aware_classification_keeps_closed_equity_visible_but_blocked():
     config = Config(
         broker_mode="paper",
-        active_markets=["crypto"],
+        active_markets=["equity"],
         symbol_universe=["AAPL"],
         capability_discovery_mode="registry",
         capability_discovery_asset_classes=["equity"],
