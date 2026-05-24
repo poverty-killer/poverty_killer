@@ -280,8 +280,14 @@ def test_decision_compiler_emits_frame_action_from_decision_frame():
     )
 
     assert record.outputs["frame_output"] == FRAME_OUTPUT_BUY
+    assert record.outputs["frame_status"] == frame["frame_status"]
+    assert record.outputs["frame_reason_codes"] == frame["frame_reason_codes"]
     assert record.outputs["compiled_action"] == FRAME_OUTPUT_BUY
+    assert record.outputs["active_threshold_profile"] == frame["active_threshold_profile"]
     assert record.metadata["frame_id"] == frame["frame_id"]
+    assert record.metadata["frame_output"] == FRAME_OUTPUT_BUY
+    assert record.metadata["frame_status"] == frame["frame_status"]
+    assert record.metadata["frame_reason_codes"] == frame["frame_reason_codes"]
 
 
 def test_decision_compiler_emits_no_trade_from_empty_frame():
@@ -301,6 +307,7 @@ def test_decision_compiler_emits_no_trade_from_empty_frame():
 
     assert record.outputs["frame_output"] == FRAME_OUTPUT_NO_TRADE
     assert record.outputs["compiled_action"] == FRAME_OUTPUT_NO_TRADE
+    assert record.metadata["frame_output"] == FRAME_OUTPUT_NO_TRADE
 
 
 def test_paper_exploration_profile_relaxes_alpha_thresholds_and_logs_values():

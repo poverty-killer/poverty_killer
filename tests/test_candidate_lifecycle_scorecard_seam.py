@@ -10,6 +10,7 @@ from app.core.candidate_lifecycle import (
     GOOD_CANDIDATE_NOT_EXECUTABLE,
     build_candidate_lifecycle,
     lifecycle_to_dict,
+    opportunity_scorecard_from_lifecycle,
     record_decision_compiler_result,
     record_execution_result,
 )
@@ -176,6 +177,8 @@ def _build_lifecycle(
     guardrail: dict | None = None,
     market_truth: dict | None = None,
     latency_truth: dict | None = None,
+    active_threshold_profile: dict | None = None,
+    decision_frame: dict | None = None,
     dispatch_evidence=(),
 ):
     signal = signal or _signal()
@@ -192,6 +195,8 @@ def _build_lifecycle(
         market_truth=market_truth or _market_truth(),
         guardrail_verdict=guardrail or _guardrail(side=signal.side),
         latency_truth=latency_truth or {},
+        active_threshold_profile=active_threshold_profile,
+        decision_frame=decision_frame,
         dispatch_evidence=tuple(dispatch_evidence),
     )
 
@@ -351,6 +356,48 @@ def test_module_declines_do_not_erase_other_strategy_score():
     assert payload["module_declines"]["SectorRotation"]["reason_code"] == "OBSERVED_PAIR_STALE"
     assert payload["module_declines"]["ShadowFront"]["reason_code"] == "WHALE_CONDITION_MISSING"
     assert payload["module_contributions"]["GammaFront"]["status"] == "PASS"
+
+
+def test_lifecycle_scorecard_carries_threshold_profile_and_decision_frame():
+    profile = {
+        "profile_name": "PAPER_EXPLORATION_ALPHA",
+        "paper_only": True,
+        "thresholds_by_name": {
+            "minimum_opportunity_score": {
+                "default_value": 0.45,
+                "exploration_value": 0.25,
+            }
+        },
+    }
+    frame = {
+        "frame_id": "frame_SOLUSD_1777948800_mts",
+        "frame_output": "NO_TRADE",
+        "frame_status": "BLOCK",
+        "frame_reason_codes": ("DECISION_FRAME_NO_TRADE",),
+    }
+    lifecycle = _build_lifecycle(
+        active_threshold_profile=profile,
+        decision_frame=frame,
+        guardrail=_guardrail(permitted=False, reason_codes=("DECISION_FRAME_NO_TRADE",)),
+    )
+    final_lifecycle = record_execution_result(
+        lifecycle,
+        submitted=False,
+        execution_result=SimpleNamespace(reason_code="DECISION_FRAME_NO_TRADE"),
+    )
+    payload = lifecycle_to_dict(final_lifecycle)
+    scorecard = opportunity_scorecard_from_lifecycle(final_lifecycle)
+
+    assert payload["active_threshold_profile"]["profile_name"] == "PAPER_EXPLORATION_ALPHA"
+    assert payload["decision_frame"]["frame_id"] == frame["frame_id"]
+    assert scorecard["active_threshold_profile"]["paper_only"] is True
+    assert scorecard["frame_id"] == frame["frame_id"]
+    assert scorecard["frame_output"] == "NO_TRADE"
+    assert scorecard["frame_status"] == "BLOCK"
+    assert scorecard["frame_reason_codes"] == ("DECISION_FRAME_NO_TRADE",)
+    assert scorecard["execution_verdict"] == "BLOCKED"
+    assert "DECISION_FRAME_NO_TRADE" in scorecard["execution_blocker_reason_codes"]
+    assert scorecard["broker_post"] is False
 
 
 def test_quote_and_pre_trade_blocks_preserve_scorecard_before_router():

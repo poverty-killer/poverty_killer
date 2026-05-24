@@ -75,6 +75,8 @@ _EXECUTION_REASON_CODES = frozenset(
         "QUOTE_SESSION_NOT_TRADABLE",
         "MARKET_CLOSED",
         "SESSION_CLOSED_STALE_QUOTE",
+        "DECISION_FRAME_BLOCKED",
+        "DECISION_FRAME_NO_TRADE",
     }
 )
 
@@ -137,6 +139,8 @@ class CandidateLifecycleRecord:
     broker_boundary_result: str = NOT_REACHED
     broker_post: bool = False
     final_outcome: str = NOT_REACHED
+    active_threshold_profile: Mapping[str, Any] = field(default_factory=dict)
+    decision_frame: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,6 +153,8 @@ class CandidateLifecycleRecord:
             "module_contributions": _json_ready(self.module_contributions),
             "module_declines": _json_ready(self.module_declines),
             "penalties": _json_ready(self.penalties),
+            "active_threshold_profile": _json_ready(self.active_threshold_profile),
+            "decision_frame": _json_ready(self.decision_frame),
             "final_opportunity_score": _decimal_to_float(self.final_opportunity_score),
             "opportunity_verdict": self.opportunity_verdict,
             "execution_verdict": self.execution_verdict,
@@ -175,6 +181,8 @@ def build_candidate_lifecycle(
     edge_attribution: Mapping[str, Any] | None = None,
     guardrail_verdict: Mapping[str, Any] | None = None,
     latency_truth: Mapping[str, Any] | None = None,
+    active_threshold_profile: Mapping[str, Any] | None = None,
+    decision_frame: Mapping[str, Any] | None = None,
     dispatch_evidence: Sequence[Mapping[str, Any]] = (),
 ) -> CandidateLifecycleRecord:
     market_snapshot = _merged_market_truth(market_truth, candle_truth)
@@ -190,6 +198,8 @@ def build_candidate_lifecycle(
     )
     module_declines = _module_declines(edge_attribution, dispatch_evidence)
     penalties = _build_penalties(market_snapshot, latency)
+    threshold_profile = dict(active_threshold_profile or {})
+    frame = dict(decision_frame or {})
     final_score = _clamp_score(raw_score + sum(_to_decimal(item.get("score_delta")) for item in penalties.values()))
     gates = (
         CandidateGate(
@@ -223,6 +233,8 @@ def build_candidate_lifecycle(
                 "raw_opportunity_score": _decimal_to_float(raw_score),
                 "final_opportunity_score": _decimal_to_float(final_score),
                 "penalties": penalties,
+                "active_threshold_profile": threshold_profile,
+                "decision_frame": frame,
             },
         ),
         CandidateGate(
@@ -264,6 +276,8 @@ def build_candidate_lifecycle(
         module_contributions=module_contributions,
         module_declines=module_declines,
         penalties=penalties,
+        active_threshold_profile=threshold_profile,
+        decision_frame=frame,
         raw_opportunity_score=raw_score,
         final_opportunity_score=final_score,
         opportunity_verdict=verdict,
@@ -415,6 +429,12 @@ def opportunity_scorecard_from_lifecycle(
         "module_contributions": lifecycle["module_contributions"],
         "module_declines": lifecycle["module_declines"],
         "penalties": lifecycle["penalties"],
+        "active_threshold_profile": lifecycle["active_threshold_profile"],
+        "decision_frame": lifecycle["decision_frame"],
+        "frame_id": lifecycle["decision_frame"].get("frame_id") if isinstance(lifecycle["decision_frame"], Mapping) else None,
+        "frame_output": lifecycle["decision_frame"].get("frame_output") if isinstance(lifecycle["decision_frame"], Mapping) else None,
+        "frame_status": lifecycle["decision_frame"].get("frame_status") if isinstance(lifecycle["decision_frame"], Mapping) else None,
+        "frame_reason_codes": lifecycle["decision_frame"].get("frame_reason_codes") if isinstance(lifecycle["decision_frame"], Mapping) else None,
         "gate_trace": lifecycle["gates"],
         "final_opportunity_score": lifecycle["final_opportunity_score"],
         "opportunity_verdict": lifecycle["opportunity_verdict"],
@@ -772,6 +792,8 @@ def _coerce_record(record: CandidateLifecycleRecord | Mapping[str, Any]) -> Cand
         broker_boundary_result=str(record.get("broker_boundary_result") or NOT_REACHED),
         broker_post=bool(record.get("broker_post", False)),
         final_outcome=str(record.get("final_outcome") or NOT_REACHED),
+        active_threshold_profile=dict(record.get("active_threshold_profile") or {}),
+        decision_frame=dict(record.get("decision_frame") or {}),
     )
 
 

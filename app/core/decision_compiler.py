@@ -228,6 +228,8 @@ class DecisionCompiler:
                 "market_truth_summary",
                 "market_truth_snapshot",
                 "candidate_market_snapshot",
+                "decision_frame",
+                "active_threshold_profile",
                 "missing_truth_summary",
                 "degraded_fallback_summary",
                 "blocked_or_abstained_summary",
@@ -280,6 +282,12 @@ class DecisionCompiler:
                 metadata["snapshot_status"] = snapshot.get("snapshot_status")
                 metadata["snapshot_reason_codes"] = snapshot.get("snapshot_reason_codes")
                 metadata["snapshot_authority"] = snapshot.get("snapshot_authority")
+            decision_frame = additional_inputs.get("decision_frame")
+            if isinstance(decision_frame, dict):
+                metadata["frame_id"] = decision_frame.get("frame_id")
+                metadata["frame_output"] = decision_frame.get("frame_output")
+                metadata["frame_status"] = decision_frame.get("frame_status")
+                metadata["frame_reason_codes"] = decision_frame.get("frame_reason_codes")
         metadata.update(attribution_sections)
         
         record = DecisionRecord(
@@ -368,6 +376,14 @@ class DecisionCompiler:
         # Additional inputs
         if additional_inputs:
             outputs["additional"] = additional_inputs
+            decision_frame = additional_inputs.get("decision_frame")
+            if isinstance(decision_frame, dict):
+                outputs["decision_frame_id"] = decision_frame.get("frame_id")
+                outputs["frame_output"] = decision_frame.get("frame_output")
+                outputs["frame_status"] = decision_frame.get("frame_status")
+                outputs["frame_reason_codes"] = decision_frame.get("frame_reason_codes")
+                outputs["compiled_action"] = decision_frame.get("frame_output") or "NO_TRADE"
+                outputs["active_threshold_profile"] = decision_frame.get("active_threshold_profile")
         
         return outputs
     
