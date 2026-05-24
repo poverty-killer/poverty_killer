@@ -53,6 +53,14 @@ def test_launcher_uses_get_only_preflight_before_bounded_run():
     assert "LIVE_ENDPOINT_USED" in text
 
 
+def test_launcher_passes_duration_to_runtime_for_graceful_shutdown_accounting():
+    text = _script_text()
+
+    assert '"--duration-seconds", "$DurationSeconds"' in text
+    assert "($DurationSeconds + 30) * 1000" in text
+    assert "did not exit gracefully within 30 seconds" in text
+
+
 def test_launcher_runs_preflight_from_temp_python_file_not_python_dash_c():
     text = _script_text()
 

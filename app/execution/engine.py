@@ -35,6 +35,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,11 +43,21 @@ from app.brain.data_validator import DataContinuityValidator
 from app.commander import Commander
 from app.core.market_snapshot import validate_market_snapshot_for_execution
 from app.execution.masking_layer import MaskingLayer
+from app.execution.oms_lifecycle import OmsReasonCode
 from app.execution.order_router import OrderRouter
 from app.models import OrderFill, OrderRequest, StrategySignal
 from app.models.contracts import DecisionRecord, EventEnvelope
 from app.models.enums import EventType
 from app.risk.guard import HybridRiskGuard
+from app.risk.net_edge_governor import (
+    AdversarialBurdens,
+    CandidateContext,
+    CandidateType,
+    EconomicDecision,
+    ExecutionEconomics,
+    NetEdgeGovernor,
+)
+from app.risk.trade_efficiency_governor import TradeEfficiencyGovernor
 from app.utils.time_utils import now_ns
 from app.telemetry.event_store import TelemetryEventStore
 
@@ -55,6 +66,13 @@ logger = logging.getLogger(__name__)
 NS_PER_SECOND = 1_000_000_000
 NS_PER_MS = 1_000_000
 ECONOMIC_NET_PROFIT_FLOOR = Decimal("0.005")
+_BPS_DIVISOR = Decimal("10000")
+_DEFAULT_MODELED_FEE_BPS = Decimal("6.0")
+_DEFAULT_MODELED_SPREAD_BPS = Decimal("10.0")
+_DEFAULT_MODELED_SLIPPAGE_BPS = Decimal("8.0")
+_DEFAULT_MODELED_LATENCY_DRAG_BPS = Decimal("4.0")
+_DEFAULT_MODELED_PARTIAL_FILL_BPS = Decimal("4.0")
+_DEFAULT_MODELED_EXIT_COST_BPS = Decimal("4.0")
 
 
 @dataclass(slots=True)
@@ -156,6 +174,56 @@ def _latency_source_scope(source: str, measurement: Dict[str, Any]) -> str:
     return normalized.replace(".", "_") or "unknown"
 
 
+def _decimal_from_any(value: Any, *, field_name: str) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except Exception as exc:
+        raise ValueError(f"{field_name} missing or invalid") from exc
+
+
+def _decimal_or_default(value: Any, default: Decimal) -> Decimal:
+    if value is None:
+        return default
+    try:
+        candidate = Decimal(str(value))
+    except Exception:
+        return default
+    if not candidate.is_finite() or candidate < Decimal("0"):
+        return default
+    return candidate
+
+
+def _bps_to_fraction(value: Decimal) -> Decimal:
+    return value / _BPS_DIVISOR
+
+
+def _expected_move_fraction(
+    metadata: Dict[str, Any],
+    supplied: Dict[str, Any],
+) -> Optional[Decimal]:
+    for key in ("expected_move", "expected_move_fraction"):
+        value = supplied.get(key, metadata.get(key))
+        if value is None:
+            continue
+        try:
+            candidate = Decimal(str(value))
+        except Exception:
+            continue
+        if candidate > Decimal("0"):
+            return candidate
+    for key in ("expected_move_bps", "gross_edge_bps"):
+        value = supplied.get(key, metadata.get(key))
+        if value is None:
+            continue
+        try:
+            candidate = Decimal(str(value)) / _BPS_DIVISOR
+        except Exception:
+            continue
+        if candidate > Decimal("0"):
+            return candidate
+    return None
+
+
 class ExecutionEngine:
     """
     Tactical Execution Engine - Sovereign Grade.
@@ -186,6 +254,8 @@ class ExecutionEngine:
         emergency_cancel_workers: int = 10,
         telemetry_store: Optional[TelemetryEventStore] = None,
         shadow_read_only: bool = False,
+        trade_efficiency_governor: Optional[TradeEfficiencyGovernor] = None,
+        net_edge_governor: Optional[NetEdgeGovernor] = None,
     ):
         self.commander = commander
         self.risk_guard = risk_guard
@@ -203,6 +273,8 @@ class ExecutionEngine:
         self.maker_offset_pct = Decimal(str(maker_offset_pct))
         self.emergency_cancel_workers = emergency_cancel_workers
         self.shadow_read_only = bool(shadow_read_only)
+        self.trade_efficiency_governor = trade_efficiency_governor or TradeEfficiencyGovernor()
+        self.net_edge_governor = net_edge_governor or NetEdgeGovernor(self.trade_efficiency_governor)
 
         self._signal_ttl_ns = int(max(0.0, signal_ttl_ms) * NS_PER_MS)
         self._recalibration_pause_ns = int(max(0.0, recalibration_pause_sec) * NS_PER_SECOND)
@@ -222,6 +294,8 @@ class ExecutionEngine:
             "rebalance": 0,
         }
         self._last_admission_block_result: Optional[ExecutionSpineResult] = None
+        self._cancel_attempted_order_ids: set[str] = set()
+        self._zombie_sweeper_errors: int = 0
         self._sweeper_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
         self._executor_thread: Optional[threading.Thread] = None
@@ -291,6 +365,24 @@ class ExecutionEngine:
         """Return broker mutation counts proven by the shadow gate."""
         with self._lock:
             return dict(self._shadow_broker_mutation_counts)
+
+    def get_oms_shutdown_accounting(self) -> Dict[str, Any]:
+        """Return execution/router OMS accounting for shutdown diagnostics."""
+        router_accounting: Dict[str, Any] = {}
+        getter = getattr(self.order_router, "get_oms_shutdown_accounting", None)
+        if callable(getter):
+            router_accounting = getter()
+        with self._lock:
+            pending_count = len(self._state.pending_orders)
+            pending_ids = tuple(self._state.pending_orders.keys())
+            zombie_sweeper_errors = int(self._zombie_sweeper_errors)
+            cancel_attempted_count = len(self._cancel_attempted_order_ids)
+        result = dict(router_accounting)
+        result["engine_pending_orders"] = pending_count
+        result["engine_pending_order_ids"] = pending_ids
+        result["zombie_sweeper_errors"] = zombie_sweeper_errors
+        result["zombie_cancel_attempted_count"] = cancel_attempted_count
+        return result
 
     def get_last_admission_block_result(self) -> Optional[ExecutionSpineResult]:
         """Return the last pre-router signal admission block, if any."""
@@ -413,7 +505,12 @@ class ExecutionEngine:
                 block_evidence=data_health_evidence,
             )
 
-        if not self._is_signal_economically_admissible(signal):
+        net_edge_evaluation = self.evaluate_signal_net_edge(
+            signal,
+            current_ns=current_ns,
+            current_price=current_price,
+        )
+        if net_edge_evaluation.get("admissible") is not True:
             return self._record_admission_block(
                 signal=signal,
                 decision_uuid=resolved_decision_uuid,
@@ -421,6 +518,22 @@ class ExecutionEngine:
                 message="Execution economic admissibility gate blocked signal admission.",
                 decision_artifact=decision_artifact,
                 guardrail_verdict=guardrail_verdict,
+                block_evidence=net_edge_evaluation,
+            )
+
+        guardrail_signal_mismatch = self._pre_trade_guardrail_signal_mismatch_evidence(
+            signal,
+            guardrail_verdict,
+        )
+        if guardrail_signal_mismatch is not None:
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code="PRE_TRADE_GUARDRAIL_SIGNAL_MISMATCH",
+                message="Pre-trade guardrail does not authorize this signal symbol/side.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+                block_evidence=guardrail_signal_mismatch,
             )
 
         if guardrail_verdict is not None and guardrail_verdict.get("route_permitted") is not True:
@@ -1097,18 +1210,79 @@ class ExecutionEngine:
             candidate_lifecycle=candidate_lifecycle or None,
         )
 
+    def evaluate_signal_net_edge(
+        self,
+        signal: StrategySignal,
+        *,
+        current_ns: Optional[int] = None,
+        current_price: Optional[Decimal] = None,
+    ) -> Dict[str, Any]:
+        """
+        Active NetEdge admission precheck.
+
+        This is a modeled economic gate, not a broker fact source. Runtime may
+        supply richer economics in signal.metadata["net_edge_context"]; missing
+        expected edge remains fail-closed.
+        """
+        current_time_ns = int(current_ns or now_ns())
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        try:
+            candidate, model_inputs = self._build_net_edge_candidate_context(
+                signal,
+                current_ns=current_time_ns,
+                current_price=current_price,
+            )
+        except ValueError as exc:
+            result = {
+                "status": "BLOCK",
+                "admissible": False,
+                "decision": EconomicDecision.DENY.value,
+                "reason_code": "NET_EDGE_MISSING_TRUTH",
+                "message": str(exc),
+                "source": "NetEdgeGovernor",
+                "cost_model_source": "active_execution_modeled_costs",
+                "broker_post": False,
+            }
+            if isinstance(metadata, dict):
+                metadata["net_edge_evaluation"] = result
+            return result
+
+        evaluation = self.net_edge_governor.evaluate(
+            current_time_ns,
+            candidate,
+            kill_switch_active=False,
+        )
+        result = self._net_edge_evaluation_to_dict(evaluation)
+        result["admissible"] = evaluation.decision in {
+            EconomicDecision.ALLOW,
+            EconomicDecision.ALLOW_REDUCED,
+            EconomicDecision.HEDGE_ONLY,
+            EconomicDecision.REDUCE_ONLY,
+        }
+        result["status"] = "PASS" if result["admissible"] else "BLOCK"
+        result["source"] = "NetEdgeGovernor"
+        result["model_inputs"] = model_inputs
+        result["broker_post"] = False
+        if isinstance(metadata, dict):
+            metadata["net_edge_context"] = model_inputs
+            metadata["net_edge_evaluation"] = result
+            metadata["economics_context"] = {
+                "verified": True,
+                "authority": "NetEdgeGovernor",
+                "decision": result.get("decision"),
+                "reason_code": result.get("reason_code"),
+                "net_adversarial_edge": result.get("net_adversarial_edge"),
+                "model_inputs": model_inputs,
+            }
+        return result
+
     def _is_signal_economically_admissible(self, signal: StrategySignal) -> bool:
         """
         Canonical execution-side economic admissibility boundary.
 
-        Behavior is intentionally preserved:
-        - expected net profit formula remains _calculate_signal_net_profit()
-        - admissibility floor remains exactly 0.005
-
-        NetEdgeGovernor remains dormant/non-authoritative in this bundle.
+        NetEdgeGovernor is the active economic authority for signal admission.
         """
-        expected_net_profit = self._calculate_signal_net_profit(signal)
-        return expected_net_profit >= ECONOMIC_NET_PROFIT_FLOOR
+        return self.evaluate_signal_net_edge(signal).get("admissible") is True
 
     def _calculate_signal_net_profit(self, signal: StrategySignal) -> Decimal:
         expected_move = Decimal("0.02")
@@ -1117,6 +1291,148 @@ class ExecutionEngine:
         gross_ev = expected_move * Decimal(str(signal.confidence))
         total_costs = Decimal("0.0036")
         return gross_ev - total_costs
+
+    def _build_net_edge_candidate_context(
+        self,
+        signal: StrategySignal,
+        *,
+        current_ns: int,
+        current_price: Optional[Decimal] = None,
+    ) -> Tuple[CandidateContext, Dict[str, Any]]:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        supplied = metadata.get("net_edge_context")
+        supplied = dict(supplied) if isinstance(supplied, dict) else {}
+
+        confidence = _decimal_from_any(
+            supplied.get("estimate_confidence", getattr(signal, "confidence", None)),
+            field_name="estimate_confidence",
+        )
+        expected_move = _expected_move_fraction(metadata, supplied)
+        if expected_move is None:
+            raise ValueError("expected_move or expected_move_bps is required for NetEdge")
+        gross_edge = _decimal_from_any(
+            supplied.get("gross_edge", expected_move * confidence),
+            field_name="gross_edge",
+        )
+        if gross_edge <= Decimal("0"):
+            raise ValueError("gross_edge must be positive for NetEdge")
+
+        signal_price = getattr(signal, "price", None) or current_price
+        price = _decimal_from_any(signal_price, field_name="price")
+        quantity = _decimal_from_any(getattr(signal, "quantity", None), field_name="quantity")
+        if price <= Decimal("0") or quantity <= Decimal("0"):
+            raise ValueError("positive signal price and quantity are required for NetEdge")
+
+        side = str(getattr(signal, "side", "") or "").lower()
+        candidate_type = CandidateType.FRESH_ENTRY
+        if side == "sell":
+            candidate_type = CandidateType.CLOSE if metadata.get("requires_existing_position") or metadata.get("protective_only") else CandidateType.FRESH_ENTRY
+
+        valid_until_ns = int(
+            supplied.get("valid_until_ns")
+            or metadata.get("valid_until_ns")
+            or (current_ns + max(self._signal_ttl_ns, NS_PER_SECOND))
+        )
+        if valid_until_ns < current_ns:
+            raise ValueError("NetEdge valid_until_ns is stale")
+
+        spread_bps = _decimal_or_default(
+            supplied.get("spread_bps", metadata.get("spread_bps")),
+            _DEFAULT_MODELED_SPREAD_BPS,
+        )
+        fee_bps = _decimal_or_default(
+            supplied.get("fee_bps", metadata.get("fee_bps")),
+            _DEFAULT_MODELED_FEE_BPS,
+        )
+        slippage_bps = _decimal_or_default(
+            supplied.get("slippage_bps", metadata.get("slippage_bps")),
+            _DEFAULT_MODELED_SLIPPAGE_BPS,
+        )
+        latency_drag_bps = _decimal_or_default(
+            supplied.get("latency_drag_bps", metadata.get("latency_drag_bps")),
+            _DEFAULT_MODELED_LATENCY_DRAG_BPS,
+        )
+        partial_fill_drag_bps = _decimal_or_default(
+            supplied.get("partial_fill_drag_bps", metadata.get("partial_fill_drag_bps")),
+            _DEFAULT_MODELED_PARTIAL_FILL_BPS,
+        )
+        exit_execution_cost_bps = _decimal_or_default(
+            supplied.get("exit_execution_cost_bps", metadata.get("exit_execution_cost_bps")),
+            _DEFAULT_MODELED_EXIT_COST_BPS,
+        )
+
+        costs = ExecutionEconomics(
+            fee_cost=_bps_to_fraction(fee_bps),
+            spread_cost=_bps_to_fraction(spread_bps),
+            slippage_cost=_bps_to_fraction(slippage_bps),
+            latency_drag=_bps_to_fraction(latency_drag_bps),
+            partial_fill_drag=_bps_to_fraction(partial_fill_drag_bps),
+            exit_execution_cost=_bps_to_fraction(exit_execution_cost_bps),
+        )
+        burdens = AdversarialBurdens(
+            borrow_burden=_bps_to_fraction(_decimal_or_default(supplied.get("borrow_bps"), Decimal("0"))),
+            funding_burden=_bps_to_fraction(_decimal_or_default(supplied.get("funding_bps"), Decimal("0"))),
+            carry_burden=_bps_to_fraction(_decimal_or_default(supplied.get("carry_bps"), Decimal("0"))),
+            capital_burden=_bps_to_fraction(_decimal_or_default(supplied.get("capital_bps"), Decimal("0"))),
+            margin_burden=_bps_to_fraction(_decimal_or_default(supplied.get("margin_bps"), Decimal("0"))),
+            regime_burden=_bps_to_fraction(_decimal_or_default(supplied.get("regime_bps"), Decimal("0"))),
+            adverse_exit_allowance=_bps_to_fraction(_decimal_or_default(supplied.get("adverse_exit_bps"), Decimal("0"))),
+        )
+        sleeve_id = str(
+            supplied.get("sleeve_id")
+            or metadata.get("sleeve")
+            or getattr(signal, "strategy", None)
+            or "unknown"
+        )
+        context = CandidateContext(
+            symbol=str(getattr(signal, "symbol", "") or ""),
+            sleeve_id=sleeve_id,
+            candidate_type=candidate_type,
+            gross_edge=gross_edge,
+            gross_edge_source=str(supplied.get("gross_edge_source") or "signal_expected_move_x_confidence"),
+            estimate_confidence=confidence,
+            timestamp_ns=current_ns,
+            valid_until_ns=valid_until_ns,
+            costs=costs,
+            burdens=burdens,
+        )
+        model_inputs = {
+            "symbol": context.symbol,
+            "sleeve_id": context.sleeve_id,
+            "candidate_type": context.candidate_type.value,
+            "expected_move": str(expected_move),
+            "gross_edge": str(gross_edge),
+            "estimate_confidence": str(confidence),
+            "fee_bps": str(fee_bps),
+            "spread_bps": str(spread_bps),
+            "slippage_bps": str(slippage_bps),
+            "latency_drag_bps": str(latency_drag_bps),
+            "partial_fill_drag_bps": str(partial_fill_drag_bps),
+            "exit_execution_cost_bps": str(exit_execution_cost_bps),
+            "valid_until_ns": valid_until_ns,
+            "cost_model_source": "active_execution_modeled_costs",
+            "default_total_cost_bps_preserves_legacy_36bps_floor": True,
+        }
+        return context, model_inputs
+
+    def _net_edge_evaluation_to_dict(self, evaluation: Any) -> Dict[str, Any]:
+        return {
+            "timestamp_ns": getattr(evaluation, "timestamp_ns", None),
+            "symbol": getattr(evaluation, "symbol", None),
+            "sleeve_id": getattr(evaluation, "sleeve_id", None),
+            "candidate_type": getattr(getattr(evaluation, "candidate_type", None), "value", getattr(evaluation, "candidate_type", None)),
+            "gross_edge_source": getattr(evaluation, "gross_edge_source", None),
+            "gross_edge": str(getattr(evaluation, "gross_edge", "")),
+            "total_modeled_cost": str(getattr(evaluation, "total_modeled_cost", "")),
+            "total_modeled_burden": str(getattr(evaluation, "total_modeled_burden", "")),
+            "net_adversarial_edge": str(getattr(evaluation, "net_adversarial_edge", "")),
+            "estimate_confidence": str(getattr(evaluation, "estimate_confidence", "")),
+            "decision": getattr(getattr(evaluation, "decision", None), "value", getattr(evaluation, "decision", None)),
+            "sizing_multiplier": str(getattr(evaluation, "sizing_multiplier", "")),
+            "sleeve_efficiency_state": getattr(getattr(evaluation, "sleeve_efficiency_state", None), "value", getattr(evaluation, "sleeve_efficiency_state", None)),
+            "reason_code": getattr(evaluation, "reason_code", None),
+            "reevaluation_conditions": tuple(getattr(evaluation, "reevaluation_conditions", ()) or ()),
+        }
 
     def _decision_artifact_summary(self, decision_record: DecisionRecord) -> Dict[str, Any]:
         return {
@@ -1156,6 +1472,41 @@ class ExecutionEngine:
         if isinstance(verdict, dict):
             return verdict
         return None
+
+    def _pre_trade_guardrail_signal_mismatch_evidence(
+        self,
+        signal: StrategySignal,
+        guardrail_verdict: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(guardrail_verdict, dict):
+            return None
+
+        def _normalized(value: Any) -> str:
+            raw = getattr(value, "value", value)
+            return str(raw or "").strip().lower()
+
+        signal_symbol = _normalized(getattr(signal, "symbol", None))
+        signal_side = _normalized(getattr(signal, "side", None))
+        guardrail_symbol = _normalized(guardrail_verdict.get("symbol"))
+        guardrail_side = _normalized(guardrail_verdict.get("side"))
+
+        mismatch_reasons: List[str] = []
+        if guardrail_symbol and signal_symbol and guardrail_symbol != signal_symbol:
+            mismatch_reasons.append("PRE_TRADE_GUARDRAIL_SYMBOL_MISMATCH")
+        if guardrail_side and signal_side and guardrail_side != signal_side:
+            mismatch_reasons.append("PRE_TRADE_GUARDRAIL_SIDE_MISMATCH")
+        if not mismatch_reasons:
+            return None
+
+        return {
+            "reason_codes": tuple(mismatch_reasons),
+            "signal_symbol": getattr(signal, "symbol", None),
+            "guardrail_symbol": guardrail_verdict.get("symbol"),
+            "signal_side": getattr(signal, "side", None),
+            "guardrail_side": guardrail_verdict.get("side"),
+            "guardrail_route_permitted": guardrail_verdict.get("route_permitted"),
+            "blocked_before_order_router": True,
+        }
 
     def _pop_matching_queued_signal(
         self,
@@ -1234,6 +1585,24 @@ class ExecutionEngine:
                 message="External Alpaca PAPER route requires a pre-trade guardrail verdict before OrderRouter.",
                 decision_artifact=decision_artifact,
                 pre_trade_guardrail_verdict=None,
+                candidate_lifecycle=candidate_lifecycle,
+            )
+        guardrail_signal_mismatch = self._pre_trade_guardrail_signal_mismatch_evidence(
+            signal,
+            guardrail_verdict,
+        )
+        if guardrail_signal_mismatch is not None:
+            return ExecutionSpineResult(
+                decision_uuid=queued.decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="blocked",
+                route="execution_engine",
+                reason_code="PRE_TRADE_GUARDRAIL_SIGNAL_MISMATCH",
+                message="Pre-trade guardrail does not authorize this signal symbol/side.",
+                decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
+                block_evidence=guardrail_signal_mismatch,
                 candidate_lifecycle=candidate_lifecycle,
             )
         current_price = self.order_router.get_mid_price(signal.symbol)
@@ -1337,6 +1706,11 @@ class ExecutionEngine:
             "edge_attribution",
             "candidate_lifecycle",
             "opportunity_scorecard",
+            "decision_frame",
+            "active_threshold_profile",
+            "frame_id",
+            "frame_output",
+            "frame_status",
             "market_truth_snapshot",
             "candidate_market_snapshot",
             "requires_canonical_market_snapshot",
@@ -1516,6 +1890,16 @@ class ExecutionEngine:
 
     def _cancel_pending_order_with_pcv(self, order_id: str) -> bool:
         """Cancel a pending order with PCV. Normal operations only."""
+        if order_id in self._cancel_attempted_order_ids:
+            logger.info(
+                "[OMS_DIAG] CANCEL_SKIPPED fields=%s",
+                {
+                    "client_order_id": order_id,
+                    "reason_code": OmsReasonCode.CANCEL_ALREADY_ATTEMPTED.value,
+                    "broker_command_performed": False,
+                },
+            )
+            return False
         if self.shadow_read_only:
             logger.info(
                 "[EXEC_DIAG] SHADOW_READ_ONLY_BLOCKED_CANCEL: order_id=%s",
@@ -1523,6 +1907,7 @@ class ExecutionEngine:
             )
             return False
         try:
+            self._cancel_attempted_order_ids.add(order_id)
             cancel_success = self.order_router.cancel_order(order_id)
             if not cancel_success:
                 return False
@@ -1661,12 +2046,35 @@ class ExecutionEngine:
                 time.sleep(self.zombie_sweep_interval_sec)
                 self._sweep_zombie_orders()
             except Exception as e:
-                logger.error("Zombie sweeper error: %s", e)
+                self._zombie_sweeper_errors += 1
+                logger.error(
+                    "Zombie sweeper error: %s reason_code=%s",
+                    e,
+                    OmsReasonCode.ZOMBIE_SWEEP_FAILED.value,
+                )
+
+    def _normalize_timestamp_ns(self, value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * NS_PER_SECOND)
+        try:
+            candidate = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if candidate <= 0:
+            return 0
+        if candidate < 10_000_000_000:
+            return candidate * NS_PER_SECOND
+        if candidate < 10_000_000_000_000:
+            return candidate * NS_PER_MS
+        return candidate
 
     def _extract_order_timestamp_ns(self, order: OrderRequest) -> int:
         """Extract best available authoritative timestamp from pending order."""
-        exchange_ts_ns = int(getattr(order, "exchange_ts_ns", 0) or 0)
-        receive_ts_ns = int(getattr(order, "receive_ts_ns", 0) or 0)
+        exchange_ts_ns = self._normalize_timestamp_ns(getattr(order, "exchange_ts_ns", 0))
+        receive_ts_ns = self._normalize_timestamp_ns(getattr(order, "receive_ts_ns", 0))
         if exchange_ts_ns > 0:
             return exchange_ts_ns
         if receive_ts_ns > 0:

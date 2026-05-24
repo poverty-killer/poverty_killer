@@ -194,11 +194,11 @@ def test_invalid_order_shape_and_unsupported_methods_fail_closed():
     with pytest.raises(BrokerGatewayError) as patch_exc:
         adapter.request_unsupported("PATCH", "/v2/orders/order-1")
     with pytest.raises(BrokerGatewayError) as delete_exc:
-        adapter.request_unsupported("DELETE", "/v2/orders/order-1")
+        adapter.request_unsupported("DELETE", "/v2/account")
 
     assert market_exc.value.reason_code == "invalid_order_request"
     assert patch_exc.value.reason_code == "unsupported_method"
-    assert delete_exc.value.reason_code == "unsupported_method"
+    assert delete_exc.value.reason_code == "unsupported_delete_path"
 
 
 def test_broker_rejection_normalizes_without_fake_fill():

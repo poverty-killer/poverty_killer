@@ -121,3 +121,6 @@ class BrokerGatewayAdapter(Protocol):
 
     def submit_order(self, order: BrokerOrderSubmitRequest) -> BrokerGatewayResponse:
         ...
+
+    def cancel_order(self, order_id: str) -> BrokerGatewayResponse:
+        ...

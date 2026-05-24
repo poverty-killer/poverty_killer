@@ -43,7 +43,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 from dotenv import load_dotenv
 
@@ -400,9 +400,19 @@ class SovereignHeartbeat:
     with full trade details for per-symbol whale detection.
     """
 
-    def __init__(self, config: Config, attack_mode: bool = False):
+    def __init__(
+        self,
+        config: Config,
+        attack_mode: bool = False,
+        bounded_duration_seconds: Optional[int] = None,
+    ):
         self.config = config
         self.attack_mode = attack_mode
+        self.bounded_duration_seconds = (
+            int(bounded_duration_seconds)
+            if bounded_duration_seconds is not None and int(bounded_duration_seconds) > 0
+            else None
+        )
 
         # BUNDLE F1: Initialize telemetry store
         self.telemetry_store = TelemetryEventStore(db_path="data/telemetry.db")
@@ -860,6 +870,7 @@ class SovereignHeartbeat:
         self.execution_engine.start()
         self.main_loop.start()
         self._start_background_threads()
+        self._start_bounded_duration_timer()
 
         logger.info(
             "Runtime started: main.py owns lifecycle/feed shell; MainLoop owns live runtime body"
@@ -893,12 +904,22 @@ class SovereignHeartbeat:
             logger.exception("Error stopping execution engine: %s", exc)
 
         try:
+            self._emit_oms_shutdown_accounting()
+        except Exception as exc:
+            logger.exception("Error emitting OMS shutdown accounting: %s", exc)
+
+        try:
             self.state_store.close()
         except Exception as exc:
             logger.exception("Error closing state store: %s", exc)
 
         self._join_background_threads()
         logger.info("Sovereign heartbeat stopped")
+
+    def _emit_oms_shutdown_accounting(self) -> None:
+        getter = getattr(self.execution_engine, "get_oms_shutdown_accounting", None)
+        accounting = getter() if callable(getter) else {}
+        logger.info("[OMS_DIAG] SHUTDOWN_ACCOUNTING fields=%s", accounting)
 
     def _wait_until_stopped(self) -> None:
         """
@@ -927,6 +948,42 @@ class SovereignHeartbeat:
 
         self._start_whale_websocket()
         self._start_polling_client()
+
+    def _start_bounded_duration_timer(self) -> None:
+        if self.bounded_duration_seconds is None:
+            return
+
+        duration = int(self.bounded_duration_seconds)
+
+        def bounded_timer() -> None:
+            logger.info(
+                "[OMS_DIAG] BOUNDED_RUNTIME_TIMER_STARTED fields=%s",
+                {
+                    "duration_seconds": duration,
+                    "shutdown_mode": "graceful_self_stop",
+                    "broker_post": False,
+                },
+            )
+            if self._stop_event.wait(timeout=float(duration)):
+                return
+            logger.info(
+                "[OMS_DIAG] BOUNDED_RUNTIME_DURATION_ELAPSED fields=%s",
+                {
+                    "duration_seconds": duration,
+                    "shutdown_mode": "graceful_self_stop",
+                    "broker_post": False,
+                },
+            )
+            self._running = False
+            self._stop_event.set()
+
+        timer_thread = threading.Thread(
+            target=bounded_timer,
+            name="pk-bounded-duration",
+            daemon=True,
+        )
+        timer_thread.start()
+        self._threads.append(timer_thread)
 
     def _join_background_threads(self) -> None:
         current = threading.current_thread()
@@ -1392,7 +1449,16 @@ def parse_arguments():
         default=".env",
         help="Path to configuration file",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--duration-seconds",
+        type=int,
+        default=None,
+        help="Optional bounded runtime duration before graceful self-shutdown.",
+    )
+    args = parser.parse_args()
+    if args.duration_seconds is not None and not (1 <= args.duration_seconds <= 86400):
+        parser.error("--duration-seconds must be between 1 and 86400")
+    return args
 
 
 def main() -> int:
@@ -1425,7 +1491,11 @@ def main() -> int:
         logger.info("Shadow read-only mode forced via command line")
     logger.info("=" * 60)
 
-    heartbeat = SovereignHeartbeat(config, attack_mode=args.attack)
+    heartbeat = SovereignHeartbeat(
+        config,
+        attack_mode=args.attack,
+        bounded_duration_seconds=args.duration_seconds,
+    )
 
     try:
         heartbeat.start()

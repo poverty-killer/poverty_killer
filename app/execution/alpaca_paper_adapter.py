@@ -273,7 +273,7 @@ class AlpacaPaperBrokerAdapter:
     portal_id = "alpaca_paper"
     environment = BrokerEnvironment.PAPER.value
     supported_asset_classes = frozenset({"equity", "us_equity", "etf", "crypto"})
-    supported_methods = frozenset({"GET", "POST"})
+    supported_methods = frozenset({"GET", "POST", "DELETE"})
 
     _allowed_get_paths = frozenset({"/v2/account", "/v2/positions", "/v2/orders", "/v2/clock"})
     _allowed_get_prefixes = ("/v2/orders/", "/v2/assets/")
@@ -346,6 +346,12 @@ class AlpacaPaperBrokerAdapter:
     def submit_order(self, order: BrokerOrderSubmitRequest) -> BrokerGatewayResponse:
         payload = self._payload_for_order(order)
         return self._request("POST", "/v2/orders", payload=payload)
+
+    def cancel_order(self, order_id: str) -> BrokerGatewayResponse:
+        safe_order_id = str(order_id or "").strip()
+        if not safe_order_id:
+            raise BrokerGatewayError("order_id_missing")
+        return self._request("DELETE", f"/v2/orders/{urllib.parse.quote(safe_order_id, safe='')}")
 
     def request_unsupported(self, method: str, path: str) -> BrokerGatewayResponse:
         return self._request(method, path)
@@ -423,6 +429,14 @@ class AlpacaPaperBrokerAdapter:
             if payload is None:
                 raise BrokerGatewayError("post_payload_missing")
             return
+        if method == "DELETE":
+            if payload is not None:
+                raise BrokerGatewayError("delete_payload_forbidden")
+            if not path.startswith("/v2/orders/"):
+                raise BrokerGatewayError("unsupported_delete_path")
+            if path.rstrip("/") == "/v2/orders":
+                raise BrokerGatewayError("delete_order_id_required")
+            return
 
     def _payload_for_order(self, order: BrokerOrderSubmitRequest) -> dict[str, Any]:
         reasons: list[str] = []
@@ -458,7 +472,11 @@ class AlpacaPaperBrokerAdapter:
     ) -> BrokerGatewayResponse:
         ok = 200 <= status_code < 300
         raw_status = payload.get("status") if isinstance(payload, dict) else None
-        normalized_status = _normalize_status(raw_status, ok=ok)
+        normalized_status = (
+            NormalizedBrokerStatus.CANCELED.value
+            if method == "DELETE" and ok
+            else _normalize_status(raw_status, ok=ok)
+        )
         reason_code = None
         message = None
         if not ok:
@@ -472,9 +490,13 @@ class AlpacaPaperBrokerAdapter:
             request_method=method,
             endpoint_path=path,
             ok=ok,
-            mutation_occurred=method == "POST" and ok,
+            mutation_occurred=method in {"POST", "DELETE"} and ok,
             live_blocked=True,
-            broker_order_id=payload.get("id") if isinstance(payload, dict) else None,
+            broker_order_id=(
+                payload.get("id")
+                if isinstance(payload, dict) and payload.get("id")
+                else (path.rsplit("/", 1)[-1] if method == "DELETE" and ok else None)
+            ),
             client_order_id=payload.get("client_order_id") if isinstance(payload, dict) else None,
             raw_broker_status=str(raw_status) if raw_status is not None else None,
             normalized_status=normalized_status,

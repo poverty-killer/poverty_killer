@@ -11,6 +11,7 @@ param(
     [string]$MarketDataProviders = "coinbase_public,kraken_public",
     [string]$CryptoMarketDataProviders = "coinbase_public,kraken_public",
     [string]$Watchlist = $env:POVERTY_KILLER_RUNTIME_WATCHLIST,
+    [switch]$PaperExplorationAlpha,
     [string]$PythonPath = "venv\Scripts\python.exe",
     [string]$LogDirectory = "logs\paper_runs"
 )
@@ -104,6 +105,10 @@ $env:POVERTY_KILLER_CRYPTO_MARKET_DATA_PROVIDERS = $CryptoMarketDataProviders
 if (-not [string]::IsNullOrWhiteSpace($Watchlist)) {
     $env:POVERTY_KILLER_RUNTIME_WATCHLIST = $Watchlist
 }
+if ($PaperExplorationAlpha) {
+    $env:POVERTY_KILLER_PAPER_EXPLORATION_ALPHA = "1"
+    $env:PAPER_EXPLORATION_ALPHA = "1"
+}
 
 Require-NonEmptyEnv "POVERTY_KILLER_EXECUTION_BROKER"
 Require-NonEmptyEnv "POVERTY_KILLER_MARKET_DATA_PROVIDERS"
@@ -117,6 +122,7 @@ import sys
 sys.path.insert(0, os.getcwd())
 
 from app.config import Config
+from app.core.decision_frame import resolve_active_threshold_profile
 from app.data.feed_provider_router import select_configured_market_data_provider
 from app.execution.alpaca_paper_adapter import collect_alpaca_paper_read_only_preflight_truth
 import main
@@ -127,6 +133,7 @@ account_status = account.get("status") if isinstance(account, dict) else None
 
 config = Config.from_env()
 config.broker_mode = "paper"
+active_threshold_profile = resolve_active_threshold_profile(config)
 broker, primary_exchange, adapter, adapter_id = main.resolve_execution_broker_gateway(config)
 universe = main.resolve_runtime_universe(config)
 providers = main.get_configured_market_data_providers(config, "crypto")
@@ -160,6 +167,8 @@ summary = {
     "provider_reason": selection.reason,
     "selected_provider_id": selection.selected_provider.provider_id if selection.selected_provider else None,
     "fallback_path": list(selection.fallback_path),
+    "paper_exploration_alpha_requested": bool(os.environ.get("POVERTY_KILLER_PAPER_EXPLORATION_ALPHA") or os.environ.get("PAPER_EXPLORATION_ALPHA")),
+    "active_threshold_profile": active_threshold_profile,
 }
 
 failures = []
@@ -183,6 +192,10 @@ if not providers:
     failures.append("MISSING_MARKET_DATA_PROVIDER_CONFIG")
 if selection.status != "SELECTED":
     failures.append(selection.reason or "MARKET_DATA_PROVIDER_NOT_SELECTED")
+if summary["paper_exploration_alpha_requested"] and active_threshold_profile.get("profile_name") != "PAPER_EXPLORATION_ALPHA":
+    failures.append("PAPER_EXPLORATION_ALPHA_REQUESTED_BUT_PROFILE_DEFAULT")
+if summary["paper_exploration_alpha_requested"] and active_threshold_profile.get("enabled") is not True:
+    failures.append("PAPER_EXPLORATION_ALPHA_REQUESTED_BUT_INACTIVE")
 
 summary["failures"] = failures
 print(json.dumps(summary, indent=2, sort_keys=True))
@@ -224,14 +237,14 @@ $stderrPath = Join-Path $LogDirectory "bounded_paper_$stamp.err.log"
 Write-Host "Starting bounded Alpaca PAPER run for $DurationSeconds seconds..."
 $process = Start-Process `
     -FilePath $PythonPath `
-    -ArgumentList @("main.py", "--paper", "--log-level", "INFO") `
+    -ArgumentList @("main.py", "--paper", "--log-level", "INFO", "--duration-seconds", "$DurationSeconds") `
     -NoNewWindow `
     -PassThru `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath
 
-if (-not $process.WaitForExit($DurationSeconds * 1000)) {
-    Write-Host "Duration elapsed; stopping bounded PAPER process."
+if (-not $process.WaitForExit(($DurationSeconds + 30) * 1000)) {
+    Write-Host "Duration elapsed; bounded PAPER process did not exit gracefully within 30 seconds; stopping process."
     $process.Kill()
     $process.WaitForExit()
 }

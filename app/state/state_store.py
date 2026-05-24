@@ -821,6 +821,28 @@ class StateStore:
             logger.error("Failed to list order ID mappings: %s", e)
             return []
 
+    def count_table_rows(self, table: str) -> int:
+        """Count rows in known state tables for shutdown accounting."""
+        allowed = {
+            "orders",
+            "fills",
+            "order_id_mappings",
+            "reservation_ledger",
+            "reservation_fill_progress",
+            "reservation_release_tombstones",
+        }
+        if table not in allowed:
+            raise ValueError(f"unsupported_state_table:{table}")
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                row = cursor.fetchone()
+                return int(row[0]) if row is not None else 0
+        except Exception as e:
+            logger.error("Failed to count rows for %s: %s", table, e)
+            return 0
+
     def mark_order_id_mapping_terminal(
         self,
         client_order_id: str,

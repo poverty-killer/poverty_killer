@@ -41,6 +41,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from decimal import Decimal as _Decimal
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -52,6 +53,12 @@ from app.execution.broker_gateway import (
     BrokerGatewayResponse,
     BrokerOrderSubmitRequest as _GatewayOrderSubmitRequest,
     NormalizedBrokerStatus as _GatewayStatus,
+)
+from app.execution.oms_lifecycle import (
+    OmsOrderState,
+    OmsReasonCode,
+    canonical_state_from_broker_status,
+    is_terminal_oms_state,
 )
 from app.execution.paper_broker import PaperBroker as _SovereignPaperBroker, PaperBrokerConfig as _PaperBrokerConfig
 from app.execution.slippage_model import SlippageModel as _SlippageModel
@@ -185,6 +192,23 @@ class OrderRouter:
         )
         self._validate_execution_broker_selection()
         self._gateway_responses_by_client_order_id: Dict[str, BrokerGatewayResponse] = {}
+        self._gateway_reconciliation_by_client_order_id: Dict[str, Dict[str, Any]] = {}
+        self._cancel_denials_by_order_id: Dict[str, str] = {}
+        self._oms_lifecycle_counts: Dict[str, int] = {
+            "submitted": 0,
+            "acknowledged": 0,
+            "open": 0,
+            "partially_filled": 0,
+            "filled": 0,
+            "cancel_requested": 0,
+            "canceled": 0,
+            "rejected": 0,
+            "expired": 0,
+            "reconciliation_conflicts": 0,
+            "cancel_authorized": 0,
+            "cancel_denied": 0,
+        }
+        self._broker_boundary_events: List[Dict[str, Any]] = []
         self._reservation_lifecycle_ack_open_results: List[Dict[str, Any]] = []
         self._reservation_lifecycle_partial_fill_results: List[Dict[str, Any]] = []
         self._reservation_lifecycle_full_fill_results: List[Dict[str, Any]] = []
@@ -268,6 +292,8 @@ class OrderRouter:
 
         self._session = requests.Session()
         self._lock = threading.Lock()
+        self._hydrate_durable_order_mappings()
+        self._reconcile_hydrated_gateway_order_mappings()
 
     def _validate_execution_broker_selection(self) -> None:
         """Fail closed when an external paper broker request cannot route to a gateway."""
@@ -275,18 +301,23 @@ class OrderRouter:
             raise ValueError("external_execution_broker_requires_paper_mode")
         if not self._external_paper_broker_requested:
             return
-        if self._broker_gateway_adapter is None:
-            raise ValueError("external_paper_broker_requires_broker_gateway_adapter")
+        identity_error = self._broker_gateway_identity_error()
+        if identity_error is not None:
+            raise ValueError(identity_error)
 
+    def _broker_gateway_identity_error(self) -> Optional[str]:
+        if self._broker_gateway_adapter is None:
+            return "external_paper_broker_requires_broker_gateway_adapter"
         identity = getattr(self._broker_gateway_adapter, "identity", None)
         if identity is None:
-            raise ValueError("broker_gateway_adapter_identity_missing")
+            return "broker_gateway_adapter_identity_missing"
         if getattr(identity, "environment", None) != "paper":
-            raise ValueError("broker_gateway_adapter_environment_not_paper")
+            return "broker_gateway_adapter_environment_not_paper"
         if getattr(identity, "live_blocked", None) is not True:
-            raise ValueError("broker_gateway_adapter_live_endpoint_not_blocked")
+            return "broker_gateway_adapter_live_endpoint_not_blocked"
         if getattr(identity, "venue_id", None) != self.primary_exchange:
-            raise ValueError("broker_gateway_adapter_primary_exchange_mismatch")
+            return "broker_gateway_adapter_primary_exchange_mismatch"
+        return None
 
     def _record_fill_telemetry(
         self,
@@ -1008,6 +1039,151 @@ class OrderRouter:
             logger.error("Invalid stored order ID mapping: %s", exc)
             return None
 
+    def _hydrate_durable_order_mappings(self) -> None:
+        """Load non-terminal durable order mappings for broker-truth reconciliation."""
+        if self._state_store is None:
+            return
+        broker = self._gateway_order_mapping_broker() if self._external_paper_broker_requested else self._mapping_broker()
+        try:
+            records = self._state_store.list_order_id_mappings(
+                broker=broker,
+                include_terminal=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[OMS_DIAG] DURABLE_MAPPING_HYDRATION_FAILED fields=%s",
+                {"broker": broker, "reason_code": str(exc), "broker_post": False},
+            )
+            return
+
+        hydrated = 0
+        for record in records:
+            mapping = self._mapping_from_record(record)
+            if mapping is None:
+                continue
+            self._active_order_id_mappings[(mapping.broker, mapping.client_order_id)] = mapping
+            hydrated += 1
+        if hydrated:
+            logger.info(
+                "[OMS_DIAG] DURABLE_MAPPING_HYDRATED fields=%s",
+                {
+                    "broker": broker,
+                    "hydrated_mappings": hydrated,
+                    "broker_post": False,
+                },
+            )
+
+    def _reconcile_hydrated_gateway_order_mappings(self) -> None:
+        """Read-only broker reconciliation for persisted external PAPER mappings."""
+        if not self._external_paper_broker_requested or self._broker_gateway_adapter is None:
+            return
+        broker = self._gateway_order_mapping_broker()
+        mappings = [
+            mapping
+            for (mapping_broker, _client_order_id), mapping in list(self._active_order_id_mappings.items())
+            if mapping_broker == broker and not mapping.is_terminal
+        ]
+        for mapping in mappings:
+            self._reconcile_gateway_mapping(mapping, source_event="startup_hydrated_mapping")
+
+    def _reconcile_gateway_mapping(
+        self,
+        mapping: ActiveOrderIdMapping,
+        *,
+        source_event: str,
+    ) -> Dict[str, Any]:
+        adapter = self._broker_gateway_adapter
+        evidence: Dict[str, Any] = {
+            "client_order_id": mapping.client_order_id,
+            "broker_order_id": mapping.broker_order_id or mapping.venue_order_id,
+            "status": OmsOrderState.RECONCILIATION_CONFLICT.value,
+            "reason_codes": [],
+            "source_event": source_event,
+            "account_status": "not_checked",
+            "open_orders_count": None,
+            "positions_count": None,
+            "order_id_mapping_present": True,
+            "broker_truth_wins_after_ack": True,
+            "local_state_authority": "supporting_evidence_only",
+            "mutation_performed": False,
+        }
+        if adapter is None or not mapping.command_order_id:
+            evidence["reason_codes"].append(OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+            self._gateway_reconciliation_by_client_order_id[mapping.client_order_id] = evidence
+            self._record_oms_state(OmsOrderState.RECONCILIATION_CONFLICT.value)
+            return evidence
+
+        try:
+            status_response = adapter.get_order_status(mapping.command_order_id)
+            open_orders_response = adapter.get_open_orders()
+            positions_response = adapter.get_positions()
+            account_response = adapter.get_account()
+        except BrokerGatewayError as exc:
+            evidence["reason_codes"].append(exc.reason_code or OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+            self._gateway_reconciliation_by_client_order_id[mapping.client_order_id] = evidence
+            self._record_oms_state(OmsOrderState.RECONCILIATION_CONFLICT.value)
+            logger.info("[OMS_DIAG] GATEWAY_MAPPING_RECONCILIATION fields=%s", evidence)
+            return evidence
+
+        responses = (status_response, open_orders_response, positions_response, account_response)
+        evidence["mutation_performed"] = any(bool(getattr(item, "mutation_occurred", False)) for item in responses)
+        evidence["account_status"] = (
+            str((account_response.payload or {}).get("status"))
+            if isinstance(account_response.payload, dict)
+            else "unknown"
+        )
+        open_orders = open_orders_response.payload if isinstance(open_orders_response.payload, list) else []
+        positions = positions_response.payload if isinstance(positions_response.payload, list) else []
+        evidence["open_orders_count"] = len(open_orders)
+        evidence["positions_count"] = len(positions)
+
+        if any(not item.ok for item in responses):
+            evidence["reason_codes"].append(OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+        if evidence["mutation_performed"]:
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+
+        broker_status = str(getattr(status_response, "normalized_status", "") or "")
+        oms_state = canonical_state_from_broker_status(broker_status)
+        payload = status_response.payload if isinstance(status_response.payload, dict) else {}
+        payload_symbol = payload.get("symbol")
+        if payload_symbol and self._normalize_broker_symbol(payload_symbol) != self._normalize_broker_symbol(mapping.symbol):
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+            oms_state = OmsOrderState.RECONCILIATION_CONFLICT.value
+        if not status_response.ok:
+            oms_state = OmsOrderState.RECONCILIATION_CONFLICT.value
+
+        evidence["status"] = oms_state
+        evidence["broker_normalized_status"] = broker_status
+        evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
+        self._gateway_reconciliation_by_client_order_id[mapping.client_order_id] = evidence
+        self._record_oms_state(oms_state)
+
+        if oms_state == OmsOrderState.RECONCILIATION_CONFLICT.value:
+            self._mark_active_order_mapping_terminal_for_broker(
+                mapping.client_order_id,
+                mapping.broker,
+                status="reconciliation_conflict",
+                terminal_reason=f"{source_event}_conflict",
+            )
+            self._pending_orders.pop(mapping.client_order_id, None)
+        elif is_terminal_oms_state(oms_state):
+            self._mark_active_order_mapping_terminal_for_broker(
+                mapping.client_order_id,
+                mapping.broker,
+                status=oms_state.lower(),
+                terminal_reason=f"{source_event}_terminal",
+            )
+            self._pending_orders.pop(mapping.client_order_id, None)
+        else:
+            mapping.status = oms_state.lower()
+            if self._state_store is not None:
+                mapping.durable = self._state_store.upsert_order_id_mapping(
+                    self._mapping_to_store_record(mapping)
+                )
+
+        logger.info("[OMS_DIAG] GATEWAY_MAPPING_RECONCILIATION fields=%s", evidence)
+        return evidence
+
     def _register_active_order_id_mapping(
         self,
         order: OrderRequest,
@@ -1080,6 +1256,21 @@ class OrderRouter:
         terminal_reason: Optional[str],
     ) -> None:
         broker = self._mapping_broker()
+        self._mark_active_order_mapping_terminal_for_broker(
+            client_order_id,
+            broker,
+            status=status,
+            terminal_reason=terminal_reason,
+        )
+
+    def _mark_active_order_mapping_terminal_for_broker(
+        self,
+        client_order_id: str,
+        broker: str,
+        *,
+        status: str,
+        terminal_reason: Optional[str],
+    ) -> None:
         mapping = self._get_active_order_id_mapping(client_order_id, broker)
         if mapping is None:
             return
@@ -1741,6 +1932,10 @@ class OrderRouter:
             idempotency_key=idempotency_key,
         )
         metadata = self._metadata_with_lifecycle_context(order, lifecycle_context)
+        canonical_state = self._oms_state_for_lifecycle_phase(lifecycle_phase)
+        metadata["canonical_order_state"] = canonical_state
+        metadata["oms_order_state"] = canonical_state
+        self._record_oms_state(canonical_state)
         self._fill_recorder.record_order_lifecycle_event(
             lifecycle_phase=lifecycle_phase,
             client_order_id=order.id,
@@ -2702,7 +2897,7 @@ class OrderRouter:
         """Submit order to exchange or sovereign paper broker."""
         self._record_order_submission_telemetry(order)
         if self.paper_mode:
-            if self._external_paper_broker_requested:
+            if self._order_requests_gateway_route(order):
                 if not self._should_use_external_paper_gateway():
                     logger.error(
                         "External paper broker requested but gateway route is unavailable: execution_broker=%s primary_exchange=%s",
@@ -2850,12 +3045,241 @@ class OrderRouter:
         """Return the normalized external broker-paper response for a routed client order."""
         return self._gateway_responses_by_client_order_id.get(client_order_id)
 
+    def get_gateway_reconciliation(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        """Return read-only post-ack reconciliation evidence for a routed client order."""
+        evidence = self._gateway_reconciliation_by_client_order_id.get(client_order_id)
+        return dict(evidence) if evidence is not None else None
+
+    def get_oms_shutdown_accounting(self) -> Dict[str, Any]:
+        """Return OMS lifecycle accounting without issuing broker mutation."""
+        mapping_rows: List[Dict[str, Any]] = []
+        table_counts: Dict[str, int] = {}
+        if self._state_store is not None:
+            try:
+                mapping_rows = self._state_store.list_order_id_mappings()
+            except Exception:
+                mapping_rows = []
+            for table in (
+                "orders",
+                "fills",
+                "order_id_mappings",
+                "reservation_ledger",
+                "reservation_fill_progress",
+                "reservation_release_tombstones",
+            ):
+                counter = getattr(self._state_store, "count_table_rows", None)
+                if callable(counter):
+                    table_counts[table] = counter(table)
+
+        request_counts = self._broker_gateway_request_counts()
+        latest_reconciliation = (
+            next(reversed(self._gateway_reconciliation_by_client_order_id.values()))
+            if self._gateway_reconciliation_by_client_order_id
+            else {}
+        )
+        return {
+            "submitted_count": int(self._oms_lifecycle_counts.get("submitted", 0)),
+            "acknowledged_count": int(self._oms_lifecycle_counts.get("acknowledged", 0)),
+            "open_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in {"open", "accepted", "acknowledged"}),
+            "filled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "filled"),
+            "canceled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in {"canceled", "cancelled"}),
+            "rejected_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "rejected"),
+            "mappings": len(mapping_rows),
+            "local_orders": int(table_counts.get("orders", 0)),
+            "local_fills": int(table_counts.get("fills", 0)),
+            "local_order_id_mappings": int(table_counts.get("order_id_mappings", len(mapping_rows))),
+            "local_reservation_ledger": int(table_counts.get("reservation_ledger", 0)),
+            "local_reservation_fill_progress": int(table_counts.get("reservation_fill_progress", 0)),
+            "local_reservation_release_tombstones": int(table_counts.get("reservation_release_tombstones", 0)),
+            "last_broker_account_status": latest_reconciliation.get("account_status"),
+            "last_broker_open_orders_count": latest_reconciliation.get("open_orders_count"),
+            "last_broker_positions_count": latest_reconciliation.get("positions_count"),
+            "reconciliation_conflicts": int(self._oms_lifecycle_counts.get("reconciliation_conflicts", 0)),
+            "cancel_authorized_count": int(self._oms_lifecycle_counts.get("cancel_authorized", 0)),
+            "cancel_denied_count": int(self._oms_lifecycle_counts.get("cancel_denied", 0)),
+            "mutation_method_counts": {
+                "GET": int(request_counts.get("GET", 0) or 0),
+                "POST": int(request_counts.get("POST", 0) or 0),
+                "DELETE": int(request_counts.get("DELETE", 0) or 0),
+            },
+            "broker_boundary_events": tuple(dict(event) for event in self._broker_boundary_events[-20:]),
+            "cancel_denials": dict(self._cancel_denials_by_order_id),
+        }
+
+    def _broker_gateway_request_counts(self) -> Dict[str, int]:
+        adapter = self._broker_gateway_adapter
+        counts = getattr(adapter, "request_counts", {}) if adapter is not None else {}
+        return {str(key).upper(): int(value) for key, value in dict(counts).items()}
+
+    def _record_oms_state(self, state: str) -> None:
+        key_by_state = {
+            OmsOrderState.ROUTER_SUBMITTED.value: "submitted",
+            OmsOrderState.BROKER_ACKNOWLEDGED.value: "acknowledged",
+            OmsOrderState.OPEN.value: "open",
+            OmsOrderState.PARTIALLY_FILLED.value: "partially_filled",
+            OmsOrderState.FILLED.value: "filled",
+            OmsOrderState.CANCEL_REQUESTED.value: "cancel_requested",
+            OmsOrderState.CANCELED.value: "canceled",
+            OmsOrderState.REJECTED.value: "rejected",
+            OmsOrderState.EXPIRED.value: "expired",
+            OmsOrderState.RECONCILIATION_CONFLICT.value: "reconciliation_conflicts",
+        }
+        key = key_by_state.get(str(state))
+        if key:
+            self._oms_lifecycle_counts[key] = int(self._oms_lifecycle_counts.get(key, 0)) + 1
+
+    def _oms_state_for_lifecycle_phase(self, lifecycle_phase: str) -> str:
+        return {
+            "order_submitted": OmsOrderState.ROUTER_SUBMITTED.value,
+            "order_acknowledged": OmsOrderState.BROKER_ACKNOWLEDGED.value,
+            "order_partially_filled": OmsOrderState.PARTIALLY_FILLED.value,
+            "order_fully_filled": OmsOrderState.FILLED.value,
+            "cancel_requested": OmsOrderState.CANCEL_REQUESTED.value,
+            "order_canceled": OmsOrderState.CANCELED.value,
+            "order_rejected": OmsOrderState.REJECTED.value,
+            "order_expired": OmsOrderState.EXPIRED.value,
+            "reconciliation_conflict": OmsOrderState.RECONCILIATION_CONFLICT.value,
+        }.get(str(lifecycle_phase), OmsOrderState.INTENT_CREATED.value)
+
+    def _record_broker_boundary_telemetry(
+        self,
+        order: OrderRequest,
+        *,
+        response: Optional[BrokerGatewayResponse],
+        broker_post_attempted: bool,
+        broker_post_authorized: bool,
+        broker_boundary_result: str,
+        reason_code: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        request_counts = self._broker_gateway_request_counts()
+        event = {
+            "client_order_id": order.id,
+            "decision_uuid": order.decision_uuid,
+            "symbol": order.symbol,
+            "side": self._value_as_str(order.side),
+            "broker_post_attempted": bool(broker_post_attempted),
+            "broker_post_authorized": bool(broker_post_authorized),
+            "broker_post_acknowledged": bool(response is not None and response.ok and response.broker_order_id),
+            "broker_order_id": getattr(response, "broker_order_id", None) if response is not None else None,
+            "broker_boundary_result": broker_boundary_result,
+            "reason_code": reason_code or (getattr(response, "reason_code", None) if response is not None else None),
+            "request_method": getattr(response, "request_method", None) if response is not None else None,
+            "endpoint_path": getattr(response, "endpoint_path", None) if response is not None else None,
+            "normalized_status": getattr(response, "normalized_status", None) if response is not None else None,
+            "mutation_occurred": bool(getattr(response, "mutation_occurred", False)) if response is not None else False,
+            "mutation_method_counts": {
+                "GET": int(request_counts.get("GET", 0) or 0),
+                "POST": int(request_counts.get("POST", 0) or 0),
+                "DELETE": int(request_counts.get("DELETE", 0) or 0),
+            },
+        }
+        self._broker_boundary_events.append(event)
+        logger.info("[OMS_DIAG] BROKER_BOUNDARY_RESULT fields=%s", event)
+        return event
+
     def _should_use_external_paper_gateway(self) -> bool:
         return (
             self.paper_mode
-            and self._external_paper_broker_requested
             and self._broker_gateway_adapter is not None
+            and self._broker_gateway_identity_error() is None
         )
+
+    def _order_requests_gateway_route(self, order: OrderRequest) -> bool:
+        if self._external_paper_broker_requested:
+            return True
+        if self._broker_gateway_adapter is None:
+            return False
+        metadata = order.metadata if isinstance(order.metadata, dict) else {}
+        requested_adapter = str(metadata.get("execution_adapter") or "").strip().lower()
+        identity = getattr(self._broker_gateway_adapter, "identity", None)
+        adapter_id = str(getattr(identity, "adapter_id", "") or "").strip().lower()
+        return bool(requested_adapter and adapter_id and requested_adapter == adapter_id)
+
+    def _gateway_order_mapping_broker(self) -> str:
+        identity = getattr(self._broker_gateway_adapter, "identity", None)
+        return str(getattr(identity, "venue_id", "") or self.primary_exchange or "").strip().lower()
+
+    def _normalize_broker_symbol(self, value: Any) -> str:
+        return str(value or "").replace("/", "").upper()
+
+    def _post_ack_gateway_reconciliation(
+        self,
+        order: OrderRequest,
+        response: BrokerGatewayResponse,
+    ) -> Dict[str, Any]:
+        """Collect broker-canonical read-only truth immediately after an ack."""
+        adapter = self._broker_gateway_adapter
+        broker_order_id = str(response.broker_order_id or "").strip()
+        evidence: Dict[str, Any] = {
+            "client_order_id": order.id,
+            "broker_order_id": broker_order_id or None,
+            "status": "UNKNOWN",
+            "reason_codes": [],
+            "account_status": "not_checked",
+            "open_orders_count": None,
+            "positions_count": None,
+            "order_id_mapping_present": False,
+            "broker_truth_wins_after_ack": True,
+            "local_state_authority": "supporting_evidence_only",
+            "mutation_performed": False,
+        }
+        if adapter is None or not broker_order_id:
+            evidence["status"] = OmsOrderState.RECONCILIATION_CONFLICT.value
+            evidence["reason_codes"].append(OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+            self._record_oms_state(OmsOrderState.RECONCILIATION_CONFLICT.value)
+            return evidence
+
+        try:
+            status_response = adapter.get_order_status(broker_order_id)
+            open_orders_response = adapter.get_open_orders()
+            positions_response = adapter.get_positions()
+            account_response = adapter.get_account()
+        except BrokerGatewayError as exc:
+            evidence["status"] = OmsOrderState.RECONCILIATION_CONFLICT.value
+            evidence["reason_codes"].append(exc.reason_code or OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+            self._record_oms_state(OmsOrderState.RECONCILIATION_CONFLICT.value)
+            return evidence
+
+        responses = (status_response, open_orders_response, positions_response, account_response)
+        evidence["mutation_performed"] = any(bool(getattr(item, "mutation_occurred", False)) for item in responses)
+        evidence["account_status"] = (
+            str((account_response.payload or {}).get("status"))
+            if isinstance(account_response.payload, dict)
+            else "unknown"
+        )
+        open_orders = open_orders_response.payload if isinstance(open_orders_response.payload, list) else []
+        positions = positions_response.payload if isinstance(positions_response.payload, list) else []
+        evidence["open_orders_count"] = len(open_orders)
+        evidence["positions_count"] = len(positions)
+        evidence["order_id_mapping_present"] = self._get_active_order_id_mapping(
+            order.id,
+            self._gateway_order_mapping_broker(),
+        ) is not None
+
+        if any(not item.ok for item in responses):
+            evidence["reason_codes"].append(OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+        if evidence["mutation_performed"]:
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+
+        broker_status = str(getattr(status_response, "normalized_status", "") or "")
+        oms_state = canonical_state_from_broker_status(broker_status)
+        payload = status_response.payload if isinstance(status_response.payload, dict) else {}
+        payload_symbol = payload.get("symbol")
+        if payload_symbol and self._normalize_broker_symbol(payload_symbol) != self._normalize_broker_symbol(order.symbol):
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+            oms_state = OmsOrderState.RECONCILIATION_CONFLICT.value
+
+        if not evidence["order_id_mapping_present"]:
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+            oms_state = OmsOrderState.RECONCILIATION_CONFLICT.value
+
+        evidence["status"] = oms_state
+        evidence["broker_normalized_status"] = broker_status
+        evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
+        self._gateway_reconciliation_by_client_order_id[order.id] = evidence
+        self._record_oms_state(oms_state)
+        logger.info("[OMS_DIAG] POST_ACK_RECONCILIATION fields=%s", evidence)
+        return evidence
 
     def _submit_order_gateway(self, order: OrderRequest) -> BrokerGatewayResponse:
         """
@@ -2865,6 +3289,8 @@ class OrderRouter:
         fabricates a fill and never falls back to the simulated PaperBroker.
         """
         request = self._gateway_request_from_order(order)
+        self._record_oms_state(OmsOrderState.ROUTER_SUBMITTED.value)
+        broker_post_authorized = self._broker_gateway_identity_error() is None
         try:
             response = self._broker_gateway_adapter.submit_order(request)
         except BrokerGatewayError as exc:
@@ -2890,6 +3316,22 @@ class OrderRouter:
             )
         self._gateway_responses_by_client_order_id[order.id] = response
         ack_ts_ns = now_ns()
+        blocked_before_submit = bool(
+            isinstance(response.reconciliation_metadata, dict)
+            and response.reconciliation_metadata.get("blocked_before_submit")
+        )
+        boundary_result = (
+            "BROKER_POST_ACKNOWLEDGED"
+            if response.ok and response.broker_order_id
+            else ("BROKER_POST_BLOCKED_BEFORE_SUBMIT" if blocked_before_submit else "BROKER_POST_REJECTED")
+        )
+        self._record_broker_boundary_telemetry(
+            order,
+            response=response,
+            broker_post_attempted=not blocked_before_submit,
+            broker_post_authorized=broker_post_authorized,
+            broker_boundary_result=boundary_result,
+        )
 
         if response.ok and response.broker_order_id:
             self._register_active_order_id_mapping(
@@ -2927,8 +3369,25 @@ class OrderRouter:
                     f"{response.broker_order_id}:{ack_ts_ns}:{response.adapter_id}_submit_order"
                 ),
             )
+            reconciliation = self._post_ack_gateway_reconciliation(order, response)
+            oms_state = str(reconciliation.get("status") or canonical_state_from_broker_status(response.normalized_status))
             if response.normalized_status in {_GatewayStatus.ACCEPTED.value, _GatewayStatus.OPEN.value}:
                 self._pending_orders[order.id] = order
+            if is_terminal_oms_state(oms_state):
+                self._pending_orders.pop(order.id, None)
+                terminal_status = response.normalized_status
+                if oms_state == OmsOrderState.RECONCILIATION_CONFLICT.value:
+                    terminal_status = "reconciliation_conflict"
+                self._mark_active_order_mapping_terminal_for_broker(
+                    order.id,
+                    response.venue_id,
+                    status=terminal_status,
+                    terminal_reason=(
+                        "post_ack_reconciliation_conflict"
+                        if oms_state == OmsOrderState.RECONCILIATION_CONFLICT.value
+                        else "post_ack_broker_terminal_status"
+                    ),
+                )
             self._order_status_cache[order.id] = OrderStatus(
                 order_id=order.id,
                 status=response.normalized_status,
@@ -2942,6 +3401,7 @@ class OrderRouter:
             timestamp_ns=ack_ts_ns,
         )
         self._record_rejection_telemetry(order, response.reason_code or response.message or "broker_gateway_rejected")
+        self._record_oms_state(OmsOrderState.REJECTED.value)
         return response
 
     def _gateway_request_from_order(self, order: OrderRequest) -> _GatewayOrderSubmitRequest:
@@ -3252,8 +3712,7 @@ class OrderRouter:
 
     def cancel_order(self, order_id: str) -> bool:
         if self._should_use_external_paper_gateway():
-            logger.warning("External paper gateway cancel is not authorized for %s", order_id)
-            return False
+            return self._cancel_order_external_paper_gateway(order_id)
         if self.paper_mode:
             return self._cancel_order_paper(order_id)
 
@@ -3289,6 +3748,148 @@ class OrderRouter:
             if self.rest_fallback_enabled:
                 return self._cancel_order_rest(order_id)
             return False
+
+    def _record_cancel_denial_once(self, order_id: str, reason_code: str) -> bool:
+        if order_id in self._cancel_denials_by_order_id:
+            return False
+        self._cancel_denials_by_order_id[order_id] = reason_code
+        self._oms_lifecycle_counts["cancel_denied"] = int(self._oms_lifecycle_counts.get("cancel_denied", 0)) + 1
+        logger.warning(
+            "[OMS_DIAG] CANCEL_DENIED fields=%s",
+            {
+                "client_order_id": order_id,
+                "reason_code": reason_code,
+                "cancel_authorized": False,
+                "broker_command_performed": False,
+            },
+        )
+        return False
+
+    def _cancel_order_external_paper_gateway(self, order_id: str) -> bool:
+        """Cancel an acknowledged external PAPER order through broker authority."""
+        client_order_id = str(order_id or "").strip()
+        if not client_order_id:
+            return self._record_cancel_denial_once("", OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+
+        identity_error = self._broker_gateway_identity_error()
+        identity = getattr(self._broker_gateway_adapter, "identity", None)
+        if identity_error is not None or identity is None:
+            return self._record_cancel_denial_once(client_order_id, OmsReasonCode.CAPABILITY_UNAUTHORIZED.value)
+        if getattr(identity, "environment", None) != "paper" or getattr(identity, "live_blocked", None) is not True:
+            return self._record_cancel_denial_once(client_order_id, OmsReasonCode.LIVE_OR_REAL_MONEY_BLOCKED.value)
+        if not hasattr(self._broker_gateway_adapter, "cancel_order"):
+            return self._record_cancel_denial_once(client_order_id, OmsReasonCode.CAPABILITY_UNAUTHORIZED.value)
+
+        broker = self._gateway_order_mapping_broker()
+        mapping = self._get_active_order_id_mapping(client_order_id, broker)
+        if mapping is None or not mapping.command_order_id:
+            return self._record_cancel_denial_once(client_order_id, OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+        if mapping.is_terminal:
+            return self._record_cancel_denial_once(client_order_id, OmsReasonCode.CANCEL_ALREADY_ATTEMPTED.value)
+
+        order = self._pending_orders.get(client_order_id)
+        cancel_request_ts_ns = now_ns()
+        if order is not None:
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source="order_router.gateway_cancel_request",
+                lifecycle_phase="cancel_requested",
+                event_ts_ns=cancel_request_ts_ns,
+                cancel_seen=True,
+                venue_order_id=mapping.venue_order_id,
+                broker_order_id=mapping.broker_order_id,
+                original_qty=order.quantity,
+                remaining_qty=order.quantity,
+                is_terminal=False,
+                status_source="order_router.gateway_cancel_request",
+                id_mapping_source=mapping.id_mapping_source,
+                idempotency_key=(
+                    f"{order.decision_uuid}:{client_order_id}:cancel_requested:"
+                    f"{mapping.command_order_id}:{cancel_request_ts_ns}:gateway_cancel_request"
+                ),
+            )
+
+        try:
+            response = self._broker_gateway_adapter.cancel_order(mapping.command_order_id)
+        except BrokerGatewayError as exc:
+            reason = (
+                OmsReasonCode.CANCEL_NOT_FOUND.value
+                if str(exc.reason_code).upper() in {"HTTP_404", "BROKER_404"}
+                else exc.reason_code
+            )
+            return self._record_cancel_denial_once(client_order_id, reason or OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+
+        self._record_broker_boundary_telemetry(
+            order or SimpleNamespace(
+                id=client_order_id,
+                symbol=mapping.symbol or "UNKNOWN",
+                side=mapping.side or "buy",
+                order_type=mapping.order_type or "limit",
+                strategy=SleeveType.SECTOR_ROTATION,
+                confidence=0.0,
+                decision_uuid=None,
+                exchange_ts_ns=max(1, int(mapping.submit_ts_ns or cancel_request_ts_ns)),
+                receive_ts_ns=max(1, cancel_request_ts_ns),
+            ),
+            response=response,
+            broker_post_attempted=False,
+            broker_post_authorized=True,
+            broker_boundary_result="BROKER_CANCEL_ACKNOWLEDGED" if response.ok else "BROKER_CANCEL_REJECTED",
+            reason_code=response.reason_code,
+        )
+
+        if not response.ok:
+            reason = response.reason_code or OmsReasonCode.BROKER_STATE_UNKNOWN.value
+            if reason == "HTTP_404":
+                reason = OmsReasonCode.CANCEL_NOT_FOUND.value
+            return self._record_cancel_denial_once(client_order_id, reason)
+
+        self._oms_lifecycle_counts["cancel_authorized"] = int(self._oms_lifecycle_counts.get("cancel_authorized", 0)) + 1
+        self._pending_orders.pop(client_order_id, None)
+        self._order_status_cache[client_order_id] = OrderStatus(
+            order_id=client_order_id,
+            status="canceled",
+            timestamp_ns=now_ns(),
+        )
+        self._mark_active_order_mapping_terminal_for_broker(
+            client_order_id,
+            broker,
+            status="canceled",
+            terminal_reason="gateway_cancel_acknowledged",
+        )
+        if order is not None:
+            event_ts_ns = now_ns()
+            self._record_order_lifecycle_telemetry(
+                order,
+                lifecycle_source=f"{response.adapter_id}.cancel_order_response",
+                lifecycle_phase="order_canceled",
+                event_ts_ns=event_ts_ns,
+                cancel_seen=True,
+                terminal_state="canceled",
+                terminal_reason="gateway_cancel_acknowledged",
+                venue_order_id=mapping.venue_order_id,
+                broker_order_id=mapping.broker_order_id,
+                original_qty=order.quantity,
+                remaining_qty=_Decimal("0"),
+                is_terminal=True,
+                status_source=f"{response.adapter_id}.cancel_order_response",
+                id_mapping_source=mapping.id_mapping_source,
+                idempotency_key=(
+                    f"{order.decision_uuid}:{client_order_id}:order_canceled:"
+                    f"{mapping.command_order_id}:{event_ts_ns}:gateway_cancel_response"
+                ),
+            )
+        logger.info(
+            "[OMS_DIAG] CANCEL_ACKNOWLEDGED fields=%s",
+            {
+                "client_order_id": client_order_id,
+                "broker_order_id": mapping.broker_order_id,
+                "cancel_authorized": True,
+                "broker_command_performed": True,
+                "reason_code": "CANCEL_ACKNOWLEDGED",
+            },
+        )
+        return True
 
     def _cancel_order_paper(self, order_id: str) -> bool:
         """Cancel paper order through sovereign paper broker when available."""
@@ -3477,6 +4078,8 @@ class OrderRouter:
         return status
 
     def _query_order_status(self, order_id: str) -> str:
+        if self.paper_mode and self._should_use_external_paper_gateway():
+            return self._query_external_paper_gateway_order_status(order_id)
         if self.paper_mode:
             self._sync_paper_reports()
             if order_id in self._order_status_cache:
@@ -3516,6 +4119,37 @@ class OrderRouter:
                 )
             return status
         return "unknown"
+
+    def _query_external_paper_gateway_order_status(self, client_order_id: str) -> str:
+        broker = self._gateway_order_mapping_broker()
+        mapping = self._get_active_order_id_mapping(client_order_id, broker)
+        if mapping is None or not mapping.command_order_id:
+            return "unknown"
+        if mapping.is_terminal:
+            return mapping.status
+        try:
+            response = self._broker_gateway_adapter.get_order_status(mapping.command_order_id)
+        except BrokerGatewayError as exc:
+            logger.warning(
+                "[OMS_DIAG] BROKER_STATUS_UNKNOWN fields=%s",
+                {
+                    "client_order_id": client_order_id,
+                    "broker": broker,
+                    "reason_code": exc.reason_code or OmsReasonCode.BROKER_STATE_UNKNOWN.value,
+                    "broker_command_performed": False,
+                },
+            )
+            return "unknown"
+        status = str(response.normalized_status or "unknown")
+        if status in {"filled", "canceled", "cancelled", "expired", "rejected"}:
+            self._mark_active_order_mapping_terminal_for_broker(
+                client_order_id,
+                broker,
+                status=status,
+                terminal_reason="gateway_status_terminal",
+            )
+            self._pending_orders.pop(client_order_id, None)
+        return status
 
     def _query_kraken_order_status(self, order_id: str) -> str:
         endpoint = self._endpoints["kraken"]["status"]
