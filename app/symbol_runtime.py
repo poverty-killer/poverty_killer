@@ -47,6 +47,7 @@ from app.brain.whale_flow_engine import WhaleFlowEngine, WhaleFlowAlert, WhaleDi
 from app.brain.market_sentiment_proxy import MarketSentimentProxy
 from app.brain.sentiment_velocity import SentimentVelocityEngine
 from app.models.market_data import WhaleFlowScore
+from app.strategies.moving_floor import TopologicalMovingFloor
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -124,6 +125,7 @@ class SymbolRuntime:
     gamma_front_strategy: Optional[Any] = None
     liquidity_void_strategy: Optional[Any] = None
     sector_rotation_strategy: Optional[Any] = None
+    moving_floor_strategy: Optional[Any] = None
 
     # OBSERVE-ONLY (Stage 2-B): last raw StrategySignal emitted by dormant sleeves.
     # Bounded by overwrite (only most-recent kept). NOT dispatched, NOT adapted to
@@ -137,6 +139,9 @@ class SymbolRuntime:
     # OrderRouter / RiskGuard / PositionSizing. Telemetry/inspection only.
     last_liquidity_void_observed_vote: Optional[Any] = None
     last_sector_rotation_observed_vote: Optional[Any] = None
+    last_moving_floor_observed_signal: Optional[Any] = None
+    last_moving_floor_observed_vote: Optional[Any] = None
+    last_moving_floor_evidence: Optional[Dict[str, Any]] = None
 
     # OBSERVE-ONLY (Stage 2-D3 / Option C): consumed marker for LiquidityVoid
     # paper-dispatch. Tracks the decision_uuid of the most-recent LV observation
@@ -278,6 +283,8 @@ class SymbolRuntime:
 
         from app.strategies.sector_rotation import SectorRotationStrategy
         self.sector_rotation_strategy = SectorRotationStrategy(config=config, symbol=self.symbol)
+
+        self.moving_floor_strategy = TopologicalMovingFloor()
 
         # PER-SYMBOL SHANSCURVE: Create instance with None dependencies
         # Dependencies will be injected via set_shans_dependencies() after creation
@@ -489,6 +496,8 @@ class SymbolRuntime:
             self.last_liquidity_void_observed_signal = signal
         elif sleeve_name == "sector_rotation":
             self.last_sector_rotation_observed_signal = signal
+        elif sleeve_name == "moving_floor":
+            self.last_moving_floor_observed_signal = signal
 
     def record_observed_vote(self, sleeve_name: str, vote: Any) -> None:
         """
@@ -503,6 +512,22 @@ class SymbolRuntime:
             self.last_liquidity_void_observed_vote = vote
         elif sleeve_name == "sector_rotation":
             self.last_sector_rotation_observed_vote = vote
+        elif sleeve_name == "moving_floor":
+            self.last_moving_floor_observed_vote = vote
+
+    def reset_moving_floor(self, reason: str = "MOVING_FLOOR_RESET") -> None:
+        """Reset protective floor state when broker-position-backed inventory is absent."""
+        self.moving_floor_strategy = TopologicalMovingFloor()
+        self.last_moving_floor_observed_signal = None
+        self.last_moving_floor_observed_vote = None
+        self.last_moving_floor_evidence = {
+            "module": "MovingFloor",
+            "authority_class": "RISK",
+            "status": "NOT_APPLICABLE",
+            "reason_code": reason,
+            "signal": "NONE",
+            "evidence": {"protective_only": True},
+        }
     
     def _compute_volatility(self, candle: Candle) -> None:
         if candle.close <= 0:

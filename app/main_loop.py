@@ -19,7 +19,7 @@ import math
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Optional, Dict, Any, List, Tuple, Set
+from typing import Optional, Dict, Any, List, Tuple, Set, Mapping
 
 from app.config import Config
 from app.commander import Commander
@@ -76,7 +76,20 @@ from app.models import (
     StrategyTruthEntry,
     RiskTruth,
 )
-from app.models.enums import RegimeType, SleeveType, SignalType, TruthStatus, RiskMode, OrderSide, InternalOrderStatus, StrategyID
+from app.models.enums import (
+    BookIntegrity,
+    LiquidityRegime,
+    RegimeType,
+    RiskAction,
+    SleeveType,
+    SignalType,
+    ToxicityLevel,
+    TruthStatus,
+    RiskMode,
+    OrderSide,
+    InternalOrderStatus,
+    StrategyID,
+)
 from app.risk.safety import SafetyGate
 from app.risk.pre_trade_guardrails import (
     PreTradeGuardrailRequest,
@@ -106,13 +119,16 @@ from app.strategies.council_metadata import (
 # dispatch / DecisionCompiler / Fusion / execution path.
 from app.strategies.strategy_vote_adapters import (
     adapt_liquidity_void_to_vote,
+    adapt_moving_floor_to_vote,
     adapt_sector_rotation_to_vote,
 )
+from app.strategies.moving_floor import FloorMarketTick, FloorRiskContext
 from app.utils.time_utils import now_ns
 
 logger = logging.getLogger(__name__)
 
 _MIN_BOOK_PROCESS_INTERVAL_NS: int = 200_000_000
+_BROKER_POSITION_CACHE_TTL_NS: int = 30_000_000_000
 
 # Candle admission logging rate limits (seconds)
 _CANDLE_REJECT_LOG_INTERVAL_SEC: int = 60
@@ -180,6 +196,8 @@ def _threshold_profile_value(profile: Dict[str, Any], threshold_name: str, defau
 
 
 def _sleeve_module_name(sleeve: Any) -> str:
+    if sleeve == StrategyID.MOVING_FLOOR or str(getattr(sleeve, "value", sleeve)) == "moving_floor":
+        return "MovingFloor"
     if sleeve == SleeveType.SHADOW_FRONT:
         return "ShadowFront"
     if sleeve == SleeveType.SECTOR_ROTATION:
@@ -199,6 +217,15 @@ def _dispatch_signal_text(signal_or_side: Any) -> str:
     if text == "buy":
         return "BUY"
     if text == "sell":
+        return "SELL"
+    return "NONE"
+
+
+def _dispatch_signal_from_bias(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"bullish", "long", "buy", "1"}:
+        return "BUY"
+    if text in {"bearish", "short", "sell", "-1"}:
         return "SELL"
     return "NONE"
 
@@ -690,10 +717,14 @@ def _to_decimal_or_none(value: Any) -> Optional[Decimal]:
         return None
 
 
+def _normalize_symbol_for_position_match(symbol: Any) -> str:
+    return str(symbol or "").upper().replace("/", "").replace("-", "").replace("_", "").strip()
+
+
 def _matching_positive_position(symbol: str, positions: Tuple[Dict[str, Any], ...]) -> bool:
-    expected = str(symbol or "").upper()
+    expected = _normalize_symbol_for_position_match(symbol)
     for position in positions:
-        if str(position.get("symbol", "")).upper() != expected:
+        if _normalize_symbol_for_position_match(position.get("symbol", "")) != expected:
             continue
         quantity = _to_decimal_or_none(position.get("quantity", position.get("qty", "0")))
         if quantity is not None and quantity > Decimal("0"):
@@ -1369,6 +1400,9 @@ class MainLoop:
         # Limits log volume to at most one entry per 5 seconds per symbol.
         # NOT used for trading decisions — logging hygiene only.
         self._shans_gate_last_log_ts: Dict[str, float] = {}
+        self._broker_position_cache: Tuple[Dict[str, Any], ...] = ()
+        self._broker_position_cache_ts_ns: int = 0
+        self._broker_position_cache_source: Optional[str] = None
 
         self._metrics = LoopMetrics()
         self._lock = threading.Lock()
@@ -1404,6 +1438,175 @@ class MainLoop:
 
     def _active_threshold_profile(self) -> Dict[str, Any]:
         return resolve_active_threshold_profile(self.config)
+
+    def _broker_position_truth(
+        self,
+        symbol: str,
+        *,
+        force_refresh: bool = False,
+    ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        positions, evidence = self._broker_positions_snapshot(force_refresh=force_refresh)
+        expected = _normalize_symbol_for_position_match(symbol)
+        for position in positions:
+            if _normalize_symbol_for_position_match(position.get("symbol")) != expected:
+                continue
+            quantity = _to_decimal_or_none(position.get("quantity"))
+            if quantity is not None and quantity > Decimal("0"):
+                return position, {
+                    **evidence,
+                    "symbol": symbol,
+                    "matched_position": True,
+                    "position_symbol": position.get("symbol"),
+                    "position_quantity": str(quantity),
+                }
+        return None, {
+            **evidence,
+            "symbol": symbol,
+            "matched_position": False,
+            "reason_code": "BROKER_POSITION_NOT_FOUND",
+        }
+
+    def _broker_positions_snapshot(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> Tuple[Tuple[Dict[str, Any], ...], Dict[str, Any]]:
+        now = time.time_ns()
+        cached = getattr(self, "_broker_position_cache", None)
+        cached_ts = int(getattr(self, "_broker_position_cache_ts_ns", 0) or 0)
+        if (
+            not force_refresh
+            and isinstance(cached, tuple)
+            and cached_ts > 0
+            and now - cached_ts <= _BROKER_POSITION_CACHE_TTL_NS
+        ):
+            return cached, {
+                "status": "PASS",
+                "reason_code": "BROKER_POSITION_TRUTH_CACHE_HIT",
+                "source": getattr(self, "_broker_position_cache_source", "unknown"),
+                "receive_ts_ns": cached_ts,
+                "positions_count": len(cached),
+                "read_only": True,
+            }
+
+        positions: Tuple[Dict[str, Any], ...] = ()
+        evidence: Dict[str, Any] = {
+            "status": "MISSING_TRUTH",
+            "reason_code": "BROKER_POSITION_TRUTH_MISSING",
+            "source": "unknown",
+            "receive_ts_ns": now,
+            "positions_count": 0,
+            "read_only": True,
+        }
+        order_router = getattr(getattr(self, "execution_engine", None), "order_router", None)
+        if order_router is None:
+            return positions, evidence
+
+        adapter = getattr(order_router, "_broker_gateway_adapter", None)
+        if adapter is not None:
+            identity = getattr(adapter, "identity", None)
+            if (
+                getattr(identity, "environment", None) != "paper"
+                or getattr(identity, "live_blocked", None) is not True
+            ):
+                return positions, {
+                    **evidence,
+                    "status": "BLOCK",
+                    "reason_code": "BROKER_POSITION_TRUTH_UNSAFE_ADAPTER",
+                    "source": "broker_gateway_adapter",
+                }
+            get_positions = getattr(adapter, "get_positions", None)
+            if callable(get_positions):
+                try:
+                    response = get_positions()
+                    payload = getattr(response, "payload", None)
+                    if getattr(response, "mutation_occurred", False):
+                        return positions, {
+                            **evidence,
+                            "status": "BLOCK",
+                            "reason_code": "BROKER_POSITION_TRUTH_MUTATION_OCCURRED",
+                            "source": getattr(identity, "adapter_id", "broker_gateway_adapter"),
+                        }
+                    if getattr(response, "ok", False) and isinstance(payload, list):
+                        positions = tuple(
+                            item
+                            for item in (
+                                self._normalize_broker_position(row) for row in payload
+                            )
+                            if item is not None
+                        )
+                        evidence = {
+                            "status": "PASS",
+                            "reason_code": "BROKER_POSITION_TRUTH_READ_ONLY",
+                            "source": getattr(identity, "adapter_id", "broker_gateway_adapter"),
+                            "receive_ts_ns": now,
+                            "positions_count": len(positions),
+                            "read_only": True,
+                            "request_counts": getattr(adapter, "request_counts", {}),
+                        }
+                except Exception as exc:
+                    evidence = {
+                        **evidence,
+                        "reason_code": "BROKER_POSITION_TRUTH_READ_FAILED",
+                        "source": getattr(identity, "adapter_id", "broker_gateway_adapter"),
+                        "error": exc.__class__.__name__,
+                    }
+        elif hasattr(order_router, "fetch_positions"):
+            try:
+                raw_positions = order_router.fetch_positions()
+                if isinstance(raw_positions, list):
+                    positions = tuple(
+                        item
+                        for item in (
+                            self._normalize_broker_position(row) for row in raw_positions
+                        )
+                        if item is not None
+                    )
+                    evidence = {
+                        "status": "PASS",
+                        "reason_code": "BROKER_POSITION_TRUTH_ROUTER_READ_ONLY",
+                        "source": "order_router.fetch_positions",
+                        "receive_ts_ns": now,
+                        "positions_count": len(positions),
+                        "read_only": True,
+                    }
+            except Exception as exc:
+                evidence = {
+                    **evidence,
+                    "reason_code": "BROKER_POSITION_TRUTH_ROUTER_READ_FAILED",
+                    "source": "order_router.fetch_positions",
+                    "error": exc.__class__.__name__,
+                }
+
+        self._broker_position_cache = positions
+        self._broker_position_cache_ts_ns = now
+        self._broker_position_cache_source = evidence.get("source")
+        return positions, evidence
+
+    @staticmethod
+    def _normalize_broker_position(raw: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, Mapping):
+            return None
+        raw_symbol = raw.get("symbol") or raw.get("asset_symbol") or raw.get("asset")
+        if not raw_symbol:
+            return None
+        quantity = _to_decimal_or_none(
+            raw.get("quantity", raw.get("qty", raw.get("asset_qty", "0")))
+        )
+        if quantity is None:
+            return None
+        average_entry = _to_decimal_or_none(
+            raw.get("average_entry_price", raw.get("avg_entry_price", raw.get("avg_entry", "0")))
+        )
+        return {
+            "symbol": str(raw_symbol),
+            "raw_symbol": str(raw_symbol),
+            "quantity": str(quantity),
+            "qty": str(quantity),
+            "average_entry_price": str(average_entry or Decimal("0")),
+            "broker_position_backed": True,
+            "source": "broker_position_truth",
+        }
 
     def _log_runtime_profile_banner(self) -> None:
         profile = self._active_threshold_profile()
@@ -1756,17 +1959,27 @@ class MainLoop:
             if isinstance(fusion_telemetry, dict)
             else None
         )
+        shans_signal = "NONE"
+        shans_bias = None
+        if fusion is not None:
+            shans_bias = getattr(fusion, "shans_bias", None)
+            shans_signal = _dispatch_signal_from_bias(shans_bias)
+            if shans_confidence is None:
+                shans_confidence = getattr(fusion, "shans_confidence", None)
         evidence.append(
             {
                 "module": "ShansCurve",
                 "authority_class": "ALPHA",
                 "status": "PASS" if shans_ready else "MISSING_TRUTH",
                 "reason_code": "SHANS_READY" if shans_ready else "shans_not_ready",
+                "signal": shans_signal if shans_ready else "NONE",
                 "confidence": shans_confidence,
                 "evidence": {
                     "shans_ready": shans_ready,
                     "shans_buffer": shans_buffer,
                     "shans_required": shans_required,
+                    "shans_bias": shans_bias,
+                    "signal_authority": "alpha_evidence_only_no_broker_intent",
                 },
             }
         )
@@ -1835,6 +2048,24 @@ class MainLoop:
             }
         )
 
+        moving_floor_evidence = getattr(runtime, "last_moving_floor_evidence", None)
+        if isinstance(moving_floor_evidence, dict):
+            evidence.append(dict(moving_floor_evidence))
+        else:
+            evidence.append(
+                {
+                    "module": "MovingFloor",
+                    "authority_class": "RISK",
+                    "status": "NOT_APPLICABLE",
+                    "reason_code": "MOVING_FLOOR_FLAT_NO_POSITION",
+                    "signal": "NONE",
+                    "evidence": {
+                        "protective_only": True,
+                        "requires_existing_position": True,
+                    },
+                }
+            )
+
         eligible_names = tuple(_sleeve_module_name(sleeve) for sleeve in eligible_sleeves)
         preferred_name = _sleeve_module_name(preferred_sleeve) if preferred_sleeve is not None else None
         if fusion is None:
@@ -1861,6 +2092,315 @@ class MainLoop:
             }
         )
         return tuple(evidence)
+
+    def _observe_moving_floor(
+        self,
+        symbol: str,
+        runtime: SymbolRuntime,
+        candle: Candle,
+        candle_execution_truth: Mapping[str, Any],
+    ) -> None:
+        """Produce protective-only MovingFloor evidence bound to broker position truth."""
+        runtime.last_moving_floor_observed_signal = None
+        runtime.last_moving_floor_observed_vote = None
+
+        position, position_evidence = self._broker_position_truth(symbol, force_refresh=False)
+        if position is None:
+            reset = getattr(runtime, "reset_moving_floor", None)
+            if callable(reset):
+                reset("MOVING_FLOOR_FLAT_NO_POSITION")
+            else:
+                runtime.last_moving_floor_evidence = {
+                    "module": "MovingFloor",
+                    "authority_class": "RISK",
+                    "status": "NOT_APPLICABLE",
+                    "reason_code": "MOVING_FLOOR_FLAT_NO_POSITION",
+                    "signal": "NONE",
+                    "evidence": position_evidence,
+                }
+            return
+
+        if candle_execution_truth.get("executable_market_truth") is not True:
+            runtime.last_moving_floor_evidence = {
+                "module": "MovingFloor",
+                "authority_class": "MARKET_TRUTH",
+                "status": "BLOCK",
+                "reason_code": "MOVING_FLOOR_MARKET_TRUTH_NOT_EXECUTABLE",
+                "signal": "NONE",
+                "evidence": {
+                    "protective_only": True,
+                    "position_truth": position_evidence,
+                    "candle_truth": dict(candle_execution_truth),
+                },
+            }
+            return
+
+        order_book = getattr(runtime, "last_order_book", None)
+        if order_book is None:
+            runtime.last_moving_floor_evidence = {
+                "module": "MovingFloor",
+                "authority_class": "MARKET_TRUTH",
+                "status": "MISSING_TRUTH",
+                "reason_code": "MOVING_FLOOR_BOOK_TRUTH_MISSING",
+                "signal": "NONE",
+                "evidence": {"protective_only": True, "position_truth": position_evidence},
+            }
+            return
+
+        try:
+            bid_depth, ask_depth = order_book.depth_at_levels(10)
+            tick = FloorMarketTick(
+                symbol=symbol,
+                price=Decimal(str(candle.close)),
+                timestamp_ns=candle.exchange_ts_ns,
+                bid_volume=Decimal(str(bid_depth)),
+                ask_volume=Decimal(str(ask_depth)),
+                regime=self._get_dispatch_regime(runtime),
+                liquidity_regime=LiquidityRegime.UNKNOWN,
+                toxicity_level=self._moving_floor_toxicity_level(runtime),
+                book_integrity=self._moving_floor_book_integrity(order_book),
+            )
+            event, assessment, recommendation = runtime.moving_floor_strategy.process_tick(
+                tick,
+                FloorRiskContext(risk_action=self._moving_floor_risk_action()),
+            )
+        except Exception as exc:
+            runtime.last_moving_floor_evidence = {
+                "module": "MovingFloor",
+                "authority_class": "RISK",
+                "status": "BLOCK",
+                "reason_code": "MOVING_FLOOR_EVALUATION_FAILED",
+                "signal": "NONE",
+                "evidence": {
+                    "error": exc.__class__.__name__,
+                    "protective_only": True,
+                    "position_truth": position_evidence,
+                },
+            }
+            return
+
+        state = runtime.moving_floor_strategy.snapshot_state()
+        if recommendation is None:
+            reason = "MOVING_FLOOR_NO_BREACH"
+            status = "DECLINED"
+            if event is not None and getattr(event, "suppressed", False):
+                reason = "MOVING_FLOOR_SUPPRESSED"
+                status = "MISSING_TRUTH"
+            runtime.last_moving_floor_evidence = {
+                "module": "MovingFloor",
+                "authority_class": "RISK",
+                "status": status,
+                "reason_code": reason,
+                "signal": "NONE",
+                "evidence": {
+                    "protective_only": True,
+                    "requires_existing_position": True,
+                    "position_truth": position_evidence,
+                    "event_type": getattr(getattr(event, "event_type", None), "value", None),
+                    "assessment_emittable": getattr(assessment, "signal_emittable", None),
+                    "floor_phase": getattr(state.phase, "value", state.phase),
+                    "current_floor": str(state.current_floor),
+                    "highest_price_seen": str(state.highest_price_seen),
+                },
+            }
+            return
+
+        fresh_position, fresh_evidence = self._broker_position_truth(symbol, force_refresh=True)
+        if fresh_position is None:
+            runtime.last_moving_floor_evidence = {
+                "module": "MovingFloor",
+                "authority_class": "BROKER_AUTHORITY",
+                "status": "BLOCK",
+                "reason_code": "MOVING_FLOOR_BROKER_POSITION_MISSING",
+                "signal": "NONE",
+                "evidence": {
+                    "protective_only": True,
+                    "position_truth": fresh_evidence,
+                },
+            }
+            return
+
+        signal = self._build_moving_floor_signal(
+            recommendation=recommendation,
+            position=fresh_position,
+            candle=candle,
+            position_evidence=fresh_evidence,
+        )
+        if signal is None:
+            runtime.last_moving_floor_evidence = {
+                "module": "MovingFloor",
+                "authority_class": "RISK",
+                "status": "BLOCK",
+                "reason_code": "MOVING_FLOOR_PROTECTIVE_EXIT_NON_POSITIVE_EDGE",
+                "signal": "NONE",
+                "evidence": {
+                    "protective_only": True,
+                    "position_truth": fresh_evidence,
+                    "worst_case_fill_price": str(recommendation.worst_case_fill_price),
+                },
+            }
+            return
+
+        reserve_decision_uuid = getattr(self.decision_compiler, "reserve_decision_uuid", None)
+        decision_uuid = reserve_decision_uuid() if callable(reserve_decision_uuid) else None
+        vote = adapt_moving_floor_to_vote(
+            recommendation,
+            exchange_ts_ns=candle.exchange_ts_ns,
+            decision_uuid=decision_uuid,
+        )
+        runtime.record_observed_signal("moving_floor", signal)
+        runtime.record_observed_vote("moving_floor", vote)
+        runtime.last_moving_floor_evidence = {
+            "module": "MovingFloor",
+            "authority_class": "RISK",
+            "status": "PASS",
+            "reason_code": "MOVING_FLOOR_PROTECTIVE_EXIT_CANDIDATE",
+            "signal": "SELL",
+            "confidence": getattr(vote, "confidence", None) or getattr(signal, "confidence", None),
+            "evidence": {
+                "protective_only": True,
+                "requires_existing_position": True,
+                "broker_position_backed": True,
+                "position_truth": fresh_evidence,
+                "floor_phase": getattr(state.phase, "value", state.phase),
+                "current_floor": str(state.current_floor),
+                "highest_price_seen": str(state.highest_price_seen),
+                "worst_case_fill_price": str(recommendation.worst_case_fill_price),
+                "candidate_side": "sell_to_close",
+            },
+        }
+        _log_dispatch_diag(
+            "MOVING_FLOOR_PROTECTIVE_EXIT_CANDIDATE",
+            symbol=symbol,
+            exchange_ts_ns=candle.exchange_ts_ns,
+            broker_post=False,
+            protective_only=True,
+            position_truth=fresh_evidence,
+        )
+
+    def _build_moving_floor_signal(
+        self,
+        *,
+        recommendation: Any,
+        position: Mapping[str, Any],
+        candle: Candle,
+        position_evidence: Mapping[str, Any],
+    ) -> Optional[StrategySignal]:
+        quantity = _to_decimal_or_none(position.get("quantity"))
+        average_entry = _to_decimal_or_none(position.get("average_entry_price"))
+        worst_case = _to_decimal_or_none(getattr(recommendation, "worst_case_fill_price", None))
+        if (
+            quantity is None
+            or quantity <= Decimal("0")
+            or average_entry is None
+            or average_entry <= Decimal("0")
+            or worst_case is None
+            or worst_case <= average_entry
+        ):
+            return None
+        expected_move_bps = ((worst_case - average_entry) / average_entry) * Decimal("10000")
+        metadata = {
+            "source_module": "MovingFloor",
+            "protective_only": True,
+            "requires_existing_position": True,
+            "fresh_entry_authorized": False,
+            "execution_candidate": True,
+            "broker_position_backed": True,
+            "existing_positions": (dict(position),),
+            "protective_context": {
+                "source_module": "MovingFloor",
+                "protective_only": True,
+                "broker_position_backed": True,
+                "position_truth": dict(position_evidence),
+            },
+            "expected_move_bps": str(expected_move_bps),
+            "gross_edge_bps": str(expected_move_bps),
+            "gross_edge_source": "moving_floor_worst_case_exit_above_broker_entry",
+            "worst_case_fill_price": str(worst_case),
+            "average_entry_price": str(average_entry),
+            "valid_until_ns": int(candle.exchange_ts_ns) + 60_000_000_000,
+            "asset_class": _infer_asset_class_for_guardrail(recommendation.symbol, {}),
+            "order_action": "sell_to_close",
+        }
+        return StrategySignal(
+            strategy="moving_floor",
+            symbol=recommendation.symbol,
+            side="sell",
+            confidence=float(recommendation.confidence),
+            quantity=float(quantity),
+            price=float(candle.close),
+            exchange_ts_ns=candle.exchange_ts_ns,
+            reason="moving_floor_protective_exit",
+            metadata=metadata,
+        )
+
+    def _consume_observed_pair_moving_floor(
+        self,
+        symbol: str,
+        runtime: SymbolRuntime,
+        exchange_ts_ns: int,
+    ) -> Tuple[Optional[StrategySignal], Optional[StrategyVote], Dict[str, Any]]:
+        signal = getattr(runtime, "last_moving_floor_observed_signal", None)
+        vote = getattr(runtime, "last_moving_floor_observed_vote", None)
+        evidence = dict(getattr(runtime, "last_moving_floor_evidence", None) or {})
+        if signal is None or vote is None:
+            return None, None, evidence
+        signal_ts = getattr(signal, "exchange_ts_ns", None)
+        vote_ts = getattr(vote, "timestamp_ns", None)
+        if (
+            str(getattr(signal, "symbol", "")).upper() != str(symbol).upper()
+            or signal_ts != exchange_ts_ns
+            or vote_ts != exchange_ts_ns
+        ):
+            runtime.last_moving_floor_observed_signal = None
+            runtime.last_moving_floor_observed_vote = None
+            evidence.update(
+                {
+                    "module": "MovingFloor",
+                    "authority_class": "RISK",
+                    "status": "STALE",
+                    "reason_code": "MOVING_FLOOR_PAIR_STALE_OR_MISMATCHED",
+                    "signal": "NONE",
+                }
+            )
+            return None, None, evidence
+        return signal, vote, evidence
+
+    @staticmethod
+    def _moving_floor_toxicity_level(runtime: SymbolRuntime) -> ToxicityLevel:
+        alert = None
+        toxicity_engine = getattr(runtime, "toxicity_engine", None)
+        get_last_alert = getattr(toxicity_engine, "get_last_alert", None)
+        if callable(get_last_alert):
+            alert = get_last_alert()
+        regime_name = str(getattr(getattr(alert, "regime", None), "name", "") or "").upper()
+        if regime_name == "EXTREME":
+            return ToxicityLevel.EXTREME
+        if regime_name == "TOXIC":
+            return ToxicityLevel.TOXIC
+        if regime_name == "ELEVATED":
+            return ToxicityLevel.ELEVATED
+        return ToxicityLevel.BENIGN
+
+    @staticmethod
+    def _moving_floor_book_integrity(order_book: Any) -> BookIntegrity:
+        spread = getattr(order_book, "spread", None)
+        try:
+            spread_value = float(spread)
+        except (TypeError, ValueError):
+            return BookIntegrity.UNTRUSTWORTHY
+        if not math.isfinite(spread_value):
+            return BookIntegrity.UNTRUSTWORTHY
+        return BookIntegrity.HEALTHY
+
+    def _moving_floor_risk_action(self) -> RiskAction:
+        risk_state = self._last_risk_state if isinstance(self._last_risk_state, dict) else {}
+        action = str(risk_state.get("action") or "").upper()
+        if action in {"EMERGENCY_HALT", "KILL_SWITCH"}:
+            return RiskAction.KILL_SWITCH
+        if action in {"RECALIBRATE", "SAFE_MODE"}:
+            return RiskAction.SAFE_MODE
+        return RiskAction.ALLOW
 
     def _apply_signal_economic_metadata(
         self,
@@ -1930,6 +2470,10 @@ class MainLoop:
         decision_frame = dict(lifecycle.get("decision_frame") or {})
         if not decision_frame:
             return
+        primary_no_submit_reason = self._primary_no_submit_reason_code(
+            reason_code,
+            decision_frame,
+        )
         opportunity_scorecard = opportunity_scorecard_from_lifecycle(lifecycle)
         try:
             decision_record = self.decision_compiler.compile(
@@ -1940,7 +2484,10 @@ class MainLoop:
                     "opportunity_scorecard": opportunity_scorecard,
                     "decision_frame": decision_frame,
                     "active_threshold_profile": decision_frame.get("active_threshold_profile"),
-                    "no_submit_reason_code": reason_code,
+                    "no_submit_reason_code": primary_no_submit_reason,
+                    "module_decline_reason_code": (
+                        reason_code if primary_no_submit_reason != reason_code else None
+                    ),
                 },
             )
         except Exception as exc:
@@ -1970,7 +2517,10 @@ class MainLoop:
             raw_opportunity_score=opportunity_scorecard.get("raw_opportunity_score"),
             final_opportunity_score=opportunity_scorecard.get("final_opportunity_score"),
             opportunity_verdict=opportunity_scorecard.get("opportunity_verdict"),
-            no_submit_reason_code=reason_code,
+            no_submit_reason_code=primary_no_submit_reason,
+            module_decline_reason_code=(
+                reason_code if primary_no_submit_reason != reason_code else None
+            ),
         )
         logger.info(
             "[DISPATCH] %s: DecisionRecord compiled: uuid=%s type=%s",
@@ -1978,6 +2528,21 @@ class MainLoop:
             getattr(decision_record, "decision_uuid", "<missing>"),
             getattr(decision_record, "decision_type", "<missing>"),
         )
+
+    @staticmethod
+    def _primary_no_submit_reason_code(reason_code: str, decision_frame: Mapping[str, Any]) -> str:
+        frame_output = str(decision_frame.get("frame_output") or "")
+        frame_status = str(decision_frame.get("frame_status") or "")
+        optional_decline_prefixes = (
+            "shadowfront_declined",
+            "GAMMA_FRONT",
+            "LIQUIDITY_VOID_OBSERVED_PAIR_MISSING",
+        )
+        if frame_status == "BLOCK":
+            return "DECISION_FRAME_BLOCKED"
+        if frame_output == "NO_TRADE" and str(reason_code or "").startswith(optional_decline_prefixes):
+            return "DECISION_FRAME_NO_TRADE"
+        return str(reason_code or "DECISION_FRAME_NO_TRADE")
 
     # =========================================================================
     # LIFECYCLE
@@ -2334,6 +2899,13 @@ class MainLoop:
         if candle_execution_truth.get("executable_market_truth") is True:
             self.data_validator.record_data(symbol, _ns_to_datetime(exchange_ts_ns))
             self.data_validator.mark_good(symbol)
+
+        self._observe_moving_floor(
+            symbol,
+            runtime,
+            candle,
+            candle_execution_truth,
+        )
 
         # ================================================================
         # LIVE GATE — Per-symbol Shans readiness.
@@ -2759,6 +3331,22 @@ class MainLoop:
         terminal_vote_for_score = None
         terminal_sleeve_for_score = None
         dispatch_evidence: List[Dict[str, Any]] = list((*pre_frame_evidence, *runtime_frame_evidence))
+        protective_signal, protective_vote, protective_evidence = self._consume_observed_pair_moving_floor(
+            symbol,
+            runtime,
+            exchange_ts_ns,
+        )
+        if protective_evidence:
+            dispatch_evidence.append(protective_evidence)
+        if protective_signal is not None and protective_vote is not None:
+            signal = protective_signal
+            strategy_vote = protective_vote
+            winning_sleeve = StrategyID.MOVING_FLOOR
+            candidates = []
+            logger.info(
+                "[DISPATCH] %s: MovingFloor protective exit selected before fresh-entry sleeves",
+                symbol,
+            )
 
         for sleeve in candidates:
             logger.info("[DISPATCH] %s: evaluating sleeve=%s", symbol, repr(sleeve))

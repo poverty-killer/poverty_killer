@@ -201,6 +201,9 @@ def _loop(
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
     )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
+    )
     loop._classify_shadow_front_decline = (
         MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
     )
@@ -220,6 +223,7 @@ def _loop(
     loop._compile_scorecard_frame_no_submit = (
         MainLoop._compile_scorecard_frame_no_submit.__get__(loop, MainLoop)
     )
+    loop._primary_no_submit_reason_code = MainLoop._primary_no_submit_reason_code
     return loop
 
 
@@ -762,6 +766,7 @@ def test_stale_backfill_candle_does_not_reach_executable_dispatch(caplog):
     loop._sync_legacy_references = MagicMock()
     loop._compute_volatility = MainLoop._compute_volatility.__get__(loop, MainLoop)
     loop._observe_sector_rotation = MagicMock()
+    loop._observe_moving_floor = MagicMock()
     loop._update_physical_freshness = MagicMock()
     loop._dispatch_fusion = MagicMock()
     loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(
@@ -981,7 +986,7 @@ def test_sell_to_close_requires_broker_position_backed_inventory():
     )
     signal = _signal(symbol="SOL/USD")
     signal.side = "sell"
-    signal.metadata["existing_positions"] = ({"symbol": "SOL/USD", "quantity": "1.0"},)
+    signal.metadata["existing_positions"] = ({"symbol": "SOLUSD", "quantity": "1.0"},)
     runtime = _runtime()
 
     verdict = main_loop_module._build_pre_trade_guardrail_verdict(
