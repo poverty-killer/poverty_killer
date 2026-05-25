@@ -295,6 +295,7 @@ class ExecutionEngine:
         }
         self._last_admission_block_result: Optional[ExecutionSpineResult] = None
         self._cancel_attempted_order_ids: set[str] = set()
+        self._cancel_already_attempted_logged_order_ids: set[str] = set()
         self._zombie_sweeper_errors: int = 0
         self._sweeper_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
@@ -369,6 +370,10 @@ class ExecutionEngine:
     def get_oms_shutdown_accounting(self) -> Dict[str, Any]:
         """Return execution/router OMS accounting for shutdown diagnostics."""
         router_accounting: Dict[str, Any] = {}
+        finalizer = getattr(self.order_router, "finalize_oms_shutdown_reconciliation", None)
+        if callable(finalizer):
+            finalizer()
+        self._prune_terminal_pending_orders()
         getter = getattr(self.order_router, "get_oms_shutdown_accounting", None)
         if callable(getter):
             router_accounting = getter()
@@ -380,6 +385,10 @@ class ExecutionEngine:
         result = dict(router_accounting)
         result["engine_pending_orders"] = pending_count
         result["engine_pending_order_ids"] = pending_ids
+        result["pending_terminal_leak_count"] = max(
+            int(result.get("pending_terminal_leak_count", 0) or 0),
+            pending_count if int(result.get("active_pending_orders", pending_count) or 0) == 0 else 0,
+        )
         result["zombie_sweeper_errors"] = zombie_sweeper_errors
         result["zombie_cancel_attempted_count"] = cancel_attempted_count
         return result
@@ -1891,14 +1900,19 @@ class ExecutionEngine:
     def _cancel_pending_order_with_pcv(self, order_id: str) -> bool:
         """Cancel a pending order with PCV. Normal operations only."""
         if order_id in self._cancel_attempted_order_ids:
-            logger.info(
-                "[OMS_DIAG] CANCEL_SKIPPED fields=%s",
-                {
-                    "client_order_id": order_id,
-                    "reason_code": OmsReasonCode.CANCEL_ALREADY_ATTEMPTED.value,
-                    "broker_command_performed": False,
-                },
-            )
+            if self._router_order_is_terminal(order_id):
+                self._remove_pending_order(order_id)
+                return True
+            if order_id not in self._cancel_already_attempted_logged_order_ids:
+                self._cancel_already_attempted_logged_order_ids.add(order_id)
+                logger.info(
+                    "[OMS_DIAG] CANCEL_SKIPPED fields=%s",
+                    {
+                        "client_order_id": order_id,
+                        "reason_code": OmsReasonCode.CANCEL_ALREADY_ATTEMPTED.value,
+                        "broker_command_performed": False,
+                    },
+                )
             return False
         if self.shadow_read_only:
             logger.info(
@@ -1914,13 +1928,9 @@ class ExecutionEngine:
 
             for _attempt in range(5):
                 status = self.order_router.get_order_status(order_id)
-                if status in ["cancelled", "expired", "rejected"]:
-                    with self._lock:
-                        if order_id in self._state.pending_orders:
-                            del self._state.pending_orders[order_id]
+                if self._is_terminal_order_status(status):
+                    self._remove_pending_order(order_id)
                     return True
-                if status == "filled":
-                    return False
                 time.sleep(0.5)
             return False
         except Exception as e:
@@ -2059,6 +2069,20 @@ class ExecutionEngine:
         if isinstance(value, datetime):
             dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
             return int(dt.timestamp() * NS_PER_SECOND)
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return 0
+            try:
+                value = int(raw)
+            except ValueError:
+                try:
+                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    return 0
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return int(dt.timestamp() * NS_PER_SECOND)
         try:
             candidate = int(value)
         except (TypeError, ValueError):
@@ -2081,13 +2105,61 @@ class ExecutionEngine:
             return receive_ts_ns
         return 0
 
+    def _timestamp_ns_to_utc_datetime(self, timestamp_ns: Optional[int]) -> Optional[datetime]:
+        if not timestamp_ns or timestamp_ns <= 0:
+            return None
+        return datetime.fromtimestamp(timestamp_ns / NS_PER_SECOND, tz=timezone.utc)
+
+    def _is_terminal_order_status(self, status: Any) -> bool:
+        return str(status or "").strip().lower() in {
+            "filled",
+            "closed",
+            "canceled",
+            "cancelled",
+            "expired",
+            "rejected",
+            "reconciliation_conflict",
+        }
+
+    def _router_order_is_terminal(self, order_id: str) -> bool:
+        checker = getattr(self.order_router, "is_order_terminal", None)
+        if callable(checker):
+            try:
+                return bool(checker(order_id))
+            except Exception:
+                return False
+        getter = getattr(self.order_router, "get_order_status", None)
+        if callable(getter):
+            try:
+                return self._is_terminal_order_status(getter(order_id))
+            except Exception:
+                return False
+        return False
+
+    def _remove_pending_order(self, order_id: str) -> None:
+        with self._lock:
+            self._state.pending_orders.pop(order_id, None)
+
+    def _prune_terminal_pending_orders(self) -> Tuple[str, ...]:
+        with self._lock:
+            order_ids = tuple(self._state.pending_orders.keys())
+        removed: List[str] = []
+        for order_id in order_ids:
+            if self._router_order_is_terminal(order_id):
+                self._remove_pending_order(order_id)
+                removed.append(order_id)
+        return tuple(removed)
+
     def _sweep_zombie_orders(self) -> None:
         """Sweep and cancel zombie orders (normal mode with PCV)."""
         current_ns = now_ns()
+        self._prune_terminal_pending_orders()
 
         with self._lock:
             zombie_orders: List[str] = []
             for order_id, order in self._state.pending_orders.items():
+                if order_id in self._cancel_attempted_order_ids:
+                    continue
                 order_ts_ns = self._extract_order_timestamp_ns(order)
                 if order_ts_ns > 0 and (current_ns - order_ts_ns) > self._max_pending_age_ns:
                     zombie_orders.append(order_id)
@@ -2108,7 +2180,7 @@ class ExecutionEngine:
             self.risk_guard.update_pending_orders(
                 count=len(self._state.pending_orders),
                 total_value=float(total_value),  # explicit float() at risk boundary — risk_guard is out of F4A scope
-                oldest_timestamp=oldest_ts_ns,
+                oldest_timestamp=self._timestamp_ns_to_utc_datetime(oldest_ts_ns),
             )
 
     def _monitor_loop(self) -> None:

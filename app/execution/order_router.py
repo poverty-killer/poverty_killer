@@ -193,6 +193,7 @@ class OrderRouter:
         self._validate_execution_broker_selection()
         self._gateway_responses_by_client_order_id: Dict[str, BrokerGatewayResponse] = {}
         self._gateway_reconciliation_by_client_order_id: Dict[str, Dict[str, Any]] = {}
+        self._shutdown_reconciliation: Dict[str, Any] = {}
         self._cancel_denials_by_order_id: Dict[str, str] = {}
         self._oms_lifecycle_counts: Dict[str, int] = {
             "submitted": 0,
@@ -1184,6 +1185,91 @@ class OrderRouter:
         logger.info("[OMS_DIAG] GATEWAY_MAPPING_RECONCILIATION fields=%s", evidence)
         return evidence
 
+    def finalize_oms_shutdown_reconciliation(self) -> Dict[str, Any]:
+        """Perform read-only broker reconciliation immediately before shutdown accounting."""
+        evidence: Dict[str, Any] = {
+            "source_event": "shutdown_final_reconciliation",
+            "performed": False,
+            "account_status": "not_checked",
+            "open_orders_count": None,
+            "positions_count": None,
+            "local_order_id_mappings": 0,
+            "local_fills": 0,
+            "broker_open_orders_matched_mapping_count": 0,
+            "broker_open_orders_unmatched_count": 0,
+            "reconciled_active_mappings": 0,
+            "reason_codes": [],
+            "mutation_performed": False,
+            "broker_truth_wins_after_ack": True,
+            "local_state_authority": "supporting_evidence_only",
+        }
+        if not self._external_paper_broker_requested or self._broker_gateway_adapter is None:
+            evidence["reason_codes"].append("BROKER_GATEWAY_NOT_ACTIVE")
+            self._shutdown_reconciliation = evidence
+            return evidence
+
+        broker = self._gateway_order_mapping_broker()
+        for (mapping_broker, _client_order_id), mapping in list(self._active_order_id_mappings.items()):
+            if mapping_broker == broker and not mapping.is_terminal:
+                self._reconcile_gateway_mapping(mapping, source_event="shutdown_active_mapping")
+                evidence["reconciled_active_mappings"] += 1
+
+        try:
+            open_orders_response = self._broker_gateway_adapter.get_open_orders()
+            positions_response = self._broker_gateway_adapter.get_positions()
+            account_response = self._broker_gateway_adapter.get_account()
+        except BrokerGatewayError as exc:
+            evidence["reason_codes"].append(exc.reason_code or OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+            self._shutdown_reconciliation = evidence
+            logger.info("[OMS_DIAG] SHUTDOWN_RECONCILIATION fields=%s", evidence)
+            return evidence
+
+        responses = (open_orders_response, positions_response, account_response)
+        evidence["performed"] = True
+        evidence["mutation_performed"] = any(bool(getattr(item, "mutation_occurred", False)) for item in responses)
+        if evidence["mutation_performed"]:
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+        if any(not item.ok for item in responses):
+            evidence["reason_codes"].append(OmsReasonCode.BROKER_STATE_UNKNOWN.value)
+
+        open_orders = open_orders_response.payload if isinstance(open_orders_response.payload, list) else []
+        positions = positions_response.payload if isinstance(positions_response.payload, list) else []
+        evidence["open_orders_count"] = len(open_orders)
+        evidence["positions_count"] = len(positions)
+        evidence["account_status"] = (
+            str((account_response.payload or {}).get("status"))
+            if isinstance(account_response.payload, dict)
+            else "unknown"
+        )
+
+        mapping_rows: List[Dict[str, Any]] = []
+        if self._state_store is not None:
+            try:
+                mapping_rows = self._state_store.list_order_id_mappings(broker=broker, include_terminal=True)
+            except Exception:
+                mapping_rows = []
+            counter = getattr(self._state_store, "count_table_rows", None)
+            if callable(counter):
+                evidence["local_fills"] = int(counter("fills"))
+        evidence["local_order_id_mappings"] = len(mapping_rows)
+        mapped_broker_order_ids = {
+            str(row.get("broker_order_id") or row.get("venue_order_id") or "").strip()
+            for row in mapping_rows
+            if str(row.get("broker_order_id") or row.get("venue_order_id") or "").strip()
+        }
+        open_order_ids = {
+            str((row or {}).get("id") or (row or {}).get("order_id") or "").strip()
+            for row in open_orders
+            if isinstance(row, dict)
+        }
+        matched = len(open_order_ids & mapped_broker_order_ids)
+        evidence["broker_open_orders_matched_mapping_count"] = matched
+        evidence["broker_open_orders_unmatched_count"] = max(0, len(open_order_ids) - matched)
+        evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
+        self._shutdown_reconciliation = evidence
+        logger.info("[OMS_DIAG] SHUTDOWN_RECONCILIATION fields=%s", evidence)
+        return evidence
+
     def _register_active_order_id_mapping(
         self,
         order: OrderRequest,
@@ -1277,10 +1363,28 @@ class OrderRouter:
         mapping.status = status
         mapping.is_terminal = True
         mapping.terminal_reason = terminal_reason
+        self._pending_orders.pop(client_order_id, None)
         if self._state_store is not None:
             mapping.durable = self._state_store.upsert_order_id_mapping(
                 self._mapping_to_store_record(mapping)
             )
+
+    def is_order_terminal(self, client_order_id: str) -> bool:
+        """Return whether broker/local OMS truth says an order is terminal."""
+        client_id = str(client_order_id or "").strip()
+        if not client_id:
+            return False
+        for broker in {self._gateway_order_mapping_broker(), self._mapping_broker(), "paper"}:
+            mapping = self._get_order_id_mapping_read_only(client_id, broker)
+            if mapping is not None and mapping.is_terminal:
+                self._pending_orders.pop(client_id, None)
+                return True
+        status = self.get_order_status(client_id)
+        canonical_state = canonical_state_from_broker_status(status)
+        if is_terminal_oms_state(canonical_state):
+            self._pending_orders.pop(client_id, None)
+            return True
+        return False
 
     def _resolve_live_command_order_id(self, client_order_id: str, *, allow_terminal_status: bool = False) -> Optional[str]:
         broker = self._mapping_broker()
@@ -3077,13 +3181,57 @@ class OrderRouter:
             if self._gateway_reconciliation_by_client_order_id
             else {}
         )
+        shutdown_reconciliation = dict(self._shutdown_reconciliation or {})
+        if shutdown_reconciliation:
+            latest_reconciliation = shutdown_reconciliation
+        post_events = [
+            event for event in self._broker_boundary_events
+            if str(event.get("request_method") or "").upper() == "POST"
+        ]
+        cancel_events = [
+            event for event in self._broker_boundary_events
+            if str(event.get("request_method") or "").upper() == "DELETE"
+        ]
+        order_post_attempted = sum(1 for event in post_events if event.get("broker_post_attempted") is True)
+        order_post_authorized = sum(1 for event in post_events if event.get("broker_post_authorized") is True)
+        order_post_acknowledged = sum(
+            1 for event in post_events
+            if event.get("broker_boundary_result") == "BROKER_POST_ACKNOWLEDGED"
+        )
+        cancel_attempted = len(cancel_events)
+        cancel_authorized = sum(1 for event in cancel_events if event.get("broker_post_authorized") is True)
+        cancel_acknowledged = sum(
+            1 for event in cancel_events
+            if event.get("broker_boundary_result") == "BROKER_CANCEL_ACKNOWLEDGED"
+        )
+        terminal_statuses = {"filled", "canceled", "cancelled", "rejected", "expired", "reconciliation_conflict"}
+        terminal_orders = sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in terminal_statuses)
+        active_pending_order_ids = tuple(self._pending_orders.keys())
+        pending_terminal_leak_ids = []
+        for order_id in active_pending_order_ids:
+            for broker in {self._gateway_order_mapping_broker(), self._mapping_broker(), "paper"}:
+                mapping = self._get_order_id_mapping_read_only(order_id, broker)
+                if mapping is not None and mapping.is_terminal:
+                    pending_terminal_leak_ids.append(order_id)
+                    break
         return {
             "submitted_count": int(self._oms_lifecycle_counts.get("submitted", 0)),
             "acknowledged_count": int(self._oms_lifecycle_counts.get("acknowledged", 0)),
+            "acknowledged_count_legacy_note": "legacy lifecycle count; use order_post_acknowledged and cancel_acknowledged for broker mutation truth",
+            "order_post_attempted": int(order_post_attempted),
+            "order_post_authorized": int(order_post_authorized),
+            "order_post_acknowledged": int(order_post_acknowledged),
+            "cancel_attempted": int(cancel_attempted),
+            "cancel_authorized": int(cancel_authorized),
+            "cancel_acknowledged": int(cancel_acknowledged),
+            "active_pending_orders": len(self._pending_orders),
+            "active_pending_order_ids": active_pending_order_ids,
+            "terminal_orders": int(terminal_orders),
             "open_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in {"open", "accepted", "acknowledged"}),
             "filled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "filled"),
             "canceled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in {"canceled", "cancelled"}),
             "rejected_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "rejected"),
+            "expired_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "expired"),
             "mappings": len(mapping_rows),
             "local_orders": int(table_counts.get("orders", 0)),
             "local_fills": int(table_counts.get("fills", 0)),
@@ -3094,14 +3242,22 @@ class OrderRouter:
             "last_broker_account_status": latest_reconciliation.get("account_status"),
             "last_broker_open_orders_count": latest_reconciliation.get("open_orders_count"),
             "last_broker_positions_count": latest_reconciliation.get("positions_count"),
+            "shutdown_reconciliation": shutdown_reconciliation,
+            "broker_open_orders_unmatched_count": int(
+                shutdown_reconciliation.get("broker_open_orders_unmatched_count", 0) or 0
+            ),
             "reconciliation_conflicts": int(self._oms_lifecycle_counts.get("reconciliation_conflicts", 0)),
             "cancel_authorized_count": int(self._oms_lifecycle_counts.get("cancel_authorized", 0)),
             "cancel_denied_count": int(self._oms_lifecycle_counts.get("cancel_denied", 0)),
+            "pending_terminal_leak_count": len(set(pending_terminal_leak_ids)),
+            "pending_terminal_leak_ids": tuple(dict.fromkeys(pending_terminal_leak_ids)),
             "mutation_method_counts": {
                 "GET": int(request_counts.get("GET", 0) or 0),
                 "POST": int(request_counts.get("POST", 0) or 0),
                 "DELETE": int(request_counts.get("DELETE", 0) or 0),
             },
+            "broker_boundary_event_history_replayed_in_shutdown": True,
+            "broker_boundary_event_history_count": len(self._broker_boundary_events),
             "broker_boundary_events": tuple(dict(event) for event in self._broker_boundary_events[-20:]),
             "cancel_denials": dict(self._cancel_denials_by_order_id),
         }

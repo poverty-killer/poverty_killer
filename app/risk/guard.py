@@ -29,7 +29,7 @@ import shutil
 from uuid import uuid4
 from typing import Optional, Dict, Any, List, Callable, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from pathlib import Path
 
@@ -605,7 +605,40 @@ class HybridRiskGuard:
     # ZOMBIE ORDER DETECTION
     # ============================================
 
-    def update_pending_orders(self, count: int, total_value: float, oldest_timestamp: Optional[datetime] = None) -> bool:
+    def _normalize_pending_order_timestamp(self, value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            try:
+                value = int(raw)
+            except ValueError:
+                try:
+                    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+                return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        try:
+            timestamp = int(value)
+        except (TypeError, ValueError):
+            return None
+        if timestamp <= 0:
+            return None
+        if timestamp < 10_000_000_000:
+            seconds = timestamp
+        elif timestamp < 10_000_000_000_000:
+            seconds = timestamp / 1_000
+        elif timestamp < 10_000_000_000_000_000:
+            seconds = timestamp / 1_000_000
+        else:
+            seconds = timestamp / 1_000_000_000
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+
+    def update_pending_orders(self, count: int, total_value: float, oldest_timestamp: Optional[Any] = None) -> bool:
         """
         Update pending order status for zombie detection.
 
@@ -620,11 +653,12 @@ class HybridRiskGuard:
         with self._lock:
             self._state.pending_orders_count = count
             self._state.pending_orders_value = total_value
-            self._state.oldest_pending_order_ts = oldest_timestamp
+            normalized_oldest_timestamp = self._normalize_pending_order_timestamp(oldest_timestamp)
+            self._state.oldest_pending_order_ts = normalized_oldest_timestamp
             self._save_state()
 
-            if oldest_timestamp:
-                age_sec = (datetime.utcnow() - oldest_timestamp).total_seconds()
+            if normalized_oldest_timestamp:
+                age_sec = (datetime.now(timezone.utc) - normalized_oldest_timestamp).total_seconds()
                 if age_sec > self.zombie_order_timeout_sec and count > 0:
                     logger.warning(f"ZOMBIE ORDERS DETECTED: {count} orders, oldest {age_sec:.1f}s old")
                     self._trigger_zombie_alert()
