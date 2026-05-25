@@ -119,6 +119,9 @@ class BrokerGatewayAdapter(Protocol):
     def get_order_status(self, order_id: str) -> BrokerGatewayResponse:
         ...
 
+    def get_account_activities(self, *, activity_types: str = "FILL", page_size: int = 100) -> BrokerGatewayResponse:
+        ...
+
     def submit_order(self, order: BrokerOrderSubmitRequest) -> BrokerGatewayResponse:
         ...
 

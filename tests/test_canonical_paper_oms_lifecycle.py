@@ -631,6 +631,220 @@ def test_missing_broker_fill_details_reports_unavailable_without_fake_fill(tmp_p
     assert accounting["fill_hydration_missing_count"] == 1
 
 
+def test_order_status_fill_without_fee_hydrates_partial_broker_ledger_without_fake_fee(tmp_path):
+    state_store = _state_store(tmp_path)
+    _persist_mapping(
+        state_store,
+        client_order_id="partial-fee-client",
+        broker_order_id="broker-partial-fee",
+        status="filled",
+        is_terminal=True,
+    )
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/broker-partial-fee"): (
+                200,
+                {
+                    "id": "broker-partial-fee",
+                    "client_order_id": "partial-fee-client",
+                    "status": "filled",
+                    "symbol": "BTCUSD",
+                    "filled_qty": "0.01",
+                    "filled_avg_price": "75010.00",
+                    "filled_at": "2026-05-25T08:20:00Z",
+                },
+            ),
+            ("GET", "/v2/account/activities"): (200, []),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+
+    router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+
+    assert accounting["filled_orders"] == 1
+    assert accounting["local_fills"] == 1
+    assert accounting["legacy_local_fills"] == 0
+    assert accounting["fill_hydration_count"] == 1
+    assert accounting["fill_hydration_partial_count"] == 1
+    assert accounting["fill_hydration_missing_count"] == 0
+    assert accounting["tca_records_count"] == 1
+    assert accounting["tca_unknown_count"] == 1
+    assert not any(call["method"] in {"POST", "DELETE"} for call in transport.calls)
+
+
+def test_account_activity_hydrates_fee_and_realized_netedge_tca(tmp_path):
+    state_store = _state_store(tmp_path)
+    filled_payload = {
+        "id": "broker-1",
+        "client_order_id": "client-1",
+        "status": "filled",
+        "symbol": "BTCUSD",
+        "filled_qty": "0.01",
+        "filled_avg_price": "75005.00",
+        "filled_at": "2026-05-25T08:30:00Z",
+    }
+    activity_payload = {
+        "id": "activity-1",
+        "order_id": "broker-1",
+        "client_order_id": "client-1",
+        "symbol": "BTCUSD",
+        "side": "buy",
+        "qty": "0.01",
+        "price": "75005.00",
+        "commission": "0.15",
+        "commission_currency": "USD",
+        "transaction_time": "2026-05-25T08:30:01Z",
+    }
+    transport = RoutingTransport(
+        {
+            ("POST", "/v2/orders"): (
+                200,
+                {
+                    "id": "broker-1",
+                    "client_order_id": "client-1",
+                    "status": "accepted",
+                    "symbol": "BTCUSD",
+                },
+            ),
+            ("GET", "/v2/orders/broker-1"): (200, filled_payload),
+            ("GET", "/v2/account/activities"): (200, [activity_payload]),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+    order = _order().model_copy(
+        update={
+            "metadata": {
+                **_order().metadata,
+                "net_edge_evaluation": {"net_adversarial_edge": "0.01"},
+                "net_edge_context": {"expected_move": "0.02"},
+            }
+        }
+    )
+
+    router.submit_order(order)
+    accounting = router.get_oms_shutdown_accounting()
+
+    assert accounting["filled_orders"] == 1
+    assert accounting["local_fills"] == 1
+    assert accounting["legacy_local_fills"] == 1
+    assert accounting["fill_hydration_count"] == 1
+    assert accounting["fill_hydration_partial_count"] == 0
+    assert accounting["fill_hydration_missing_count"] == 0
+    assert accounting["tca_records_count"] == 1
+    assert accounting["tca_unknown_count"] == 0
+    assert accounting["realized_vs_modeled_netedge_available_count"] == 1
+    assert any(call["method"] == "GET" and call["path"] == "/v2/account/activities" for call in transport.calls)
+
+
+def test_repeated_fill_hydration_is_idempotent(tmp_path):
+    state_store = _state_store(tmp_path)
+    _persist_mapping(
+        state_store,
+        client_order_id="idempotent-client",
+        broker_order_id="broker-idempotent",
+        status="filled",
+        is_terminal=True,
+    )
+    filled_payload = {
+        "id": "broker-idempotent",
+        "client_order_id": "idempotent-client",
+        "status": "filled",
+        "symbol": "BTCUSD",
+        "filled_qty": "0.01",
+        "filled_avg_price": "75001.00",
+        "fee": "0.10",
+        "fee_currency": "USD",
+        "filled_at": "2026-05-25T08:40:00Z",
+    }
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/broker-idempotent"): (200, filled_payload),
+            ("GET", "/v2/account/activities"): (200, []),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+
+    router.finalize_oms_shutdown_reconciliation()
+    router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+
+    assert accounting["local_fills"] == 1
+    assert accounting["legacy_local_fills"] == 1
+    assert accounting["fill_hydration_count"] == 1
+
+
+def test_canceled_order_with_filled_qty_records_partial_fill_then_cancel(tmp_path):
+    state_store = _state_store(tmp_path)
+    _persist_mapping(state_store, client_order_id="partial-cancel-client", broker_order_id="broker-partial-cancel")
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/broker-partial-cancel"): (
+                200,
+                {
+                    "id": "broker-partial-cancel",
+                    "client_order_id": "partial-cancel-client",
+                    "status": "canceled",
+                    "symbol": "BTCUSD",
+                    "filled_qty": "0.005",
+                    "filled_avg_price": "74990.00",
+                    "updated_at": "2026-05-25T08:50:00Z",
+                },
+            ),
+            ("GET", "/v2/account/activities"): (200, []),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.005"}]),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+
+    router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+    mapping = state_store.get_order_id_mapping("partial-cancel-client", "alpaca")
+
+    assert mapping["is_terminal"] is True
+    assert mapping["status"] == "canceled"
+    assert accounting["local_fills"] == 1
+    assert accounting["broker_canceled_with_fill_count"] == 1
+    assert accounting["fill_hydration_partial_count"] == 1
+    assert accounting["fill_hydration_missing_count"] == 0
+    assert not any(call["method"] in {"POST", "DELETE"} for call in transport.calls)
+
+
 def test_stale_terminal_mapping_does_not_trigger_unsafe_cancel_mutation(tmp_path):
     adapter, transport = _adapter_with_ack()
     state_store = _state_store(tmp_path)

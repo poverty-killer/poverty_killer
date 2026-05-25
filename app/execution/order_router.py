@@ -34,12 +34,14 @@ BUNDLE F1 — TELEMETRY HOOKS
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import math
 import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal as _Decimal
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -195,6 +197,8 @@ class OrderRouter:
         self._gateway_reconciliation_by_client_order_id: Dict[str, Dict[str, Any]] = {}
         self._shutdown_reconciliation: Dict[str, Any] = {}
         self._fill_hydration_results: List[Dict[str, Any]] = []
+        self._broker_fill_activity_cache: Optional[List[Dict[str, Any]]] = None
+        self._broker_fill_activity_fetch_error: Optional[str] = None
         self._cancel_denials_by_order_id: Dict[str, str] = {}
         self._oms_lifecycle_counts: Dict[str, int] = {
             "submitted": 0,
@@ -1156,7 +1160,9 @@ class OrderRouter:
 
         evidence["status"] = oms_state
         evidence["broker_normalized_status"] = broker_status
-        if oms_state == OmsOrderState.FILLED.value:
+        if oms_state in {OmsOrderState.FILLED.value, OmsOrderState.PARTIALLY_FILLED.value} or (
+            self._decimal_from_payload(payload, ("filled_qty", "filled_quantity", "qty")) or _Decimal("0")
+        ) > 0:
             evidence["fill_hydration"] = self._hydrate_fill_ledger_from_broker_payload(
                 mapping,
                 payload,
@@ -1205,11 +1211,22 @@ class OrderRouter:
             "local_open_without_broker_match_count": 0,
             "final_state_unknown_count": 0,
             "reconciliation_conflict_count": 0,
+            "fill_hydration_attempted_count": 0,
             "fill_hydration_count": 0,
+            "fill_hydration_partial_count": 0,
             "fill_hydration_missing_count": 0,
+            "fill_hydration_conflict_count": 0,
+            "broker_filled_orders": 0,
+            "broker_partially_filled_orders": 0,
+            "broker_canceled_with_fill_count": 0,
+            "tca_records_count": 0,
+            "tca_unknown_count": 0,
+            "realized_vs_modeled_netedge_available_count": 0,
+            "realized_vs_modeled_netedge_unknown_count": 0,
             "positions_count": None,
             "local_order_id_mappings": 0,
             "local_fills": 0,
+            "legacy_local_fills": 0,
             "broker_open_orders_matched_mapping_count": 0,
             "broker_open_orders_unmatched_count": 0,
             "reconciled_active_mappings": 0,
@@ -1274,7 +1291,8 @@ class OrderRouter:
             )
             counter = getattr(self._state_store, "count_table_rows", None)
             if callable(counter):
-                evidence["local_fills"] = int(counter("fills"))
+                evidence["legacy_local_fills"] = int(counter("fills"))
+                evidence["local_fills"] = int(counter("broker_fill_ledger"))
         evidence["local_order_id_mappings"] = len(mapping_rows)
         evidence["local_open_orders_before_final_reconcile"] = sum(
             1 for row in mapping_rows if self._is_local_open_order_mapping(row)
@@ -1315,7 +1333,8 @@ class OrderRouter:
                 mapping_rows = []
             counter = getattr(self._state_store, "count_table_rows", None)
             if callable(counter):
-                evidence["local_fills"] = int(counter("fills"))
+                evidence["legacy_local_fills"] = int(counter("fills"))
+                evidence["local_fills"] = int(counter("broker_fill_ledger"))
         local_open_after = [
             row for row in mapping_rows
             if self._is_local_open_order_mapping(row)
@@ -1328,13 +1347,48 @@ class OrderRouter:
                 local_open_without_broker_match_count += 1
         evidence["local_open_without_broker_match_count"] = local_open_without_broker_match_count
         evidence["final_nonterminal_resolutions"] = tuple(final_resolutions)
+        evidence["fill_hydration_attempted_count"] = len(self._fill_hydration_results)
         evidence["fill_hydration_count"] = sum(
             1 for result in self._fill_hydration_results if result.get("inserted") is True
+        )
+        evidence["fill_hydration_partial_count"] = sum(
+            1 for result in self._fill_hydration_results if result.get("status") == "PARTIAL"
         )
         evidence["fill_hydration_missing_count"] = sum(
             1
             for result in self._fill_hydration_results
             if OmsReasonCode.FILL_LEDGER_UNAVAILABLE.value in result.get("reason_codes", ())
+        )
+        evidence["fill_hydration_conflict_count"] = sum(
+            1 for result in self._fill_hydration_results if result.get("status") == "CONFLICT"
+        )
+        evidence["tca_records_count"] = sum(
+            1 for result in self._fill_hydration_results if result.get("inserted") is True
+        )
+        evidence["tca_unknown_count"] = sum(
+            1
+            for result in self._fill_hydration_results
+            if result.get("inserted") is True
+            and result.get("execution_quality_verdict") == "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+        )
+        evidence["realized_vs_modeled_netedge_available_count"] = sum(
+            1 for result in self._fill_hydration_results if result.get("realized_netedge_available") is True
+        )
+        evidence["realized_vs_modeled_netedge_unknown_count"] = max(
+            0,
+            int(evidence["tca_records_count"]) - int(evidence["realized_vs_modeled_netedge_available_count"]),
+        )
+        evidence["broker_filled_orders"] = sum(
+            1 for row in mapping_rows if str(row.get("status") or "").lower() == "filled"
+        )
+        evidence["broker_partially_filled_orders"] = sum(
+            1 for row in mapping_rows if str(row.get("status") or "").lower() in {"partially_filled", "partial_fill", "partial"}
+        )
+        evidence["broker_canceled_with_fill_count"] = sum(
+            1
+            for result in self._fill_hydration_results
+            if str(result.get("known_broker_terminal_status") or "").lower() in {"canceled", "cancelled"}
+            and result.get("inserted") is True
         )
         evidence["reconciliation_conflict_count"] = max(
             int(evidence["reconciliation_conflict_count"]),
@@ -3241,6 +3295,7 @@ class OrderRouter:
             for table in (
                 "orders",
                 "fills",
+                "broker_fill_ledger",
                 "order_id_mappings",
                 "reservation_ledger",
                 "reservation_fill_progress",
@@ -3299,6 +3354,40 @@ class OrderRouter:
                 if OmsReasonCode.FILL_LEDGER_UNAVAILABLE.value in result.get("reason_codes", ())
             ),
         )
+        fill_hydration_attempted_count = max(
+            int(shutdown_reconciliation.get("fill_hydration_attempted_count", 0) or 0),
+            len(self._fill_hydration_results),
+        )
+        fill_hydration_count = max(
+            int(shutdown_reconciliation.get("fill_hydration_count", 0) or 0),
+            sum(1 for result in self._fill_hydration_results if result.get("inserted") is True),
+        )
+        fill_hydration_partial_count = max(
+            int(shutdown_reconciliation.get("fill_hydration_partial_count", 0) or 0),
+            sum(1 for result in self._fill_hydration_results if result.get("status") == "PARTIAL"),
+        )
+        fill_hydration_conflict_count = max(
+            int(shutdown_reconciliation.get("fill_hydration_conflict_count", 0) or 0),
+            sum(1 for result in self._fill_hydration_results if result.get("status") == "CONFLICT"),
+        )
+        tca_records_count = max(
+            int(shutdown_reconciliation.get("tca_records_count", 0) or 0),
+            sum(1 for result in self._fill_hydration_results if result.get("inserted") is True),
+        )
+        tca_unknown_count = max(
+            int(shutdown_reconciliation.get("tca_unknown_count", 0) or 0),
+            sum(
+                1
+                for result in self._fill_hydration_results
+                if result.get("inserted") is True
+                and result.get("execution_quality_verdict") == "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+            ),
+        )
+        realized_netedge_available_count = max(
+            int(shutdown_reconciliation.get("realized_vs_modeled_netedge_available_count", 0) or 0),
+            sum(1 for result in self._fill_hydration_results if result.get("realized_netedge_available") is True),
+        )
+        realized_netedge_unknown_count = max(0, int(tca_records_count) - int(realized_netedge_available_count))
         active_pending_order_ids = tuple(self._pending_orders.keys())
         pending_terminal_leak_ids = []
         for order_id in active_pending_order_ids:
@@ -3333,15 +3422,26 @@ class OrderRouter:
             ),
             "final_state_unknown_count": int(shutdown_reconciliation.get("final_state_unknown_count", 0) or 0),
             "reconciliation_conflict_count": int(reconciliation_conflicts),
-            "fill_hydration_count": int(shutdown_reconciliation.get("fill_hydration_count", 0) or 0),
+            "fill_hydration_attempted_count": int(fill_hydration_attempted_count),
+            "fill_hydration_count": int(fill_hydration_count),
+            "fill_hydration_partial_count": int(fill_hydration_partial_count),
             "fill_hydration_missing_count": int(fill_hydration_missing_count),
+            "fill_hydration_conflict_count": int(fill_hydration_conflict_count),
+            "broker_filled_orders": int(shutdown_reconciliation.get("broker_filled_orders", 0) or 0),
+            "broker_partially_filled_orders": int(shutdown_reconciliation.get("broker_partially_filled_orders", 0) or 0),
+            "broker_canceled_with_fill_count": int(shutdown_reconciliation.get("broker_canceled_with_fill_count", 0) or 0),
+            "tca_records_count": int(tca_records_count),
+            "tca_unknown_count": int(tca_unknown_count),
+            "realized_vs_modeled_netedge_available_count": int(realized_netedge_available_count),
+            "realized_vs_modeled_netedge_unknown_count": int(realized_netedge_unknown_count),
             "filled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "filled"),
             "canceled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in {"canceled", "cancelled"}),
             "rejected_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "rejected"),
             "expired_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "expired"),
             "mappings": len(mapping_rows),
             "local_orders": int(table_counts.get("orders", 0)),
-            "local_fills": int(table_counts.get("fills", 0)),
+            "legacy_local_fills": int(table_counts.get("fills", 0)),
+            "local_fills": int(table_counts.get("broker_fill_ledger", table_counts.get("fills", 0))),
             "local_order_id_mappings": int(table_counts.get("order_id_mappings", len(mapping_rows))),
             "local_reservation_ledger": int(table_counts.get("reservation_ledger", 0)),
             "local_reservation_fill_progress": int(table_counts.get("reservation_fill_progress", 0)),
@@ -3522,14 +3622,170 @@ class OrderRouter:
                 return None
         return None
 
+    def _payload_value(self, payload: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
+        for key in keys:
+            if key in payload and payload.get(key) not in (None, ""):
+                return payload.get(key)
+        return None
+
+    def _broker_fill_activities(self) -> List[Dict[str, Any]]:
+        if self._broker_fill_activity_cache is not None:
+            return list(self._broker_fill_activity_cache)
+        self._broker_fill_activity_cache = []
+        adapter = self._broker_gateway_adapter
+        getter = getattr(adapter, "get_account_activities", None)
+        if not callable(getter):
+            self._broker_fill_activity_fetch_error = "broker_activity_method_missing"
+            return []
+        try:
+            response = getter(activity_types="FILL", page_size=100)
+        except BrokerGatewayError as exc:
+            self._broker_fill_activity_fetch_error = exc.reason_code
+            return []
+        if not getattr(response, "ok", False):
+            self._broker_fill_activity_fetch_error = str(getattr(response, "reason_code", None) or "broker_activity_get_failed")
+            return []
+        payload = response.payload
+        if isinstance(payload, dict):
+            payload = payload.get("activities", payload.get("items", []))
+        if not isinstance(payload, list):
+            self._broker_fill_activity_fetch_error = "broker_activity_invalid_shape"
+            return []
+        self._broker_fill_activity_cache = [item for item in payload if isinstance(item, dict)]
+        return list(self._broker_fill_activity_cache)
+
+    def _matching_broker_fill_activity(
+        self,
+        *,
+        broker_order_id: str,
+        client_order_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        for activity in self._broker_fill_activities():
+            activity_order_id = str(activity.get("order_id") or activity.get("broker_order_id") or "").strip()
+            activity_client_id = str(activity.get("client_order_id") or "").strip()
+            if broker_order_id and activity_order_id == broker_order_id:
+                return activity
+            if client_order_id and activity_client_id == client_order_id:
+                return activity
+        return None
+
+    def _timestamp_ns_from_broker_text(self, value: Any) -> Optional[int]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp() * 1_000_000_000)
+
+    def _order_metadata_decimal(self, metadata: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[_Decimal]:
+        for key in keys:
+            value = metadata.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return _Decimal(str(value))
+            except Exception:
+                continue
+        return None
+
+    def _fill_tca_fields(
+        self,
+        *,
+        mapping: ActiveOrderIdMapping,
+        quantity: _Decimal,
+        price: _Decimal,
+        fee: Optional[_Decimal],
+        fill_ts_ns: Optional[int],
+        order: Optional[OrderRequest],
+    ) -> Dict[str, Any]:
+        metadata = dict(getattr(order, "metadata", {}) or {}) if order is not None else {}
+        net_edge = metadata.get("net_edge_evaluation") if isinstance(metadata.get("net_edge_evaluation"), dict) else {}
+        context = metadata.get("net_edge_context") if isinstance(metadata.get("net_edge_context"), dict) else {}
+        reference = self._order_metadata_decimal(
+            metadata,
+            ("modeled_entry_price", "reference_price", "decision_reference_price", "signal_price"),
+        )
+        if reference is None and order is not None and getattr(order, "limit_price", None) is not None:
+            reference = _Decimal(str(order.limit_price))
+        modeled_net_edge = self._order_metadata_decimal(
+            dict(net_edge),
+            ("net_adversarial_edge", "net_edge", "modeled_net_edge"),
+        )
+        if modeled_net_edge is None:
+            modeled_net_edge = self._order_metadata_decimal(
+                dict(context),
+                ("net_adversarial_edge", "net_edge", "modeled_net_edge"),
+            )
+
+        notional = quantity * price
+        slippage: Optional[_Decimal] = None
+        slippage_bps: Optional[_Decimal] = None
+        if reference is not None and reference > 0:
+            if str(mapping.side).lower() == "sell":
+                slippage = reference - price
+            else:
+                slippage = price - reference
+            slippage_bps = (slippage / reference) * _Decimal("10000")
+
+        fee_bps: Optional[_Decimal] = None
+        if fee is not None and notional > 0:
+            fee_bps = (fee / notional) * _Decimal("10000")
+
+        decision_ts_ns = int(getattr(order, "exchange_ts_ns", 0) or mapping.submit_ts_ns or 0)
+        ack_ts_ns = int(mapping.ack_ts_ns or 0)
+        latency_decision_to_ack_ms = None
+        latency_ack_to_fill_ms = None
+        if decision_ts_ns > 0 and ack_ts_ns > 0 and ack_ts_ns >= decision_ts_ns:
+            latency_decision_to_ack_ms = str((ack_ts_ns - decision_ts_ns) / 1_000_000)
+        if ack_ts_ns > 0 and fill_ts_ns is not None and fill_ts_ns >= ack_ts_ns:
+            latency_ack_to_fill_ms = str((fill_ts_ns - ack_ts_ns) / 1_000_000)
+
+        realized_vs_modeled = None
+        if modeled_net_edge is not None and slippage_bps is not None and fee_bps is not None:
+            realized_drag = (max(slippage_bps, _Decimal("0")) + fee_bps) / _Decimal("10000")
+            realized_vs_modeled = modeled_net_edge - realized_drag
+
+        if slippage_bps is None or fee_bps is None or modeled_net_edge is None:
+            tca_status = "UNKNOWN"
+            verdict = "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+        elif slippage_bps > _Decimal("1"):
+            tca_status = "HYDRATED"
+            verdict = "WORSE_THAN_MODELED"
+        elif slippage_bps < _Decimal("-1"):
+            tca_status = "HYDRATED"
+            verdict = "BETTER_THAN_MODELED"
+        else:
+            tca_status = "HYDRATED"
+            verdict = "IN_LINE"
+
+        return {
+            "notional": str(notional),
+            "modeled_entry_price": str(reference) if reference is not None else None,
+            "modeled_net_edge": str(modeled_net_edge) if modeled_net_edge is not None else None,
+            "realized_vs_modeled_netedge": str(realized_vs_modeled) if realized_vs_modeled is not None else None,
+            "slippage": str(slippage) if slippage is not None else None,
+            "slippage_bps": str(slippage_bps) if slippage_bps is not None else None,
+            "fee_bps": str(fee_bps) if fee_bps is not None else None,
+            "latency_decision_to_ack_ms": latency_decision_to_ack_ms,
+            "latency_ack_to_fill_ms": latency_ack_to_fill_ms,
+            "tca_status": tca_status,
+            "execution_quality_verdict": verdict,
+            "realized_netedge_available": realized_vs_modeled is not None,
+        }
+
     def _hydrate_fill_ledger_from_broker_payload(
         self,
         mapping: ActiveOrderIdMapping,
         payload: Dict[str, Any],
         *,
         source_event: str,
+        order: Optional[OrderRequest] = None,
     ) -> Dict[str, Any]:
-        """Hydrate a local fill only when broker payload carries real fill facts."""
+        """Hydrate fill truth from broker payload/activity without inventing facts."""
         result: Dict[str, Any] = {
             "client_order_id": mapping.client_order_id,
             "broker_order_id": mapping.broker_order_id or mapping.venue_order_id,
@@ -3537,6 +3793,10 @@ class OrderRouter:
             "status": "NOT_APPLICABLE",
             "reason_codes": (),
             "inserted": False,
+            "legacy_fill_inserted": False,
+            "duplicate_ignored": False,
+            "tca_status": "UNKNOWN",
+            "execution_quality_verdict": "UNKNOWN_INSUFFICIENT_BROKER_DETAIL",
         }
         if self._state_store is None:
             result["status"] = "MISSING_TRUTH"
@@ -3544,20 +3804,59 @@ class OrderRouter:
             self._fill_hydration_results.append(result)
             return result
 
-        quantity = self._decimal_from_payload(payload, ("filled_qty", "filled_quantity"))
-        price = self._decimal_from_payload(payload, ("filled_avg_price", "avg_fill_price", "filled_price"))
-        fee = self._decimal_from_payload(payload, ("fee", "commission", "commission_amount"))
-        fee_currency = str(payload.get("fee_currency") or payload.get("commission_currency") or "").strip()
-        timestamp = str(payload.get("filled_at") or payload.get("updated_at") or payload.get("transaction_time") or "").strip()
+        broker_order_id = str(mapping.broker_order_id or mapping.venue_order_id or mapping.command_order_id)
+        activity = self._matching_broker_fill_activity(
+            broker_order_id=broker_order_id,
+            client_order_id=mapping.client_order_id,
+        )
+        activity_payload = activity or {}
+
+        activity_symbol = activity_payload.get("symbol")
+        if activity_symbol and self._normalize_broker_symbol(activity_symbol) != self._normalize_broker_symbol(mapping.symbol):
+            result["status"] = "CONFLICT"
+            result["reason_codes"] = (OmsReasonCode.RECONCILIATION_CONFLICT.value,)
+            result["conflict_field"] = "symbol"
+            self._fill_hydration_results.append(result)
+            logger.info("[OMS_DIAG] FILL_LEDGER_CONFLICT fields=%s", result)
+            return result
+        activity_side = activity_payload.get("side")
+        if activity_side and str(activity_side).strip().lower() != str(mapping.side).strip().lower():
+            result["status"] = "CONFLICT"
+            result["reason_codes"] = (OmsReasonCode.RECONCILIATION_CONFLICT.value,)
+            result["conflict_field"] = "side"
+            self._fill_hydration_results.append(result)
+            logger.info("[OMS_DIAG] FILL_LEDGER_CONFLICT fields=%s", result)
+            return result
+
+        quantity = (
+            self._decimal_from_payload(activity_payload, ("qty", "quantity", "filled_qty"))
+            or self._decimal_from_payload(payload, ("filled_qty", "filled_quantity", "qty"))
+        )
+        price = (
+            self._decimal_from_payload(activity_payload, ("price", "filled_avg_price", "avg_fill_price"))
+            or self._decimal_from_payload(payload, ("filled_avg_price", "avg_fill_price", "filled_price", "price"))
+        )
+        fee = (
+            self._decimal_from_payload(activity_payload, ("commission", "fee", "commission_amount"))
+            or self._decimal_from_payload(payload, ("fee", "commission", "commission_amount"))
+        )
+        fee_currency = str(
+            activity_payload.get("fee_currency")
+            or activity_payload.get("commission_currency")
+            or payload.get("fee_currency")
+            or payload.get("commission_currency")
+            or ""
+        ).strip()
+        timestamp = str(
+            self._payload_value(activity_payload, ("transaction_time", "filled_at", "updated_at"))
+            or self._payload_value(payload, ("filled_at", "updated_at", "transaction_time"))
+            or ""
+        ).strip()
         missing = []
         if quantity is None or quantity <= 0:
             missing.append("filled_qty")
         if price is None or price <= 0:
             missing.append("filled_avg_price")
-        if fee is None:
-            missing.append("fee")
-        if not fee_currency:
-            missing.append("fee_currency")
         if not timestamp:
             missing.append("timestamp")
         if missing:
@@ -3568,25 +3867,112 @@ class OrderRouter:
             logger.info("[OMS_DIAG] FILL_LEDGER_UNAVAILABLE fields=%s", result)
             return result
 
-        broker_order_id = str(mapping.broker_order_id or mapping.venue_order_id or mapping.command_order_id)
-        fill_id = f"broker_fill:{mapping.broker}:{broker_order_id}:{quantity}:{price}:{timestamp}"
-        inserted = self._state_store.insert_fill(
+        broker_activity_id = str(activity_payload.get("id") or activity_payload.get("activity_id") or "").strip() or None
+        fill_id = (
+            f"broker_activity:{mapping.broker}:{broker_activity_id}"
+            if broker_activity_id
+            else f"broker_fill:{mapping.broker}:{broker_order_id}:{quantity}:{price}:{timestamp}"
+        )
+        fill_ts_ns = self._timestamp_ns_from_broker_text(timestamp)
+        hydration_status = "HYDRATED" if fee is not None and fee_currency else "PARTIAL"
+        hydration_reason = (
+            "BROKER_FILL_DETAIL_HYDRATED"
+            if hydration_status == "HYDRATED"
+            else "BROKER_FILL_FEE_DETAIL_UNAVAILABLE"
+        )
+        tca_fields = self._fill_tca_fields(
+            mapping=mapping,
+            quantity=quantity,
+            price=price,
+            fee=fee,
+            fill_ts_ns=fill_ts_ns,
+            order=order,
+        )
+        metadata = dict(getattr(order, "metadata", {}) or {}) if order is not None else {}
+        candidate_lifecycle = metadata.get("candidate_lifecycle") if isinstance(metadata.get("candidate_lifecycle"), dict) else {}
+        fill_record = {
+            "fill_id": fill_id,
+            "broker_order_id": broker_order_id,
+            "client_order_id": mapping.client_order_id,
+            "decision_uuid": getattr(order, "decision_uuid", None) if order is not None else None,
+            "frame_id": metadata.get("frame_id"),
+            "candidate_id": candidate_lifecycle.get("candidate_id"),
+            "snapshot_id": metadata.get("snapshot_id"),
+            "symbol": mapping.symbol,
+            "side": mapping.side,
+            "action": metadata.get("action") or ("sell_to_close" if str(mapping.side).lower() == "sell" else "buy_to_open"),
+            "quantity": str(quantity),
+            "price": str(price),
+            "notional": tca_fields.get("notional"),
+            "fill_timestamp": timestamp,
+            "fill_ts_ns": fill_ts_ns,
+            "broker_activity_id": broker_activity_id,
+            "fee": str(fee) if fee is not None else None,
+            "fee_currency": fee_currency or None,
+            "liquidity_flag": activity_payload.get("liquidity") or activity_payload.get("liquidity_flag"),
+            "source": "broker_activity" if activity_payload else "broker_order_status",
+            "hydration_status": hydration_status,
+            "hydration_reason_code": hydration_reason,
+            "tca_status": tca_fields.get("tca_status"),
+            "execution_quality_verdict": tca_fields.get("execution_quality_verdict"),
+            "modeled_entry_price": tca_fields.get("modeled_entry_price"),
+            "modeled_net_edge": tca_fields.get("modeled_net_edge"),
+            "realized_vs_modeled_netedge": tca_fields.get("realized_vs_modeled_netedge"),
+            "slippage": tca_fields.get("slippage"),
+            "slippage_bps": tca_fields.get("slippage_bps"),
+            "fee_bps": tca_fields.get("fee_bps"),
+            "latency_decision_to_ack_ms": tca_fields.get("latency_decision_to_ack_ms"),
+            "latency_ack_to_fill_ms": tca_fields.get("latency_ack_to_fill_ms"),
+            "metadata": {
+                "source_event": source_event,
+                "broker_activity_available": bool(activity_payload),
+                "broker_activity_fetch_error": self._broker_fill_activity_fetch_error,
+                "order_status": payload.get("status"),
+                "net_edge_evaluation": metadata.get("net_edge_evaluation"),
+                "net_edge_context": metadata.get("net_edge_context"),
+            },
+            "created_at_ns": now_ns(),
+            "observed_at_ns": now_ns(),
+        }
+        ledger_status = self._state_store.upsert_broker_fill_ledger(fill_record)
+        result.update(
             {
-                "id": fill_id,
-                "order_id": mapping.client_order_id,
-                "symbol": mapping.symbol,
-                "side": mapping.side,
-                "quantity": float(quantity),
-                "price": float(price),
-                "fee": float(fee),
-                "fee_currency": fee_currency,
-                "timestamp": timestamp,
-                "exchange_order_id": broker_order_id,
-                "latency_ms": None,
+                "status": hydration_status if ledger_status in {"inserted", "duplicate"} else "CONFLICT",
+                "reason_codes": () if ledger_status in {"inserted", "duplicate"} else (OmsReasonCode.RECONCILIATION_CONFLICT.value,),
+                "hydration_reason_code": hydration_reason,
+                "inserted": ledger_status == "inserted",
+                "duplicate_ignored": ledger_status == "duplicate",
+                "ledger_status": ledger_status,
+                "fill_id": fill_id,
+                "broker_activity_id": broker_activity_id,
+                "quantity": str(quantity),
+                "price": str(price),
+                "known_broker_terminal_status": str(payload.get("status") or "").lower() or None,
+                "fee_available": fee is not None,
+                "fee_currency_available": bool(fee_currency),
+                "tca_status": tca_fields.get("tca_status"),
+                "execution_quality_verdict": tca_fields.get("execution_quality_verdict"),
+                "realized_netedge_available": bool(tca_fields.get("realized_netedge_available")),
             }
         )
-        result["status"] = "CONTRIBUTED" if inserted else "ALREADY_PRESENT_OR_REJECTED"
-        result["inserted"] = bool(inserted)
+        if fee is not None and fee_currency:
+            legacy_fill_id = f"legacy:{fill_id}"
+            legacy_inserted = self._state_store.insert_fill(
+                {
+                    "id": legacy_fill_id,
+                    "order_id": mapping.client_order_id,
+                    "symbol": mapping.symbol,
+                    "side": mapping.side,
+                    "quantity": float(quantity),
+                    "price": float(price),
+                    "fee": float(fee),
+                    "fee_currency": fee_currency,
+                    "timestamp": timestamp,
+                    "exchange_order_id": broker_order_id,
+                    "latency_ms": None,
+                }
+            )
+            result["legacy_fill_inserted"] = bool(legacy_inserted)
         self._fill_hydration_results.append(result)
         logger.info("[OMS_DIAG] FILL_LEDGER_HYDRATION fields=%s", result)
         return result
@@ -3625,11 +4011,11 @@ class OrderRouter:
         *,
         source_event: str,
     ) -> None:
-        """Hydrate or explain terminal filled mappings with no local fill rows."""
+        """Hydrate or explain terminal mappings that broker truth says filled."""
         adapter = self._broker_gateway_adapter
         for row in mapping_rows:
             status = str(row.get("status") or "").strip().lower()
-            if status != "filled":
+            if status not in {"filled", "partially_filled", "partial_fill", "partial", "canceled", "cancelled"}:
                 continue
             mapping = self._mapping_from_record(row)
             if mapping is None:
@@ -3654,12 +4040,23 @@ class OrderRouter:
                 continue
             broker_status = str(getattr(status_response, "normalized_status", "") or "")
             payload = status_response.payload if isinstance(status_response.payload, dict) else {}
-            if not status_response.ok or canonical_state_from_broker_status(broker_status) != OmsOrderState.FILLED.value:
+            broker_state = canonical_state_from_broker_status(broker_status)
+            broker_filled_qty = self._decimal_from_payload(payload, ("filled_qty", "filled_quantity", "qty"))
+            has_fill_quantity = broker_filled_qty is not None and broker_filled_qty > 0
+            if not status_response.ok:
                 self._record_fill_ledger_unavailable(
                     mapping,
                     source_event=source_event,
                     missing_fields=("broker_filled_status",),
                 )
+                continue
+            if broker_state not in {OmsOrderState.FILLED.value, OmsOrderState.PARTIALLY_FILLED.value} and not has_fill_quantity:
+                if status == "filled":
+                    self._record_fill_ledger_unavailable(
+                        mapping,
+                        source_event=source_event,
+                        missing_fields=("broker_filled_status",),
+                    )
                 continue
             self._hydrate_fill_ledger_from_broker_payload(
                 mapping,
@@ -3739,7 +4136,9 @@ class OrderRouter:
 
         evidence["status"] = oms_state
         evidence["broker_normalized_status"] = broker_status
-        if oms_state == OmsOrderState.FILLED.value:
+        if oms_state in {OmsOrderState.FILLED.value, OmsOrderState.PARTIALLY_FILLED.value} or (
+            self._decimal_from_payload(payload, ("filled_qty", "filled_quantity", "qty")) or _Decimal("0")
+        ) > 0:
             evidence["fill_hydration"] = self._hydrate_fill_ledger_from_broker_payload(
                 mapping,
                 payload,
@@ -3829,13 +4228,16 @@ class OrderRouter:
 
         evidence["status"] = oms_state
         evidence["broker_normalized_status"] = broker_status
-        if oms_state == OmsOrderState.FILLED.value:
+        if oms_state in {OmsOrderState.FILLED.value, OmsOrderState.PARTIALLY_FILLED.value} or (
+            self._decimal_from_payload(payload, ("filled_qty", "filled_quantity", "qty")) or _Decimal("0")
+        ) > 0:
             mapping = self._get_active_order_id_mapping(order.id, self._gateway_order_mapping_broker())
             if mapping is not None:
                 evidence["fill_hydration"] = self._hydrate_fill_ledger_from_broker_payload(
                     mapping,
                     payload,
                     source_event="post_ack_reconciliation",
+                    order=order,
                 )
         evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
         self._gateway_reconciliation_by_client_order_id[order.id] = evidence
@@ -3937,7 +4339,7 @@ class OrderRouter:
                 self._pending_orders[order.id] = order
             if is_terminal_oms_state(oms_state):
                 self._pending_orders.pop(order.id, None)
-                terminal_status = response.normalized_status
+                terminal_status = oms_state.lower()
                 if oms_state == OmsOrderState.RECONCILIATION_CONFLICT.value:
                     terminal_status = "reconciliation_conflict"
                 self._mark_active_order_mapping_terminal_for_broker(

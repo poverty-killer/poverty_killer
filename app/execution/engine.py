@@ -1713,6 +1713,8 @@ class ExecutionEngine:
             "compiled_decision_artifact",
             "pre_trade_guardrail_verdict",
             "edge_attribution",
+            "net_edge_context",
+            "net_edge_evaluation",
             "candidate_lifecycle",
             "opportunity_scorecard",
             "decision_frame",

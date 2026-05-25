@@ -275,7 +275,7 @@ class AlpacaPaperBrokerAdapter:
     supported_asset_classes = frozenset({"equity", "us_equity", "etf", "crypto"})
     supported_methods = frozenset({"GET", "POST", "DELETE"})
 
-    _allowed_get_paths = frozenset({"/v2/account", "/v2/positions", "/v2/orders", "/v2/clock"})
+    _allowed_get_paths = frozenset({"/v2/account", "/v2/account/activities", "/v2/positions", "/v2/orders", "/v2/clock"})
     _allowed_get_prefixes = ("/v2/orders/", "/v2/assets/")
 
     def __init__(
@@ -342,6 +342,15 @@ class AlpacaPaperBrokerAdapter:
         if not safe_order_id:
             raise BrokerGatewayError("order_id_missing")
         return self._request("GET", f"/v2/orders/{urllib.parse.quote(safe_order_id, safe='')}")
+
+    def get_account_activities(self, *, activity_types: str = "FILL", page_size: int = 100) -> BrokerGatewayResponse:
+        safe_activity_types = str(activity_types or "FILL").strip().upper()
+        safe_page_size = max(1, min(int(page_size or 100), 100))
+        return self._request(
+            "GET",
+            "/v2/account/activities",
+            query={"activity_types": safe_activity_types, "page_size": str(safe_page_size)},
+        )
 
     def submit_order(self, order: BrokerOrderSubmitRequest) -> BrokerGatewayResponse:
         payload = self._payload_for_order(order)

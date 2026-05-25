@@ -228,6 +228,50 @@ class StateStore:
                 )
             """)
 
+            # Canonical broker-backed fill ledger. This table permits partial
+            # hydration when broker truth supplies fill quantity/price/time but
+            # fee or TCA detail is unavailable. The legacy fills table remains
+            # stricter and is populated only when complete fee truth exists.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_fill_ledger (
+                    fill_id TEXT PRIMARY KEY,
+                    broker_order_id TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    decision_uuid TEXT,
+                    frame_id TEXT,
+                    candidate_id TEXT,
+                    snapshot_id TEXT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    action TEXT,
+                    quantity TEXT,
+                    price TEXT,
+                    notional TEXT,
+                    fill_timestamp TEXT,
+                    fill_ts_ns INTEGER,
+                    broker_activity_id TEXT,
+                    fee TEXT,
+                    fee_currency TEXT,
+                    liquidity_flag TEXT,
+                    source TEXT NOT NULL,
+                    hydration_status TEXT NOT NULL,
+                    hydration_reason_code TEXT,
+                    tca_status TEXT,
+                    execution_quality_verdict TEXT,
+                    modeled_entry_price TEXT,
+                    modeled_net_edge TEXT,
+                    realized_vs_modeled_netedge TEXT,
+                    slippage TEXT,
+                    slippage_bps TEXT,
+                    fee_bps TEXT,
+                    latency_decision_to_ack_ms TEXT,
+                    latency_ack_to_fill_ms TEXT,
+                    metadata TEXT,
+                    created_at_ns INTEGER NOT NULL,
+                    observed_at_ns INTEGER NOT NULL
+                )
+            """)
+
             # Portfolio snapshots table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -323,6 +367,9 @@ class StateStore:
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_venue ON order_id_mappings(broker, venue_order_id) WHERE venue_order_id IS NOT NULL")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_broker ON order_id_mappings(broker, broker_order_id) WHERE broker_order_id IS NOT NULL")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id_mappings_txid ON order_id_mappings(broker, exchange_txid) WHERE exchange_txid IS NOT NULL")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_broker_fill_ledger_client ON broker_fill_ledger(client_order_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_broker_fill_ledger_broker_order ON broker_fill_ledger(broker_order_id)")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_broker_fill_ledger_activity ON broker_fill_ledger(broker_activity_id) WHERE broker_activity_id IS NOT NULL")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_ledger_active_dedupe ON reservation_ledger(reservation_dedupe_key) WHERE is_active = 1")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_client ON reservation_ledger(client_order_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_active ON reservation_ledger(is_active)")
@@ -826,6 +873,7 @@ class StateStore:
         allowed = {
             "orders",
             "fills",
+            "broker_fill_ledger",
             "order_id_mappings",
             "reservation_ledger",
             "reservation_fill_progress",
@@ -1279,14 +1327,77 @@ class StateStore:
         """Insert a fill record."""
         return self.atomic_insert("fills", fill)
 
+    def upsert_broker_fill_ledger(self, fill: Dict[str, Any]) -> str:
+        """Insert a broker-backed fill ledger row idempotently.
+
+        Returns one of: inserted, duplicate, conflict, failed.
+        """
+        required = ("fill_id", "broker_order_id", "client_order_id", "symbol", "side", "source", "hydration_status")
+        if any(not str(fill.get(field) or "").strip() for field in required):
+            logger.error("Broker fill ledger row missing required field")
+            return "failed"
+        now = now_ns()
+        record = dict(fill)
+        record.setdefault("created_at_ns", now)
+        record.setdefault("observed_at_ns", now)
+        if isinstance(record.get("metadata"), (dict, list, tuple)):
+            record["metadata"] = json.dumps(record["metadata"], sort_keys=True, default=str)
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute("SELECT * FROM broker_fill_ledger WHERE fill_id = ?", (str(record["fill_id"]),))
+                existing = cursor.fetchone()
+                if existing is not None:
+                    existing_dict = dict(existing)
+                    for field in ("broker_order_id", "client_order_id", "symbol", "side", "quantity", "price"):
+                        current = "" if existing_dict.get(field) is None else str(existing_dict.get(field))
+                        incoming = "" if record.get(field) is None else str(record.get(field))
+                        if current != incoming:
+                            logger.error(
+                                "Broker fill ledger conflict for %s field=%s existing=%s incoming=%s",
+                                record["fill_id"],
+                                field,
+                                current,
+                                incoming,
+                            )
+                            conn.rollback()
+                            return "conflict"
+                    conn.rollback()
+                    return "duplicate"
+
+                columns = list(record.keys())
+                placeholders = ", ".join(["?" for _ in columns])
+                cursor.execute(
+                    f"""
+                    INSERT INTO broker_fill_ledger ({", ".join(columns)})
+                    VALUES ({placeholders})
+                    """,
+                    [record[column] for column in columns],
+                )
+                conn.commit()
+                return "inserted"
+        except Exception as e:
+            logger.error("Failed to upsert broker fill ledger %s: %s", fill.get("fill_id"), e)
+            return "failed"
+
     def count_fills_for_order(self, order_id: str) -> int:
         """Count local fill ledger rows for one client order ID."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                legacy_count = 0
                 cursor.execute("SELECT COUNT(*) FROM fills WHERE order_id = ?", (str(order_id),))
                 row = cursor.fetchone()
-                return int(row[0]) if row is not None else 0
+                if row is not None:
+                    legacy_count = int(row[0])
+                broker_count = 0
+                cursor.execute("SELECT COUNT(*) FROM broker_fill_ledger WHERE client_order_id = ?", (str(order_id),))
+                row = cursor.fetchone()
+                if row is not None:
+                    broker_count = int(row[0])
+                return max(legacy_count, broker_count)
         except Exception as e:
             logger.error("Failed to count fills for order %s: %s", order_id, e)
             return 0
