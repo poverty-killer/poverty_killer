@@ -194,6 +194,7 @@ class OrderRouter:
         self._gateway_responses_by_client_order_id: Dict[str, BrokerGatewayResponse] = {}
         self._gateway_reconciliation_by_client_order_id: Dict[str, Dict[str, Any]] = {}
         self._shutdown_reconciliation: Dict[str, Any] = {}
+        self._fill_hydration_results: List[Dict[str, Any]] = []
         self._cancel_denials_by_order_id: Dict[str, str] = {}
         self._oms_lifecycle_counts: Dict[str, int] = {
             "submitted": 0,
@@ -1155,6 +1156,12 @@ class OrderRouter:
 
         evidence["status"] = oms_state
         evidence["broker_normalized_status"] = broker_status
+        if oms_state == OmsOrderState.FILLED.value:
+            evidence["fill_hydration"] = self._hydrate_fill_ledger_from_broker_payload(
+                mapping,
+                payload,
+                source_event=source_event,
+            )
         evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
         self._gateway_reconciliation_by_client_order_id[mapping.client_order_id] = evidence
         self._record_oms_state(oms_state)
@@ -1192,12 +1199,21 @@ class OrderRouter:
             "performed": False,
             "account_status": "not_checked",
             "open_orders_count": None,
+            "local_open_orders_before_final_reconcile": 0,
+            "broker_confirmed_open_orders": 0,
+            "local_open_orders_after_final_reconcile": 0,
+            "local_open_without_broker_match_count": 0,
+            "final_state_unknown_count": 0,
+            "reconciliation_conflict_count": 0,
+            "fill_hydration_count": 0,
+            "fill_hydration_missing_count": 0,
             "positions_count": None,
             "local_order_id_mappings": 0,
             "local_fills": 0,
             "broker_open_orders_matched_mapping_count": 0,
             "broker_open_orders_unmatched_count": 0,
             "reconciled_active_mappings": 0,
+            "final_nonterminal_resolutions": (),
             "reason_codes": [],
             "mutation_performed": False,
             "broker_truth_wins_after_ack": True,
@@ -1209,9 +1225,11 @@ class OrderRouter:
             return evidence
 
         broker = self._gateway_order_mapping_broker()
+        final_resolutions: List[Dict[str, Any]] = []
         for (mapping_broker, _client_order_id), mapping in list(self._active_order_id_mappings.items()):
             if mapping_broker == broker and not mapping.is_terminal:
-                self._reconcile_gateway_mapping(mapping, source_event="shutdown_active_mapping")
+                resolution = self._reconcile_gateway_mapping(mapping, source_event="shutdown_active_mapping")
+                final_resolutions.append(resolution)
                 evidence["reconciled_active_mappings"] += 1
 
         try:
@@ -1234,7 +1252,9 @@ class OrderRouter:
 
         open_orders = open_orders_response.payload if isinstance(open_orders_response.payload, list) else []
         positions = positions_response.payload if isinstance(positions_response.payload, list) else []
+        open_order_ids = self._broker_open_order_identity_set(open_orders)
         evidence["open_orders_count"] = len(open_orders)
+        evidence["broker_confirmed_open_orders"] = len(open_orders)
         evidence["positions_count"] = len(positions)
         evidence["account_status"] = (
             str((account_response.payload or {}).get("status"))
@@ -1248,23 +1268,78 @@ class OrderRouter:
                 mapping_rows = self._state_store.list_order_id_mappings(broker=broker, include_terminal=True)
             except Exception:
                 mapping_rows = []
+            self._hydrate_missing_fill_ledger_for_terminal_filled_mappings(
+                mapping_rows,
+                source_event="shutdown_final_reconciliation_terminal_fill_ledger",
+            )
             counter = getattr(self._state_store, "count_table_rows", None)
             if callable(counter):
                 evidence["local_fills"] = int(counter("fills"))
         evidence["local_order_id_mappings"] = len(mapping_rows)
-        mapped_broker_order_ids = {
-            str(row.get("broker_order_id") or row.get("venue_order_id") or "").strip()
-            for row in mapping_rows
-            if str(row.get("broker_order_id") or row.get("venue_order_id") or "").strip()
-        }
-        open_order_ids = {
-            str((row or {}).get("id") or (row or {}).get("order_id") or "").strip()
-            for row in open_orders
-            if isinstance(row, dict)
-        }
-        matched = len(open_order_ids & mapped_broker_order_ids)
-        evidence["broker_open_orders_matched_mapping_count"] = matched
-        evidence["broker_open_orders_unmatched_count"] = max(0, len(open_order_ids) - matched)
+        evidence["local_open_orders_before_final_reconcile"] = sum(
+            1 for row in mapping_rows if self._is_local_open_order_mapping(row)
+        )
+        mapped_order_identities: set[str] = set()
+        for row in mapping_rows:
+            mapping = self._mapping_from_record(row)
+            if mapping is not None:
+                mapped_order_identities.update(self._mapping_identity_values(mapping))
+        matched_open_orders = 0
+        for open_order in open_orders:
+            row_identities = self._broker_open_order_identity_set([open_order])
+            if row_identities & mapped_order_identities:
+                matched_open_orders += 1
+        evidence["broker_open_orders_matched_mapping_count"] = matched_open_orders
+        evidence["broker_open_orders_unmatched_count"] = max(0, len(open_orders) - matched_open_orders)
+        for row in mapping_rows:
+            if not self._is_local_open_order_mapping(row):
+                continue
+            mapping = self._mapping_from_record(row)
+            if mapping is None:
+                continue
+            resolution = self._resolve_nonterminal_mapping_against_final_broker_truth(
+                mapping,
+                open_order_ids=open_order_ids,
+                source_event="shutdown_final_reconciliation",
+            )
+            final_resolutions.append(resolution)
+            if OmsReasonCode.BROKER_FINAL_STATE_UNKNOWN.value in resolution.get("reason_codes", ()):
+                evidence["final_state_unknown_count"] += 1
+            if resolution.get("status") == OmsOrderState.RECONCILIATION_CONFLICT.value:
+                evidence["reconciliation_conflict_count"] += 1
+
+        if self._state_store is not None:
+            try:
+                mapping_rows = self._state_store.list_order_id_mappings(broker=broker, include_terminal=True)
+            except Exception:
+                mapping_rows = []
+            counter = getattr(self._state_store, "count_table_rows", None)
+            if callable(counter):
+                evidence["local_fills"] = int(counter("fills"))
+        local_open_after = [
+            row for row in mapping_rows
+            if self._is_local_open_order_mapping(row)
+        ]
+        evidence["local_open_orders_after_final_reconcile"] = len(local_open_after)
+        local_open_without_broker_match_count = 0
+        for row in local_open_after:
+            mapping = self._mapping_from_record(row)
+            if mapping is None or not self._mapping_matches_broker_open_orders(mapping, open_order_ids):
+                local_open_without_broker_match_count += 1
+        evidence["local_open_without_broker_match_count"] = local_open_without_broker_match_count
+        evidence["final_nonterminal_resolutions"] = tuple(final_resolutions)
+        evidence["fill_hydration_count"] = sum(
+            1 for result in self._fill_hydration_results if result.get("inserted") is True
+        )
+        evidence["fill_hydration_missing_count"] = sum(
+            1
+            for result in self._fill_hydration_results
+            if OmsReasonCode.FILL_LEDGER_UNAVAILABLE.value in result.get("reason_codes", ())
+        )
+        evidence["reconciliation_conflict_count"] = max(
+            int(evidence["reconciliation_conflict_count"]),
+            int(self._oms_lifecycle_counts.get("reconciliation_conflicts", 0) or 0),
+        )
         evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
         self._shutdown_reconciliation = evidence
         logger.info("[OMS_DIAG] SHUTDOWN_RECONCILIATION fields=%s", evidence)
@@ -3206,6 +3281,24 @@ class OrderRouter:
         )
         terminal_statuses = {"filled", "canceled", "cancelled", "rejected", "expired", "reconciliation_conflict"}
         terminal_orders = sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in terminal_statuses)
+        local_open_orders = sum(1 for row in mapping_rows if self._is_local_open_order_mapping(row))
+        broker_confirmed_open_orders = (
+            int(shutdown_reconciliation.get("broker_confirmed_open_orders", 0) or 0)
+            if shutdown_reconciliation.get("performed")
+            else local_open_orders
+        )
+        reconciliation_conflicts = max(
+            int(self._oms_lifecycle_counts.get("reconciliation_conflicts", 0) or 0),
+            int(shutdown_reconciliation.get("reconciliation_conflict_count", 0) or 0),
+        )
+        fill_hydration_missing_count = max(
+            int(shutdown_reconciliation.get("fill_hydration_missing_count", 0) or 0),
+            sum(
+                1
+                for result in self._fill_hydration_results
+                if OmsReasonCode.FILL_LEDGER_UNAVAILABLE.value in result.get("reason_codes", ())
+            ),
+        )
         active_pending_order_ids = tuple(self._pending_orders.keys())
         pending_terminal_leak_ids = []
         for order_id in active_pending_order_ids:
@@ -3227,7 +3320,21 @@ class OrderRouter:
             "active_pending_orders": len(self._pending_orders),
             "active_pending_order_ids": active_pending_order_ids,
             "terminal_orders": int(terminal_orders),
-            "open_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in {"open", "accepted", "acknowledged"}),
+            "open_orders": int(broker_confirmed_open_orders),
+            "local_open_orders_before_final_reconcile": int(
+                shutdown_reconciliation.get("local_open_orders_before_final_reconcile", local_open_orders) or 0
+            ),
+            "broker_confirmed_open_orders": int(broker_confirmed_open_orders),
+            "local_open_orders_after_final_reconcile": int(
+                shutdown_reconciliation.get("local_open_orders_after_final_reconcile", local_open_orders) or 0
+            ),
+            "local_open_without_broker_match_count": int(
+                shutdown_reconciliation.get("local_open_without_broker_match_count", 0) or 0
+            ),
+            "final_state_unknown_count": int(shutdown_reconciliation.get("final_state_unknown_count", 0) or 0),
+            "reconciliation_conflict_count": int(reconciliation_conflicts),
+            "fill_hydration_count": int(shutdown_reconciliation.get("fill_hydration_count", 0) or 0),
+            "fill_hydration_missing_count": int(fill_hydration_missing_count),
             "filled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "filled"),
             "canceled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() in {"canceled", "cancelled"}),
             "rejected_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "rejected"),
@@ -3246,7 +3353,7 @@ class OrderRouter:
             "broker_open_orders_unmatched_count": int(
                 shutdown_reconciliation.get("broker_open_orders_unmatched_count", 0) or 0
             ),
-            "reconciliation_conflicts": int(self._oms_lifecycle_counts.get("reconciliation_conflicts", 0)),
+            "reconciliation_conflicts": int(reconciliation_conflicts),
             "cancel_authorized_count": int(self._oms_lifecycle_counts.get("cancel_authorized", 0)),
             "cancel_denied_count": int(self._oms_lifecycle_counts.get("cancel_denied", 0)),
             "pending_terminal_leak_count": len(set(pending_terminal_leak_ids)),
@@ -3358,6 +3465,297 @@ class OrderRouter:
     def _normalize_broker_symbol(self, value: Any) -> str:
         return str(value or "").replace("/", "").upper()
 
+    def _is_local_open_order_mapping(self, row: Dict[str, Any]) -> bool:
+        if bool(row.get("is_terminal")):
+            return False
+        status = str(row.get("status") or "").strip().lower()
+        return status in {
+            "open",
+            "accepted",
+            "acknowledged",
+            "broker_acknowledged",
+            "partially_filled",
+            "partial_fill",
+            "partial",
+            "pending",
+            "new",
+        }
+
+    def _broker_open_order_identity_set(self, open_orders: List[Dict[str, Any]]) -> set[str]:
+        identities: set[str] = set()
+        for row in open_orders:
+            if not isinstance(row, dict):
+                continue
+            for key in ("id", "order_id", "client_order_id"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    identities.add(value)
+        return identities
+
+    def _mapping_identity_values(self, mapping: ActiveOrderIdMapping) -> set[str]:
+        return {
+            value
+            for value in (
+                str(mapping.client_order_id or "").strip(),
+                str(mapping.command_order_id or "").strip(),
+                str(mapping.broker_order_id or "").strip(),
+                str(mapping.venue_order_id or "").strip(),
+                str(mapping.exchange_txid or "").strip(),
+            )
+            if value
+        }
+
+    def _mapping_matches_broker_open_orders(
+        self,
+        mapping: ActiveOrderIdMapping,
+        open_order_ids: set[str],
+    ) -> bool:
+        return bool(self._mapping_identity_values(mapping) & open_order_ids)
+
+    def _decimal_from_payload(self, payload: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[_Decimal]:
+        for key in keys:
+            if key not in payload or payload.get(key) in (None, ""):
+                continue
+            try:
+                return _Decimal(str(payload.get(key)))
+            except Exception:
+                return None
+        return None
+
+    def _hydrate_fill_ledger_from_broker_payload(
+        self,
+        mapping: ActiveOrderIdMapping,
+        payload: Dict[str, Any],
+        *,
+        source_event: str,
+    ) -> Dict[str, Any]:
+        """Hydrate a local fill only when broker payload carries real fill facts."""
+        result: Dict[str, Any] = {
+            "client_order_id": mapping.client_order_id,
+            "broker_order_id": mapping.broker_order_id or mapping.venue_order_id,
+            "source_event": source_event,
+            "status": "NOT_APPLICABLE",
+            "reason_codes": (),
+            "inserted": False,
+        }
+        if self._state_store is None:
+            result["status"] = "MISSING_TRUTH"
+            result["reason_codes"] = (OmsReasonCode.FILL_LEDGER_UNAVAILABLE.value,)
+            self._fill_hydration_results.append(result)
+            return result
+
+        quantity = self._decimal_from_payload(payload, ("filled_qty", "filled_quantity"))
+        price = self._decimal_from_payload(payload, ("filled_avg_price", "avg_fill_price", "filled_price"))
+        fee = self._decimal_from_payload(payload, ("fee", "commission", "commission_amount"))
+        fee_currency = str(payload.get("fee_currency") or payload.get("commission_currency") or "").strip()
+        timestamp = str(payload.get("filled_at") or payload.get("updated_at") or payload.get("transaction_time") or "").strip()
+        missing = []
+        if quantity is None or quantity <= 0:
+            missing.append("filled_qty")
+        if price is None or price <= 0:
+            missing.append("filled_avg_price")
+        if fee is None:
+            missing.append("fee")
+        if not fee_currency:
+            missing.append("fee_currency")
+        if not timestamp:
+            missing.append("timestamp")
+        if missing:
+            result["status"] = "MISSING_TRUTH"
+            result["reason_codes"] = (OmsReasonCode.FILL_LEDGER_UNAVAILABLE.value,)
+            result["missing_fields"] = tuple(missing)
+            self._fill_hydration_results.append(result)
+            logger.info("[OMS_DIAG] FILL_LEDGER_UNAVAILABLE fields=%s", result)
+            return result
+
+        broker_order_id = str(mapping.broker_order_id or mapping.venue_order_id or mapping.command_order_id)
+        fill_id = f"broker_fill:{mapping.broker}:{broker_order_id}:{quantity}:{price}:{timestamp}"
+        inserted = self._state_store.insert_fill(
+            {
+                "id": fill_id,
+                "order_id": mapping.client_order_id,
+                "symbol": mapping.symbol,
+                "side": mapping.side,
+                "quantity": float(quantity),
+                "price": float(price),
+                "fee": float(fee),
+                "fee_currency": fee_currency,
+                "timestamp": timestamp,
+                "exchange_order_id": broker_order_id,
+                "latency_ms": None,
+            }
+        )
+        result["status"] = "CONTRIBUTED" if inserted else "ALREADY_PRESENT_OR_REJECTED"
+        result["inserted"] = bool(inserted)
+        self._fill_hydration_results.append(result)
+        logger.info("[OMS_DIAG] FILL_LEDGER_HYDRATION fields=%s", result)
+        return result
+
+    def _local_fill_exists_for_order(self, client_order_id: str) -> bool:
+        if self._state_store is None:
+            return False
+        counter = getattr(self._state_store, "count_fills_for_order", None)
+        if not callable(counter):
+            return False
+        return int(counter(client_order_id) or 0) > 0
+
+    def _record_fill_ledger_unavailable(
+        self,
+        mapping: ActiveOrderIdMapping,
+        *,
+        source_event: str,
+        missing_fields: Tuple[str, ...],
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "client_order_id": mapping.client_order_id,
+            "broker_order_id": mapping.broker_order_id or mapping.venue_order_id,
+            "source_event": source_event,
+            "status": "MISSING_TRUTH",
+            "reason_codes": (OmsReasonCode.FILL_LEDGER_UNAVAILABLE.value,),
+            "missing_fields": tuple(missing_fields),
+            "inserted": False,
+        }
+        self._fill_hydration_results.append(result)
+        logger.info("[OMS_DIAG] FILL_LEDGER_UNAVAILABLE fields=%s", result)
+        return result
+
+    def _hydrate_missing_fill_ledger_for_terminal_filled_mappings(
+        self,
+        mapping_rows: List[Dict[str, Any]],
+        *,
+        source_event: str,
+    ) -> None:
+        """Hydrate or explain terminal filled mappings with no local fill rows."""
+        adapter = self._broker_gateway_adapter
+        for row in mapping_rows:
+            status = str(row.get("status") or "").strip().lower()
+            if status != "filled":
+                continue
+            mapping = self._mapping_from_record(row)
+            if mapping is None:
+                continue
+            if self._local_fill_exists_for_order(mapping.client_order_id):
+                continue
+            if adapter is None or not mapping.command_order_id:
+                self._record_fill_ledger_unavailable(
+                    mapping,
+                    source_event=source_event,
+                    missing_fields=("broker_order_status",),
+                )
+                continue
+            try:
+                status_response = adapter.get_order_status(mapping.command_order_id)
+            except BrokerGatewayError:
+                self._record_fill_ledger_unavailable(
+                    mapping,
+                    source_event=source_event,
+                    missing_fields=("broker_order_status",),
+                )
+                continue
+            broker_status = str(getattr(status_response, "normalized_status", "") or "")
+            payload = status_response.payload if isinstance(status_response.payload, dict) else {}
+            if not status_response.ok or canonical_state_from_broker_status(broker_status) != OmsOrderState.FILLED.value:
+                self._record_fill_ledger_unavailable(
+                    mapping,
+                    source_event=source_event,
+                    missing_fields=("broker_filled_status",),
+                )
+                continue
+            self._hydrate_fill_ledger_from_broker_payload(
+                mapping,
+                payload,
+                source_event=source_event,
+            )
+
+    def _resolve_nonterminal_mapping_against_final_broker_truth(
+        self,
+        mapping: ActiveOrderIdMapping,
+        *,
+        open_order_ids: set[str],
+        source_event: str,
+    ) -> Dict[str, Any]:
+        evidence: Dict[str, Any] = {
+            "client_order_id": mapping.client_order_id,
+            "broker_order_id": mapping.broker_order_id or mapping.venue_order_id,
+            "source_event": source_event,
+            "status": "UNKNOWN",
+            "broker_confirmed_open": False,
+            "reason_codes": [],
+            "mutation_performed": False,
+        }
+        if self._mapping_matches_broker_open_orders(mapping, open_order_ids):
+            evidence["status"] = OmsOrderState.OPEN.value
+            evidence["broker_confirmed_open"] = True
+            mapping.status = "open"
+            if self._state_store is not None:
+                mapping.durable = self._state_store.upsert_order_id_mapping(
+                    self._mapping_to_store_record(mapping)
+                )
+            return evidence
+
+        adapter = self._broker_gateway_adapter
+        if adapter is None or not mapping.command_order_id:
+            evidence["status"] = OmsOrderState.RECONCILIATION_CONFLICT.value
+            evidence["reason_codes"].append(OmsReasonCode.BROKER_FINAL_STATE_UNKNOWN.value)
+            self._mark_active_order_mapping_terminal_for_broker(
+                mapping.client_order_id,
+                mapping.broker,
+                status="reconciliation_conflict",
+                terminal_reason=f"{source_event}_broker_final_state_unknown",
+            )
+            self._record_oms_state(OmsOrderState.RECONCILIATION_CONFLICT.value)
+            return evidence
+
+        try:
+            status_response = adapter.get_order_status(mapping.command_order_id)
+        except BrokerGatewayError as exc:
+            evidence["status"] = OmsOrderState.RECONCILIATION_CONFLICT.value
+            evidence["reason_codes"].append(exc.reason_code or OmsReasonCode.BROKER_FINAL_STATE_UNKNOWN.value)
+            self._mark_active_order_mapping_terminal_for_broker(
+                mapping.client_order_id,
+                mapping.broker,
+                status="reconciliation_conflict",
+                terminal_reason=f"{source_event}_broker_final_state_unknown",
+            )
+            self._record_oms_state(OmsOrderState.RECONCILIATION_CONFLICT.value)
+            return evidence
+
+        evidence["mutation_performed"] = bool(getattr(status_response, "mutation_occurred", False))
+        if evidence["mutation_performed"]:
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+        broker_status = str(getattr(status_response, "normalized_status", "") or "")
+        oms_state = canonical_state_from_broker_status(broker_status)
+        payload = status_response.payload if isinstance(status_response.payload, dict) else {}
+        payload_symbol = payload.get("symbol")
+        if payload_symbol and self._normalize_broker_symbol(payload_symbol) != self._normalize_broker_symbol(mapping.symbol):
+            evidence["reason_codes"].append(OmsReasonCode.RECONCILIATION_CONFLICT.value)
+            oms_state = OmsOrderState.RECONCILIATION_CONFLICT.value
+        if not status_response.ok:
+            evidence["reason_codes"].append(status_response.reason_code or OmsReasonCode.BROKER_FINAL_STATE_UNKNOWN.value)
+            oms_state = OmsOrderState.RECONCILIATION_CONFLICT.value
+        elif not is_terminal_oms_state(oms_state):
+            evidence["reason_codes"].append(OmsReasonCode.BROKER_FINAL_STATE_UNKNOWN.value)
+            oms_state = OmsOrderState.RECONCILIATION_CONFLICT.value
+
+        evidence["status"] = oms_state
+        evidence["broker_normalized_status"] = broker_status
+        if oms_state == OmsOrderState.FILLED.value:
+            evidence["fill_hydration"] = self._hydrate_fill_ledger_from_broker_payload(
+                mapping,
+                payload,
+                source_event=source_event,
+            )
+        terminal_status = "reconciliation_conflict" if oms_state == OmsOrderState.RECONCILIATION_CONFLICT.value else oms_state.lower()
+        self._mark_active_order_mapping_terminal_for_broker(
+            mapping.client_order_id,
+            mapping.broker,
+            status=terminal_status,
+            terminal_reason=f"{source_event}_terminal_or_unmatched",
+        )
+        self._record_oms_state(oms_state)
+        evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
+        return evidence
+
     def _post_ack_gateway_reconciliation(
         self,
         order: OrderRequest,
@@ -3431,6 +3829,14 @@ class OrderRouter:
 
         evidence["status"] = oms_state
         evidence["broker_normalized_status"] = broker_status
+        if oms_state == OmsOrderState.FILLED.value:
+            mapping = self._get_active_order_id_mapping(order.id, self._gateway_order_mapping_broker())
+            if mapping is not None:
+                evidence["fill_hydration"] = self._hydrate_fill_ledger_from_broker_payload(
+                    mapping,
+                    payload,
+                    source_event="post_ack_reconciliation",
+                )
         evidence["reason_codes"] = tuple(dict.fromkeys(evidence["reason_codes"]))
         self._gateway_reconciliation_by_client_order_id[order.id] = evidence
         self._record_oms_state(oms_state)

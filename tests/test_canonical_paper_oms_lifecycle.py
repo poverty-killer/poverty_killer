@@ -118,6 +118,37 @@ def _adapter_with_ack(status_payload: dict | None = None, *, delete_status: int 
     return AlpacaPaperBrokerAdapter(_creds(), transport=transport), transport
 
 
+def _persist_mapping(
+    state_store: StateStore,
+    *,
+    client_order_id: str = "old-open-client",
+    broker_order_id: str = "broker-old",
+    status: str = "acknowledged",
+    is_terminal: bool = False,
+    symbol: str = "BTC/USD",
+) -> None:
+    state_store.upsert_order_id_mapping(
+        {
+            "client_order_id": client_order_id,
+            "broker": "alpaca",
+            "symbol": symbol,
+            "side": "buy",
+            "order_type": "limit",
+            "venue_order_id": broker_order_id,
+            "broker_order_id": broker_order_id,
+            "exchange_txid": None,
+            "command_id_namespace": "venue_order_id",
+            "command_order_id": broker_order_id,
+            "id_mapping_source": "test",
+            "submit_ts_ns": T0_NS,
+            "ack_ts_ns": T0_NS,
+            "status": status,
+            "is_terminal": is_terminal,
+            "terminal_reason": "test_terminal" if is_terminal else None,
+        }
+    )
+
+
 def test_broker_ack_maps_cleanly_and_telemetry_is_honest(tmp_path):
     adapter, transport = _adapter_with_ack()
     router = OrderRouter(
@@ -375,8 +406,229 @@ def test_shutdown_final_reconciliation_explains_broker_open_order_truth(tmp_path
 
     assert reconciliation["performed"] is True
     assert accounting["last_broker_open_orders_count"] == 2
+    assert accounting["open_orders"] == accounting["broker_confirmed_open_orders"] == 2
+    assert accounting["local_open_orders_after_final_reconcile"] == 1
+    assert accounting["local_open_without_broker_match_count"] == 0
     assert accounting["broker_open_orders_unmatched_count"] == 1
     assert accounting["shutdown_reconciliation"]["account_status"] == "ACTIVE"
+
+
+def test_shutdown_reconciliation_terminalizes_filled_local_open_without_broker_open_match(tmp_path):
+    state_store = _state_store(tmp_path)
+    filled_payload = {
+        "id": "broker-filled",
+        "client_order_id": "filled-client",
+        "status": "filled",
+        "symbol": "BTCUSD",
+        "filled_qty": "0.01",
+        "filled_avg_price": "75001.25",
+        "fee": "0.11",
+        "fee_currency": "USD",
+        "filled_at": "2026-05-25T08:00:00Z",
+    }
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/broker-filled"): (200, filled_payload),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+    _persist_mapping(state_store, client_order_id="filled-client", broker_order_id="broker-filled")
+
+    reconciliation = router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+    mapping = state_store.get_order_id_mapping("filled-client", "alpaca")
+
+    assert mapping["is_terminal"] is True
+    assert mapping["status"] == "filled"
+    assert accounting["open_orders"] == accounting["broker_confirmed_open_orders"] == 0
+    assert accounting["local_open_orders_after_final_reconcile"] == 0
+    assert accounting["local_open_without_broker_match_count"] == 0
+    assert accounting["filled_orders"] == 1
+    assert accounting["local_fills"] == 1
+    assert accounting["fill_hydration_count"] == 1
+    assert accounting["fill_hydration_missing_count"] == 0
+    assert reconciliation["final_nonterminal_resolutions"][0]["status"] == OmsOrderState.FILLED.value
+    assert not any(call["method"] in {"POST", "DELETE"} for call in transport.calls)
+
+
+def test_shutdown_hydrates_existing_terminal_filled_mapping_without_local_fill(tmp_path):
+    state_store = _state_store(tmp_path)
+    _persist_mapping(
+        state_store,
+        client_order_id="old-filled-client",
+        broker_order_id="old-broker-filled",
+        status="filled",
+        is_terminal=True,
+    )
+    filled_payload = {
+        "id": "old-broker-filled",
+        "client_order_id": "old-filled-client",
+        "status": "filled",
+        "symbol": "BTCUSD",
+        "filled_qty": "0.02",
+        "filled_avg_price": "75002.50",
+        "fee": "0.12",
+        "fee_currency": "USD",
+        "filled_at": "2026-05-25T08:10:00Z",
+    }
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/old-broker-filled"): (200, filled_payload),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.02"}]),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+
+    router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+
+    assert accounting["filled_orders"] == 1
+    assert accounting["local_fills"] == 1
+    assert accounting["fill_hydration_count"] == 1
+    assert accounting["fill_hydration_missing_count"] == 0
+    assert not any(call["method"] in {"POST", "DELETE"} for call in transport.calls)
+
+
+def test_shutdown_reconciliation_terminalizes_canceled_local_open_without_broker_open_match(tmp_path):
+    state_store = _state_store(tmp_path)
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/broker-canceled"): (
+                200,
+                {
+                    "id": "broker-canceled",
+                    "client_order_id": "canceled-client",
+                    "status": "canceled",
+                    "symbol": "BTCUSD",
+                },
+            ),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, []),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+    _persist_mapping(state_store, client_order_id="canceled-client", broker_order_id="broker-canceled")
+
+    router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+    mapping = state_store.get_order_id_mapping("canceled-client", "alpaca")
+
+    assert mapping["is_terminal"] is True
+    assert mapping["status"] == "canceled"
+    assert accounting["open_orders"] == 0
+    assert accounting["canceled_orders"] == 1
+    assert accounting["local_open_without_broker_match_count"] == 0
+    assert not any(call["method"] in {"POST", "DELETE"} for call in transport.calls)
+
+
+def test_shutdown_reconciliation_conflicts_unexplained_local_open(tmp_path):
+    state_store = _state_store(tmp_path)
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/broker-unknown"): (
+                200,
+                {
+                    "id": "broker-unknown",
+                    "client_order_id": "unknown-client",
+                    "status": "accepted",
+                    "symbol": "BTCUSD",
+                },
+            ),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, []),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+    _persist_mapping(state_store, client_order_id="unknown-client", broker_order_id="broker-unknown")
+
+    reconciliation = router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+    mapping = state_store.get_order_id_mapping("unknown-client", "alpaca")
+
+    assert mapping["is_terminal"] is True
+    assert mapping["status"] == "reconciliation_conflict"
+    assert accounting["open_orders"] == accounting["broker_confirmed_open_orders"] == 0
+    assert accounting["local_open_orders_after_final_reconcile"] == 0
+    assert accounting["local_open_without_broker_match_count"] == 0
+    assert accounting["final_state_unknown_count"] == 1
+    assert accounting["reconciliation_conflicts"] >= 1
+    assert reconciliation["final_nonterminal_resolutions"][0]["reason_codes"] == (
+        OmsReasonCode.BROKER_FINAL_STATE_UNKNOWN.value,
+    )
+    assert not any(call["method"] in {"POST", "DELETE"} for call in transport.calls)
+
+
+def test_missing_broker_fill_details_reports_unavailable_without_fake_fill(tmp_path):
+    state_store = _state_store(tmp_path)
+    _persist_mapping(
+        state_store,
+        client_order_id="filled-client",
+        broker_order_id="broker-filled",
+        status="filled",
+        is_terminal=True,
+    )
+    transport = RoutingTransport(
+        {
+            ("GET", "/v2/orders/broker-filled"): (
+                200,
+                {
+                    "id": "broker-filled",
+                    "client_order_id": "filled-client",
+                    "status": "filled",
+                    "symbol": "BTCUSD",
+                },
+            ),
+            ("GET", "/v2/orders"): (200, []),
+            ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+        }
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        state_store=state_store,
+    )
+
+    router.finalize_oms_shutdown_reconciliation()
+    accounting = router.get_oms_shutdown_accounting()
+
+    assert accounting["filled_orders"] == 1
+    assert accounting["local_fills"] == 0
+    assert accounting["fill_hydration_count"] == 0
+    assert accounting["fill_hydration_missing_count"] == 1
 
 
 def test_stale_terminal_mapping_does_not_trigger_unsafe_cancel_mutation(tmp_path):

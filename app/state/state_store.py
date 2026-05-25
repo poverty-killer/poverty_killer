@@ -1279,6 +1279,18 @@ class StateStore:
         """Insert a fill record."""
         return self.atomic_insert("fills", fill)
 
+    def count_fills_for_order(self, order_id: str) -> int:
+        """Count local fill ledger rows for one client order ID."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM fills WHERE order_id = ?", (str(order_id),))
+                row = cursor.fetchone()
+                return int(row[0]) if row is not None else 0
+        except Exception as e:
+            logger.error("Failed to count fills for order %s: %s", order_id, e)
+            return 0
+
     def save_strategy_state(
         self,
         strategy: str,
