@@ -1,0 +1,147 @@
+{
+  "version": "phase-3-static-shell",
+  "mode": "read_only_mock",
+  "readOnlyEndpoints": {
+    "/status": {
+      "bot_status": "RUNNING",
+      "runtime_state": "PAPER_OBSERVATION",
+      "mode_state": "PAPER_ENABLED",
+      "active_profile": "PAPER_EXPLORATION_ALPHA",
+      "last_heartbeat_ts": "2026-05-26T01:38:32Z",
+      "session_uptime_s": 7200,
+      "dominant_blocker": "BROKER_FEE_DETAIL_UNAVAILABLE",
+      "safety_verdict": "CLEAN",
+      "needs_approval": false
+    },
+    "/runtime": {
+      "process_state": "RUNNING",
+      "launch_command": "run_bounded_paper.ps1 -Run -ApproveAutonomousPaper -PaperExplorationAlpha",
+      "duration_seconds": 7200,
+      "started_at": "2026-05-25T23:38:26Z",
+      "shutdown_reason": "BOUNDED_DURATION_ELAPSED",
+      "bounded_timer_started": true,
+      "bounded_duration_elapsed": true,
+      "active_config_hash": "mock-config-hash",
+      "runtime_commit": "fe4697a"
+    },
+    "/profile": {
+      "active_threshold_profile": "PAPER_EXPLORATION_ALPHA",
+      "profile_enabled": true,
+      "paper_only": true,
+      "activation_status": "PASS",
+      "activation_refusal_reason": null
+    },
+    "/universe": {
+      "symbols": ["BTC/USD", "ETH/USD", "SOL/USD"],
+      "asset_classes": ["crypto"],
+      "venues": ["alpaca", "kraken"],
+      "runtime_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+      "universe_source": "CONFIG_EXPLICIT_ALLOWED:runtime_watchlist",
+      "excluded_symbols": [],
+      "exclusion_reason_codes": []
+    },
+    "/market-truth": {
+      "snapshot_id": "mts_mock_001",
+      "symbol": "SOL/USD",
+      "book_fresh": true,
+      "candle_fresh": true,
+      "executable_market_truth": true,
+      "source_type": "runtime",
+      "snapshot_status": "PASS",
+      "snapshot_reason_codes": []
+    },
+    "/decision-frames": {
+      "frame_id": "df_mock_001",
+      "frame_output": "BUY",
+      "opportunity_verdict": "PLAUSIBLE_CANDIDATE",
+      "final_opportunity_score": 0.67
+    },
+    "/module-evidence": {
+      "frame_id": "df_mock_001",
+      "module_name": "NetEdgeGovernor",
+      "authority_class": "RISK",
+      "status": "CONTRIBUTED",
+      "signal": "NO_ACTION",
+      "reason_codes": ["ECONOMICALLY_ADMISSIBLE"]
+    },
+    "/netedge": {
+      "decision": "ALLOW",
+      "net_edge": 0.0132,
+      "reason_code": "ECONOMICALLY_ADMISSIBLE",
+      "realized_vs_modeled_status": "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+    },
+    "/risk": {
+      "hard_gate_status": "ALLOW",
+      "economic_gate_status": "ALLOW",
+      "pre_trade_guardrail_status": "ALLOW",
+      "live_endpoint_block": true,
+      "real_money_block": true
+    },
+    "/positions": {
+      "source": "broker_confirmed",
+      "positions_count": 3,
+      "reconciliation_status": "PASS"
+    },
+    "/orders": {
+      "open_orders": 0,
+      "terminal_orders": 91,
+      "reconciliation_status": "PASS"
+    },
+    "/fills": {
+      "local_fills": 29,
+      "hydration_status": "HYDRATED_WITH_UNKNOWN_FEES",
+      "conflicts": 0
+    },
+    "/tca": {
+      "tca_records_count": 4,
+      "tca_unknown_count": 4,
+      "execution_quality_verdict": "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+    },
+    "/pnl": {
+      "source": "broker_confirmed_when_available",
+      "net_pnl": null,
+      "unknown_reason_codes": ["BROKER_FEE_DETAIL_UNAVAILABLE"]
+    },
+    "/moving-floor": {
+      "protective_only": true,
+      "breach_status": "NO_BREACH",
+      "sell_to_close_authority": "BROKER_POSITION_REQUIRED"
+    },
+    "/audit-log": {
+      "event_type": "BROKER_POST_ACKNOWLEDGED",
+      "endpoint_mode": "PAPER",
+      "mutation_occurred": true,
+      "authority": "SERVER_BROKER_BOUNDARY"
+    },
+    "/world-awareness": {
+      "status": "ADVISORY_ONLY",
+      "direct_trade_authority": false
+    },
+    "/diagnostics": {
+      "git_commit": "fe4697a",
+      "dirty_worktree": "UNKNOWN_MOCK",
+      "credentials_present": "present_or_missing_only_no_secret_values"
+    },
+    "/readiness/live": {
+      "live_state": "LIVE_LOCKED",
+      "live_refusal_reason": "LIVE_NOT_APPROVED",
+      "required_before_activation": [
+        "separate_governance_packet",
+        "server_side_authority",
+        "live_endpoint_authority",
+        "real_money_authority",
+        "risk_governor_approval",
+        "operator_approval",
+        "audit_evidence"
+      ]
+    }
+  },
+  "futureIntentEndpoints": {
+    "/intent/paper/start": "server_authorized_future",
+    "/intent/paper/stop": "server_authorized_future",
+    "/intent/snapshot/export": "server_authorized_future",
+    "/intent/live/request-enable": "future_locked",
+    "/intent/live/start": "future_locked",
+    "/intent/emergency-stop": "future_server_authorized"
+  }
+}
