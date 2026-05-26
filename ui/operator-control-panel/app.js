@@ -1,7 +1,8 @@
 (function () {
   "use strict";
 
-  const data = window.PK_MOCK_DATA;
+  const mockData = window.PK_MOCK_DATA;
+  let data = clone(mockData);
   const screens = [
     ["command", "Command Center"],
     ["pnl", "P&L / Net Profit"],
@@ -18,6 +19,14 @@
 
   function badge(text, color) {
     return `<span class="badge ${color || "gray"}">${escapeHtml(String(text))}</span>`;
+  }
+
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function pick(value, fallback) {
+    return value === undefined || value === null || value === "" ? fallback : value;
   }
 
   function escapeHtml(value) {
@@ -75,11 +84,13 @@
 
   function renderTopBar() {
     const s = data.status;
+    const endpointLabel = String(s.endpoint || "").includes("paper-api") ? "PAPER endpoint" : pick(s.endpoint, "endpoint unknown");
     document.querySelector(".status-strip").innerHTML = [
+      badge(data.meta.dataSource, data.meta.dataSource === "READ_ONLY_BACKEND" ? "green" : "yellow"),
       badge(s.runtimeMode, "green"),
       badge(s.activeProfile, "cyan"),
       badge(s.broker, "blue"),
-      badge("PAPER endpoint", "green"),
+      badge(endpointLabel, endpointLabel === "PAPER endpoint" ? "green" : "yellow"),
       badge(s.universe.join(", "), "gray"),
       badge(`POST ${s.brokerPostCount}`, "yellow"),
       badge(`DELETE ${s.brokerDeleteCount}`, "yellow"),
@@ -193,10 +204,10 @@
 
   function renderActivity() {
     return `
-      ${header("Bot Activity Control", "Read-only now. Future PAPER controls are audited server-side intents.", "MOCK ONLY")}
+      ${header("Bot Activity Control", "Read-only now. Future PAPER controls are audited server-side intents.", data.meta.dataSource)}
       <div class="grid">
         <div class="card span-6"><h3>Runtime Snapshot</h3>${kv([
-          ["Process", badge("RUNNING", "green")],
+          ["Process", badge(data.status.botStatus, statusColor(data.status.botStatus))],
           ["Profile", badge(data.status.activeProfile, "cyan")],
           ["Watchlist", escapeHtml(data.status.universe.join(", "))],
           ["Preflight", badge("PAPER_READ_ONLY_PREFLIGHT_REQUIRED", "yellow")],
@@ -282,7 +293,7 @@
   function renderDiagnostics() {
     const d = data.diagnostics;
     return `
-      ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", "STATIC MOCK")}
+      ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", data.meta.dataSource)}
       <div class="card">${kv([
         ["Git commit", escapeHtml(d.gitCommit)],
         ["Dirty worktree", badge(d.dirtyWorktree, "yellow")],
@@ -315,6 +326,7 @@
     document.querySelector(".rail").innerHTML = `
       <div class="card rail-card"><h3>Current Alerts</h3>
         <div class="stack">
+          ${badge(data.meta.dataSource, data.meta.dataSource === "READ_ONLY_BACKEND" ? "green" : "yellow")}
           ${badge("LIVE_LOCKED", "red")}
           ${badge("REAL_MONEY_BLOCKED", "red")}
           ${badge("BROKER_FEE_DETAIL_UNAVAILABLE", "yellow")}
@@ -355,7 +367,124 @@
     showScreen("command");
   }
 
-  function boot() {
+  async function fetchJson(path) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 1500);
+    try {
+      const response = await fetch(`${window.PK_OPERATOR_API_BASE || ""}${path}`, {
+        cache: "no-store",
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function normalizeBackendData(payload) {
+    const next = clone(mockData);
+    const status = payload.status || {};
+    const runtime = payload.runtime || {};
+    const profile = payload.profile || {};
+    const universe = payload.universe || {};
+    const readiness = payload.readiness || {};
+    const diagnostics = payload.diagnostics || {};
+    const orders = payload.orders || {};
+    const fills = payload.fills || {};
+    const tca = payload.tca || {};
+
+    next.meta.dataSource = "READ_ONLY_BACKEND";
+    next.meta.buildMode = "backend_readonly_fallback_ready";
+    next.meta.runtimeCommit = pick(runtime.runtime_commit, diagnostics.git_commit || "unknown");
+    next.meta.lastUpdated = pick(status.updated_at, new Date().toISOString());
+
+    next.status.botStatus = pick(status.bot_status, "NO_ACTIVE_RUNTIME_ATTACHED");
+    next.status.runtimeMode = pick(status.runtime_mode, "PAPER");
+    next.status.capabilityState = pick(status.capability_state || status.mode_state, "PAPER_ENABLED");
+    next.status.activeProfile = pick(status.active_profile || profile.active_threshold_profile, "UNKNOWN_NO_ACTIVE_RUNTIME");
+    next.status.broker = pick(status.broker, "UNKNOWN_NO_ACTIVE_RUNTIME");
+    next.status.endpoint = pick(status.endpoint, "UNKNOWN_NO_ACTIVE_RUNTIME");
+    next.status.marketData = pick(status.market_data, "UNKNOWN_NO_ACTIVE_RUNTIME");
+    next.status.universe = Array.isArray(status.universe) && status.universe.length ? status.universe : pick(universe.symbols, []);
+    next.status.assetClasses = Array.isArray(status.asset_classes) && status.asset_classes.length ? status.asset_classes : pick(universe.asset_classes, []);
+    next.status.uptime = runtime.duration_seconds === null || runtime.duration_seconds === undefined ? "no active runtime" : `${runtime.duration_seconds}s`;
+    next.status.lastHeartbeat = pick(status.last_heartbeat_ts, "unknown");
+    next.status.liveBlocked = status.live_blocked !== false;
+    next.status.realMoneyBlocked = status.real_money_blocked !== false;
+    next.status.brokerPostCount = pick(status.broker_post_count, 0);
+    next.status.brokerDeleteCount = pick(status.broker_delete_count, 0);
+    next.status.mutationAuthorizedCount = pick(status.mutation_authorized_count, 0);
+    next.status.safetyVerdict = pick(status.safety_verdict, "READ_ONLY_BACKEND_IDLE");
+    next.status.dominantBlocker = pick(status.dominant_blocker, "NO_ACTIVE_RUNTIME_ATTACHED");
+    next.status.lastDecision = runtime.process_state === "NO_ACTIVE_RUNTIME_ATTACHED" ? "No active runtime attached" : next.status.lastDecision;
+
+    next.liveReadiness.state = pick(readiness.live_status, "LIVE_LOCKED");
+    next.liveReadiness.refusal = pick(readiness.refusal_reason, "LIVE_NOT_APPROVED");
+    next.liveReadiness.passed = pick(readiness.passed_prerequisites, []);
+    next.liveReadiness.missing = pick(readiness.missing_prerequisites, next.liveReadiness.missing);
+
+    next.diagnostics.gitCommit = pick(diagnostics.git_commit, "UNKNOWN_NOT_INSPECTED");
+    next.diagnostics.dirtyWorktree = pick(diagnostics.dirty_worktree, "UNKNOWN_NOT_INSPECTED");
+    next.diagnostics.pythonVersion = pick(diagnostics.python_version, "UNKNOWN_NOT_INSPECTED");
+    next.diagnostics.credentials = pick(diagnostics.credentials_present, "NOT_INSPECTED_NO_SECRET_ACCESS");
+    next.diagnostics.logs = pick(diagnostics.logs, "NOT_READ_BY_OPERATOR_BACKEND_V1");
+    next.diagnostics.db = pick(diagnostics.db, "NOT_READ_BY_OPERATOR_BACKEND_V1");
+
+    next.orders = [
+      {
+        clientOrderId: "read_only_backend_summary",
+        symbol: "all",
+        side: "none",
+        action: "read_only_summary",
+        state: `broker_open=${pick(orders.broker_confirmed_open_orders, 0)}`,
+        brokerStatus: `terminal=${pick(orders.terminal_orders, 0)}`,
+        reconciliation: `conflicts=${pick(orders.reconciliation_conflicts, 0)}`
+      }
+    ];
+    next.fills = [
+      {
+        fillId: "read_only_backend_summary",
+        symbol: "all",
+        side: "none",
+        quantity: String(pick(fills.local_fills, 0)),
+        price: "not displayed by backend v1",
+        source: pick(fills.source, "NO_ACTIVE_RUNTIME_ATTACHED"),
+        hydrationStatus: `hydrated=${pick(fills.fill_hydration_count, 0)}`,
+        tca: pick(tca.execution_quality_verdict, "UNKNOWN_NO_ACTIVE_RUNTIME"),
+        reason: `conflicts=${pick(fills.fill_hydration_conflict_count, 0)}`
+      }
+    ];
+
+    return next;
+  }
+
+  async function loadData() {
+    try {
+      const [status, runtime, profile, universe, readiness, diagnostics, contracts, orders, fills, tca, audit] = await Promise.all([
+        fetchJson("/operator/status"),
+        fetchJson("/operator/runtime"),
+        fetchJson("/operator/profile"),
+        fetchJson("/operator/universe"),
+        fetchJson("/operator/readiness/live"),
+        fetchJson("/operator/diagnostics"),
+        fetchJson("/operator/contracts"),
+        fetchJson("/operator/orders-summary"),
+        fetchJson("/operator/fills-summary"),
+        fetchJson("/operator/tca-summary"),
+        fetchJson("/operator/audit-summary")
+      ]);
+      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, orders, fills, tca, audit });
+    } catch (error) {
+      const fallback = clone(mockData);
+      fallback.meta.dataSource = "MOCK_DATA";
+      fallback.meta.backendStatus = `backend unavailable: ${error.name || "fetch_failed"}`;
+      return fallback;
+    }
+  }
+
+  async function boot() {
+    data = await loadData();
     renderTopBar();
     renderNav();
     renderScreens();

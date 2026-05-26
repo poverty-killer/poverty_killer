@@ -1,37 +1,64 @@
 {
-  "version": "phase-3-static-shell",
-  "mode": "read_only_mock",
+  "version": "phase-4-readonly-backend-ready",
+  "mode": "read_only_operator_contracts",
+  "ui_policy": {
+    "paper_enabled_first": true,
+    "live_visible_but_locked": true,
+    "manual_trading_available": false,
+    "force_trade_available": false,
+    "ui_is_trading_engine": false,
+    "server_authority_required": true,
+    "broker_direct_calls_from_ui": false
+  },
+  "data_source_labels": [
+    "MOCK_DATA",
+    "READ_ONLY_BACKEND"
+  ],
   "readOnlyEndpoints": {
-    "/status": {
-      "bot_status": "RUNNING",
-      "runtime_state": "PAPER_OBSERVATION",
-      "mode_state": "PAPER_ENABLED",
-      "active_profile": "PAPER_EXPLORATION_ALPHA",
-      "last_heartbeat_ts": "2026-05-26T01:38:32Z",
-      "session_uptime_s": 7200,
-      "dominant_blocker": "BROKER_FEE_DETAIL_UNAVAILABLE",
-      "safety_verdict": "CLEAN",
-      "needs_approval": false
+    "/operator/status": {
+      "api_version": "operator-readonly-v1",
+      "data_source": "READ_ONLY_BACKEND",
+      "bot_status": "RUNNING | NO_ACTIVE_RUNTIME_ATTACHED | DEGRADED | BLOCKED",
+      "runtime_mode": "PAPER | SHADOW | BACKTEST | LIVE_DISABLED",
+      "mode_state": "PAPER_ENABLED | LIVE_LOCKED",
+      "capability_state": "PAPER_ENABLED",
+      "active_profile": "PAPER_EXPLORATION_ALPHA | DEFAULT | UNKNOWN_NO_ACTIVE_RUNTIME",
+      "broker": "alpaca_paper | UNKNOWN_NO_ACTIVE_RUNTIME",
+      "endpoint": "paper endpoint or unknown",
+      "market_data": "provider id or unknown",
+      "universe": ["BTC/USD", "ETH/USD", "SOL/USD"],
+      "asset_classes": ["crypto"],
+      "last_heartbeat_ts": "ISO-8601 or null",
+      "dominant_blocker": "reason code",
+      "safety_verdict": "CLEAN | DEGRADED | BLOCKED | READ_ONLY_BACKEND_IDLE",
+      "live_blocked": true,
+      "real_money_blocked": true,
+      "broker_post_count": 0,
+      "broker_delete_count": 0,
+      "mutation_authorized_count": 0,
+      "manual_trading_available": false,
+      "force_trade_available": false
     },
-    "/runtime": {
-      "process_state": "RUNNING",
-      "launch_command": "run_bounded_paper.ps1 -Run -ApproveAutonomousPaper -PaperExplorationAlpha",
-      "duration_seconds": 7200,
-      "started_at": "2026-05-25T23:38:26Z",
-      "shutdown_reason": "BOUNDED_DURATION_ELAPSED",
+    "/operator/runtime": {
+      "process_state": "RUNNING | STOPPED | NO_ACTIVE_RUNTIME_ATTACHED",
+      "launch_command": "redacted command or null",
+      "duration_seconds": 0,
+      "started_at": "ISO-8601 or null",
+      "shutdown_reason": "reason code or null",
       "bounded_timer_started": true,
       "bounded_duration_elapsed": true,
-      "active_config_hash": "mock-config-hash",
-      "runtime_commit": "fe4697a"
+      "runtime_commit": "git sha or null",
+      "supervisor_state": "future supervisor state",
+      "duplicate_run_prevention": "future duplicate-run policy"
     },
-    "/profile": {
-      "active_threshold_profile": "PAPER_EXPLORATION_ALPHA",
-      "profile_enabled": true,
+    "/operator/profile": {
+      "active_threshold_profile": "PAPER_EXPLORATION_ALPHA | DEFAULT | UNKNOWN_NO_ACTIVE_RUNTIME",
+      "paper_exploration_alpha_active": true,
       "paper_only": true,
-      "activation_status": "PASS",
-      "activation_refusal_reason": null
+      "activation_status": "PASS | REFUSED | NO_ACTIVE_RUNTIME_ATTACHED",
+      "activation_refusal_reason": "reason code or null"
     },
-    "/universe": {
+    "/operator/universe": {
       "symbols": ["BTC/USD", "ETH/USD", "SOL/USD"],
       "asset_classes": ["crypto"],
       "venues": ["alpaca", "kraken"],
@@ -40,108 +67,100 @@
       "excluded_symbols": [],
       "exclusion_reason_codes": []
     },
-    "/market-truth": {
-      "snapshot_id": "mts_mock_001",
-      "symbol": "SOL/USD",
-      "book_fresh": true,
-      "candle_fresh": true,
-      "executable_market_truth": true,
-      "source_type": "runtime",
-      "snapshot_status": "PASS",
-      "snapshot_reason_codes": []
+    "/operator/readiness/live": {
+      "live_status": "LIVE_LOCKED | LIVE_READINESS_PENDING | LIVE_READY_BUT_DISABLED | LIVE_ENABLED",
+      "refusal_reason": "LIVE_NOT_APPROVED",
+      "broker_endpoint_authority": "PAPER_ONLY_FOR_CURRENT_OPERATOR_API",
+      "credential_authority": "present/not present only; no secrets",
+      "real_money_authority": "BLOCKED",
+      "physical_fuse": "required status",
+      "risk_governor_status": "required status",
+      "account_status": "required status",
+      "position_reconciliation": "required status",
+      "order_reconciliation": "required status",
+      "fill_ledger_health": "required status",
+      "tca_status": "required status",
+      "market_truth_health": "required status",
+      "kill_switch_status": "required status",
+      "audit_logging_status": "required status",
+      "operator_approval_status": "NOT_APPROVED",
+      "dirty_worktree_warning": "clean/dirty/unknown",
+      "current_git_commit": "git sha or unknown",
+      "pushed_commit_match": "true/false/unknown",
+      "missing_prerequisites": [],
+      "passed_prerequisites": [],
+      "authority_chain": [],
+      "last_live_readiness_audit": "ISO-8601 or null"
     },
-    "/decision-frames": {
-      "frame_id": "df_mock_001",
-      "frame_output": "BUY",
-      "opportunity_verdict": "PLAUSIBLE_CANDIDATE",
-      "final_opportunity_score": 0.67
+    "/operator/diagnostics": {
+      "api_version": "operator-readonly-v1",
+      "data_source": "READ_ONLY_BACKEND",
+      "git_commit": "sha or unknown",
+      "dirty_worktree": "clean/dirty/unknown",
+      "python_version": "version or unknown",
+      "credentials_present": "present/not present only; no secret values",
+      "logs": "status only",
+      "db": "status only",
+      "legacy_dashboard_command_routes_present": true,
+      "legacy_dashboard_reuse_allowed": false
     },
-    "/module-evidence": {
-      "frame_id": "df_mock_001",
-      "module_name": "NetEdgeGovernor",
-      "authority_class": "RISK",
-      "status": "CONTRIBUTED",
-      "signal": "NO_ACTION",
-      "reason_codes": ["ECONOMICALLY_ADMISSIBLE"]
+    "/operator/orders-summary": {
+      "source": "broker_confirmed | no_active_runtime",
+      "broker_confirmed_open_orders": 0,
+      "local_open_without_broker_match_count": 0,
+      "terminal_orders": 0,
+      "reconciliation_conflicts": 0,
+      "broker_truth_canonical": true
     },
-    "/netedge": {
-      "decision": "ALLOW",
-      "net_edge": 0.0132,
-      "reason_code": "ECONOMICALLY_ADMISSIBLE",
-      "realized_vs_modeled_status": "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+    "/operator/fills-summary": {
+      "source": "broker_confirmed | no_active_runtime",
+      "local_fills": 0,
+      "broker_fill_ledger_rows": 0,
+      "fill_hydration_count": 0,
+      "fill_hydration_missing_count": 0,
+      "fill_hydration_conflict_count": 0,
+      "fake_fills_allowed": false
     },
-    "/risk": {
-      "hard_gate_status": "ALLOW",
-      "economic_gate_status": "ALLOW",
-      "pre_trade_guardrail_status": "ALLOW",
-      "live_endpoint_block": true,
-      "real_money_block": true
+    "/operator/tca-summary": {
+      "source": "broker_confirmed_when_available | no_active_runtime",
+      "tca_records_count": 0,
+      "tca_unknown_count": 0,
+      "execution_quality_verdict": "UNKNOWN_INSUFFICIENT_BROKER_DETAIL | UNKNOWN_NO_ACTIVE_RUNTIME",
+      "fake_fees_allowed": false,
+      "fake_tca_allowed": false
     },
-    "/positions": {
-      "source": "broker_confirmed",
-      "positions_count": 3,
-      "reconciliation_status": "PASS"
+    "/operator/audit-summary": {
+      "source": "audit_log | no_active_runtime",
+      "operator_action_count": 0,
+      "broker_mutation_count": 0,
+      "live_refusal_count": 0,
+      "last_event": null
     },
-    "/orders": {
-      "open_orders": 0,
-      "terminal_orders": 91,
-      "reconciliation_status": "PASS"
-    },
-    "/fills": {
-      "local_fills": 29,
-      "hydration_status": "HYDRATED_WITH_UNKNOWN_FEES",
-      "conflicts": 0
-    },
-    "/tca": {
-      "tca_records_count": 4,
-      "tca_unknown_count": 4,
-      "execution_quality_verdict": "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
-    },
-    "/pnl": {
-      "source": "broker_confirmed_when_available",
-      "net_pnl": null,
-      "unknown_reason_codes": ["BROKER_FEE_DETAIL_UNAVAILABLE"]
-    },
-    "/moving-floor": {
-      "protective_only": true,
-      "breach_status": "NO_BREACH",
-      "sell_to_close_authority": "BROKER_POSITION_REQUIRED"
-    },
-    "/audit-log": {
-      "event_type": "BROKER_POST_ACKNOWLEDGED",
-      "endpoint_mode": "PAPER",
-      "mutation_occurred": true,
-      "authority": "SERVER_BROKER_BOUNDARY"
-    },
-    "/world-awareness": {
-      "status": "ADVISORY_ONLY",
-      "direct_trade_authority": false
-    },
-    "/diagnostics": {
-      "git_commit": "fe4697a",
-      "dirty_worktree": "UNKNOWN_MOCK",
-      "credentials_present": "present_or_missing_only_no_secret_values"
-    },
-    "/readiness/live": {
-      "live_state": "LIVE_LOCKED",
-      "live_refusal_reason": "LIVE_NOT_APPROVED",
-      "required_before_activation": [
-        "separate_governance_packet",
-        "server_side_authority",
-        "live_endpoint_authority",
-        "real_money_authority",
-        "risk_governor_approval",
-        "operator_approval",
-        "audit_evidence"
-      ]
+    "/operator/contracts": {
+      "version": "operator-readonly-v1",
+      "read_only": true,
+      "truth_labels": {
+        "broker_confirmed": "canonical after broker acknowledgement/reconciliation",
+        "local_diagnostic": "diagnostic only",
+        "estimated": "non-authoritative estimate",
+        "unknown": "unavailable; not invented"
+      }
     }
   },
   "futureIntentEndpoints": {
-    "/intent/paper/start": "server_authorized_future",
-    "/intent/paper/stop": "server_authorized_future",
-    "/intent/snapshot/export": "server_authorized_future",
-    "/intent/live/request-enable": "future_locked",
-    "/intent/live/start": "future_locked",
-    "/intent/emergency-stop": "future_server_authorized"
+    "/operator/intent/paper/start": "disabled/refused until supervisor authority is implemented",
+    "/operator/intent/paper/stop": "disabled/refused until supervisor authority is implemented",
+    "/operator/intent/snapshot/export": "disabled/refused until export authority is implemented",
+    "/operator/intent/live/request-enable": "LIVE_NOT_APPROVED",
+    "/operator/intent/live/start": "LIVE_NOT_APPROVED",
+    "/operator/intent/emergency-stop": "disabled/refused until governed emergency authority is implemented"
+  },
+  "intentRules": {
+    "validate_authority_server_side": true,
+    "emit_audit_event": true,
+    "return_allow_or_refuse": true,
+    "include_refusal_reason": true,
+    "never_bypass_engine": true,
+    "never_call_broker_directly_from_ui": true
   }
 }

@@ -5,7 +5,7 @@
     meta: {
       title: "Poverty Killer Operator Control Panel",
       buildMode: "static_mock",
-      dataSource: "contract-shaped mock data",
+      dataSource: "MOCK_DATA",
       runtimeCommit: "fe4697a",
       lastUpdated: "2026-05-26T01:38:32Z"
     },
