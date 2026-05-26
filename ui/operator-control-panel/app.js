@@ -46,6 +46,10 @@
     return "gray";
   }
 
+  function dataSourceColor() {
+    return data.meta.dataSource === "MOCK_DATA" ? "yellow" : "green";
+  }
+
   function table(headers, rows) {
     return `
       <table class="table">
@@ -86,7 +90,7 @@
     const s = data.status;
     const endpointLabel = String(s.endpoint || "").includes("paper-api") ? "PAPER endpoint" : pick(s.endpoint, "endpoint unknown");
     document.querySelector(".status-strip").innerHTML = [
-      badge(data.meta.dataSource, data.meta.dataSource === "READ_ONLY_BACKEND" ? "green" : "yellow"),
+      badge(data.meta.dataSource, dataSourceColor()),
       badge(s.runtimeMode, "green"),
       badge(s.activeProfile, "cyan"),
       badge(s.broker, "blue"),
@@ -203,8 +207,9 @@
   }
 
   function renderActivity() {
+    const sup = data.supervisor;
     return `
-      ${header("Bot Activity Control", "Read-only now. Future PAPER controls are audited server-side intents.", data.meta.dataSource)}
+      ${header("Bot Activity Control", "Governed PAPER intents only. Live and manual trading remain locked.", data.meta.dataSource)}
       <div class="grid">
         <div class="card span-6"><h3>Runtime Snapshot</h3>${kv([
           ["Process", badge(data.status.botStatus, statusColor(data.status.botStatus))],
@@ -213,12 +218,25 @@
           ["Preflight", badge("PAPER_READ_ONLY_PREFLIGHT_REQUIRED", "yellow")],
           ["Credential status", "present/not present only; no secrets"]
         ])}</div>
-        <div class="card span-6"><h3>Future PAPER Intents</h3>
+        <div class="card span-6"><h3>Supervisor Session</h3>${kv([
+          ["Supervisor", badge(sup.state, statusColor(sup.state))],
+          ["Session", escapeHtml(sup.sessionId || "none")],
+          ["PID", escapeHtml(sup.pid || "none")],
+          ["Duration", escapeHtml(`${sup.durationSeconds || "unknown"}s`)],
+          ["stdout", escapeHtml(sup.stdoutPath || "not available")],
+          ["stderr", escapeHtml(sup.stderrPath || "not available")]
+        ])}</div>
+        <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
-            <button class="intent-button paper" disabled>Request bounded PAPER start - future server-authorized intent</button>
-            <button class="intent-button paper" disabled>Request PAPER stop - future server-authorized intent</button>
+            <button class="intent-button paper" data-intent="paper-start" ${sup.paperStartAllowed ? "" : "disabled"}>
+              Start bounded PAPER - ${sup.paperStartAllowed ? "server-authorized intent" : escapeHtml(sup.paperStartRefusalReason || "disabled")}
+            </button>
+            <button class="intent-button paper" data-intent="paper-stop" ${sup.paperStopAllowed ? "" : "disabled"}>
+              Stop PAPER - ${sup.paperStopAllowed ? "graceful supervisor request" : escapeHtml(sup.paperStopRefusalReason || "disabled")}
+            </button>
             <button class="intent-button paper" disabled>Export run report - future server-authorized intent</button>
             <button class="intent-button live" disabled>Live start locked - LIVE_NOT_APPROVED</button>
+            <div class="notice mono">Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
           </div>
         </div>
       </div>
@@ -326,7 +344,7 @@
     document.querySelector(".rail").innerHTML = `
       <div class="card rail-card"><h3>Current Alerts</h3>
         <div class="stack">
-          ${badge(data.meta.dataSource, data.meta.dataSource === "READ_ONLY_BACKEND" ? "green" : "yellow")}
+          ${badge(data.meta.dataSource, dataSourceColor())}
           ${badge("LIVE_LOCKED", "red")}
           ${badge("REAL_MONEY_BLOCKED", "red")}
           ${badge("BROKER_FEE_DETAIL_UNAVAILABLE", "yellow")}
@@ -337,6 +355,12 @@
       </div>
       <div class="card rail-card"><h3>Last Decision</h3>
         <div>${escapeHtml(data.status.lastDecision)}</div>
+      </div>
+      <div class="card rail-card"><h3>Supervisor</h3>
+        <div class="stack">
+          ${badge(data.supervisor.state, statusColor(data.supervisor.state))}
+          ${badge(data.supervisor.sessionId || "no session", "gray")}
+        </div>
       </div>
       <div class="card rail-card"><h3>Needs Approval</h3>
         <div class="stack">
@@ -393,9 +417,12 @@
     const orders = payload.orders || {};
     const fills = payload.fills || {};
     const tca = payload.tca || {};
+    const latestRun = payload.latestRun || {};
+    const supervisor = status.supervisor || latestRun || {};
+    const activeSession = supervisor.active_session || supervisor.latest_session || {};
 
-    next.meta.dataSource = "READ_ONLY_BACKEND";
-    next.meta.buildMode = "backend_readonly_fallback_ready";
+    next.meta.dataSource = "OPERATOR_BACKEND";
+    next.meta.buildMode = "operator_backend_supervisor_ready";
     next.meta.runtimeCommit = pick(runtime.runtime_commit, diagnostics.git_commit || "unknown");
     next.meta.lastUpdated = pick(status.updated_at, new Date().toISOString());
 
@@ -418,6 +445,19 @@
     next.status.safetyVerdict = pick(status.safety_verdict, "READ_ONLY_BACKEND_IDLE");
     next.status.dominantBlocker = pick(status.dominant_blocker, "NO_ACTIVE_RUNTIME_ATTACHED");
     next.status.lastDecision = runtime.process_state === "NO_ACTIVE_RUNTIME_ATTACHED" ? "No active runtime attached" : next.status.lastDecision;
+    next.supervisor.state = pick(supervisor.state, "UNKNOWN");
+    next.supervisor.sessionId = pick(activeSession.session_id || supervisor.active_session_id, "none");
+    next.supervisor.pid = pick(activeSession.pid || runtime.pid, "none");
+    next.supervisor.processState = pick(activeSession.status || runtime.process_state, "UNKNOWN");
+    next.supervisor.durationSeconds = pick(activeSession.duration_seconds || runtime.duration_seconds, 300);
+    next.supervisor.profile = pick(activeSession.profile || status.active_profile, "PAPER_EXPLORATION_ALPHA");
+    next.supervisor.watchlist = pick(activeSession.watchlist || status.universe, ["BTC/USD", "ETH/USD", "SOL/USD"]);
+    next.supervisor.stdoutPath = pick(activeSession.stdout_path || runtime.stdout_path, "not available");
+    next.supervisor.stderrPath = pick(activeSession.stderr_path || runtime.stderr_path, "not available");
+    next.supervisor.paperStartAllowed = supervisor.paper_start_allowed === true || runtime.paper_start_allowed === true;
+    next.supervisor.paperStopAllowed = supervisor.paper_stop_allowed === true || runtime.paper_stop_allowed === true;
+    next.supervisor.paperStartRefusalReason = pick(supervisor.paper_start_refusal_reason || runtime.paper_start_refusal_reason, null);
+    next.supervisor.paperStopRefusalReason = pick(supervisor.paper_stop_refusal_reason || runtime.paper_stop_refusal_reason, null);
 
     next.liveReadiness.state = pick(readiness.live_status, "LIVE_LOCKED");
     next.liveReadiness.refusal = pick(readiness.refusal_reason, "LIVE_NOT_APPROVED");
@@ -461,7 +501,7 @@
 
   async function loadData() {
     try {
-      const [status, runtime, profile, universe, readiness, diagnostics, contracts, orders, fills, tca, audit] = await Promise.all([
+      const [status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit] = await Promise.all([
         fetchJson("/operator/status"),
         fetchJson("/operator/runtime"),
         fetchJson("/operator/profile"),
@@ -469,12 +509,13 @@
         fetchJson("/operator/readiness/live"),
         fetchJson("/operator/diagnostics"),
         fetchJson("/operator/contracts"),
+        fetchJson("/operator/latest-run"),
         fetchJson("/operator/orders-summary"),
         fetchJson("/operator/fills-summary"),
         fetchJson("/operator/tca-summary"),
         fetchJson("/operator/audit-summary")
       ]);
-      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, orders, fills, tca, audit });
+      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit });
     } catch (error) {
       const fallback = clone(mockData);
       fallback.meta.dataSource = "MOCK_DATA";
@@ -490,6 +531,60 @@
     renderScreens();
     renderRail();
   }
+
+  async function postIntent(path, body) {
+    const response = await fetch(`${window.PK_OPERATOR_API_BASE || ""}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function handleIntent(intent) {
+    if (data.meta.dataSource !== "OPERATOR_BACKEND") return;
+    try {
+      let message = "none";
+      if (intent === "paper-start") {
+        const confirmed = window.confirm(
+          "Request bounded PAPER start?\n\nProfile: PAPER_EXPLORATION_ALPHA\nWatchlist: BTC/USD, ETH/USD, SOL/USD\nDuration: 300 seconds\n\nNo live trading or manual order will be sent by the UI."
+        );
+        if (!confirmed) return;
+        const result = await postIntent("/operator/intent/paper/start", {
+          mode: "PAPER",
+          profile: "PAPER_EXPLORATION_ALPHA",
+          duration_seconds: 300,
+          watchlist: ["BTC/USD", "ETH/USD", "SOL/USD"],
+          approve_autonomous_paper: true,
+          real_money: false,
+          live: false
+        });
+        message = `${result.status}: ${result.reason_code}`;
+      }
+      if (intent === "paper-stop") {
+        const confirmed = window.confirm("Request governed PAPER stop? This does not send broker orders or flatten positions from the UI.");
+        if (!confirmed) return;
+        const result = await postIntent("/operator/intent/paper/stop", {});
+        message = `${result.status}: ${result.reason_code}`;
+      }
+      data = await loadData();
+      data.supervisor.lastIntentResult = message;
+      renderTopBar();
+      renderScreens();
+      renderRail();
+    } catch (error) {
+      data.supervisor.lastIntentResult = `FAILED: ${error.message || error.name || "intent_error"}`;
+      renderScreens();
+      renderRail();
+    }
+  }
+
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-intent]");
+    if (!button || button.disabled) return;
+    handleIntent(button.dataset.intent);
+  });
 
   document.addEventListener("DOMContentLoaded", boot);
 })();

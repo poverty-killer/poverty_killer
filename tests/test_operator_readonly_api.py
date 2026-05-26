@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from app.api.operator_readonly_api import API_VERSION, create_operator_app
+from app.api.operator_readonly_api import API_VERSION, OperatorSnapshotProvider, create_operator_app
+from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
+from tests.test_operator_paper_supervisor import FakeRunner
 
 
 def _endpoint(app, path: str, method: str = "GET"):
@@ -16,7 +18,7 @@ def test_operator_readonly_status_contract_is_safe_default():
     payload = _endpoint(app, "/operator/status")()
 
     assert payload["api_version"] == API_VERSION
-    assert payload["data_source"] == "READ_ONLY_BACKEND"
+    assert payload["data_source"] == "OPERATOR_BACKEND"
     assert payload["bot_status"] == "NO_ACTIVE_RUNTIME_ATTACHED"
     assert payload["live_blocked"] is True
     assert payload["real_money_blocked"] is True
@@ -74,6 +76,33 @@ def test_operator_intents_are_refused_without_mutation():
         assert payload["broker_call_occurred"] is False
         assert payload["runtime_mutation_occurred"] is False
 
-    assert paper["reason_code"] == "PAPER_INTENT_NOT_IMPLEMENTED"
+    assert paper["reason_code"] == "AUTONOMOUS_PAPER_APPROVAL_REQUIRED"
     assert live["reason_code"] == "LIVE_NOT_APPROVED"
     assert emergency["reason_code"] == "EMERGENCY_STOP_INTENT_NOT_IMPLEMENTED"
+
+
+def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=supervisor))
+    start = _endpoint(app, "/operator/intent/paper/start", "POST")
+    runtime = _endpoint(app, "/operator/runtime")
+
+    result = start(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "approve_autonomous_paper": True,
+        }
+    )
+
+    assert result["allowed"] is True
+    assert result["reason_code"] == "PAPER_RUN_STARTED"
+    assert result["broker_call_occurred"] is False
+    assert result["runtime_mutation_occurred"] is True
+    runtime_payload = runtime()
+    assert runtime_payload["process_state"] == "RUNNING"
+    assert runtime_payload["paper_start_allowed"] is False
+    assert runtime_payload["paper_stop_allowed"] is True

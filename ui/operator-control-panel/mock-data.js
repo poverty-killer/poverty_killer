@@ -30,6 +30,22 @@
       dominantBlocker: "BROKER_FEE_DETAIL_UNAVAILABLE",
       lastDecision: "BUY -> PAPER order acknowledged -> cancel acknowledged"
     },
+    supervisor: {
+      state: "MOCK_ONLY",
+      sessionId: "mock-session",
+      pid: "not running",
+      processState: "MOCK_ONLY",
+      durationSeconds: 300,
+      profile: "PAPER_EXPLORATION_ALPHA",
+      watchlist: ["BTC/USD", "ETH/USD", "SOL/USD"],
+      stdoutPath: "not available in mock mode",
+      stderrPath: "not available in mock mode",
+      paperStartAllowed: false,
+      paperStopAllowed: false,
+      paperStartRefusalReason: "MOCK_DATA_NO_BACKEND",
+      paperStopRefusalReason: "MOCK_DATA_NO_BACKEND",
+      lastIntentResult: "none"
+    },
     pnl: {
       realizedPnl: { value: null, source: "UNKNOWN_INSUFFICIENT_BROKER_DETAIL" },
       unrealizedPnl: { value: null, source: "BROKER_CONFIRMED_REQUIRED" },

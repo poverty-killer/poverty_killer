@@ -12,12 +12,13 @@
   },
   "data_source_labels": [
     "MOCK_DATA",
-    "READ_ONLY_BACKEND"
+    "READ_ONLY_BACKEND",
+    "OPERATOR_BACKEND"
   ],
   "readOnlyEndpoints": {
     "/operator/status": {
-      "api_version": "operator-readonly-v1",
-      "data_source": "READ_ONLY_BACKEND",
+      "api_version": "operator-backend-v1",
+      "data_source": "OPERATOR_BACKEND",
       "bot_status": "RUNNING | NO_ACTIVE_RUNTIME_ATTACHED | DEGRADED | BLOCKED",
       "runtime_mode": "PAPER | SHADOW | BACKTEST | LIVE_DISABLED",
       "mode_state": "PAPER_ENABLED | LIVE_LOCKED",
@@ -37,7 +38,16 @@
       "broker_delete_count": 0,
       "mutation_authorized_count": 0,
       "manual_trading_available": false,
-      "force_trade_available": false
+      "force_trade_available": false,
+      "supervisor": {
+        "supervisor_version": "operator-paper-supervisor-v1",
+        "state": "IDLE | RUNNING",
+        "active_session": "session object or null",
+        "paper_start_allowed": true,
+        "paper_stop_allowed": false,
+        "paper_start_refusal_reason": "reason code or null",
+        "paper_stop_refusal_reason": "reason code or null"
+      }
     },
     "/operator/runtime": {
       "process_state": "RUNNING | STOPPED | NO_ACTIVE_RUNTIME_ATTACHED",
@@ -48,8 +58,17 @@
       "bounded_timer_started": true,
       "bounded_duration_elapsed": true,
       "runtime_commit": "git sha or null",
+      "session_id": "paper session id or null",
+      "pid": "process id or null",
+      "stdout_path": "operator wrapper stdout path or null",
+      "stderr_path": "operator wrapper stderr path or null",
+      "exit_code": "process exit code or null",
       "supervisor_state": "future supervisor state",
-      "duplicate_run_prevention": "future duplicate-run policy"
+      "duplicate_run_prevention": "ACTIVE",
+      "paper_start_allowed": true,
+      "paper_stop_allowed": false,
+      "paper_start_refusal_reason": "reason code or null",
+      "paper_stop_refusal_reason": "reason code or null"
     },
     "/operator/profile": {
       "active_threshold_profile": "PAPER_EXPLORATION_ALPHA | DEFAULT | UNKNOWN_NO_ACTIVE_RUNTIME",
@@ -93,8 +112,8 @@
       "last_live_readiness_audit": "ISO-8601 or null"
     },
     "/operator/diagnostics": {
-      "api_version": "operator-readonly-v1",
-      "data_source": "READ_ONLY_BACKEND",
+      "api_version": "operator-backend-v1",
+      "data_source": "OPERATOR_BACKEND",
       "git_commit": "sha or unknown",
       "dirty_worktree": "clean/dirty/unknown",
       "python_version": "version or unknown",
@@ -102,7 +121,8 @@
       "logs": "status only",
       "db": "status only",
       "legacy_dashboard_command_routes_present": true,
-      "legacy_dashboard_reuse_allowed": false
+      "legacy_dashboard_reuse_allowed": false,
+      "supervisor_version": "operator-paper-supervisor-v1"
     },
     "/operator/orders-summary": {
       "source": "broker_confirmed | no_active_runtime",
@@ -136,8 +156,25 @@
       "live_refusal_count": 0,
       "last_event": null
     },
+    "/operator/latest-run": {
+      "supervisor_version": "operator-paper-supervisor-v1",
+      "state": "IDLE | RUNNING",
+      "active_session": {
+        "session_id": "paper_x",
+        "status": "STARTING | RUNNING | STOP_REQUESTED | STOPPED | EXITED | FAILED | REFUSED",
+        "pid": 0,
+        "profile": "PAPER_EXPLORATION_ALPHA",
+        "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+        "duration_seconds": 300,
+        "stdout_path": "logs/operator_runs/...",
+        "stderr_path": "logs/operator_runs/..."
+      },
+      "paper_start_allowed": true,
+      "paper_stop_allowed": false,
+      "allowed_durations": [180, 300, 1200, 7200, 10800, 14400]
+    },
     "/operator/contracts": {
-      "version": "operator-readonly-v1",
+      "version": "operator-backend-v1",
       "read_only": true,
       "truth_labels": {
         "broker_confirmed": "canonical after broker acknowledgement/reconciliation",
@@ -148,8 +185,37 @@
     }
   },
   "futureIntentEndpoints": {
-    "/operator/intent/paper/start": "disabled/refused until supervisor authority is implemented",
-    "/operator/intent/paper/stop": "disabled/refused until supervisor authority is implemented",
+    "/operator/intent/paper/start": {
+      "status": "server_authorized_for_bounded_paper_only",
+      "required_body": {
+        "mode": "PAPER",
+        "profile": "PAPER_EXPLORATION_ALPHA",
+        "duration_seconds": "one of allowed durations",
+        "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+        "approve_autonomous_paper": true,
+        "real_money": false,
+        "live": false
+      },
+      "refusals": [
+        "AUTONOMOUS_PAPER_APPROVAL_REQUIRED",
+        "DUPLICATE_ACTIVE_RUN",
+        "LIVE_NOT_APPROVED",
+        "REAL_MONEY_NOT_APPROVED",
+        "UNSUPPORTED_PAPER_PROFILE",
+        "UNSUPPORTED_WATCHLIST_SYMBOL",
+        "UNSUPPORTED_DURATION_SECONDS"
+      ]
+    },
+    "/operator/intent/paper/stop": {
+      "status": "server_authorized_graceful_stop_request",
+      "does_not_call_broker": true,
+      "does_not_flatten_positions": true,
+      "refusals": [
+        "NO_ACTIVE_RUN",
+        "SAFE_STOP_UNAVAILABLE_NON_WINDOWS",
+        "GRACEFUL_STOP_SIGNAL_FAILED"
+      ]
+    },
     "/operator/intent/snapshot/export": "disabled/refused until export authority is implemented",
     "/operator/intent/live/request-enable": "LIVE_NOT_APPROVED",
     "/operator/intent/live/start": "LIVE_NOT_APPROVED",

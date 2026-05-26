@@ -287,6 +287,16 @@ select {
   cursor: not-allowed;
 }
 
+.intent-button:not(:disabled) {
+  color: var(--text);
+  cursor: pointer;
+}
+
+.intent-button:not(:disabled):hover {
+  border-color: rgba(6, 182, 212, 0.7);
+  background: #121a25;
+}
+
 .intent-button.paper {
   color: var(--cyan);
   border-color: rgba(6, 182, 212, 0.35);
