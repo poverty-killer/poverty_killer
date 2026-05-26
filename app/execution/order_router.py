@@ -199,6 +199,9 @@ class OrderRouter:
         self._fill_hydration_results: List[Dict[str, Any]] = []
         self._broker_fill_activity_cache: Optional[List[Dict[str, Any]]] = None
         self._broker_fill_activity_fetch_error: Optional[str] = None
+        self._broker_fee_hydration_results: List[Dict[str, Any]] = []
+        self._broker_fee_activity_cache: Optional[List[Dict[str, Any]]] = None
+        self._broker_fee_activity_fetch_error: Optional[str] = None
         self._cancel_denials_by_order_id: Dict[str, str] = {}
         self._oms_lifecycle_counts: Dict[str, int] = {
             "submitted": 0,
@@ -1221,6 +1224,17 @@ class OrderRouter:
             "broker_canceled_with_fill_count": 0,
             "tca_records_count": 0,
             "tca_unknown_count": 0,
+            "broker_fee_hydration_attempted_count": 0,
+            "broker_fee_hydration_count": 0,
+            "broker_fee_hydration_pending_count": 0,
+            "broker_fee_hydration_unmatched_count": 0,
+            "broker_fee_hydration_conflict_count": 0,
+            "broker_fee_activity_records_seen_count": 0,
+            "broker_fee_activity_records_matched_count": 0,
+            "broker_fee_activity_duplicate_ignored_count": 0,
+            "tca_complete_count": 0,
+            "tca_estimated_count": 0,
+            "tca_fee_pending_count": 0,
             "realized_vs_modeled_netedge_available_count": 0,
             "realized_vs_modeled_netedge_unknown_count": 0,
             "positions_count": None,
@@ -1331,6 +1345,7 @@ class OrderRouter:
                 mapping_rows = self._state_store.list_order_id_mappings(broker=broker, include_terminal=True)
             except Exception:
                 mapping_rows = []
+            self._hydrate_deferred_broker_fees(source_event="shutdown_final_reconciliation_fee_hydration")
             counter = getattr(self._state_store, "count_table_rows", None)
             if callable(counter):
                 evidence["legacy_local_fills"] = int(counter("fills"))
@@ -1378,6 +1393,7 @@ class OrderRouter:
             0,
             int(evidence["tca_records_count"]) - int(evidence["realized_vs_modeled_netedge_available_count"]),
         )
+        evidence.update(self._broker_fee_hydration_summary())
         evidence["broker_filled_orders"] = sum(
             1 for row in mapping_rows if str(row.get("status") or "").lower() == "filled"
         )
@@ -3388,6 +3404,7 @@ class OrderRouter:
             sum(1 for result in self._fill_hydration_results if result.get("realized_netedge_available") is True),
         )
         realized_netedge_unknown_count = max(0, int(tca_records_count) - int(realized_netedge_available_count))
+        broker_fee_summary = self._broker_fee_hydration_summary()
         active_pending_order_ids = tuple(self._pending_orders.keys())
         pending_terminal_leak_ids = []
         for order_id in active_pending_order_ids:
@@ -3432,6 +3449,50 @@ class OrderRouter:
             "broker_canceled_with_fill_count": int(shutdown_reconciliation.get("broker_canceled_with_fill_count", 0) or 0),
             "tca_records_count": int(tca_records_count),
             "tca_unknown_count": int(tca_unknown_count),
+            "broker_fee_hydration_attempted_count": max(
+                int(shutdown_reconciliation.get("broker_fee_hydration_attempted_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_hydration_attempted_count", 0) or 0),
+            ),
+            "broker_fee_hydration_count": max(
+                int(shutdown_reconciliation.get("broker_fee_hydration_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_hydration_count", 0) or 0),
+            ),
+            "broker_fee_hydration_pending_count": max(
+                int(shutdown_reconciliation.get("broker_fee_hydration_pending_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_hydration_pending_count", 0) or 0),
+            ),
+            "broker_fee_hydration_unmatched_count": max(
+                int(shutdown_reconciliation.get("broker_fee_hydration_unmatched_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_hydration_unmatched_count", 0) or 0),
+            ),
+            "broker_fee_hydration_conflict_count": max(
+                int(shutdown_reconciliation.get("broker_fee_hydration_conflict_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_hydration_conflict_count", 0) or 0),
+            ),
+            "broker_fee_activity_records_seen_count": max(
+                int(shutdown_reconciliation.get("broker_fee_activity_records_seen_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_activity_records_seen_count", 0) or 0),
+            ),
+            "broker_fee_activity_records_matched_count": max(
+                int(shutdown_reconciliation.get("broker_fee_activity_records_matched_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_activity_records_matched_count", 0) or 0),
+            ),
+            "broker_fee_activity_duplicate_ignored_count": max(
+                int(shutdown_reconciliation.get("broker_fee_activity_duplicate_ignored_count", 0) or 0),
+                int(broker_fee_summary.get("broker_fee_activity_duplicate_ignored_count", 0) or 0),
+            ),
+            "tca_complete_count": max(
+                int(shutdown_reconciliation.get("tca_complete_count", 0) or 0),
+                int(broker_fee_summary.get("tca_complete_count", 0) or 0),
+            ),
+            "tca_estimated_count": max(
+                int(shutdown_reconciliation.get("tca_estimated_count", 0) or 0),
+                int(broker_fee_summary.get("tca_estimated_count", 0) or 0),
+            ),
+            "tca_fee_pending_count": max(
+                int(shutdown_reconciliation.get("tca_fee_pending_count", 0) or 0),
+                int(broker_fee_summary.get("tca_fee_pending_count", 0) or 0),
+            ),
             "realized_vs_modeled_netedge_available_count": int(realized_netedge_available_count),
             "realized_vs_modeled_netedge_unknown_count": int(realized_netedge_unknown_count),
             "filled_orders": sum(1 for row in mapping_rows if str(row.get("status") or "").lower() == "filled"),
@@ -3654,6 +3715,38 @@ class OrderRouter:
         self._broker_fill_activity_cache = [item for item in payload if isinstance(item, dict)]
         return list(self._broker_fill_activity_cache)
 
+    def _broker_fee_activities(self) -> List[Dict[str, Any]]:
+        if self._broker_fee_activity_cache is not None:
+            return list(self._broker_fee_activity_cache)
+        self._broker_fee_activity_cache = []
+        adapter = self._broker_gateway_adapter
+        getter = getattr(adapter, "get_fee_activities", None)
+        try:
+            if callable(getter):
+                response = getter(page_size=100)
+            else:
+                getter = getattr(adapter, "get_account_activities", None)
+                if not callable(getter):
+                    self._broker_fee_activity_fetch_error = "broker_fee_activity_method_missing"
+                    return []
+                response = getter(activity_types="CFEE,FEE", page_size=100)
+        except BrokerGatewayError as exc:
+            self._broker_fee_activity_fetch_error = exc.reason_code
+            return []
+        if not getattr(response, "ok", False):
+            self._broker_fee_activity_fetch_error = str(
+                getattr(response, "reason_code", None) or "broker_fee_activity_get_failed"
+            )
+            return []
+        payload = response.payload
+        if isinstance(payload, dict):
+            payload = payload.get("activities", payload.get("items", []))
+        if not isinstance(payload, list):
+            self._broker_fee_activity_fetch_error = "broker_fee_activity_invalid_shape"
+            return []
+        self._broker_fee_activity_cache = [item for item in payload if isinstance(item, dict)]
+        return list(self._broker_fee_activity_cache)
+
     def _matching_broker_fill_activity(
         self,
         *,
@@ -3668,6 +3761,459 @@ class OrderRouter:
             if client_order_id and activity_client_id == client_order_id:
                 return activity
         return None
+
+    def _normalized_broker_fee_activity(self, activity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        activity_type = str(activity.get("activity_type") or activity.get("type") or "").strip().upper()
+        if activity_type not in {"CFEE", "FEE"}:
+            return None
+        activity_id = str(activity.get("id") or activity.get("activity_id") or "").strip()
+        fee_amount = self._decimal_from_payload(
+            activity,
+            ("net_amount", "amount", "fee", "commission", "commission_amount"),
+        )
+        raw_amount = fee_amount
+        if fee_amount is not None:
+            fee_amount = abs(fee_amount)
+        fee_currency = str(
+            activity.get("currency")
+            or activity.get("currency_code")
+            or activity.get("fee_currency")
+            or activity.get("commission_currency")
+            or ""
+        ).strip()
+        transaction_time = str(
+            self._payload_value(activity, ("transaction_time", "date", "created_at", "updated_at"))
+            or ""
+        ).strip()
+        order_ids = {
+            str(value).strip()
+            for value in (
+                activity.get("order_id"),
+                activity.get("broker_order_id"),
+                activity.get("client_order_id"),
+            )
+            if str(value or "").strip()
+        }
+        quantity = self._decimal_from_payload(activity, ("qty", "quantity", "cum_qty"))
+        price = self._decimal_from_payload(activity, ("price", "avg_price"))
+        return {
+            "raw": activity,
+            "activity_id": activity_id or None,
+            "activity_key": activity_id
+            or "|".join(
+                (
+                    activity_type,
+                    str(activity.get("symbol") or ""),
+                    str(raw_amount),
+                    fee_currency,
+                    transaction_time,
+                    str(activity.get("description") or ""),
+                )
+            ),
+            "activity_type": activity_type,
+            "fee_amount": fee_amount,
+            "fee_amount_signed": str(raw_amount) if raw_amount is not None else None,
+            "fee_currency": fee_currency or None,
+            "symbol": activity.get("symbol"),
+            "symbol_norm": self._normalize_broker_symbol(activity.get("symbol")),
+            "order_ids": order_ids,
+            "quantity": quantity,
+            "price": price,
+            "transaction_time": transaction_time or None,
+            "transaction_ts_ns": self._timestamp_ns_from_broker_text(transaction_time),
+            "description": activity.get("description"),
+        }
+
+    def _fill_row_identity_values(self, row: Dict[str, Any]) -> set[str]:
+        return {
+            str(value).strip()
+            for value in (
+                row.get("broker_order_id"),
+                row.get("client_order_id"),
+                row.get("broker_activity_id"),
+            )
+            if str(value or "").strip()
+        }
+
+    def _decimal_text_equal(self, left: Any, right: Any) -> bool:
+        left_decimal = self._decimal_from_payload({"value": left}, ("value",))
+        right_decimal = self._decimal_from_payload({"value": right}, ("value",))
+        return left_decimal is not None and right_decimal is not None and left_decimal == right_decimal
+
+    def _fee_activity_composite_matches_row(self, activity: Dict[str, Any], row: Dict[str, Any]) -> bool:
+        if not activity.get("symbol_norm"):
+            return False
+        if activity["symbol_norm"] != self._normalize_broker_symbol(row.get("symbol")):
+            return False
+        activity_ts_ns = activity.get("transaction_ts_ns")
+        row_ts_ns = row.get("fill_ts_ns")
+        try:
+            row_ts_ns = int(row_ts_ns) if row_ts_ns is not None else None
+        except Exception:
+            row_ts_ns = None
+        if activity_ts_ns is None or row_ts_ns is None:
+            return False
+        if abs(int(activity_ts_ns) - int(row_ts_ns)) > 36 * 60 * 60 * 1_000_000_000:
+            return False
+        if activity.get("quantity") is not None and not self._decimal_text_equal(activity.get("quantity"), row.get("quantity")):
+            return False
+        if activity.get("price") is not None and not self._decimal_text_equal(activity.get("price"), row.get("price")):
+            return False
+        return True
+
+    def _fee_activity_match_for_fill_row(
+        self,
+        *,
+        row: Dict[str, Any],
+        activity: Dict[str, Any],
+        all_rows: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        row_identities = self._fill_row_identity_values(row)
+        if row_identities and row_identities & set(activity.get("order_ids", set())):
+            return {
+                "confidence": "EXACT",
+                "keys": tuple(sorted(row_identities & set(activity.get("order_ids", set())))),
+            }
+        if not self._fee_activity_composite_matches_row(activity, row):
+            return None
+        matching_rows = [
+            candidate
+            for candidate in all_rows
+            if self._fee_activity_composite_matches_row(activity, candidate)
+        ]
+        if len(matching_rows) == 1 and str(matching_rows[0].get("fill_id")) == str(row.get("fill_id")):
+            return {
+                "confidence": "STRONG",
+                "keys": ("symbol", "fill_timestamp_window", "quantity_or_price_when_available"),
+            }
+        return {"confidence": "AMBIGUOUS", "keys": ("composite_many_to_one",)}
+
+    def _fee_tca_fields_for_fill_row(self, row: Dict[str, Any], fee: _Decimal) -> Dict[str, Any]:
+        notional = self._decimal_from_payload(row, ("notional",))
+        price = self._decimal_from_payload(row, ("price",))
+        quantity = self._decimal_from_payload(row, ("quantity",))
+        if notional is None and price is not None and quantity is not None:
+            notional = price * quantity
+        fee_bps = (fee / notional) * _Decimal("10000") if notional is not None and notional > 0 else None
+        modeled_net_edge = self._decimal_from_payload(row, ("modeled_net_edge",))
+        slippage_bps = self._decimal_from_payload(row, ("slippage_bps",))
+        realized_vs_modeled = None
+        if modeled_net_edge is not None and slippage_bps is not None and fee_bps is not None:
+            realized_drag = (max(slippage_bps, _Decimal("0")) + fee_bps) / _Decimal("10000")
+            realized_vs_modeled = modeled_net_edge - realized_drag
+        if modeled_net_edge is None or slippage_bps is None or fee_bps is None:
+            tca_status = "UNKNOWN"
+            verdict = "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+        elif slippage_bps > _Decimal("1"):
+            tca_status = "HYDRATED"
+            verdict = "WORSE_THAN_MODELED"
+        elif slippage_bps < _Decimal("-1"):
+            tca_status = "HYDRATED"
+            verdict = "BETTER_THAN_MODELED"
+        else:
+            tca_status = "HYDRATED"
+            verdict = "IN_LINE"
+        return {
+            "fee_bps": str(fee_bps) if fee_bps is not None else None,
+            "tca_status": tca_status,
+            "execution_quality_verdict": verdict,
+            "realized_vs_modeled_netedge": str(realized_vs_modeled) if realized_vs_modeled is not None else None,
+            "realized_netedge_available": realized_vs_modeled is not None,
+        }
+
+    def _insert_legacy_fill_after_fee_match(
+        self,
+        row: Dict[str, Any],
+        *,
+        fee: _Decimal,
+        fee_currency: str,
+    ) -> bool:
+        if self._state_store is None:
+            return False
+        quantity = self._decimal_from_payload(row, ("quantity",))
+        price = self._decimal_from_payload(row, ("price",))
+        if quantity is None or price is None:
+            return False
+        timestamp = str(row.get("fill_timestamp") or "").strip()
+        if not timestamp:
+            return False
+        return bool(
+            self._state_store.insert_fill(
+                {
+                    "id": f"legacy:{row.get('fill_id')}",
+                    "order_id": row.get("client_order_id"),
+                    "symbol": row.get("symbol"),
+                    "side": row.get("side"),
+                    "quantity": float(quantity),
+                    "price": float(price),
+                    "fee": float(fee),
+                    "fee_currency": fee_currency,
+                    "timestamp": timestamp,
+                    "exchange_order_id": row.get("broker_order_id"),
+                    "latency_ms": None,
+                }
+            )
+        )
+
+    def _hydrate_deferred_broker_fees(self, *, source_event: str) -> None:
+        if self._state_store is None:
+            return
+        lister = getattr(self._state_store, "list_broker_fill_ledger", None)
+        updater = getattr(self._state_store, "update_broker_fill_fee_hydration", None)
+        if not callable(lister) or not callable(updater):
+            return
+        all_rows = lister(missing_fee_only=False)
+        missing_fee_rows = [
+            row
+            for row in all_rows
+            if not str(row.get("fee") or "").strip() or not str(row.get("fee_currency") or "").strip()
+        ]
+        if not missing_fee_rows:
+            return
+        normalized_activities: List[Dict[str, Any]] = []
+        seen_activity_keys: set[str] = set()
+        for activity in self._broker_fee_activities():
+            normalized = self._normalized_broker_fee_activity(activity)
+            if normalized is None:
+                continue
+            activity_key = str(normalized.get("activity_key") or "")
+            if activity_key and activity_key in seen_activity_keys:
+                self._broker_fee_hydration_results.append(
+                    {
+                        "source_event": source_event,
+                        "status": "DUPLICATE_IGNORED",
+                        "reason_code": "DUPLICATE_BROKER_FEE_ACTIVITY",
+                        "broker_fee_activity_id": normalized.get("activity_id"),
+                        "broker_fee_activity_type": normalized.get("activity_type"),
+                    }
+                )
+                continue
+            if activity_key:
+                seen_activity_keys.add(activity_key)
+            normalized_activities.append(normalized)
+
+        used_activity_keys: set[str] = set()
+        for row in missing_fee_rows:
+            base_result: Dict[str, Any] = {
+                "source_event": source_event,
+                "fill_id": row.get("fill_id"),
+                "broker_order_id": row.get("broker_order_id"),
+                "client_order_id": row.get("client_order_id"),
+                "symbol": row.get("symbol"),
+                "status": "FEE_PENDING_BROKER_ACTIVITY",
+                "reason_code": "FEE_ACTIVITY_NOT_YET_POSTED",
+                "inserted": False,
+                "updated": False,
+                "duplicate_ignored": False,
+                "tca_status": row.get("tca_status") or "UNKNOWN",
+                "execution_quality_verdict": row.get("execution_quality_verdict") or "UNKNOWN_INSUFFICIENT_BROKER_DETAIL",
+            }
+            if self._broker_fee_activity_fetch_error:
+                base_result["reason_code"] = "FEE_ACTIVITY_QUERY_FAILED"
+                base_result["fetch_error"] = self._broker_fee_activity_fetch_error
+                self._broker_fee_hydration_results.append(base_result)
+                continue
+            if not normalized_activities:
+                self._broker_fee_hydration_results.append(base_result)
+                continue
+
+            matches = []
+            for activity in normalized_activities:
+                activity_key = str(activity.get("activity_key") or "")
+                if activity_key and activity_key in used_activity_keys:
+                    continue
+                match = self._fee_activity_match_for_fill_row(row=row, activity=activity, all_rows=missing_fee_rows)
+                if match is not None:
+                    matches.append((activity, match))
+
+            ambiguous = [item for item in matches if item[1].get("confidence") == "AMBIGUOUS"]
+            valid_matches = [item for item in matches if item[1].get("confidence") in {"EXACT", "STRONG"}]
+            if ambiguous and not valid_matches:
+                conflict = dict(base_result)
+                conflict.update(
+                    {
+                        "status": "FEE_ACTIVITY_CONFLICT",
+                        "reason_code": "FEE_ACTIVITY_AMBIGUOUS_MATCH",
+                        "matched_activity_count": len(ambiguous),
+                    }
+                )
+                self._broker_fee_hydration_results.append(conflict)
+                continue
+            if not valid_matches:
+                unmatched = dict(base_result)
+                unmatched.update(
+                    {
+                        "status": "FEE_ACTIVITY_UNMATCHED",
+                        "reason_code": "FEE_ACTIVITY_UNMATCHED",
+                    }
+                )
+                self._broker_fee_hydration_results.append(unmatched)
+                continue
+            if len(valid_matches) > 1:
+                conflict = dict(base_result)
+                conflict.update(
+                    {
+                        "status": "FEE_ACTIVITY_CONFLICT",
+                        "reason_code": "MULTIPLE_FEE_ACTIVITY_MATCHES",
+                        "matched_activity_count": len(valid_matches),
+                    }
+                )
+                self._broker_fee_hydration_results.append(conflict)
+                continue
+
+            activity, match = valid_matches[0]
+            result = dict(base_result)
+            result.update(
+                {
+                    "broker_fee_activity_id": activity.get("activity_id"),
+                    "broker_fee_activity_type": activity.get("activity_type"),
+                    "fee_match_confidence": match.get("confidence"),
+                    "fee_match_keys": tuple(match.get("keys") or ()),
+                }
+            )
+            fee_amount = activity.get("fee_amount")
+            fee_currency = activity.get("fee_currency")
+            if fee_amount is None or not fee_currency:
+                result.update(
+                    {
+                        "status": "FEE_UNAVAILABLE",
+                        "reason_code": "FEE_AMOUNT_OR_CURRENCY_MISSING",
+                        "missing_fields": tuple(
+                            field
+                            for field, value in (("fee_amount", fee_amount), ("fee_currency", fee_currency))
+                            if value in (None, "")
+                        ),
+                    }
+                )
+                self._broker_fee_hydration_results.append(result)
+                continue
+
+            tca_fields = self._fee_tca_fields_for_fill_row(row, fee_amount)
+            fee_source = "BROKER_CFEE" if activity.get("activity_type") == "CFEE" else "BROKER_FEE"
+            update_status = updater(
+                str(row.get("fill_id")),
+                fee=fee_amount,
+                fee_currency=str(fee_currency),
+                fee_bps=tca_fields.get("fee_bps"),
+                tca_status=tca_fields.get("tca_status"),
+                execution_quality_verdict=tca_fields.get("execution_quality_verdict"),
+                realized_vs_modeled_netedge=tca_fields.get("realized_vs_modeled_netedge"),
+                metadata_updates={
+                    "fee_status": "FEE_ACTIVITY_MATCHED",
+                    "fee_source": fee_source,
+                    "broker_fee_activity_id": activity.get("activity_id"),
+                    "broker_fee_activity_type": activity.get("activity_type"),
+                    "broker_fee_amount": str(fee_amount),
+                    "broker_fee_amount_signed": activity.get("fee_amount_signed"),
+                    "broker_fee_currency": fee_currency,
+                    "broker_fee_symbol": activity.get("symbol"),
+                    "broker_fee_quantity": str(activity.get("quantity")) if activity.get("quantity") is not None else None,
+                    "broker_fee_price": str(activity.get("price")) if activity.get("price") is not None else None,
+                    "broker_fee_transaction_time": activity.get("transaction_time"),
+                    "fee_hydrated_at": now_ns(),
+                    "fee_hydration_reason_code": "BROKER_CFEE_FEE_ACTIVITY_MATCHED",
+                    "fee_match_confidence": match.get("confidence"),
+                    "fee_match_keys": tuple(match.get("keys") or ()),
+                    "fee_activity_description": activity.get("description"),
+                },
+            )
+            if update_status in {"updated", "duplicate"}:
+                if activity.get("activity_key"):
+                    used_activity_keys.add(str(activity.get("activity_key")))
+                result.update(
+                    {
+                        "status": "FEE_ACTIVITY_MATCHED",
+                        "reason_code": "BROKER_CFEE_FEE_ACTIVITY_MATCHED",
+                        "updated": update_status == "updated",
+                        "duplicate_ignored": update_status == "duplicate",
+                        "fee_available": True,
+                        "fee_currency_available": True,
+                        "fee_source": fee_source,
+                        "fee_amount": str(fee_amount),
+                        "fee_currency": fee_currency,
+                        "fee_bps": tca_fields.get("fee_bps"),
+                        "tca_status": tca_fields.get("tca_status"),
+                        "execution_quality_verdict": tca_fields.get("execution_quality_verdict"),
+                        "realized_netedge_available": bool(tca_fields.get("realized_netedge_available")),
+                        "legacy_fill_inserted": self._insert_legacy_fill_after_fee_match(
+                            row,
+                            fee=fee_amount,
+                            fee_currency=str(fee_currency),
+                        )
+                        if update_status == "updated"
+                        else False,
+                    }
+                )
+            else:
+                result.update(
+                    {
+                        "status": "FEE_ACTIVITY_CONFLICT" if update_status == "conflict" else "FEE_UNAVAILABLE",
+                        "reason_code": f"FEE_HYDRATION_{str(update_status).upper()}",
+                        "ledger_status": update_status,
+                    }
+                )
+            self._broker_fee_hydration_results.append(result)
+        logger.info("[OMS_DIAG] BROKER_FEE_HYDRATION fields=%s", tuple(self._broker_fee_hydration_results[-len(missing_fee_rows):]))
+
+    def _broker_fee_hydration_summary(self) -> Dict[str, Any]:
+        rows: List[Dict[str, Any]] = []
+        if self._state_store is not None:
+            lister = getattr(self._state_store, "list_broker_fill_ledger", None)
+            if callable(lister):
+                rows = lister(missing_fee_only=False)
+        matched_results = [
+            result for result in self._broker_fee_hydration_results
+            if result.get("status") == "FEE_ACTIVITY_MATCHED"
+        ]
+        pending_results = [
+            result for result in self._broker_fee_hydration_results
+            if result.get("status") == "FEE_PENDING_BROKER_ACTIVITY"
+        ]
+        unmatched_results = [
+            result for result in self._broker_fee_hydration_results
+            if result.get("status") in {"FEE_ACTIVITY_UNMATCHED", "FEE_UNAVAILABLE"}
+        ]
+        conflict_results = [
+            result for result in self._broker_fee_hydration_results
+            if result.get("status") == "FEE_ACTIVITY_CONFLICT"
+        ]
+        duplicate_results = [
+            result for result in self._broker_fee_hydration_results
+            if result.get("status") == "DUPLICATE_IGNORED" or result.get("duplicate_ignored") is True
+        ]
+        tca_complete_count = 0
+        tca_estimated_count = 0
+        tca_fee_pending_count = 0
+        for row in rows:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if (
+                str(row.get("tca_status") or "").upper() == "HYDRATED"
+                and str(row.get("execution_quality_verdict") or "") != "UNKNOWN_INSUFFICIENT_BROKER_DETAIL"
+            ):
+                tca_complete_count += 1
+            if metadata.get("fee_source") == "ESTIMATED_POLICY":
+                tca_estimated_count += 1
+            if not str(row.get("fee") or "").strip() or not str(row.get("fee_currency") or "").strip():
+                tca_fee_pending_count += 1
+        return {
+            "broker_fee_hydration_attempted_count": len(self._broker_fee_hydration_results),
+            "broker_fee_hydration_count": sum(1 for result in matched_results if result.get("updated") is True),
+            "broker_fee_hydration_pending_count": len(pending_results),
+            "broker_fee_hydration_unmatched_count": len(unmatched_results),
+            "broker_fee_hydration_conflict_count": len(conflict_results),
+            "broker_fee_activity_records_seen_count": len(self._broker_fee_activity_cache or ()),
+            "broker_fee_activity_records_matched_count": len(
+                {
+                    str(result.get("broker_fee_activity_id") or result.get("fill_id") or "")
+                    for result in matched_results
+                    if str(result.get("broker_fee_activity_id") or result.get("fill_id") or "")
+                }
+            ),
+            "broker_fee_activity_duplicate_ignored_count": len(duplicate_results),
+            "tca_complete_count": int(tca_complete_count),
+            "tca_estimated_count": int(tca_estimated_count),
+            "tca_fee_pending_count": int(tca_fee_pending_count),
+        }
 
     def _timestamp_ns_from_broker_text(self, value: Any) -> Optional[int]:
         text = str(value or "").strip()
@@ -3930,6 +4476,9 @@ class OrderRouter:
                 "order_status": payload.get("status"),
                 "net_edge_evaluation": metadata.get("net_edge_evaluation"),
                 "net_edge_context": metadata.get("net_edge_context"),
+                "fee_status": "FEE_ACTIVITY_MATCHED" if fee is not None and fee_currency else "FEE_PENDING_BROKER_ACTIVITY",
+                "fee_source": "BROKER_FILL_ACTIVITY" if fee is not None and fee_currency else "UNAVAILABLE",
+                "fee_hydration_reason_code": hydration_reason,
             },
             "created_at_ns": now_ns(),
             "observed_at_ns": now_ns(),

@@ -935,6 +935,18 @@ class StateStore:
         except (InvalidOperation, ValueError):
             return None
 
+    @staticmethod
+    def _json_dict_or_empty(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(str(value))
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
     def upsert_reservation_ledger(self, reservation: Dict[str, Any]) -> bool:
         """
         Persist a reservation ledger fact without creating reservation authority.
@@ -1326,6 +1338,108 @@ class StateStore:
     def insert_fill(self, fill: Dict[str, Any]) -> bool:
         """Insert a fill record."""
         return self.atomic_insert("fills", fill)
+
+    def list_broker_fill_ledger(self, *, missing_fee_only: bool = False) -> List[Dict[str, Any]]:
+        """List canonical broker-backed fill rows for reconciliation/accounting."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                where_clause = ""
+                if missing_fee_only:
+                    where_clause = "WHERE fee IS NULL OR fee = '' OR fee_currency IS NULL OR fee_currency = ''"
+                cursor.execute(
+                    f"""
+                    SELECT * FROM broker_fill_ledger
+                    {where_clause}
+                    ORDER BY COALESCE(fill_ts_ns, observed_at_ns, created_at_ns, 0) DESC
+                    """
+                )
+                rows = []
+                for row in cursor.fetchall():
+                    record = dict(row)
+                    record["metadata"] = self._json_dict_or_empty(record.get("metadata"))
+                    rows.append(record)
+                return rows
+        except Exception as e:
+            logger.error("Failed to list broker fill ledger rows: %s", e)
+            return []
+
+    def update_broker_fill_fee_hydration(
+        self,
+        fill_id: str,
+        *,
+        fee: Any,
+        fee_currency: str,
+        fee_bps: Any = None,
+        tca_status: Optional[str] = None,
+        execution_quality_verdict: Optional[str] = None,
+        realized_vs_modeled_netedge: Any = None,
+        hydration_reason_code: str = "BROKER_CFEE_FEE_HYDRATED",
+        metadata_updates: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Idempotently enrich an existing broker fill row with broker-confirmed fee truth."""
+        safe_fill_id = str(fill_id or "").strip()
+        safe_currency = str(fee_currency or "").strip()
+        incoming_fee = self._decimal_or_none(fee)
+        if not safe_fill_id or incoming_fee is None or not safe_currency:
+            return "failed"
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute("SELECT * FROM broker_fill_ledger WHERE fill_id = ?", (safe_fill_id,))
+                existing = cursor.fetchone()
+                if existing is None:
+                    conn.rollback()
+                    return "missing"
+
+                existing_dict = dict(existing)
+                existing_fee = self._decimal_or_none(existing_dict.get("fee"))
+                existing_currency = str(existing_dict.get("fee_currency") or "").strip()
+                if existing_fee is not None or existing_currency:
+                    if existing_fee == incoming_fee and existing_currency == safe_currency:
+                        conn.rollback()
+                        return "duplicate"
+                    logger.error(
+                        "Broker fill ledger fee conflict for %s existing=%s/%s incoming=%s/%s",
+                        safe_fill_id,
+                        existing_dict.get("fee"),
+                        existing_currency,
+                        str(incoming_fee),
+                        safe_currency,
+                    )
+                    conn.rollback()
+                    return "conflict"
+
+                metadata = self._json_dict_or_empty(existing_dict.get("metadata"))
+                metadata.update(metadata_updates or {})
+                updates = {
+                    "fee": str(incoming_fee),
+                    "fee_currency": safe_currency,
+                    "fee_bps": None if fee_bps is None else str(fee_bps),
+                    "tca_status": tca_status or existing_dict.get("tca_status"),
+                    "execution_quality_verdict": execution_quality_verdict or existing_dict.get("execution_quality_verdict"),
+                    "realized_vs_modeled_netedge": (
+                        existing_dict.get("realized_vs_modeled_netedge")
+                        if realized_vs_modeled_netedge is None
+                        else str(realized_vs_modeled_netedge)
+                    ),
+                    "hydration_status": "HYDRATED",
+                    "hydration_reason_code": hydration_reason_code,
+                    "metadata": json.dumps(metadata, sort_keys=True, default=str),
+                    "observed_at_ns": now_ns(),
+                }
+                set_clause = ", ".join([f"{column} = ?" for column in updates])
+                cursor.execute(
+                    f"UPDATE broker_fill_ledger SET {set_clause} WHERE fill_id = ?",
+                    [updates[column] for column in updates] + [safe_fill_id],
+                )
+                conn.commit()
+                return "updated"
+        except Exception as e:
+            logger.error("Failed to update broker fill fee hydration %s: %s", fill_id, e)
+            return "failed"
 
     def upsert_broker_fill_ledger(self, fill: Dict[str, Any]) -> str:
         """Insert a broker-backed fill ledger row idempotently.

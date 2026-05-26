@@ -50,7 +50,7 @@
       realizedPnl: { value: null, source: "UNKNOWN_INSUFFICIENT_BROKER_DETAIL" },
       unrealizedPnl: { value: null, source: "BROKER_CONFIRMED_REQUIRED" },
       netPnl: { value: null, source: "UNKNOWN_INSUFFICIENT_BROKER_DETAIL" },
-      fees: { value: null, source: "BROKER_FEE_DETAIL_UNAVAILABLE" },
+      fees: { value: null, source: "FEE_PENDING_BROKER_ACTIVITY" },
       spreadCost: "modeled only",
       slippage: "unknown until complete TCA detail",
       latencyDrag: "modeled",
@@ -115,8 +115,10 @@
         price: "76635.835",
         source: "broker_activity",
         hydrationStatus: "PARTIAL",
+        feeStatus: "FEE_PENDING_BROKER_ACTIVITY",
+        feeSource: "UNAVAILABLE",
         tca: "UNKNOWN_INSUFFICIENT_BROKER_DETAIL",
-        reason: "BROKER_FILL_FEE_DETAIL_UNAVAILABLE"
+        reason: "Broker fee detail may post later as CFEE/FEE activity; no fee is invented."
       },
       {
         fillId: "broker_activity:alpaca:mock-002",
@@ -126,8 +128,10 @@
         price: "84.255",
         source: "broker_activity",
         hydrationStatus: "PARTIAL",
+        feeStatus: "FEE_ACTIVITY_MATCHED",
+        feeSource: "BROKER_CFEE",
         tca: "UNKNOWN_INSUFFICIENT_BROKER_DETAIL",
-        reason: "BROKER_FILL_FEE_DETAIL_UNAVAILABLE"
+        reason: "Broker fee matched; execution quality remains unknown until all modeled/broker fields are present."
       }
     ],
     decisionFrames: [

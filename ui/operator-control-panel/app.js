@@ -490,9 +490,11 @@
         quantity: String(pick(fills.local_fills, 0)),
         price: "not displayed by backend v1",
         source: pick(fills.source, "NO_ACTIVE_RUNTIME_ATTACHED"),
-        hydrationStatus: `hydrated=${pick(fills.fill_hydration_count, 0)}`,
+        hydrationStatus: `fills=${pick(fills.fill_hydration_count, 0)} fee=${pick(fills.broker_fee_hydration_count, 0)} pending=${pick(fills.broker_fee_hydration_pending_count, 0)}`,
+        feeStatus: pick(fills.fee_status, "FEE_PENDING_BROKER_ACTIVITY"),
+        feeSource: pick(fills.fee_source, "UNAVAILABLE"),
         tca: pick(tca.execution_quality_verdict, "UNKNOWN_NO_ACTIVE_RUNTIME"),
-        reason: `conflicts=${pick(fills.fill_hydration_conflict_count, 0)}`
+        reason: `fill_conflicts=${pick(fills.fill_hydration_conflict_count, 0)} fee_conflicts=${pick(fills.broker_fee_hydration_conflict_count, 0)}`
       }
     ];
 

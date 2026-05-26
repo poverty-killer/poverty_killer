@@ -343,13 +343,45 @@ class AlpacaPaperBrokerAdapter:
             raise BrokerGatewayError("order_id_missing")
         return self._request("GET", f"/v2/orders/{urllib.parse.quote(safe_order_id, safe='')}")
 
-    def get_account_activities(self, *, activity_types: str = "FILL", page_size: int = 100) -> BrokerGatewayResponse:
+    def get_account_activities(
+        self,
+        *,
+        activity_types: str = "FILL",
+        page_size: int = 100,
+        after: str | None = None,
+        until: str | None = None,
+        date: str | None = None,
+    ) -> BrokerGatewayResponse:
         safe_activity_types = str(activity_types or "FILL").strip().upper()
         safe_page_size = max(1, min(int(page_size or 100), 100))
+        query = {"activity_types": safe_activity_types, "page_size": str(safe_page_size)}
+        if after:
+            query["after"] = str(after)
+        if until:
+            query["until"] = str(until)
+        if date:
+            query["date"] = str(date)
         return self._request(
             "GET",
             "/v2/account/activities",
-            query={"activity_types": safe_activity_types, "page_size": str(safe_page_size)},
+            query=query,
+        )
+
+    def get_fee_activities(
+        self,
+        *,
+        page_size: int = 100,
+        after: str | None = None,
+        until: str | None = None,
+        date: str | None = None,
+    ) -> BrokerGatewayResponse:
+        """Read-only Alpaca account activity fetch for deferred broker fee truth."""
+        return self.get_account_activities(
+            activity_types="CFEE,FEE",
+            page_size=page_size,
+            after=after,
+            until=until,
+            date=date,
         )
 
     def submit_order(self, order: BrokerOrderSubmitRequest) -> BrokerGatewayResponse:
