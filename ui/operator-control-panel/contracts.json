@@ -225,6 +225,40 @@
       "providers": "same provider rows as /operator/world-awareness",
       "feed_can_trade": false
     },
+    "/operator/world-awareness/runtime": {
+      "source": "OPERATOR_BACKEND_WORLD_AWARENESS_RUNTIME",
+      "authority_class": "ADVISORY",
+      "advisory_only": true,
+      "runtime": "world-awareness-provider-runtime-v1",
+      "auto_start": false,
+      "manual_poll_only": true,
+      "provider_polling_active": false,
+      "due_providers": [],
+      "providers": [
+        {
+          "provider": "alpaca_news",
+          "enabled": false,
+          "status": "FEED_DISABLED | CREDENTIAL_MISSING | FEED_READY | FEED_RATE_LIMITED | FEED_UNAVAILABLE | FEED_STALE | FEED_ERROR",
+          "next_poll_time": "ISO-8601 or null",
+          "next_poll_due": false,
+          "min_poll_interval_seconds": 300,
+          "backoff_seconds": 300,
+          "last_poll_time": "ISO-8601 or null",
+          "poll_count": 0,
+          "error_count": 0,
+          "consecutive_error_count": 0,
+          "last_error_type": null,
+          "last_added_count": 0,
+          "last_duplicate_count": 0
+        }
+      ],
+      "cache": {
+        "event_count": 0,
+        "duplicate_event_ignored_count": 0
+      },
+      "feed_can_trade": false,
+      "decisionframe_score_impact": 0.0
+    },
     "/operator/world-awareness/events": {
       "source": "OPERATOR_BACKEND_WORLD_AWARENESS_CACHE",
       "authority_class": "ADVISORY",
@@ -303,6 +337,25 @@
       ]
     },
     "/operator/intent/snapshot/export": "disabled/refused until export authority is implemented",
+    "/operator/intent/world-awareness/poll": {
+      "status": "server_authorized_read_only_external_feed_poll",
+      "required_body": {
+        "provider": "alpaca_news",
+        "symbols": ["BTC/USD", "ETH/USD", "SOL/USD"],
+        "limit": 25,
+        "force": false
+      },
+      "does_not_call_broker": true,
+      "does_not_trade": true,
+      "does_not_change_decisionframe_score": true,
+      "refusals": [
+        "FEED_DISABLED",
+        "CREDENTIAL_MISSING",
+        "UNKNOWN_PROVIDER",
+        "PROVIDER_NOT_DUE",
+        "PROVIDER_ADAPTER_MISSING"
+      ]
+    },
     "/operator/intent/live/request-enable": "LIVE_NOT_APPROVED",
     "/operator/intent/live/start": "LIVE_NOT_APPROVED",
     "/operator/intent/emergency-stop": "disabled/refused until governed emergency authority is implemented"

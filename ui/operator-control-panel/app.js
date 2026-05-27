@@ -300,18 +300,27 @@
       ${header("World Awareness", "External intelligence is advisory evidence only.", "NO EXECUTION AUTHORITY")}
       <div class="grid">
         <div class="card span-12"><h3>Provider Health</h3>${table(
-          ["Provider", "Type", "Enabled", "Status", "Events", "Stale", "Last Poll", "Rule"],
+          ["Provider", "Type", "Enabled", "Status", "Events", "Next Poll", "Backoff", "Errors", "Rule"],
           data.worldAwareness.map((w) => [
             w.source,
             w.feedType || "UNKNOWN",
             badge(String(w.enabled === true), w.enabled === true ? "green" : "gray"),
             badge(w.status, statusColor(w.status)),
             escapeHtml(w.eventCount || 0),
-            escapeHtml(w.staleCount || 0),
-            escapeHtml(w.lastPollTime || "never"),
+            badge(w.nextPollDue ? "due now" : (w.nextPollTime || "not scheduled"), w.nextPollDue ? "yellow" : "gray"),
+            escapeHtml(`${w.backoffSeconds || 0}s`),
+            escapeHtml(w.consecutiveErrorCount || w.errorCount || 0),
             w.rule
           ])
         )}</div>
+        <div class="card span-12"><h3>Manual Read-only Poll</h3>
+          <div class="stack">
+            <button class="intent-button paper" data-intent="world-poll" ${data.meta.dataSource === "OPERATOR_BACKEND" ? "" : "disabled"}>
+              Poll Alpaca News - read-only provider intent
+            </button>
+            <div class="notice mono">Runtime: ${escapeHtml(data.worldRuntime.manualPollOnly ? "manual poll only" : "unknown")} | Active polling: ${escapeHtml(String(data.worldRuntime.providerPollingActive))} | Last poll: ${escapeHtml(data.worldRuntime.lastPollResult || "none")}</div>
+          </div>
+        </div>
         <div class="card span-12"><h3>Latest Advisory Events</h3>${table(
           ["Provider", "Symbols", "Title", "Event Time", "Freshness", "Verification", "Advisory"],
           data.worldAwarenessEvents.map((event) => [
@@ -440,6 +449,7 @@
     const tca = payload.tca || {};
     const latestRun = payload.latestRun || {};
     const world = payload.world || {};
+    const worldRuntime = payload.worldRuntime || {};
     const supervisor = status.supervisor || latestRun || {};
     const activeSession = supervisor.active_session || supervisor.latest_session || {};
 
@@ -493,7 +503,23 @@
     next.diagnostics.logs = pick(diagnostics.logs, "NOT_READ_BY_OPERATOR_BACKEND_V1");
     next.diagnostics.db = pick(diagnostics.db, "NOT_READ_BY_OPERATOR_BACKEND_V1");
     if (Array.isArray(world.providers)) {
+      const runtimeByProvider = {};
+      if (Array.isArray(worldRuntime.providers)) {
+        worldRuntime.providers.forEach((provider) => {
+          runtimeByProvider[provider.provider] = provider;
+        });
+      }
       next.worldAwareness = world.providers.map((provider) => ({
+        ...(() => {
+          const runtimeProvider = runtimeByProvider[provider.provider] || {};
+          return {
+            nextPollTime: pick(runtimeProvider.next_poll_time, provider.next_poll_time || "not scheduled"),
+            nextPollDue: runtimeProvider.next_poll_due === true,
+            backoffSeconds: pick(runtimeProvider.backoff_seconds, provider.backoff_seconds || 0),
+            errorCount: pick(runtimeProvider.error_count, provider.error_count || 0),
+            consecutiveErrorCount: pick(runtimeProvider.consecutive_error_count, 0)
+          };
+        })(),
         source: pick(provider.provider, "unknown_provider"),
         feedType: pick(provider.feed_type, "UNKNOWN"),
         enabled: provider.enabled === true,
@@ -508,6 +534,9 @@
         rule: "advisory only; cannot bypass MarketTruthSnapshot, NetEdge, guardrails, or broker boundary"
       }));
     }
+    next.worldRuntime.manualPollOnly = worldRuntime.manual_poll_only !== false;
+    next.worldRuntime.providerPollingActive = worldRuntime.provider_polling_active === true;
+    next.worldRuntime.dueProviders = pick(worldRuntime.due_providers, []);
     if (Array.isArray(world.events)) {
       next.worldAwarenessEvents = world.events.map((event) => ({
         eventId: pick(event.event_id, "unknown"),
@@ -556,7 +585,7 @@
 
   async function loadData() {
     try {
-      const [status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world] = await Promise.all([
+      const [status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime] = await Promise.all([
         fetchJson("/operator/status"),
         fetchJson("/operator/runtime"),
         fetchJson("/operator/profile"),
@@ -569,9 +598,10 @@
         fetchJson("/operator/fills-summary"),
         fetchJson("/operator/tca-summary"),
         fetchJson("/operator/audit-summary"),
-        fetchJson("/operator/world-awareness")
+        fetchJson("/operator/world-awareness"),
+        fetchJson("/operator/world-awareness/runtime")
       ]);
-      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world });
+      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime });
     } catch (error) {
       const fallback = clone(mockData);
       fallback.meta.dataSource = "MOCK_DATA";
@@ -624,8 +654,20 @@
         const result = await postIntent("/operator/intent/paper/stop", {});
         message = `${result.status}: ${result.reason_code}`;
       }
+      if (intent === "world-poll") {
+        const confirmed = window.confirm("Request read-only Alpaca News poll? This cannot trade, bypass guardrails, or touch broker execution.");
+        if (!confirmed) return;
+        const result = await postIntent("/operator/intent/world-awareness/poll", {
+          provider: "alpaca_news",
+          force: false,
+          symbols: ["BTC/USD", "ETH/USD", "SOL/USD"],
+          limit: 25
+        });
+        message = `${result.status}: ${result.reason_code}`;
+      }
       data = await loadData();
       data.supervisor.lastIntentResult = message;
+      data.worldRuntime.lastPollResult = message;
       renderTopBar();
       renderScreens();
       renderRail();

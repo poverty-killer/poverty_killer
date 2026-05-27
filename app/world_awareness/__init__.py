@@ -42,6 +42,7 @@ from .feed_spine import (
     normalize_external_event,
     world_awareness_summary,
 )
+from .scheduler import WorldAwarenessProviderRuntime
 
 __all__ = [
     "WorldAwarenessConfig",
@@ -66,6 +67,7 @@ __all__ = [
     "ExternalIntelligenceEvent",
     "ProviderRuntimeSnapshot",
     "WorldAwarenessEventCache",
+    "WorldAwarenessProviderRuntime",
     "build_provider_registry",
     "normalize_external_event",
     "world_awareness_summary",

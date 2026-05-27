@@ -209,6 +209,11 @@
         feedType: "NEWS",
         enabled: false,
         status: "ADVISORY_ONLY",
+        nextPollTime: "not scheduled",
+        nextPollDue: false,
+        backoffSeconds: 300,
+        errorCount: 0,
+        consecutiveErrorCount: 0,
         relevance: "disabled by default; no polling active",
         confidence: "unknown",
         stale: false,
@@ -220,6 +225,11 @@
         feedType: "SEC_FILING",
         enabled: false,
         status: "FEED_DISABLED",
+        nextPollTime: "not scheduled",
+        nextPollDue: false,
+        backoffSeconds: 300,
+        errorCount: 0,
+        consecutiveErrorCount: 0,
         relevance: "equities-only advisory lane; not crypto execution authority",
         confidence: "unknown",
         stale: false,
@@ -231,6 +241,11 @@
         feedType: "ECONOMIC_CALENDAR",
         enabled: false,
         status: "FEED_DISABLED",
+        nextPollTime: "not scheduled",
+        nextPollDue: false,
+        backoffSeconds: 300,
+        errorCount: 0,
+        consecutiveErrorCount: 0,
         relevance: "provider TBD",
         confidence: "unknown",
         stale: false,
@@ -253,6 +268,12 @@
         reason: "Advisory display only; no DecisionFrame score impact."
       }
     ],
+    worldRuntime: {
+      manualPollOnly: true,
+      providerPollingActive: false,
+      dueProviders: [],
+      lastPollResult: "none"
+    },
     diagnostics: {
       gitCommit: "fe4697a",
       dirtyWorktree: "warning surface required",

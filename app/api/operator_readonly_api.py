@@ -17,6 +17,7 @@ from fastapi import APIRouter, FastAPI
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor
 from app.world_awareness.config import WorldAwarenessConfig
 from app.world_awareness.feed_spine import WorldAwarenessEventCache
+from app.world_awareness.scheduler import WorldAwarenessProviderRuntime
 
 
 API_VERSION = "operator-backend-v1"
@@ -52,6 +53,7 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/world-awareness": "read_only_external_intelligence_advisory_summary",
         "/operator/world-awareness/providers": "read_only_external_intelligence_provider_health",
         "/operator/world-awareness/events": "read_only_external_intelligence_events",
+        "/operator/world-awareness/runtime": "read_only_external_intelligence_provider_runtime",
         "/operator/latest-run": "read_only_supervisor_session_summary",
     },
     "disabled_intents": {
@@ -87,11 +89,23 @@ class OperatorSnapshotProvider:
         world_awareness_cache: WorldAwarenessEventCache | None = None,
         world_awareness_config: WorldAwarenessConfig | None = None,
         world_awareness_env: dict[str, str] | None = None,
+        world_awareness_runtime: WorldAwarenessProviderRuntime | None = None,
     ) -> None:
         self.supervisor = supervisor or OperatorPaperSupervisor()
-        self.world_awareness_cache = world_awareness_cache or WorldAwarenessEventCache()
-        self.world_awareness_config = world_awareness_config or WorldAwarenessConfig()
-        self.world_awareness_env = world_awareness_env or {}
+        if world_awareness_runtime is not None:
+            self.world_awareness_runtime = world_awareness_runtime
+            self.world_awareness_cache = world_awareness_runtime.cache
+            self.world_awareness_config = world_awareness_runtime.config
+            self.world_awareness_env = dict(world_awareness_runtime.env)
+        else:
+            self.world_awareness_cache = world_awareness_cache or WorldAwarenessEventCache()
+            self.world_awareness_config = world_awareness_config or WorldAwarenessConfig()
+            self.world_awareness_env = world_awareness_env or {}
+            self.world_awareness_runtime = WorldAwarenessProviderRuntime(
+                config=self.world_awareness_config,
+                cache=self.world_awareness_cache,
+                env=self.world_awareness_env,
+            )
 
     def status(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
@@ -334,6 +348,43 @@ class OperatorSnapshotProvider:
             "reason_codes": ("ADVISORY_ONLY_NO_TRADE_AUTHORITY",),
         }
 
+    def world_awareness_runtime_status(self) -> dict[str, Any]:
+        snapshot = self.world_awareness_runtime.status_snapshot()
+        snapshot.update(
+            {
+                "source": "OPERATOR_BACKEND_WORLD_AWARENESS_RUNTIME",
+                "authority_class": "ADVISORY",
+                "advisory_only": True,
+                "feed_can_trade": False,
+                "market_truth_bypass_allowed": False,
+                "netedge_bypass_allowed": False,
+                "guardrail_bypass_allowed": False,
+            }
+        )
+        return snapshot
+
+    def world_awareness_poll_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        provider_name = str(body.get("provider") or "alpaca_news")
+        result = self.world_awareness_runtime.poll_provider(
+            provider_name,
+            force=bool(body.get("force", False)),
+            symbols=body.get("symbols") if isinstance(body.get("symbols"), list) else None,
+            limit=body.get("limit") if body.get("limit") is not None else None,
+        )
+        result.update(
+            {
+                "intent_id": f"world_awareness_poll:{provider_name}",
+                "broker_call_occurred": False,
+                "runtime_mutation_occurred": False,
+                "trading_mutation_occurred": False,
+                "world_awareness_cache_mutation_occurred": result.get("allowed") is True,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+            }
+        )
+        return result
+
     def contracts(self) -> dict[str, Any]:
         return deepcopy(READ_ONLY_CONTRACTS)
 
@@ -413,6 +464,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     def world_awareness_events() -> dict[str, Any]:
         return provider.world_awareness_events()
 
+    @router.get("/world-awareness/runtime")
+    def world_awareness_runtime_status() -> dict[str, Any]:
+        return provider.world_awareness_runtime_status()
+
     @router.get("/latest-run")
     def latest_run() -> dict[str, Any]:
         return provider.latest_run()
@@ -428,6 +483,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.post("/intent/snapshot/export")
     def snapshot_export_intent() -> dict[str, Any]:
         return provider.refused_intent("snapshot_export", "PAPER_INTENT_NOT_IMPLEMENTED")
+
+    @router.post("/intent/world-awareness/poll")
+    def world_awareness_poll_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.world_awareness_poll_intent(payload)
 
     @router.post("/intent/live/request-enable")
     def live_request_enable_intent() -> dict[str, Any]:

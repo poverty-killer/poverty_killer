@@ -22,6 +22,7 @@ class ExternalFeedProviderConfig(BaseModel):
     min_poll_interval_seconds: int = Field(default=300, ge=1)
     timeout_seconds: int = Field(default=20, ge=1)
     max_items_per_fetch: int = Field(default=100, ge=1)
+    backoff_seconds: int = Field(default=300, ge=1)
     stale_after_seconds: int = Field(default=3600, ge=1)
     advisory_only: bool = True
 
