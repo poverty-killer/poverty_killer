@@ -202,7 +202,8 @@ class OperatorSnapshotProvider:
             "credentials_present": "NOT_INSPECTED_NO_SECRET_ACCESS",
             "logs": "NOT_READ_BY_OPERATOR_BACKEND_V1",
             "db": "NOT_READ_BY_OPERATOR_BACKEND_V1",
-            "legacy_dashboard_command_routes_present": True,
+            "legacy_dashboard_command_routes_present": False,
+            "legacy_dashboard_status": "QUARANTINED_FROM_OPERATOR_PATH",
             "legacy_dashboard_reuse_allowed": False,
             "supervisor_version": self.supervisor.status_snapshot().get("supervisor_version"),
         }

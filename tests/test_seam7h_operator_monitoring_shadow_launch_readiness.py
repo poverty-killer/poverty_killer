@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import main
-from app.api.dashboard_server import SovereignDashboard
+from app.api.operator_readonly_api import create_operator_app
 from app.config import Config
 from app.constants import ControlMode
 from app.control_plane import ControlPlane
@@ -79,33 +79,29 @@ def test_control_plane_signs_operator_posture_without_broker_authority(tmp_path)
     assert "broker" not in record["output_summary"].lower() or "no broker" in record["output_summary"].lower()
 
 
-def test_dashboard_server_is_validated_without_starting_open_port():
-    dashboard = SovereignDashboard(bot_instance=None, api_key="test-key")
+def test_operator_api_replaces_legacy_dashboard_without_mutating_routes():
+    operator_app = create_operator_app()
+    route_paths = {route.path for route in operator_app.routes}
 
-    stats = dashboard.get_stats()
-    full_packet = dashboard._build_full_state_packet()
-    health_route_paths = {route.path for route in dashboard.app.routes}
-
-    assert dashboard._running is False
-    assert stats["connections"] == 0
-    assert full_packet["bot"] == {"error": "Bot not available"}
-    assert "/health" in health_route_paths
-    assert "/api/mode/{mode}" in health_route_paths
+    assert "/operator/status" in route_paths
+    assert "/operator/readiness/live" in route_paths
+    assert "/operator/intent/paper/start" in route_paths
+    assert "/api/mode/{mode}" not in route_paths
+    assert "/api/flatten" not in route_paths
 
     record = _operator_record(
-        module_name="SovereignDashboard",
-        category="dashboard_server",
-        status="INTENTIONALLY_BLOCKED_SERVER_START",
+        module_name="OperatorReadonlyAPI",
+        category="operator_control",
+        status="LEGACY_DASHBOARD_REPLACED",
         effect="NO_EFFECT_WITH_REASON",
-        reason="TESTS_MUST_NOT_OPEN_PORTS_OR_EXERCISE_MUTATING_OPERATOR_ENDPOINTS",
-        input_truth="FastAPI route table and local in-memory dashboard object",
-        output_summary="health/status helpers import and instantiate; server start not called",
-        provenance=stats,
+        reason="SUPPORTED_OPERATOR_PATH_USES_OPERATOR_ENDPOINTS_ONLY",
+        input_truth="FastAPI route table for operator app",
+        output_summary="operator routes present; legacy mode and flatten routes absent",
+        provenance={"route_count": len(route_paths), "routes": sorted(route_paths)},
         blocking=False,
-        operator_action_required="Do not start dashboard without explicit bounded operator approval.",
+        operator_action_required="Use /operator/* only for the supported operator UI path.",
     )
-    assert record["status"] == "INTENTIONALLY_BLOCKED_SERVER_START"
-    assert dashboard.get_connections() == 0
+    assert record["status"] == "LEGACY_DASHBOARD_REPLACED"
 
 
 def test_alerts_generate_local_records_without_external_dispatch(tmp_path, monkeypatch):

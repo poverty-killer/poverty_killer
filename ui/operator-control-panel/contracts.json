@@ -120,7 +120,8 @@
       "credentials_present": "present/not present only; no secret values",
       "logs": "status only",
       "db": "status only",
-      "legacy_dashboard_command_routes_present": true,
+      "legacy_dashboard_command_routes_present": false,
+      "legacy_dashboard_status": "QUARANTINED_FROM_OPERATOR_PATH",
       "legacy_dashboard_reuse_allowed": false,
       "supervisor_version": "operator-paper-supervisor-v1"
     },
