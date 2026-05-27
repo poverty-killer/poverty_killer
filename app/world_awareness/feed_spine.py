@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .config import ExternalFeedProviderConfig, WorldAwarenessConfig
 from .enums import DirectionalityHint, ExternalFeedStatus, ExternalFeedType, ExternalVerificationStatus
@@ -168,6 +169,87 @@ class ProviderRegistryEntry:
     reason_codes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProviderRuntimeSnapshot:
+    provider_name: str
+    feed_type: ExternalFeedType
+    enabled: bool
+    status: ExternalFeedStatus
+    advisory_only: bool
+    last_poll_time: datetime | None = None
+    latest_event_time: datetime | None = None
+    event_count: int = 0
+    stale_count: int = 0
+    error_count: int = 0
+    last_error_type: str | None = None
+    duplicate_event_ignored_count: int = 0
+    reason_codes: tuple[str, ...] = ("ADVISORY_ONLY_NO_TRADE_AUTHORITY",)
+
+
+@dataclass
+class WorldAwarenessEventCache:
+    """In-memory advisory event cache.
+
+    The cache is intentionally process-local and replaceable by a future
+    persistent store. It never polls providers by itself and never grants trade
+    authority.
+    """
+
+    max_events: int = 250
+    _events: OrderedDict[str, ExternalIntelligenceEvent] = field(default_factory=OrderedDict)
+    _provider_snapshots: dict[str, ProviderRuntimeSnapshot] = field(default_factory=dict)
+    duplicate_event_ignored_count: int = 0
+
+    @staticmethod
+    def event_key(event: ExternalIntelligenceEvent) -> str:
+        if event.source_id:
+            return f"{event.provider}:source:{event.source_id}"
+        return f"{event.provider}:event:{event.event_id}"
+
+    def upsert(self, events: Iterable[ExternalIntelligenceEvent]) -> tuple[int, int]:
+        added = 0
+        duplicates = 0
+        for event in events:
+            key = self.event_key(event)
+            if key in self._events:
+                duplicates += 1
+                self.duplicate_event_ignored_count += 1
+                continue
+            self._events[key] = event
+            added += 1
+        while len(self._events) > self.max_events:
+            self._events.popitem(last=False)
+        return added, duplicates
+
+    def mark_provider(self, snapshot: ProviderRuntimeSnapshot) -> None:
+        self._provider_snapshots[snapshot.provider_name] = snapshot
+
+    def events(self, *, limit: int = 25, provider: str | None = None) -> list[ExternalIntelligenceEvent]:
+        rows = list(self._events.values())
+        if provider:
+            rows = [event for event in rows if event.provider == provider]
+        rows.sort(key=lambda event: event.event_time or event.received_time, reverse=True)
+        return rows[: max(int(limit), 0)]
+
+    def provider_snapshots(self) -> list[ProviderRuntimeSnapshot]:
+        return list(self._provider_snapshots.values())
+
+    def summary(
+        self,
+        config: WorldAwarenessConfig | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        return world_awareness_summary(
+            config,
+            env=env,
+            events=self.events(limit=limit),
+            provider_runtime=self.provider_snapshots(),
+            duplicate_event_ignored_count=self.duplicate_event_ignored_count,
+        )
+
+
 def provider_entry(
     config: ExternalFeedProviderConfig,
     *,
@@ -184,8 +266,8 @@ def provider_entry(
         status = ExternalFeedStatus.CREDENTIAL_MISSING
         reasons = ("CREDENTIAL_MISSING",)
     else:
-        status = ExternalFeedStatus.FEED_AVAILABLE
-        reasons = ("READ_ONLY_ADVISORY_FEED_AVAILABLE",)
+        status = ExternalFeedStatus.FEED_READY
+        reasons = ("READ_ONLY_ADVISORY_FEED_READY",)
     return ProviderRegistryEntry(
         provider_name=config.provider_name,
         feed_type=feed_type,
@@ -220,24 +302,41 @@ def world_awareness_summary(
     *,
     env: Mapping[str, str] | None = None,
     events: list[ExternalIntelligenceEvent] | None = None,
+    provider_runtime: Iterable[ProviderRuntimeSnapshot] | None = None,
+    duplicate_event_ignored_count: int = 0,
 ) -> dict[str, Any]:
     registry = build_provider_registry(config, env=env)
     event_rows = events or []
+    runtime_by_provider = {snapshot.provider_name: snapshot for snapshot in provider_runtime or []}
+
+    def provider_row(entry: ProviderRegistryEntry) -> dict[str, Any]:
+        runtime = runtime_by_provider.get(entry.provider_name)
+        status = runtime.status if runtime else entry.status
+        reason_codes = runtime.reason_codes if runtime else entry.reason_codes
+        return {
+            "provider": entry.provider_name,
+            "feed_type": entry.feed_type.value,
+            "enabled": entry.enabled,
+            "status": status.value,
+            "credential_present": entry.credential_present,
+            "advisory_only": entry.advisory_only,
+            "last_poll_time": runtime.last_poll_time.isoformat() if runtime and runtime.last_poll_time else None,
+            "latest_event_time": runtime.latest_event_time.isoformat() if runtime and runtime.latest_event_time else None,
+            "event_count": runtime.event_count if runtime else 0,
+            "stale_count": runtime.stale_count if runtime else 0,
+            "error_count": runtime.error_count if runtime else 0,
+            "last_error_type": runtime.last_error_type if runtime else None,
+            "duplicate_event_ignored_count": runtime.duplicate_event_ignored_count if runtime else 0,
+            "reason_codes": reason_codes,
+        }
+
     return {
         "module_name": "WorldAwareness",
         "authority_class": "ADVISORY",
         "advisory_only": True,
         "direct_trade_authority": False,
         "providers": [
-            {
-                "provider": entry.provider_name,
-                "feed_type": entry.feed_type.value,
-                "enabled": entry.enabled,
-                "status": entry.status.value,
-                "credential_present": entry.credential_present,
-                "advisory_only": entry.advisory_only,
-                "reason_codes": entry.reason_codes,
-            }
+            provider_row(entry)
             for entry in registry
         ],
         "event_count": len(event_rows),
@@ -245,6 +344,7 @@ def world_awareness_summary(
         "stale_event_count": sum(1 for event in event_rows if event.stale),
         "high_relevance_event_count": sum(1 for event in event_rows if event.relevance >= 0.75 and not event.stale),
         "decisionframe_eligible_count": sum(1 for event in event_rows if event.decisionframe_eligible),
+        "duplicate_event_ignored_count": int(duplicate_event_ignored_count),
         "events": [event.model_dump(mode="json") for event in event_rows[:25]],
         "reason_codes": ("ADVISORY_ONLY_NO_TRADE_AUTHORITY",),
     }

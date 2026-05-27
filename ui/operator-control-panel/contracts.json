@@ -164,7 +164,7 @@
       "fake_tca_allowed": false
     },
     "/operator/world-awareness": {
-      "source": "OPERATOR_BACKEND_SAFE_DEFAULT",
+      "source": "OPERATOR_BACKEND_WORLD_AWARENESS_CACHE",
       "module_name": "WorldAwareness",
       "authority_class": "ADVISORY",
       "advisory_only": true,
@@ -178,19 +178,62 @@
           "status": "FEED_DISABLED",
           "credential_present": false,
           "advisory_only": true,
+          "last_poll_time": null,
+          "latest_event_time": null,
+          "event_count": 0,
+          "stale_count": 0,
+          "error_count": 0,
+          "last_error_type": null,
+          "duplicate_event_ignored_count": 0,
           "reason_codes": ["FEED_DISABLED_BY_CONFIG"]
         }
       ],
-      "events": [],
+      "events": [
+        {
+          "event_id": "provider event id or stable hash",
+          "provider": "alpaca_news",
+          "feed_type": "NEWS",
+          "symbols": ["BTC/USD"],
+          "title": "headline",
+          "summary": "advisory summary",
+          "event_time": "ISO-8601 or null",
+          "received_time": "ISO-8601",
+          "freshness_seconds": 0,
+          "stale": false,
+          "verification_status": "CONFIRMED | UNVERIFIED | CONFLICTING | STALE",
+          "advisory_only": true,
+          "decisionframe_eligible": false,
+          "reason_codes": ["ADVISORY_ONLY", "NO_TRADE_AUTHORITY"]
+        }
+      ],
       "event_count": 0,
       "advisory_event_count": 0,
       "stale_event_count": 0,
       "high_relevance_event_count": 0,
       "decisionframe_eligible_count": 0,
+      "duplicate_event_ignored_count": 0,
       "feed_can_trade": false,
       "market_truth_bypass_allowed": false,
       "netedge_bypass_allowed": false,
       "guardrail_bypass_allowed": false
+    },
+    "/operator/world-awareness/providers": {
+      "source": "OPERATOR_BACKEND_WORLD_AWARENESS_CACHE",
+      "authority_class": "ADVISORY",
+      "advisory_only": true,
+      "provider_count": 0,
+      "providers": "same provider rows as /operator/world-awareness",
+      "feed_can_trade": false
+    },
+    "/operator/world-awareness/events": {
+      "source": "OPERATOR_BACKEND_WORLD_AWARENESS_CACHE",
+      "authority_class": "ADVISORY",
+      "advisory_only": true,
+      "event_count": 0,
+      "stale_event_count": 0,
+      "decisionframe_eligible_count": 0,
+      "events": "same event rows as /operator/world-awareness",
+      "feed_can_trade": false
     },
     "/operator/audit-summary": {
       "source": "audit_log | no_active_runtime",

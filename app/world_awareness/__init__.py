@@ -35,7 +35,13 @@ from .models import (
     WorldAwarenessEvent,
     ExternalIntelligenceEvent,
 )
-from .feed_spine import build_provider_registry, normalize_external_event, world_awareness_summary
+from .feed_spine import (
+    ProviderRuntimeSnapshot,
+    WorldAwarenessEventCache,
+    build_provider_registry,
+    normalize_external_event,
+    world_awareness_summary,
+)
 
 __all__ = [
     "WorldAwarenessConfig",
@@ -58,6 +64,8 @@ __all__ = [
     "ReplayMetadata",
     "WorldAwarenessEvent",
     "ExternalIntelligenceEvent",
+    "ProviderRuntimeSnapshot",
+    "WorldAwarenessEventCache",
     "build_provider_registry",
     "normalize_external_event",
     "world_awareness_summary",

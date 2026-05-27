@@ -238,6 +238,21 @@
         rule: "macro events are context, not direct order authority"
       }
     ],
+    worldAwarenessEvents: [
+      {
+        eventId: "mock-alpaca-news-001",
+        provider: "alpaca_news",
+        feedType: "NEWS",
+        symbols: ["BTC/USD", "ETH/USD"],
+        title: "Mock Alpaca News headline",
+        eventTime: "2026-05-26T12:00:00Z",
+        freshness: "60s",
+        stale: false,
+        verification: "UNVERIFIED",
+        advisoryOnly: true,
+        reason: "Advisory display only; no DecisionFrame score impact."
+      }
+    ],
     diagnostics: {
       gitCommit: "fe4697a",
       dirtyWorktree: "warning surface required",

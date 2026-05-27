@@ -298,18 +298,34 @@
   function renderWorld() {
     return `
       ${header("World Awareness", "External intelligence is advisory evidence only.", "NO EXECUTION AUTHORITY")}
-      <div class="card">${table(
-        ["Provider", "Type", "Enabled", "Status", "Confidence", "Relevance", "Rule"],
-        data.worldAwareness.map((w) => [
-          w.source,
-          w.feedType || "UNKNOWN",
-          badge(String(w.enabled === true), w.enabled === true ? "green" : "gray"),
-          badge(w.status, statusColor(w.status)),
-          w.confidence || "unknown",
-          w.relevance,
-          w.rule
-        ])
-      )}</div>
+      <div class="grid">
+        <div class="card span-12"><h3>Provider Health</h3>${table(
+          ["Provider", "Type", "Enabled", "Status", "Events", "Stale", "Last Poll", "Rule"],
+          data.worldAwareness.map((w) => [
+            w.source,
+            w.feedType || "UNKNOWN",
+            badge(String(w.enabled === true), w.enabled === true ? "green" : "gray"),
+            badge(w.status, statusColor(w.status)),
+            escapeHtml(w.eventCount || 0),
+            escapeHtml(w.staleCount || 0),
+            escapeHtml(w.lastPollTime || "never"),
+            w.rule
+          ])
+        )}</div>
+        <div class="card span-12"><h3>Latest Advisory Events</h3>${table(
+          ["Provider", "Symbols", "Title", "Event Time", "Freshness", "Verification", "Advisory"],
+          data.worldAwarenessEvents.map((event) => [
+            escapeHtml(event.provider),
+            escapeHtml((event.symbols || []).join(", ") || "none"),
+            escapeHtml(event.title || "untitled"),
+            escapeHtml(event.eventTime || "unknown"),
+            escapeHtml(event.freshness || "unknown"),
+            badge(event.verification || "UNVERIFIED", statusColor(event.verification || "UNVERIFIED")),
+            badge(event.advisoryOnly === false ? "not advisory" : "advisory only", event.advisoryOnly === false ? "red" : "gray")
+          ])
+        )}</div>
+        <div class="notice span-12">World Awareness is advisory evidence only. It cannot trade or bypass MarketTruthSnapshot, NetEdge, guardrails, or broker boundary.</div>
+      </div>
     `;
   }
 
@@ -482,11 +498,29 @@
         feedType: pick(provider.feed_type, "UNKNOWN"),
         enabled: provider.enabled === true,
         status: pick(provider.status, "FEED_DISABLED"),
+        eventCount: pick(provider.event_count, 0),
+        staleCount: pick(provider.stale_count, 0),
+        lastPollTime: pick(provider.last_poll_time, "never"),
         relevance: provider.enabled === true ? "read-only advisory provider configured" : "disabled by default",
         confidence: provider.credential_present === true ? "credential present" : "credential missing/not inspected",
         stale: false,
         verification: "UNVERIFIED",
         rule: "advisory only; cannot bypass MarketTruthSnapshot, NetEdge, guardrails, or broker boundary"
+      }));
+    }
+    if (Array.isArray(world.events)) {
+      next.worldAwarenessEvents = world.events.map((event) => ({
+        eventId: pick(event.event_id, "unknown"),
+        provider: pick(event.provider, "unknown_provider"),
+        feedType: pick(event.feed_type, "UNKNOWN"),
+        symbols: Array.isArray(event.symbols) ? event.symbols : [],
+        title: pick(event.title, "untitled advisory event"),
+        eventTime: pick(event.event_time, "unknown"),
+        freshness: `${pick(event.freshness_seconds, 0)}s`,
+        stale: event.stale === true,
+        verification: pick(event.verification_status, "UNVERIFIED"),
+        advisoryOnly: event.advisory_only !== false,
+        reason: Array.isArray(event.reason_codes) ? event.reason_codes.join(", ") : "ADVISORY_ONLY"
       }));
     }
 

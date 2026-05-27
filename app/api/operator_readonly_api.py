@@ -15,7 +15,8 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor
-from app.world_awareness.feed_spine import world_awareness_summary
+from app.world_awareness.config import WorldAwarenessConfig
+from app.world_awareness.feed_spine import WorldAwarenessEventCache
 
 
 API_VERSION = "operator-backend-v1"
@@ -49,6 +50,8 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/tca-summary": "read_only_tca_summary",
         "/operator/audit-summary": "read_only_audit_summary",
         "/operator/world-awareness": "read_only_external_intelligence_advisory_summary",
+        "/operator/world-awareness/providers": "read_only_external_intelligence_provider_health",
+        "/operator/world-awareness/events": "read_only_external_intelligence_events",
         "/operator/latest-run": "read_only_supervisor_session_summary",
     },
     "disabled_intents": {
@@ -77,8 +80,18 @@ class OperatorSnapshotProvider:
     PAPER processes through the existing launch script only.
     """
 
-    def __init__(self, supervisor: OperatorPaperSupervisor | None = None) -> None:
+    def __init__(
+        self,
+        supervisor: OperatorPaperSupervisor | None = None,
+        *,
+        world_awareness_cache: WorldAwarenessEventCache | None = None,
+        world_awareness_config: WorldAwarenessConfig | None = None,
+        world_awareness_env: dict[str, str] | None = None,
+    ) -> None:
         self.supervisor = supervisor or OperatorPaperSupervisor()
+        self.world_awareness_cache = world_awareness_cache or WorldAwarenessEventCache()
+        self.world_awareness_config = world_awareness_config or WorldAwarenessConfig()
+        self.world_awareness_env = world_awareness_env or {}
 
     def status(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
@@ -278,11 +291,14 @@ class OperatorSnapshotProvider:
         }
 
     def world_awareness(self) -> dict[str, Any]:
-        summary = world_awareness_summary()
+        summary = self.world_awareness_cache.summary(
+            self.world_awareness_config,
+            env=self.world_awareness_env,
+        )
         summary.update(
             {
-                "source": "OPERATOR_BACKEND_SAFE_DEFAULT",
-                "credential_status": "NOT_INSPECTED_NO_SECRET_ACCESS",
+                "source": "OPERATOR_BACKEND_WORLD_AWARENESS_CACHE",
+                "credential_status": "CONFIG_GATED_NO_SECRET_VALUES",
                 "provider_polling_active": False,
                 "feed_can_trade": False,
                 "market_truth_bypass_allowed": False,
@@ -291,6 +307,32 @@ class OperatorSnapshotProvider:
             }
         )
         return summary
+
+    def world_awareness_providers(self) -> dict[str, Any]:
+        summary = self.world_awareness()
+        return {
+            "source": summary["source"],
+            "authority_class": "ADVISORY",
+            "advisory_only": True,
+            "providers": summary["providers"],
+            "provider_count": len(summary["providers"]),
+            "feed_can_trade": False,
+            "reason_codes": ("ADVISORY_ONLY_NO_TRADE_AUTHORITY",),
+        }
+
+    def world_awareness_events(self) -> dict[str, Any]:
+        summary = self.world_awareness()
+        return {
+            "source": summary["source"],
+            "authority_class": "ADVISORY",
+            "advisory_only": True,
+            "events": summary["events"],
+            "event_count": summary["event_count"],
+            "stale_event_count": summary["stale_event_count"],
+            "decisionframe_eligible_count": summary["decisionframe_eligible_count"],
+            "feed_can_trade": False,
+            "reason_codes": ("ADVISORY_ONLY_NO_TRADE_AUTHORITY",),
+        }
 
     def contracts(self) -> dict[str, Any]:
         return deepcopy(READ_ONLY_CONTRACTS)
@@ -362,6 +404,14 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.get("/world-awareness")
     def world_awareness() -> dict[str, Any]:
         return provider.world_awareness()
+
+    @router.get("/world-awareness/providers")
+    def world_awareness_providers() -> dict[str, Any]:
+        return provider.world_awareness_providers()
+
+    @router.get("/world-awareness/events")
+    def world_awareness_events() -> dict[str, Any]:
+        return provider.world_awareness_events()
 
     @router.get("/latest-run")
     def latest_run() -> dict[str, Any]:
