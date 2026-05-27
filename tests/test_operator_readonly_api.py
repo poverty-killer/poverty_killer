@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.api.operator_readonly_api import API_VERSION, OperatorSnapshotProvider, create_operator_app
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
+from app.api.operator_runtime_config import OperatorRuntimeConfig
 from tests.test_operator_paper_supervisor import FakeRunner
 
 
@@ -12,8 +13,13 @@ def _endpoint(app, path: str, method: str = "GET"):
     raise AssertionError(f"route not found: {method} {path}")
 
 
-def test_operator_readonly_status_contract_is_safe_default():
-    app = create_operator_app()
+def _app(tmp_path):
+    runtime_config = OperatorRuntimeConfig.from_env({}, repo_root=tmp_path)
+    return create_operator_app(provider=OperatorSnapshotProvider(runtime_config=runtime_config))
+
+
+def test_operator_readonly_status_contract_is_safe_default(tmp_path):
+    app = _app(tmp_path)
 
     payload = _endpoint(app, "/operator/status")()
 
@@ -28,8 +34,8 @@ def test_operator_readonly_status_contract_is_safe_default():
     assert payload["broker_delete_count"] == 0
 
 
-def test_operator_live_readiness_is_locked_and_refused():
-    app = create_operator_app()
+def test_operator_live_readiness_is_locked_and_refused(tmp_path):
+    app = _app(tmp_path)
 
     payload = _endpoint(app, "/operator/readiness/live")()
 
@@ -39,8 +45,8 @@ def test_operator_live_readiness_is_locked_and_refused():
     assert "separate_live_governance_packet" in payload["missing_prerequisites"]
 
 
-def test_operator_contracts_distinguish_truth_authorities():
-    app = create_operator_app()
+def test_operator_contracts_distinguish_truth_authorities(tmp_path):
+    app = _app(tmp_path)
 
     payload = _endpoint(app, "/operator/contracts")()
 
@@ -52,9 +58,9 @@ def test_operator_contracts_distinguish_truth_authorities():
     assert payload["truth_labels"]["unknown"].startswith("Truth unavailable")
 
 
-def test_operator_app_does_not_include_legacy_mutating_dashboard_routes():
-    app = create_operator_app()
-    routes = {(route.path, ",".join(sorted(route.methods or []))) for route in app.routes}
+def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path):
+    app = _app(tmp_path)
+    routes = {(route.path, ",".join(sorted(getattr(route, "methods", set()) or []))) for route in app.routes}
     paths = {path for path, _methods in routes}
 
     assert "/api/mode/{mode}" not in paths
@@ -63,8 +69,8 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes():
     assert "/operator/readiness/live" in paths
 
 
-def test_operator_intents_are_refused_without_mutation():
-    app = create_operator_app()
+def test_operator_intents_are_refused_without_mutation(tmp_path):
+    app = _app(tmp_path)
 
     paper = _endpoint(app, "/operator/intent/paper/start", "POST")()
     live = _endpoint(app, "/operator/intent/live/start", "POST")()
@@ -106,3 +112,24 @@ def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
     assert runtime_payload["process_state"] == "RUNNING"
     assert runtime_payload["paper_start_allowed"] is False
     assert runtime_payload["paper_stop_allowed"] is True
+
+
+def test_operator_health_readiness_and_storage_are_safe(tmp_path):
+    app = _app(tmp_path)
+
+    health = _endpoint(app, "/operator/health")()
+    readiness = _endpoint(app, "/operator/readiness")()
+    storage = _endpoint(app, "/operator/storage")()
+    diagnostics = _endpoint(app, "/operator/diagnostics")()
+
+    assert health["live_status"] == "LIVE_LOCKED"
+    assert health["real_money_status"] == "BLOCKED"
+    assert health["broker_call_occurred"] is False
+    assert readiness["live_ready"] is False
+    assert readiness["live_refusal_reason"] == "LIVE_NOT_APPROVED"
+    assert storage["session_store"]["store_type"] == "jsonl_append_only"
+    assert storage["world_awareness_cache"]["cache_type"] == "jsonl_append_only"
+    assert storage["stores_log_contents"] is False
+    assert diagnostics["operator_config"]["live_enabled"] is False
+    assert diagnostics["operator_config"]["real_money_enabled"] is False
+    assert diagnostics["storage"]["secrets_values_exposed"] is False

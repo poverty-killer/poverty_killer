@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from app.api.operator_paper_supervisor import (
@@ -7,6 +8,7 @@ from app.api.operator_paper_supervisor import (
     PaperSupervisorConfig,
     ProcessStartSpec,
 )
+from app.api.operator_session_store import OperatorSessionStore
 
 
 class FakeProcess:
@@ -22,7 +24,7 @@ class FakeRunner:
     def __init__(self, *, available: bool = True, unavailable_reason: str | None = None) -> None:
         self.available = available
         self.unavailable_reason = unavailable_reason
-        self.repo_root = Path("/tmp/pk-operator-supervisor-test")
+        self.repo_root = Path(tempfile.mkdtemp(prefix="pk-operator-supervisor-test-"))
         self.started_specs: list[ProcessStartSpec] = []
         self.stop_requests = 0
         self.process = FakeProcess()
@@ -72,6 +74,8 @@ def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
     assert "300" in command
     assert "BTC/USD,ETH/USD,SOL/USD" in command
     assert "APCA_API_SECRET_KEY" not in " ".join(command)
+    assert result["session"]["wrapper_stdout_path"] == result["session"]["stdout_path"]
+    assert result["session"]["runtime_profile"] == "LOCAL_PAPER"
 
 
 def test_supervisor_rejects_duplicate_active_run():
@@ -126,6 +130,48 @@ def test_supervisor_tracks_exit_code_and_status():
     assert snapshot["latest_session"]["status"] == "EXITED"
     assert snapshot["latest_session"]["exit_code"] == 0
     assert snapshot["paper_start_allowed"] is True
+
+
+def test_supervisor_persists_session_and_parses_child_log_paths(tmp_path):
+    runner = FakeRunner()
+    store = OperatorSessionStore(path=tmp_path / "state" / "operator" / "sessions.jsonl")
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=runner.repo_root,
+            session_store_path=str(tmp_path / "state" / "operator" / "sessions.jsonl"),
+        ),
+        runner=runner,
+        session_store=store,
+    )
+    result = supervisor.start_paper(_valid_request())
+    wrapper_stdout = Path(result["session"]["stdout_path"])
+    wrapper_stdout.parent.mkdir(parents=True, exist_ok=True)
+    wrapper_stdout.write_text(
+        "stdout: logs\\paper_runs\\bounded_paper_20260527_120000.out.log\n"
+        "stderr: logs\\paper_runs\\bounded_paper_20260527_120000.err.log\n"
+        "BOUNDED_RUNTIME_TIMER_STARTED\n"
+        "BOUNDED_RUNTIME_DURATION_ELAPSED\n",
+        encoding="utf-8",
+    )
+    runner.process.exit_code = 0
+
+    snapshot = supervisor.status_snapshot()
+    reloaded_store = OperatorSessionStore(path=tmp_path / "state" / "operator" / "sessions.jsonl")
+    reloaded = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=runner.repo_root,
+            session_store_path=str(tmp_path / "state" / "operator" / "sessions.jsonl"),
+        ),
+        runner=runner,
+        session_store=reloaded_store,
+    )
+
+    assert snapshot["latest_session"]["status"] == "EXITED"
+    assert snapshot["latest_session"]["child_stdout_path"].endswith(".out.log")
+    assert snapshot["latest_session"]["child_stderr_path"].endswith(".err.log")
+    assert snapshot["latest_session"]["bounded_timer_started"] is True
+    assert snapshot["latest_session"]["bounded_duration_elapsed"] is True
+    assert reloaded.status_snapshot()["latest_session"]["session_id"] == result["session_id"]
 
 
 def test_supervisor_stop_requests_graceful_process_stop_without_broker_call():

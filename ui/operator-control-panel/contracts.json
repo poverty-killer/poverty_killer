@@ -49,6 +49,57 @@
         "paper_stop_refusal_reason": "reason code or null"
       }
     },
+    "/operator/health": {
+      "api_status": "OK | DEGRADED",
+      "supervisor_status": "IDLE | RUNNING | STALE_ACTIVE_SESSION",
+      "session_store_status": "READY | DEGRADED",
+      "world_awareness_cache_status": "READY | DEGRADED",
+      "config_status": "READY | READY_WITH_WARNINGS",
+      "log_dir_status": "READY | MISSING_PARENT",
+      "data_dir_status": "READY | MISSING_PARENT",
+      "runtime_profile": "LOCAL_DEV | LOCAL_PAPER | CLOUD_PAPER | CLOUD_SHADOW | CLOUD_LIVE_LOCKED",
+      "hosted_mode": false,
+      "live_status": "LIVE_LOCKED",
+      "real_money_status": "BLOCKED",
+      "broker_call_occurred": false,
+      "secrets_values_exposed": false,
+      "degraded_reasons": []
+    },
+    "/operator/readiness": {
+      "local_paper_ready": false,
+      "cloud_paper_ready": false,
+      "hosted_mode_ready": false,
+      "live_ready": false,
+      "live_status": "LIVE_LOCKED",
+      "live_refusal_reason": "LIVE_NOT_APPROVED",
+      "runtime_profile": "LOCAL_PAPER",
+      "missing_prerequisites": [],
+      "cloud_missing_prerequisites": [],
+      "warnings": [],
+      "broker_call_occurred": false,
+      "real_money_blocked": true
+    },
+    "/operator/storage": {
+      "runtime_profile": "LOCAL_PAPER",
+      "hosted_mode": false,
+      "session_store": {
+        "store_type": "jsonl_append_only",
+        "path": "state/operator/sessions.jsonl",
+        "status": "READY | DEGRADED",
+        "session_count": 0,
+        "audit_event_count": 0,
+        "secrets_values_exposed": false
+      },
+      "world_awareness_cache": {
+        "cache_type": "jsonl_append_only | memory_only",
+        "path": "state/world_awareness/operator_events.jsonl",
+        "status": "READY | DEGRADED",
+        "event_count": 0,
+        "secrets_values_exposed": false
+      },
+      "stores_log_contents": false,
+      "secrets_values_exposed": false
+    },
     "/operator/runtime": {
       "process_state": "RUNNING | STOPPED | NO_ACTIVE_RUNTIME_ATTACHED",
       "launch_command": "redacted command or null",
@@ -62,7 +113,12 @@
       "pid": "process id or null",
       "stdout_path": "operator wrapper stdout path or null",
       "stderr_path": "operator wrapper stderr path or null",
+      "wrapper_stdout_path": "operator wrapper stdout path or null",
+      "wrapper_stderr_path": "operator wrapper stderr path or null",
+      "child_stdout_path": "bounded paper stdout path parsed from wrapper output or null",
+      "child_stderr_path": "bounded paper stderr path parsed from wrapper output or null",
       "exit_code": "process exit code or null",
+      "runtime_profile": "LOCAL_PAPER | CLOUD_PAPER | CLOUD_SHADOW",
       "supervisor_state": "future supervisor state",
       "duplicate_run_prevention": "ACTIVE",
       "paper_start_allowed": true,
@@ -118,8 +174,14 @@
       "dirty_worktree": "clean/dirty/unknown",
       "python_version": "version or unknown",
       "credentials_present": "present/not present only; no secret values",
+      "alpaca_credentials_present": false,
+      "world_awareness_credentials_present": false,
       "logs": "status only",
       "db": "status only",
+      "runtime_profile": "LOCAL_PAPER",
+      "hosted_mode": false,
+      "operator_config": "safe config summary with booleans only, no secret values",
+      "storage": "same shape as /operator/storage",
       "legacy_dashboard_command_routes_present": false,
       "legacy_dashboard_status": "QUARANTINED_FROM_OPERATOR_PATH",
       "legacy_dashboard_reuse_allowed": false,
@@ -271,7 +333,7 @@
       "feed_can_trade": false
     },
     "/operator/audit-summary": {
-      "source": "audit_log | no_active_runtime",
+      "source": "OPERATOR_SESSION_STORE | audit_log | no_active_runtime",
       "operator_action_count": 0,
       "broker_mutation_count": 0,
       "live_refusal_count": 0,

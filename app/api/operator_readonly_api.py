@@ -8,15 +8,20 @@ engine or direct broker control surface.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
+from fastapi.staticfiles import StaticFiles
 
-from app.api.operator_paper_supervisor import OperatorPaperSupervisor
+from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
+from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.world_awareness.config import WorldAwarenessConfig
 from app.world_awareness.feed_spine import WorldAwarenessEventCache
+from app.world_awareness.persistent_cache import PersistentWorldAwarenessEventCache
 from app.world_awareness.scheduler import WorldAwarenessProviderRuntime
 
 
@@ -40,6 +45,9 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
     },
     "endpoints": {
         "/operator/status": "read_only_runtime_status",
+        "/operator/health": "read_only_operator_health",
+        "/operator/readiness": "read_only_operator_readiness",
+        "/operator/storage": "read_only_operator_storage_status",
         "/operator/runtime": "read_only_runtime_session_summary",
         "/operator/profile": "read_only_profile_summary",
         "/operator/universe": "read_only_universe_summary",
@@ -86,21 +94,28 @@ class OperatorSnapshotProvider:
         self,
         supervisor: OperatorPaperSupervisor | None = None,
         *,
+        runtime_config: OperatorRuntimeConfig | None = None,
         world_awareness_cache: WorldAwarenessEventCache | None = None,
         world_awareness_config: WorldAwarenessConfig | None = None,
         world_awareness_env: dict[str, str] | None = None,
         world_awareness_runtime: WorldAwarenessProviderRuntime | None = None,
     ) -> None:
-        self.supervisor = supervisor or OperatorPaperSupervisor()
+        self.runtime_config = runtime_config or OperatorRuntimeConfig.from_env()
+        self.supervisor = supervisor or OperatorPaperSupervisor(
+            config=PaperSupervisorConfig.from_runtime_config(self.runtime_config)
+        )
+        self.world_awareness_env = world_awareness_env if world_awareness_env is not None else dict(os.environ)
         if world_awareness_runtime is not None:
             self.world_awareness_runtime = world_awareness_runtime
             self.world_awareness_cache = world_awareness_runtime.cache
             self.world_awareness_config = world_awareness_runtime.config
             self.world_awareness_env = dict(world_awareness_runtime.env)
         else:
-            self.world_awareness_cache = world_awareness_cache or WorldAwarenessEventCache()
+            self.world_awareness_cache = world_awareness_cache or PersistentWorldAwarenessEventCache(
+                max_events=self.runtime_config.max_event_cache,
+                path=self.runtime_config.world_awareness_cache_path,
+            )
             self.world_awareness_config = world_awareness_config or WorldAwarenessConfig()
-            self.world_awareness_env = world_awareness_env or {}
             self.world_awareness_runtime = WorldAwarenessProviderRuntime(
                 config=self.world_awareness_config,
                 cache=self.world_awareness_cache,
@@ -141,6 +156,110 @@ class OperatorSnapshotProvider:
             "updated_at": _utc_now(),
         }
 
+    def health(self) -> dict[str, Any]:
+        supervisor = self.supervisor.status_snapshot()
+        storage = self.storage()
+        config_status = self.runtime_config.status()
+        world_runtime = self.world_awareness_runtime.status_snapshot()
+        degraded_reasons: list[str] = []
+        if storage["session_store"]["status"] != "READY":
+            degraded_reasons.append("SESSION_STORE_DEGRADED")
+        if storage["world_awareness_cache"]["status"] != "READY":
+            degraded_reasons.append("WORLD_AWARENESS_CACHE_DEGRADED")
+        if config_status["warnings"]:
+            degraded_reasons.extend(str(item) for item in config_status["warnings"])
+        return {
+            "api_status": "DEGRADED" if degraded_reasons else "OK",
+            "supervisor_status": supervisor["state"],
+            "session_store_status": storage["session_store"]["status"],
+            "world_awareness_cache_status": storage["world_awareness_cache"]["status"],
+            "config_status": config_status["status"],
+            "log_dir_status": storage["log_dir"]["status"],
+            "data_dir_status": storage["data_dir"]["status"],
+            "runtime_profile": self.runtime_config.runtime_profile,
+            "hosted_mode": self.runtime_config.hosted_mode,
+            "live_status": "LIVE_LOCKED",
+            "real_money_status": "BLOCKED",
+            "broker_call_occurred": False,
+            "secrets_values_exposed": False,
+            "degraded_reasons": degraded_reasons,
+            "world_awareness_runtime": {
+                "manual_poll_only": world_runtime.get("manual_poll_only"),
+                "provider_polling_active": world_runtime.get("provider_polling_active"),
+                "provider_count": world_runtime.get("provider_count"),
+            },
+            "updated_at": _utc_now(),
+        }
+
+    def readiness(self) -> dict[str, Any]:
+        health = self.health()
+        missing: list[str] = []
+        warnings: list[str] = list(health.get("degraded_reasons") or [])
+        if not self.runtime_config.alpaca_credentials_present:
+            missing.append("APCA_PAPER_CREDENTIALS_NOT_VISIBLE_TO_OPERATOR_ENV")
+        if health["session_store_status"] != "READY":
+            missing.append("SESSION_STORE_NOT_READY")
+        if health["world_awareness_cache_status"] != "READY":
+            missing.append("WORLD_AWARENESS_CACHE_NOT_READY")
+        local_paper_ready = not missing and health["api_status"] in {"OK", "DEGRADED"}
+        cloud_missing = [
+            "CLOUD_SECRET_MANAGER_NOT_CONFIGURED",
+            "HOSTED_PROCESS_SUPERVISOR_NOT_DEPLOYED",
+            "BACKUP_ROTATION_NOT_DEPLOYED",
+        ]
+        return {
+            "local_paper_ready": local_paper_ready,
+            "cloud_paper_ready": False,
+            "hosted_mode_ready": bool(self.runtime_config.hosted_mode and not missing),
+            "live_ready": False,
+            "live_status": "LIVE_LOCKED",
+            "live_refusal_reason": "LIVE_NOT_APPROVED",
+            "runtime_profile": self.runtime_config.runtime_profile,
+            "missing_prerequisites": missing,
+            "cloud_missing_prerequisites": cloud_missing,
+            "warnings": warnings,
+            "broker_call_occurred": False,
+            "real_money_blocked": True,
+            "updated_at": _utc_now(),
+        }
+
+    def storage(self) -> dict[str, Any]:
+        session_store = self.supervisor.session_store.status()
+        cache_status = (
+            self.world_awareness_cache.status()
+            if hasattr(self.world_awareness_cache, "status")
+            else {
+                "cache_type": "memory_only",
+                "status": "READY",
+                "event_count": len(self.world_awareness_cache.events(limit=self.world_awareness_cache.max_events)),
+            }
+        )
+
+        def path_status(path) -> dict[str, Any]:
+            exists = path.exists()
+            parent = path if path.suffix == "" else path.parent
+            return {
+                "path": str(path),
+                "exists": exists,
+                "parent_exists": parent.exists(),
+                "status": "READY" if parent.exists() else "MISSING_PARENT",
+            }
+
+        return {
+            "runtime_profile": self.runtime_config.runtime_profile,
+            "hosted_mode": self.runtime_config.hosted_mode,
+            "session_store": session_store,
+            "world_awareness_cache": cache_status,
+            "operator_state_dir": path_status(self.runtime_config.operator_state_dir),
+            "log_dir": path_status(self.runtime_config.log_dir),
+            "data_dir": path_status(self.runtime_config.data_dir),
+            "logs_operator_runs": path_status(self.runtime_config.log_dir / "operator_runs"),
+            "logs_paper_runs": path_status(self.runtime_config.log_dir / "paper_runs"),
+            "archives_runs": path_status(self.runtime_config.repo_root / "archives" / "runs"),
+            "stores_log_contents": False,
+            "secrets_values_exposed": False,
+        }
+
     def runtime(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
         latest = supervisor.get("latest_session") or {}
@@ -157,7 +276,12 @@ class OperatorSnapshotProvider:
             "pid": latest.get("pid"),
             "stdout_path": latest.get("stdout_path"),
             "stderr_path": latest.get("stderr_path"),
+            "wrapper_stdout_path": latest.get("wrapper_stdout_path"),
+            "wrapper_stderr_path": latest.get("wrapper_stderr_path"),
+            "child_stdout_path": latest.get("child_stdout_path"),
+            "child_stderr_path": latest.get("child_stderr_path"),
             "exit_code": latest.get("exit_code"),
+            "runtime_profile": latest.get("runtime_profile") or self.runtime_config.runtime_profile,
             "supervisor_state": supervisor["state"],
             "duplicate_run_prevention": "ACTIVE",
             "paper_start_allowed": supervisor["paper_start_allowed"],
@@ -200,8 +324,14 @@ class OperatorSnapshotProvider:
             "dirty_worktree": "UNKNOWN_NOT_INSPECTED",
             "python_version": "UNKNOWN_NOT_INSPECTED",
             "credentials_present": "NOT_INSPECTED_NO_SECRET_ACCESS",
-            "logs": "NOT_READ_BY_OPERATOR_BACKEND_V1",
-            "db": "NOT_READ_BY_OPERATOR_BACKEND_V1",
+            "alpaca_credentials_present": self.runtime_config.alpaca_credentials_present,
+            "world_awareness_credentials_present": self.runtime_config.world_awareness_credentials_present,
+            "logs": str(self.runtime_config.log_dir),
+            "db": "NO_DB_RUNTIME_FILE_STAGED_JSONL_METADATA_ONLY",
+            "runtime_profile": self.runtime_config.runtime_profile,
+            "hosted_mode": self.runtime_config.hosted_mode,
+            "operator_config": self.runtime_config.safe_summary(),
+            "storage": self.storage(),
             "legacy_dashboard_command_routes_present": False,
             "legacy_dashboard_status": "QUARANTINED_FROM_OPERATOR_PATH",
             "legacy_dashboard_reuse_allowed": False,
@@ -296,10 +426,14 @@ class OperatorSnapshotProvider:
 
     def audit_summary(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
-        last_event = supervisor.get("last_audit_event")
+        persisted_events = self.supervisor.session_store.audit_events(limit=1)
+        last_event = supervisor.get("last_audit_event") or (persisted_events[-1] if persisted_events else None)
         return {
-            "source": "OPERATOR_SUPERVISOR_MEMORY",
-            "operator_action_count": supervisor.get("audit_event_count", 0),
+            "source": "OPERATOR_SESSION_STORE",
+            "operator_action_count": max(
+                int(supervisor.get("audit_event_count", 0)),
+                int(self.supervisor.session_store.status().get("audit_event_count", 0)),
+            ),
             "broker_mutation_count": 0,
             "live_refusal_count": 1 if last_event and last_event.get("reason_code") == "LIVE_NOT_APPROVED" else 0,
             "last_event": last_event,
@@ -413,6 +547,18 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     def status() -> dict[str, Any]:
         return provider.status()
 
+    @router.get("/health")
+    def health() -> dict[str, Any]:
+        return provider.health()
+
+    @router.get("/readiness")
+    def readiness() -> dict[str, Any]:
+        return provider.readiness()
+
+    @router.get("/storage")
+    def storage() -> dict[str, Any]:
+        return provider.storage()
+
     @router.get("/runtime")
     def runtime() -> dict[str, Any]:
         return provider.runtime()
@@ -507,6 +653,9 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
 def create_operator_app(provider: OperatorSnapshotProvider | None = None) -> FastAPI:
     app = FastAPI(title="Poverty Killer Operator Read-Only API", version=API_VERSION)
     app.include_router(get_operator_router(provider))
+    ui_dir = Path(__file__).resolve().parents[2] / "ui" / "operator-control-panel"
+    if ui_dir.exists():
+        app.mount("/operator-ui", StaticFiles(directory=str(ui_dir), html=True), name="operator-ui")
     return app
 
 

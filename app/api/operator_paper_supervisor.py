@@ -8,6 +8,7 @@ engine code, OMS internals, or strategy modules.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -16,6 +17,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+
+from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.api.operator_session_store import OperatorSessionStore
 
 
 SUPERVISOR_VERSION = "operator-paper-supervisor-v1"
@@ -122,6 +126,16 @@ class PaperRunSession:
     command_summary: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
+    wrapper_stdout_path: str | None = None
+    wrapper_stderr_path: str | None = None
+    child_stdout_path: str | None = None
+    child_stderr_path: str | None = None
+    bounded_timer_started: bool | None = None
+    bounded_duration_elapsed: bool | None = None
+    runtime_profile: str | None = None
+    git_commit: str | None = None
+    created_by: str = "operator_api"
+    audit_event_ids: list[str] = field(default_factory=list)
     pid: int | None = None
     started_at: str | None = None
     ended_at: str | None = None
@@ -135,6 +149,15 @@ class PaperRunSession:
         data = asdict(self)
         data["watchlist"] = list(self.watchlist)
         return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PaperRunSession":
+        payload = dict(data)
+        payload["watchlist"] = tuple(payload.get("watchlist") or ())
+        if "audit_event_ids" not in payload or payload["audit_event_ids"] is None:
+            payload["audit_event_ids"] = []
+        allowed = set(cls.__dataclass_fields__)  # type: ignore[attr-defined]
+        return cls(**{key: value for key, value in payload.items() if key in allowed})
 
 
 @dataclass
@@ -161,8 +184,26 @@ class PaperSupervisorConfig:
     allowed_watchlist: tuple[str, ...] = DEFAULT_WATCHLIST
     allowed_durations: frozenset[int] = DEFAULT_ALLOWED_DURATIONS
     log_directory: str = "logs/operator_runs"
+    runtime_profile: str = "LOCAL_PAPER"
+    session_store_path: str | None = None
+    max_session_history: int = 250
     script_path: str = "scripts/run_bounded_paper.ps1"
     powershell_executable: str = "powershell.exe"
+
+    @classmethod
+    def from_runtime_config(cls, runtime_config: OperatorRuntimeConfig) -> "PaperSupervisorConfig":
+        return cls(
+            repo_root=runtime_config.repo_root,
+            allowed_profile=runtime_config.allowed_profile,
+            allowed_watchlist=runtime_config.allowed_watchlist,
+            allowed_durations=frozenset(runtime_config.allowed_durations),
+            log_directory=str(runtime_config.log_dir.relative_to(runtime_config.repo_root) / "operator_runs")
+            if runtime_config.log_dir.is_relative_to(runtime_config.repo_root)
+            else str(runtime_config.log_dir / "operator_runs"),
+            runtime_profile=runtime_config.runtime_profile,
+            session_store_path=str(runtime_config.operator_session_store_path),
+            max_session_history=runtime_config.max_session_history,
+        )
 
 
 class OperatorPaperSupervisor:
@@ -171,31 +212,54 @@ class OperatorPaperSupervisor:
         *,
         config: PaperSupervisorConfig | None = None,
         runner: PaperProcessRunner | None = None,
+        session_store: OperatorSessionStore | None = None,
     ) -> None:
-        self.config = config or PaperSupervisorConfig()
+        if config is None:
+            runtime_config = OperatorRuntimeConfig.from_env()
+            config = PaperSupervisorConfig.from_runtime_config(runtime_config)
+        self.config = config
         self.runner = runner or SubprocessPaperRunner()
+        store_path = Path(self.config.session_store_path) if self.config.session_store_path else (
+            self.config.repo_root / "state" / "operator" / "sessions.jsonl"
+        )
+        self.session_store = session_store or OperatorSessionStore(
+            path=store_path,
+            max_sessions=self.config.max_session_history,
+        )
         self._session: PaperRunSession | None = None
         self._process: PaperProcessHandle | None = None
         self._audit_events: list[AuditEvent] = []
+        latest = self.session_store.latest_session()
+        if latest:
+            self._session = PaperRunSession.from_dict(latest)
+            if self._session.status in {"STARTING", "RUNNING", "STOP_REQUESTED"}:
+                self._session.status = "PROCESS_STATE_UNKNOWN_AFTER_RESTART"
+                self._session.stop_reason = self._session.stop_reason or "PROCESS_HANDLE_NOT_ATTACHED_AFTER_RESTART"
 
     def status_snapshot(self) -> dict[str, Any]:
         self._refresh_process_state()
         is_active = bool(self._session and self._session.status in {"STARTING", "RUNNING", "STOP_REQUESTED"})
+        stale_after_restart = bool(self._session and self._session.status == "PROCESS_STATE_UNKNOWN_AFTER_RESTART")
         latest_session = self._session.as_dict() if self._session else None
         active_session = latest_session if is_active else None
         return {
             "supervisor_version": SUPERVISOR_VERSION,
-            "state": "RUNNING" if is_active else "IDLE",
+            "state": "RUNNING" if is_active else ("STALE_ACTIVE_SESSION" if stale_after_restart else "IDLE"),
             "active_session": active_session,
             "latest_session": latest_session,
             "active_session_id": self._session.session_id if is_active and self._session else None,
-            "paper_start_allowed": not is_active,
+            "paper_start_allowed": not is_active and not stale_after_restart,
             "paper_stop_allowed": is_active,
-            "paper_start_refusal_reason": None if not is_active else "DUPLICATE_ACTIVE_RUN",
+            "paper_start_refusal_reason": (
+                "DUPLICATE_ACTIVE_RUN" if is_active else (
+                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART" if stale_after_restart else None
+                )
+            ),
             "paper_stop_refusal_reason": None if is_active else "NO_ACTIVE_RUN",
             "allowed_profile": self.config.allowed_profile,
             "allowed_watchlist": list(self.config.allowed_watchlist),
             "allowed_durations": sorted(self.config.allowed_durations),
+            "session_store": self.session_store.status(),
             "audit_event_count": len(self._audit_events),
             "last_audit_event": self._audit_events[-1].as_dict() if self._audit_events else None,
         }
@@ -206,6 +270,8 @@ class OperatorPaperSupervisor:
         if refusal:
             session = self._build_refused_session(request, refusal)
             event = self._record_event("paper_start", False, refusal, session.session_id, False)
+            session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(session)
             return self._intent_response(
                 intent="paper_start",
                 allowed=False,
@@ -220,6 +286,8 @@ class OperatorPaperSupervisor:
         if not available:
             session = self._build_refused_session(request, unavailable_reason or "PAPER_RUNNER_UNAVAILABLE")
             event = self._record_event("paper_start", False, session.refusal_reason or "PAPER_RUNNER_UNAVAILABLE", session.session_id, False)
+            session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(session)
             return self._intent_response(
                 intent="paper_start",
                 allowed=False,
@@ -243,7 +311,11 @@ class OperatorPaperSupervisor:
             command_summary=spec.command_summary,
             stdout_path=spec.stdout_path,
             stderr_path=spec.stderr_path,
+            wrapper_stdout_path=spec.stdout_path,
+            wrapper_stderr_path=spec.stderr_path,
+            runtime_profile=self.config.runtime_profile,
         )
+        self._persist_session(session)
 
         try:
             process = self.runner.start(spec)
@@ -251,8 +323,10 @@ class OperatorPaperSupervisor:
             session.status = "FAILED"
             session.refusal_reason = "PAPER_PROCESS_START_FAILED"
             event = self._record_event("paper_start", False, "PAPER_PROCESS_START_FAILED", session.session_id, False)
+            session.audit_event_ids.append(event.audit_event_id)
             self._session = session
             self._process = None
+            self._persist_session(session)
             return self._intent_response(
                 intent="paper_start",
                 allowed=False,
@@ -268,6 +342,8 @@ class OperatorPaperSupervisor:
         self._session = session
         self._process = process
         event = self._record_event("paper_start", True, "PAPER_RUN_STARTED", session.session_id, True)
+        session.audit_event_ids.append(event.audit_event_id)
+        self._persist_session(session)
         return self._intent_response(
             intent="paper_start",
             allowed=True,
@@ -307,6 +383,8 @@ class OperatorPaperSupervisor:
         self._session.stop_requested_at = utc_now_iso()
         self._session.stop_reason = reason
         event = self._record_event("paper_stop", True, reason, self._session.session_id, True)
+        self._session.audit_event_ids.append(event.audit_event_id)
+        self._persist_session(self._session)
         return self._intent_response(
             intent="paper_stop",
             allowed=True,
@@ -342,6 +420,8 @@ class OperatorPaperSupervisor:
         self._refresh_process_state()
         if self._session and self._session.status in {"STARTING", "RUNNING", "STOP_REQUESTED"}:
             return "DUPLICATE_ACTIVE_RUN"
+        if self._session and self._session.status == "PROCESS_STATE_UNKNOWN_AFTER_RESTART":
+            return "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART"
 
         mode = str(request.get("mode") or "PAPER").strip().upper()
         if mode in {"LIVE", "REAL", "REAL_MONEY"}:
@@ -438,16 +518,19 @@ class OperatorPaperSupervisor:
             watchlist=watchlist,
             duration_seconds=duration,
             refusal_reason=reason,
+            runtime_profile=self.config.runtime_profile,
         )
 
     def _refresh_process_state(self) -> None:
         if self._session is None or self._process is None:
             return
         self._session.last_status_check_at = utc_now_iso()
+        self._update_child_log_paths(self._session)
         exit_code = self._process.poll()
         if exit_code is None:
             if self._session.status not in {"STOP_REQUESTED", "STARTING"}:
                 self._session.status = "RUNNING"
+                self._persist_session(self._session)
             return
         self._session.exit_code = int(exit_code)
         if self._session.ended_at is None:
@@ -456,6 +539,8 @@ class OperatorPaperSupervisor:
             self._session.status = "STOPPED" if exit_code == 0 else "FAILED"
         elif self._session.status in {"STARTING", "RUNNING"}:
             self._session.status = "EXITED" if exit_code == 0 else "FAILED"
+        self._update_child_log_paths(self._session)
+        self._persist_session(self._session)
 
     def _record_event(
         self,
@@ -475,6 +560,7 @@ class OperatorPaperSupervisor:
             runtime_mutation_occurred=runtime_mutation_occurred,
         )
         self._audit_events.append(event)
+        self.session_store.write_audit_event(event.as_dict())
         return event
 
     def _intent_response(
@@ -506,3 +592,28 @@ class OperatorPaperSupervisor:
 
     def _new_session_id(self) -> str:
         return f"paper_{uuid.uuid4().hex[:16]}"
+
+    def _persist_session(self, session: PaperRunSession) -> None:
+        self.session_store.write_session(session.as_dict())
+
+    def _update_child_log_paths(self, session: PaperRunSession) -> None:
+        wrapper_stdout = session.wrapper_stdout_path or session.stdout_path
+        if not wrapper_stdout:
+            return
+        path = Path(wrapper_stdout)
+        if not path.exists() or not path.is_file():
+            return
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        stdout_match = re.findall(r"(?:stdout|out(?:put)?(?: log)?)\s*[:=]\s*([^\r\n]+?\.out\.log)", text, flags=re.IGNORECASE)
+        stderr_match = re.findall(r"(?:stderr|err(?:or)?(?: log)?)\s*[:=]\s*([^\r\n]+?\.err\.log)", text, flags=re.IGNORECASE)
+        if stdout_match:
+            session.child_stdout_path = stdout_match[-1].strip().strip('"')
+        if stderr_match:
+            session.child_stderr_path = stderr_match[-1].strip().strip('"')
+        if "BOUNDED_RUNTIME_TIMER_STARTED" in text:
+            session.bounded_timer_started = True
+        if "BOUNDED_RUNTIME_DURATION_ELAPSED" in text or "Poverty Killer shutdown complete" in text:
+            session.bounded_duration_elapsed = True

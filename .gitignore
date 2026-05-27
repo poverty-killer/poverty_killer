@@ -12,4 +12,7 @@ _repo_quarantine/
 data/*.db*
 state/*.tmp
 state/*.json.*.tmp
+state/operator/
+state/world_awareness/
+archives/runs/
 reports/*.tmp

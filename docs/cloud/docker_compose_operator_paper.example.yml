@@ -1,0 +1,25 @@
+services:
+  operator-api:
+    image: poverty-killer/operator-api:paper-example
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.api.operator_readonly_api:create_operator_app
+      - --factory
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8765"
+    env_file:
+      - ./operator.env
+    environment:
+      PK_RUNTIME_PROFILE: CLOUD_PAPER
+      PK_HOSTED_MODE: "true"
+      PK_LIVE_ENABLED: "false"
+      PK_REAL_MONEY_ENABLED: "false"
+    volumes:
+      - ./state:/var/lib/poverty_killer/state
+      - ./logs:/var/log/poverty_killer
+    ports:
+      - "127.0.0.1:8765:8765"

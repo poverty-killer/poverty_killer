@@ -1,0 +1,15 @@
+PK_RUNTIME_PROFILE=CLOUD_PAPER
+PK_HOSTED_MODE=true
+PK_DATA_DIR=/var/lib/poverty_killer/data
+PK_LOG_DIR=/var/log/poverty_killer
+PK_OPERATOR_STATE_DIR=/var/lib/poverty_killer/state/operator
+PK_OPERATOR_SESSION_STORE_PATH=/var/lib/poverty_killer/state/operator/sessions.jsonl
+PK_WORLD_AWARENESS_CACHE_PATH=/var/lib/poverty_killer/state/world_awareness/operator_events.jsonl
+PK_ALLOWED_WATCHLIST=BTC/USD,ETH/USD,SOL/USD
+PK_ALLOWED_DURATIONS=180,300,1200,7200,10800,14400
+PK_LIVE_ENABLED=false
+PK_REAL_MONEY_ENABLED=false
+
+# Inject through a secrets manager or host environment. Do not commit values.
+APCA_API_KEY_ID=
+APCA_API_SECRET_KEY=

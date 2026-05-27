@@ -86,6 +86,12 @@
     return `<div class="kv">${items.map(([k, v]) => `<div>${escapeHtml(k)}</div><div>${v}</div>`).join("")}</div>`;
   }
 
+  function operatorApiBase() {
+    if (window.PK_OPERATOR_API_BASE) return window.PK_OPERATOR_API_BASE;
+    const params = new URLSearchParams(window.location.search || "");
+    return params.get("apiBase") || "";
+  }
+
   function renderTopBar() {
     const s = data.status;
     const endpointLabel = String(s.endpoint || "").includes("paper-api") ? "PAPER endpoint" : pick(s.endpoint, "endpoint unknown");
@@ -223,8 +229,10 @@
           ["Session", escapeHtml(sup.sessionId || "none")],
           ["PID", escapeHtml(sup.pid || "none")],
           ["Duration", escapeHtml(`${sup.durationSeconds || "unknown"}s`)],
-          ["stdout", escapeHtml(sup.stdoutPath || "not available")],
-          ["stderr", escapeHtml(sup.stderrPath || "not available")]
+          ["Wrapper stdout", escapeHtml(sup.wrapperStdoutPath || sup.stdoutPath || "not available")],
+          ["Wrapper stderr", escapeHtml(sup.wrapperStderrPath || sup.stderrPath || "not available")],
+          ["Child stdout", escapeHtml(sup.childStdoutPath || "not available")],
+          ["Child stderr", escapeHtml(sup.childStderrPath || "not available")]
         ])}</div>
         <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
@@ -343,12 +351,21 @@
     return `
       ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", data.meta.dataSource)}
       <div class="card">${kv([
+        ["Health", badge(d.healthStatus, statusColor(d.healthStatus))],
+        ["Runtime profile", badge(d.runtimeProfile, "cyan")],
+        ["Hosted mode", badge(String(d.hostedMode), d.hostedMode ? "yellow" : "gray")],
         ["Git commit", escapeHtml(d.gitCommit)],
         ["Dirty worktree", badge(d.dirtyWorktree, "yellow")],
         ["Python version", escapeHtml(d.pythonVersion)],
         ["Credentials", escapeHtml(d.credentials)],
         ["Logs", escapeHtml(d.logs)],
-        ["DB", escapeHtml(d.db)]
+        ["DB", escapeHtml(d.db)],
+        ["Session store", badge(d.sessionStoreStatus, statusColor(d.sessionStoreStatus))],
+        ["World cache", badge(d.worldCacheStatus, statusColor(d.worldCacheStatus))],
+        ["Operator state", escapeHtml(d.operatorStateDir)],
+        ["World cache path", escapeHtml(d.worldAwarenessCachePath)],
+        ["Latest child stdout", escapeHtml(d.latestChildStdout)],
+        ["Latest child stderr", escapeHtml(d.latestChildStderr)]
       ])}</div>
     `;
   }
@@ -425,7 +442,7 @@
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 1500);
     try {
-      const response = await fetch(`${window.PK_OPERATOR_API_BASE || ""}${path}`, {
+      const response = await fetch(`${operatorApiBase()}${path}`, {
         cache: "no-store",
         signal: controller.signal
       });
@@ -443,6 +460,9 @@
     const profile = payload.profile || {};
     const universe = payload.universe || {};
     const readiness = payload.readiness || {};
+    const operatorReadiness = payload.operatorReadiness || {};
+    const health = payload.health || {};
+    const storage = payload.storage || {};
     const diagnostics = payload.diagnostics || {};
     const orders = payload.orders || {};
     const fills = payload.fills || {};
@@ -486,6 +506,10 @@
     next.supervisor.watchlist = pick(activeSession.watchlist || status.universe, ["BTC/USD", "ETH/USD", "SOL/USD"]);
     next.supervisor.stdoutPath = pick(activeSession.stdout_path || runtime.stdout_path, "not available");
     next.supervisor.stderrPath = pick(activeSession.stderr_path || runtime.stderr_path, "not available");
+    next.supervisor.wrapperStdoutPath = pick(activeSession.wrapper_stdout_path || runtime.wrapper_stdout_path, next.supervisor.stdoutPath);
+    next.supervisor.wrapperStderrPath = pick(activeSession.wrapper_stderr_path || runtime.wrapper_stderr_path, next.supervisor.stderrPath);
+    next.supervisor.childStdoutPath = pick(activeSession.child_stdout_path || runtime.child_stdout_path, "not available");
+    next.supervisor.childStderrPath = pick(activeSession.child_stderr_path || runtime.child_stderr_path, "not available");
     next.supervisor.paperStartAllowed = supervisor.paper_start_allowed === true || runtime.paper_start_allowed === true;
     next.supervisor.paperStopAllowed = supervisor.paper_stop_allowed === true || runtime.paper_stop_allowed === true;
     next.supervisor.paperStartRefusalReason = pick(supervisor.paper_start_refusal_reason || runtime.paper_start_refusal_reason, null);
@@ -494,7 +518,7 @@
     next.liveReadiness.state = pick(readiness.live_status, "LIVE_LOCKED");
     next.liveReadiness.refusal = pick(readiness.refusal_reason, "LIVE_NOT_APPROVED");
     next.liveReadiness.passed = pick(readiness.passed_prerequisites, []);
-    next.liveReadiness.missing = pick(readiness.missing_prerequisites, next.liveReadiness.missing);
+    next.liveReadiness.missing = pick(readiness.missing_prerequisites || operatorReadiness.missing_prerequisites, next.liveReadiness.missing);
 
     next.diagnostics.gitCommit = pick(diagnostics.git_commit, "UNKNOWN_NOT_INSPECTED");
     next.diagnostics.dirtyWorktree = pick(diagnostics.dirty_worktree, "UNKNOWN_NOT_INSPECTED");
@@ -502,6 +526,15 @@
     next.diagnostics.credentials = pick(diagnostics.credentials_present, "NOT_INSPECTED_NO_SECRET_ACCESS");
     next.diagnostics.logs = pick(diagnostics.logs, "NOT_READ_BY_OPERATOR_BACKEND_V1");
     next.diagnostics.db = pick(diagnostics.db, "NOT_READ_BY_OPERATOR_BACKEND_V1");
+    next.diagnostics.runtimeProfile = pick(health.runtime_profile || diagnostics.runtime_profile || storage.runtime_profile, "UNKNOWN");
+    next.diagnostics.hostedMode = health.hosted_mode === true || diagnostics.hosted_mode === true || storage.hosted_mode === true;
+    next.diagnostics.healthStatus = pick(health.api_status, "UNKNOWN");
+    next.diagnostics.sessionStoreStatus = pick(storage.session_store && storage.session_store.status, "UNKNOWN");
+    next.diagnostics.worldCacheStatus = pick(storage.world_awareness_cache && storage.world_awareness_cache.status, "UNKNOWN");
+    next.diagnostics.operatorStateDir = pick(storage.operator_state_dir && storage.operator_state_dir.path, "not configured");
+    next.diagnostics.worldAwarenessCachePath = pick(storage.world_awareness_cache && storage.world_awareness_cache.path, "not configured");
+    next.diagnostics.latestChildStdout = next.supervisor.childStdoutPath;
+    next.diagnostics.latestChildStderr = next.supervisor.childStderrPath;
     if (Array.isArray(world.providers)) {
       const runtimeByProvider = {};
       if (Array.isArray(worldRuntime.providers)) {
@@ -585,8 +618,11 @@
 
   async function loadData() {
     try {
-      const [status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime] = await Promise.all([
+      const [status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime] = await Promise.all([
         fetchJson("/operator/status"),
+        fetchJson("/operator/health"),
+        fetchJson("/operator/readiness"),
+        fetchJson("/operator/storage"),
         fetchJson("/operator/runtime"),
         fetchJson("/operator/profile"),
         fetchJson("/operator/universe"),
@@ -601,7 +637,7 @@
         fetchJson("/operator/world-awareness"),
         fetchJson("/operator/world-awareness/runtime")
       ]);
-      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime });
+      return normalizeBackendData({ status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime });
     } catch (error) {
       const fallback = clone(mockData);
       fallback.meta.dataSource = "MOCK_DATA";
@@ -619,7 +655,7 @@
   }
 
   async function postIntent(path, body) {
-    const response = await fetch(`${window.PK_OPERATOR_API_BASE || ""}${path}`, {
+    const response = await fetch(`${operatorApiBase()}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {})

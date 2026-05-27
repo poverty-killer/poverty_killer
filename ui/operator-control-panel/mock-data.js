@@ -280,7 +280,16 @@
       pythonVersion: "runtime reported later",
       credentials: "present/not present only",
       logs: "not read by static shell",
-      db: "not read by static shell"
+      db: "not read by static shell",
+      runtimeProfile: "LOCAL_PAPER",
+      hostedMode: false,
+      healthStatus: "MOCK_ONLY",
+      sessionStoreStatus: "MOCK_ONLY",
+      worldCacheStatus: "MOCK_ONLY",
+      operatorStateDir: "state/operator/",
+      worldAwarenessCachePath: "state/world_awareness/operator_events.jsonl",
+      latestChildStdout: "not available in mock mode",
+      latestChildStderr: "not available in mock mode"
     },
     liveReadiness: {
       state: "LIVE_LOCKED",
