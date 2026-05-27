@@ -16,6 +16,9 @@ from .enums import (
     SourceFamily,
     TrustTier,
     NormalizedEventClass,
+    ExternalFeedType,
+    ExternalVerificationStatus,
+    ExternalFeedStatus,
     SourceLatencyClass,
     DirectionalityHint,
     MagnitudeHint,
@@ -30,13 +33,18 @@ from .models import (
     EventHints,
     ReplayMetadata,
     WorldAwarenessEvent,
+    ExternalIntelligenceEvent,
 )
+from .feed_spine import build_provider_registry, normalize_external_event, world_awareness_summary
 
 __all__ = [
     "WorldAwarenessConfig",
     "SourceFamily",
     "TrustTier",
     "NormalizedEventClass",
+    "ExternalFeedType",
+    "ExternalVerificationStatus",
+    "ExternalFeedStatus",
     "SourceLatencyClass",
     "DirectionalityHint",
     "MagnitudeHint",
@@ -49,4 +57,8 @@ __all__ = [
     "EventHints",
     "ReplayMetadata",
     "WorldAwarenessEvent",
+    "ExternalIntelligenceEvent",
+    "build_provider_registry",
+    "normalize_external_event",
+    "world_awareness_summary",
 ]

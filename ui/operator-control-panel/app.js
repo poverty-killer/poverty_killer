@@ -296,15 +296,20 @@
   }
 
   function renderWorld() {
-    const w = data.worldAwareness[0];
     return `
       ${header("World Awareness", "External intelligence is advisory evidence only.", "NO EXECUTION AUTHORITY")}
-      <div class="card">${kv([
-        ["Source", escapeHtml(w.source)],
-        ["Status", badge(w.status, "yellow")],
-        ["Relevance", escapeHtml(w.relevance)],
-        ["Rule", escapeHtml(w.rule)]
-      ])}</div>
+      <div class="card">${table(
+        ["Provider", "Type", "Enabled", "Status", "Confidence", "Relevance", "Rule"],
+        data.worldAwareness.map((w) => [
+          w.source,
+          w.feedType || "UNKNOWN",
+          badge(String(w.enabled === true), w.enabled === true ? "green" : "gray"),
+          badge(w.status, statusColor(w.status)),
+          w.confidence || "unknown",
+          w.relevance,
+          w.rule
+        ])
+      )}</div>
     `;
   }
 
@@ -418,6 +423,7 @@
     const fills = payload.fills || {};
     const tca = payload.tca || {};
     const latestRun = payload.latestRun || {};
+    const world = payload.world || {};
     const supervisor = status.supervisor || latestRun || {};
     const activeSession = supervisor.active_session || supervisor.latest_session || {};
 
@@ -470,6 +476,19 @@
     next.diagnostics.credentials = pick(diagnostics.credentials_present, "NOT_INSPECTED_NO_SECRET_ACCESS");
     next.diagnostics.logs = pick(diagnostics.logs, "NOT_READ_BY_OPERATOR_BACKEND_V1");
     next.diagnostics.db = pick(diagnostics.db, "NOT_READ_BY_OPERATOR_BACKEND_V1");
+    if (Array.isArray(world.providers)) {
+      next.worldAwareness = world.providers.map((provider) => ({
+        source: pick(provider.provider, "unknown_provider"),
+        feedType: pick(provider.feed_type, "UNKNOWN"),
+        enabled: provider.enabled === true,
+        status: pick(provider.status, "FEED_DISABLED"),
+        relevance: provider.enabled === true ? "read-only advisory provider configured" : "disabled by default",
+        confidence: provider.credential_present === true ? "credential present" : "credential missing/not inspected",
+        stale: false,
+        verification: "UNVERIFIED",
+        rule: "advisory only; cannot bypass MarketTruthSnapshot, NetEdge, guardrails, or broker boundary"
+      }));
+    }
 
     next.orders = [
       {
@@ -503,7 +522,7 @@
 
   async function loadData() {
     try {
-      const [status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit] = await Promise.all([
+      const [status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world] = await Promise.all([
         fetchJson("/operator/status"),
         fetchJson("/operator/runtime"),
         fetchJson("/operator/profile"),
@@ -515,9 +534,10 @@
         fetchJson("/operator/orders-summary"),
         fetchJson("/operator/fills-summary"),
         fetchJson("/operator/tca-summary"),
-        fetchJson("/operator/audit-summary")
+        fetchJson("/operator/audit-summary"),
+        fetchJson("/operator/world-awareness")
       ]);
-      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit });
+      return normalizeBackendData({ status, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world });
     } catch (error) {
       const fallback = clone(mockData);
       fallback.meta.dataSource = "MOCK_DATA";

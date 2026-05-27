@@ -163,6 +163,35 @@
       "fake_fees_allowed": false,
       "fake_tca_allowed": false
     },
+    "/operator/world-awareness": {
+      "source": "OPERATOR_BACKEND_SAFE_DEFAULT",
+      "module_name": "WorldAwareness",
+      "authority_class": "ADVISORY",
+      "advisory_only": true,
+      "direct_trade_authority": false,
+      "provider_polling_active": false,
+      "providers": [
+        {
+          "provider": "alpaca_news",
+          "feed_type": "NEWS",
+          "enabled": false,
+          "status": "FEED_DISABLED",
+          "credential_present": false,
+          "advisory_only": true,
+          "reason_codes": ["FEED_DISABLED_BY_CONFIG"]
+        }
+      ],
+      "events": [],
+      "event_count": 0,
+      "advisory_event_count": 0,
+      "stale_event_count": 0,
+      "high_relevance_event_count": 0,
+      "decisionframe_eligible_count": 0,
+      "feed_can_trade": false,
+      "market_truth_bypass_allowed": false,
+      "netedge_bypass_allowed": false,
+      "guardrail_bypass_allowed": false
+    },
     "/operator/audit-summary": {
       "source": "audit_log | no_active_runtime",
       "operator_action_count": 0,

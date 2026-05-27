@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor
+from app.world_awareness.feed_spine import world_awareness_summary
 
 
 API_VERSION = "operator-backend-v1"
@@ -47,6 +48,7 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/fills-summary": "read_only_fill_ledger_summary",
         "/operator/tca-summary": "read_only_tca_summary",
         "/operator/audit-summary": "read_only_audit_summary",
+        "/operator/world-awareness": "read_only_external_intelligence_advisory_summary",
         "/operator/latest-run": "read_only_supervisor_session_summary",
     },
     "disabled_intents": {
@@ -275,6 +277,21 @@ class OperatorSnapshotProvider:
             "last_event": last_event,
         }
 
+    def world_awareness(self) -> dict[str, Any]:
+        summary = world_awareness_summary()
+        summary.update(
+            {
+                "source": "OPERATOR_BACKEND_SAFE_DEFAULT",
+                "credential_status": "NOT_INSPECTED_NO_SECRET_ACCESS",
+                "provider_polling_active": False,
+                "feed_can_trade": False,
+                "market_truth_bypass_allowed": False,
+                "netedge_bypass_allowed": False,
+                "guardrail_bypass_allowed": False,
+            }
+        )
+        return summary
+
     def contracts(self) -> dict[str, Any]:
         return deepcopy(READ_ONLY_CONTRACTS)
 
@@ -341,6 +358,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.get("/audit-summary")
     def audit_summary() -> dict[str, Any]:
         return provider.audit_summary()
+
+    @router.get("/world-awareness")
+    def world_awareness() -> dict[str, Any]:
+        return provider.world_awareness()
 
     @router.get("/latest-run")
     def latest_run() -> dict[str, Any]:

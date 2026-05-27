@@ -205,10 +205,37 @@
     ],
     worldAwareness: [
       {
-        source: "world_awareness",
+        source: "alpaca_news",
+        feedType: "NEWS",
+        enabled: false,
         status: "ADVISORY_ONLY",
-        relevance: "not wired to execution authority",
+        relevance: "disabled by default; no polling active",
+        confidence: "unknown",
+        stale: false,
+        verification: "UNVERIFIED",
         rule: "cannot bypass MarketTruthSnapshot, NetEdge, or guardrails"
+      },
+      {
+        source: "sec_insider_filings",
+        feedType: "SEC_FILING",
+        enabled: false,
+        status: "FEED_DISABLED",
+        relevance: "equities-only advisory lane; not crypto execution authority",
+        confidence: "unknown",
+        stale: false,
+        verification: "UNVERIFIED",
+        rule: "Form 4-style data contributes advisory evidence only"
+      },
+      {
+        source: "economic_calendar",
+        feedType: "ECONOMIC_CALENDAR",
+        enabled: false,
+        status: "FEED_DISABLED",
+        relevance: "provider TBD",
+        confidence: "unknown",
+        stale: false,
+        verification: "UNVERIFIED",
+        rule: "macro events are context, not direct order authority"
       }
     ],
     diagnostics: {
