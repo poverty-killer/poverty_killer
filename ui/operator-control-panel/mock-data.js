@@ -308,6 +308,114 @@
         "operator approval",
         "live-readiness audit"
       ]
+    },
+    runArchive: {
+      runCount: 1,
+      latestVerdict: "CONDITIONAL_PASS",
+      reportStatus: "on demand",
+      runs: [
+        {
+          runId: "mock-paper-run",
+          status: "EXITED",
+          finalVerdict: "CONDITIONAL_PASS",
+          profile: "PAPER_EXPLORATION_ALPHA",
+          durationSeconds: 300,
+          ordersSubmitted: 1,
+          ordersAcknowledged: 1,
+          ordersCanceled: 1,
+          fillsObserved: 1,
+          tcaStatus: "UNKNOWN",
+          reportPath: "not generated in mock mode"
+        }
+      ]
+    },
+    explanation: {
+      headline: "Mock DecisionFrame BUY passed hard blockers; economics still require broker-confirmed TCA before performance claims.",
+      frameId: "df_e5126d62",
+      output: "BUY",
+      netEdge: "ALLOW",
+      confidence: "MEDIUM",
+      nextBestAction: "Audit fill hydration, fees, OMS reconciliation, and TCA before drawing performance conclusions.",
+      blockers: [],
+      missingTruth: ["BROKER_FEE_DETAIL_PENDING"]
+    },
+    actionCenter: {
+      counts: {
+        INFO: 2,
+        WARNING: 2,
+        BLOCKER: 2,
+        NEEDS_APPROVAL: 0,
+        SAFETY_CRITICAL: 0
+      },
+      items: [
+        {
+          type: "BLOCKER",
+          title: "Live trading is locked",
+          detail: "LIVE_NOT_APPROVED remains active.",
+          source: "readiness",
+          canExecute: false
+        },
+        {
+          type: "WARNING",
+          title: "Broker fee detail pending",
+          detail: "Fee/TCA remains unknown until broker evidence arrives.",
+          source: "fills-summary",
+          canExecute: false
+        }
+      ]
+    },
+    tcaDashboard: {
+      status: "PENDING_FEE_DETAIL",
+      recordsTotal: 0,
+      recordsComplete: 0,
+      recordsUnknown: 0,
+      feePending: 1
+    },
+    alerts: [
+      {
+        severity: "WARNING",
+        title: "No active runtime",
+        detail: "Mock mode is not attached to a PAPER supervisor.",
+        source: "status",
+        acknowledged: false,
+        canExecute: false
+      }
+    ],
+    ai: {
+      provider: "disabled",
+      providerState: "AI_DISABLED",
+      pendingReviewCount: 0,
+      secretsValuesExposed: false,
+      lastAnalyzeResult: "none",
+      recommendations: [
+        {
+          recommendationId: "mock-ai-rec",
+          recommendationType: "OBSERVATION",
+          status: "DRAFT",
+          summary: "AI Chief is advisory-only and disabled in mock mode.",
+          proposedAction: "NO_ACTION",
+          canExecute: false
+        }
+      ]
+    },
+    systemMap: {
+      reportPath: "reports/poverty_killer_system_map_operator_explainer.md",
+      sections: [
+        "runtime launcher",
+        "MarketTruthSnapshot",
+        "DecisionFrame",
+        "NetEdge",
+        "ExecutionEngine",
+        "BrokerBoundary",
+        "OMS",
+        "Fill/TCA/Fee hydration",
+        "Operator API",
+        "Supervisor",
+        "UI",
+        "World Awareness",
+        "AI Chief Operator",
+        "live readiness gates"
+      ]
     }
   };
 })();

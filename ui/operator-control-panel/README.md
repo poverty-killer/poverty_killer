@@ -55,3 +55,21 @@ New readiness endpoints:
 
 These endpoints report storage/cache/config health, live refusal, and readiness
 without exposing secrets or calling broker APIs.
+
+Operator intelligence endpoints:
+
+- `/operator/runs`
+- `/operator/runs/{run_id}`
+- `/operator/runs/{run_id}/report`
+- `/operator/explain/latest`
+- `/operator/action-center`
+- `/operator/pnl`
+- `/operator/tca`
+- `/operator/alerts`
+- `/operator/system-map`
+- `/operator/ai/status`
+- `/operator/ai/recommendations`
+
+AI Chief Operator remains advisory only. `/operator/ai/analyze` queues a
+recommendation through the governance queue; it cannot trade, start PAPER,
+enable live, or call broker execution.

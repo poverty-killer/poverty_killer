@@ -5,12 +5,17 @@
   let data = clone(mockData);
   const screens = [
     ["command", "Command Center"],
+    ["action", "Action Center"],
+    ["runs", "Run Archive"],
     ["pnl", "P&L / Net Profit"],
     ["positions", "Positions & Orders"],
     ["activity", "Bot Activity Control"],
     ["decision", "Signal & Decision Lab"],
     ["market", "Market Data Truth"],
     ["risk", "Risk & Governor"],
+    ["alerts", "Watchdog Alerts"],
+    ["ai", "AI Chief Operator"],
+    ["system", "System Map"],
     ["audit", "Audit Log"],
     ["world", "World Awareness"],
     ["diagnostics", "Diagnostics"],
@@ -114,7 +119,7 @@
     nav.innerHTML = screens.map(([id, label], index) => `
       <button class="nav-button ${index === 0 ? "active" : ""}" data-screen="${id}">
         <span>${escapeHtml(label)}</span>
-        <span class="muted">0${index + 1}</span>
+        <span class="muted">${String(index + 1).padStart(2, "0")}</span>
       </button>
     `).join("");
     nav.addEventListener("click", (event) => {
@@ -131,6 +136,7 @@
 
   function renderCommand() {
     const s = data.status;
+    const actionCounts = data.actionCenter.counts || {};
     return `
       ${header("Command Center", "Operational truth, authority, and current runtime safety.", s.safetyVerdict)}
       <div class="grid">
@@ -165,8 +171,58 @@
         <div class="card span-4"><h3>Needs Approval</h3>${kv([
           ["Live activation", badge("not approved", "red")],
           ["Manual trading", badge("not available", "gray")],
-          ["Force trade", badge("forbidden", "red")]
+          ["Force trade", badge("forbidden", "red")],
+          ["AI review queue", badge(actionCounts.NEEDS_APPROVAL || 0, actionCounts.NEEDS_APPROVAL ? "yellow" : "gray")]
         ])}</div>
+      </div>
+    `;
+  }
+
+  function renderActionCenter() {
+    const center = data.actionCenter;
+    return `
+      ${header("Action Center", "Blockers, degraded states, and advisory items needing review.", "NEEDS REVIEW")}
+      <div class="grid">
+        ${metric("Blockers", center.counts.BLOCKER || 0, center.counts.BLOCKER ? "red" : "gray")}
+        ${metric("Warnings", center.counts.WARNING || 0, center.counts.WARNING ? "yellow" : "gray")}
+        ${metric("Needs Approval", center.counts.NEEDS_APPROVAL || 0, center.counts.NEEDS_APPROVAL ? "yellow" : "gray")}
+        ${metric("Safety Critical", center.counts.SAFETY_CRITICAL || 0, center.counts.SAFETY_CRITICAL ? "red" : "gray")}
+        <div class="card span-12"><h3>Current Items</h3>${table(
+          ["Type", "Title", "Detail", "Source", "Executable"],
+          center.items.map((item) => [
+            badge(item.type, statusColor(item.type)),
+            escapeHtml(item.title),
+            escapeHtml(item.detail),
+            escapeHtml(item.source),
+            badge(item.canExecute ? "yes" : "no", item.canExecute ? "red" : "gray")
+          ])
+        )}</div>
+      </div>
+    `;
+  }
+
+  function renderRuns() {
+    const archive = data.runArchive;
+    return `
+      ${header("Run Archive / Flight Recorder", "Session evidence, log paths, safety markers, and final verdicts.", "READ ONLY")}
+      <div class="grid">
+        ${metric("Archived Runs", archive.runCount || 0, archive.runCount ? "green" : "gray")}
+        ${metric("Latest Verdict", archive.latestVerdict || "UNKNOWN", statusColor(archive.latestVerdict || "UNKNOWN"))}
+        ${metric("Report Status", archive.reportStatus || "on demand", "gray")}
+        <div class="card span-12"><h3>Runs</h3>${table(
+          ["Run", "Status", "Verdict", "Profile", "Duration", "Orders", "Fills", "TCA", "Report"],
+          archive.runs.map((run) => [
+            escapeHtml(run.runId),
+            badge(run.status, statusColor(run.status)),
+            badge(run.finalVerdict, statusColor(run.finalVerdict)),
+            escapeHtml(run.profile || "unknown"),
+            escapeHtml(run.durationSeconds || "unknown"),
+            escapeHtml(`${run.ordersSubmitted}/${run.ordersAcknowledged}/${run.ordersCanceled}`),
+            escapeHtml(`${run.fillsObserved}`),
+            badge(run.tcaStatus, statusColor(run.tcaStatus)),
+            escapeHtml(run.reportPath || "not generated")
+          ])
+        )}</div>
       </div>
     `;
   }
@@ -191,6 +247,15 @@
           ["Trade count", escapeHtml(p.trades)],
           ["Win/loss", badge(p.winLoss, "yellow")],
           ["Max drawdown", badge(p.maxDrawdown, "yellow")]
+        ])}</div>
+        <div class="card span-12"><h3>TCA / Execution Quality</h3>${kv([
+          ["TCA status", badge(data.tcaDashboard.status || "UNKNOWN", statusColor(data.tcaDashboard.status || "UNKNOWN"))],
+          ["TCA records", escapeHtml(data.tcaDashboard.recordsTotal || 0)],
+          ["Complete", escapeHtml(data.tcaDashboard.recordsComplete || 0)],
+          ["Unknown", escapeHtml(data.tcaDashboard.recordsUnknown || 0)],
+          ["Fee pending", escapeHtml(data.tcaDashboard.feePending || 0)],
+          ["Fake P&L", badge("forbidden", "red")],
+          ["Fake fees/TCA", badge("forbidden", "red")]
         ])}</div>
       </div>
     `;
@@ -252,9 +317,24 @@
   }
 
   function renderDecision() {
+    const explain = data.explanation;
     return `
       ${header("Signal & Decision Lab", "Why BUY, SELL, or NO_TRADE happened.", "DECISIONFRAME FIRST")}
       <div class="grid">
+        <div class="card span-12"><h3>Plain-English Explainer</h3>${kv([
+          ["Headline", escapeHtml(explain.headline)],
+          ["Frame", escapeHtml(explain.frameId || "none")],
+          ["Output", badge(explain.output || "UNKNOWN", statusColor(explain.output || "UNKNOWN"))],
+          ["NetEdge", badge(explain.netEdge || "UNKNOWN", statusColor(explain.netEdge || "UNKNOWN"))],
+          ["Confidence", badge(explain.confidence || "LOW", statusColor(explain.confidence || "LOW"))],
+          ["Next action", escapeHtml(explain.nextBestAction)]
+        ])}</div>
+        <div class="card span-12"><h3>Explainer Blockers / Missing Truth</h3>
+          <div class="status-strip">
+            ${(explain.blockers || []).map((x) => badge(x, statusColor(x))).join("") || badge("none", "gray")}
+            ${(explain.missingTruth || []).map((x) => badge(x, "yellow")).join("")}
+          </div>
+        </div>
         <div class="card span-12"><h3>DecisionFrames</h3>${table(
           ["Frame", "Symbol", "Output", "Opportunity", "Raw", "Final", "NetEdge", "Compiler", "Submit"],
           data.decisionFrames.map((d) => [d.frameId, d.symbol, badge(d.output, statusColor(d.output)), d.opportunityVerdict, d.rawScore, d.finalScore, badge(d.netEdge, statusColor(d.netEdge)), d.compiler, d.submitSignal])
@@ -290,6 +370,82 @@
         ["Gate", "Category", "Decision", "Reason"],
         data.risk.map((r) => [r[0], r[1], badge(r[2], statusColor(r[2])), r[3]])
       )}</div>
+    `;
+  }
+
+  function renderAlerts() {
+    return `
+      ${header("Watchdog Alerts", "Local queue only. No SMS, email, Discord, or broker mutation.", "LOCAL ONLY")}
+      <div class="grid">
+        ${metric("Alert Count", data.alerts.length, data.alerts.length ? "yellow" : "gray")}
+        <div class="card span-12"><h3>Alerts</h3>${table(
+          ["Severity", "Title", "Detail", "Source", "Acknowledged", "Executable"],
+          data.alerts.map((alert) => [
+            badge(alert.severity, statusColor(alert.severity)),
+            escapeHtml(alert.title),
+            escapeHtml(alert.detail),
+            escapeHtml(alert.source),
+            badge(String(alert.acknowledged === true), alert.acknowledged ? "green" : "gray"),
+            badge(alert.canExecute ? "yes" : "no", alert.canExecute ? "red" : "gray")
+          ])
+        )}</div>
+      </div>
+    `;
+  }
+
+  function renderAI() {
+    const ai = data.ai;
+    return `
+      ${header("AI Chief Operator", "Advisory-only model gateway and governance queue.", ai.providerState)}
+      <div class="grid">
+        ${metric("Provider", ai.provider, statusColor(ai.providerState))}
+        ${metric("State", ai.providerState, statusColor(ai.providerState))}
+        ${metric("Pending Review", ai.pendingReviewCount || 0, ai.pendingReviewCount ? "yellow" : "gray")}
+        ${metric("Can Execute", "false", "gray")}
+        <div class="card span-12"><h3>Advisory Boundary</h3>${kv([
+          ["AI direct broker calls", badge("forbidden", "red")],
+          ["AI order submit/cancel/liquidate", badge("forbidden", "red")],
+          ["Live enable", badge("separate approval required", "red")],
+          ["Secrets exposed", badge(String(ai.secretsValuesExposed === true), ai.secretsValuesExposed ? "red" : "green")]
+        ])}</div>
+        <div class="card span-12"><h3>Governance Queue</h3>${table(
+          ["ID", "Type", "Status", "Summary", "Action", "Executable"],
+          ai.recommendations.map((rec) => [
+            escapeHtml(rec.recommendationId),
+            badge(rec.recommendationType, statusColor(rec.recommendationType)),
+            badge(rec.status, statusColor(rec.status)),
+            escapeHtml(rec.summary),
+            escapeHtml(rec.proposedAction),
+            badge(rec.canExecute ? "yes" : "no", rec.canExecute ? "red" : "gray")
+          ])
+        )}</div>
+        <div class="card span-12"><h3>Advisory Analyze</h3>
+          <div class="stack">
+            <button class="intent-button paper" data-intent="ai-analyze" ${data.meta.dataSource === "OPERATOR_BACKEND" ? "" : "disabled"}>
+              Run advisory AI analysis
+            </button>
+            <div class="notice mono">Last AI result: ${escapeHtml(ai.lastAnalyzeResult || "none")}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSystem() {
+    const map = data.systemMap;
+    return `
+      ${header("System Map", "Plain-English operator map of engine authority boundaries.", "READ ONLY")}
+      <div class="grid">
+        <div class="card span-12"><h3>Report</h3>${kv([
+          ["Path", escapeHtml(map.reportPath)],
+          ["Live", badge("LOCKED", "red")],
+          ["Real money", badge("BLOCKED", "red")],
+          ["AI", badge("advisory only", "yellow")]
+        ])}</div>
+        <div class="card span-12"><h3>Sections</h3>
+          <div class="status-strip">${map.sections.map((section) => badge(section, "gray")).join("")}</div>
+        </div>
+      </div>
     `;
   }
 
@@ -388,13 +544,16 @@
   }
 
   function renderRail() {
+    const critical = data.alerts.filter((alert) => alert.severity === "SAFETY_CRITICAL").length;
+    const pendingAI = data.ai.pendingReviewCount || 0;
     document.querySelector(".rail").innerHTML = `
       <div class="card rail-card"><h3>Current Alerts</h3>
         <div class="stack">
           ${badge(data.meta.dataSource, dataSourceColor())}
           ${badge("LIVE_LOCKED", "red")}
           ${badge("REAL_MONEY_BLOCKED", "red")}
-          ${badge("BROKER_FEE_DETAIL_UNAVAILABLE", "yellow")}
+          ${badge(`${data.alerts.length} watchdog`, data.alerts.length ? "yellow" : "gray")}
+          ${badge(`${critical} critical`, critical ? "red" : "gray")}
         </div>
       </div>
       <div class="card rail-card"><h3>Dominant Blocker</h3>
@@ -414,6 +573,7 @@
           ${badge("live governance packet", "red")}
           ${badge("server-side authority", "red")}
           ${badge("operator approval", "red")}
+          ${badge(`${pendingAI} AI review`, pendingAI ? "yellow" : "gray")}
         </div>
       </div>
     `;
@@ -423,12 +583,17 @@
     const main = document.querySelector(".main");
     const renderers = {
       command: renderCommand,
+      action: renderActionCenter,
+      runs: renderRuns,
       pnl: renderPnl,
       positions: renderPositions,
       activity: renderActivity,
       decision: renderDecision,
       market: renderMarket,
       risk: renderRisk,
+      alerts: renderAlerts,
+      ai: renderAI,
+      system: renderSystem,
       audit: renderAudit,
       world: renderWorld,
       diagnostics: renderDiagnostics,
@@ -470,6 +635,15 @@
     const latestRun = payload.latestRun || {};
     const world = payload.world || {};
     const worldRuntime = payload.worldRuntime || {};
+    const runs = payload.runs || {};
+    const explain = payload.explain || {};
+    const actionCenter = payload.actionCenter || {};
+    const pnlDashboard = payload.pnlDashboard || {};
+    const tcaDashboard = payload.tcaDashboard || {};
+    const alerts = payload.alerts || {};
+    const systemMap = payload.systemMap || {};
+    const aiStatus = payload.aiStatus || {};
+    const aiRecommendations = payload.aiRecommendations || {};
     const supervisor = status.supervisor || latestRun || {};
     const activeSession = supervisor.active_session || supervisor.latest_session || {};
 
@@ -535,6 +709,110 @@
     next.diagnostics.worldAwarenessCachePath = pick(storage.world_awareness_cache && storage.world_awareness_cache.path, "not configured");
     next.diagnostics.latestChildStdout = next.supervisor.childStdoutPath;
     next.diagnostics.latestChildStderr = next.supervisor.childStderrPath;
+    if (Array.isArray(runs.runs)) {
+      next.runArchive.runCount = pick(runs.run_count, runs.runs.length);
+      next.runArchive.runs = runs.runs.map((run) => ({
+        runId: pick(run.run_id, "unknown"),
+        status: pick(run.status, "UNKNOWN"),
+        finalVerdict: pick(run.final_verdict, "UNKNOWN"),
+        profile: pick(run.profile, "unknown"),
+        durationSeconds: pick(run.duration_seconds, "unknown"),
+        ordersSubmitted: pick(run.orders && run.orders.submitted, 0),
+        ordersAcknowledged: pick(run.orders && run.orders.acknowledged, 0),
+        ordersCanceled: pick(run.orders && run.orders.canceled, 0),
+        fillsObserved: pick(run.fills && run.fills.observed, 0),
+        tcaStatus: pick(run.tca && run.tca.status, "UNKNOWN"),
+        reportPath: pick(run.report_path, "")
+      }));
+      next.runArchive.latestVerdict = next.runArchive.runs.length ? next.runArchive.runs[0].finalVerdict : "UNKNOWN";
+      next.runArchive.reportStatus = "on demand";
+    }
+    next.explanation = {
+      headline: pick(explain.headline, next.explanation.headline),
+      frameId: pick(explain.frame_id, null),
+      output: pick(explain.output, "UNKNOWN"),
+      netEdge: pick(explain.netedge_result, "UNKNOWN"),
+      confidence: pick(explain.confidence, "LOW"),
+      nextBestAction: pick(explain.next_best_action, next.explanation.nextBestAction),
+      blockers: Array.isArray(explain.blockers)
+        ? explain.blockers.map((item) => typeof item === "string" ? item : `${item.source || "blocker"}:${item.reason || "UNKNOWN"}`)
+        : next.explanation.blockers,
+      missingTruth: Array.isArray(explain.missing_truth) ? explain.missing_truth : next.explanation.missingTruth
+    };
+    if (Array.isArray(actionCenter.items)) {
+      next.actionCenter.items = actionCenter.items.map((item) => ({
+        type: pick(item.type, "INFO"),
+        title: pick(item.title, "operator item"),
+        detail: pick(item.detail, ""),
+        source: pick(item.source, "unknown"),
+        canExecute: item.can_execute === true
+      }));
+      next.actionCenter.counts = {
+        INFO: pick(actionCenter.counts && actionCenter.counts.INFO, 0),
+        WARNING: pick(actionCenter.counts && actionCenter.counts.WARNING, 0),
+        BLOCKER: pick(actionCenter.counts && actionCenter.counts.BLOCKER, 0),
+        NEEDS_APPROVAL: pick(actionCenter.counts && actionCenter.counts.NEEDS_APPROVAL, 0),
+        SAFETY_CRITICAL: pick(actionCenter.counts && actionCenter.counts.SAFETY_CRITICAL, 0)
+      };
+    }
+    if (pnlDashboard.source) {
+      next.pnl.realizedPnl = {
+        value: pnlDashboard.realized_pnl && pnlDashboard.realized_pnl.value,
+        source: pick(pnlDashboard.realized_pnl && pnlDashboard.realized_pnl.truth_label, "unknown")
+      };
+      next.pnl.unrealizedPnl = {
+        value: pnlDashboard.unrealized_pnl && pnlDashboard.unrealized_pnl.value,
+        source: pick(pnlDashboard.unrealized_pnl && pnlDashboard.unrealized_pnl.truth_label, "unknown")
+      };
+      next.pnl.netPnl = {
+        value: pnlDashboard.net_pnl && pnlDashboard.net_pnl.value,
+        source: pick(pnlDashboard.net_pnl && pnlDashboard.net_pnl.truth_label, "unknown")
+      };
+      next.pnl.fees = {
+        value: null,
+        source: pick(pnlDashboard.fee_hydration && pnlDashboard.fee_hydration.source, "UNKNOWN")
+      };
+      next.pnl.trades = pick(pnlDashboard.fill_count, 0);
+      next.pnl.winLoss = "unknown without broker-confirmed realized trade outcomes";
+      next.pnl.maxDrawdown = "unknown unless broker/account truth provides it";
+    }
+    if (tcaDashboard.source) {
+      next.tcaDashboard = {
+        status: pick(tcaDashboard.status, "UNKNOWN"),
+        recordsTotal: pick(tcaDashboard.records && tcaDashboard.records.total, 0),
+        recordsComplete: pick(tcaDashboard.records && tcaDashboard.records.complete, 0),
+        recordsUnknown: pick(tcaDashboard.records && tcaDashboard.records.unknown, 0),
+        feePending: pick(tcaDashboard.records && tcaDashboard.records.fee_pending, 0)
+      };
+    }
+    if (Array.isArray(alerts.alerts)) {
+      next.alerts = alerts.alerts.map((alert) => ({
+        severity: pick(alert.severity, "INFO"),
+        title: pick(alert.title, "alert"),
+        detail: pick(alert.detail, ""),
+        source: pick(alert.source, "watchdog"),
+        acknowledged: alert.acknowledged === true,
+        canExecute: alert.can_execute === true
+      }));
+    }
+    if (systemMap.summary) {
+      next.systemMap.reportPath = pick(systemMap.report_path || systemMap.summary.report_path, next.systemMap.reportPath);
+      next.systemMap.sections = Array.isArray(systemMap.summary.sections) ? systemMap.summary.sections : next.systemMap.sections;
+    }
+    next.ai.provider = pick(aiStatus.gateway && aiStatus.gateway.provider && aiStatus.gateway.provider.provider, next.ai.provider);
+    next.ai.providerState = pick(aiStatus.gateway && aiStatus.gateway.provider && aiStatus.gateway.provider.provider_state, next.ai.providerState);
+    next.ai.pendingReviewCount = pick(aiStatus.pending_review_count, next.ai.pendingReviewCount);
+    next.ai.secretsValuesExposed = aiStatus.secrets_values_exposed === true;
+    if (Array.isArray(aiRecommendations.recommendations)) {
+      next.ai.recommendations = aiRecommendations.recommendations.map((rec) => ({
+        recommendationId: pick(rec.recommendation_id, "unknown"),
+        recommendationType: pick(rec.recommendation_type, "OBSERVATION"),
+        status: pick(rec.status, "DRAFT"),
+        summary: pick(rec.summary, ""),
+        proposedAction: pick(rec.proposed_action, "NO_ACTION"),
+        canExecute: rec.can_execute === true
+      }));
+    }
     if (Array.isArray(world.providers)) {
       const runtimeByProvider = {};
       if (Array.isArray(worldRuntime.providers)) {
@@ -618,7 +896,7 @@
 
   async function loadData() {
     try {
-      const [status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime] = await Promise.all([
+      const [status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime, runs, explain, actionCenter, pnlDashboard, tcaDashboard, alerts, systemMap, aiStatus, aiRecommendations] = await Promise.all([
         fetchJson("/operator/status"),
         fetchJson("/operator/health"),
         fetchJson("/operator/readiness"),
@@ -635,9 +913,18 @@
         fetchJson("/operator/tca-summary"),
         fetchJson("/operator/audit-summary"),
         fetchJson("/operator/world-awareness"),
-        fetchJson("/operator/world-awareness/runtime")
+        fetchJson("/operator/world-awareness/runtime"),
+        fetchJson("/operator/runs"),
+        fetchJson("/operator/explain/latest"),
+        fetchJson("/operator/action-center"),
+        fetchJson("/operator/pnl"),
+        fetchJson("/operator/tca"),
+        fetchJson("/operator/alerts"),
+        fetchJson("/operator/system-map"),
+        fetchJson("/operator/ai/status"),
+        fetchJson("/operator/ai/recommendations")
       ]);
-      return normalizeBackendData({ status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime });
+      return normalizeBackendData({ status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime, runs, explain, actionCenter, pnlDashboard, tcaDashboard, alerts, systemMap, aiStatus, aiRecommendations });
     } catch (error) {
       const fallback = clone(mockData);
       fallback.meta.dataSource = "MOCK_DATA";
@@ -701,9 +988,20 @@
         });
         message = `${result.status}: ${result.reason_code}`;
       }
+      if (intent === "ai-analyze") {
+        const confirmed = window.confirm("Run advisory AI Chief analysis? This cannot trade, start PAPER, enable live, or call broker execution.");
+        if (!confirmed) return;
+        const result = await postIntent("/operator/ai/analyze", {
+          requested_by: "operator_ui",
+          advisory_only: true
+        });
+        const recommendation = result.recommendation || {};
+        message = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "OBSERVATION"}`;
+      }
       data = await loadData();
       data.supervisor.lastIntentResult = message;
       data.worldRuntime.lastPollResult = message;
+      data.ai.lastAnalyzeResult = message;
       renderTopBar();
       renderScreens();
       renderRail();

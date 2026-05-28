@@ -17,8 +17,19 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.ai_chief_operator.config import AIChiefConfig
+from app.ai_chief_operator.context_builder import build_ai_context
+from app.ai_chief_operator.governance_queue import GovernanceQueue
+from app.ai_chief_operator.provider_gateway import AIProviderGateway
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.operator_intelligence.action_center import build_action_center
+from app.operator_intelligence.archive import RunArchive
+from app.operator_intelligence.decision_explainer import DecisionExplainer
+from app.operator_intelligence.pnl_tca import build_pnl_summary, build_tca_dashboard
+from app.operator_intelligence.reports import RunReportGenerator
+from app.operator_intelligence.system_map import SYSTEM_MAP_SUMMARY, render_system_map_markdown
+from app.operator_intelligence.watchdog import AlertQueue, build_watchdog_alerts
 from app.world_awareness.config import WorldAwarenessConfig
 from app.world_awareness.feed_spine import WorldAwarenessEventCache
 from app.world_awareness.persistent_cache import PersistentWorldAwarenessEventCache
@@ -63,6 +74,21 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/world-awareness/events": "read_only_external_intelligence_events",
         "/operator/world-awareness/runtime": "read_only_external_intelligence_provider_runtime",
         "/operator/latest-run": "read_only_supervisor_session_summary",
+        "/operator/runs": "read_only_run_archive",
+        "/operator/runs/{run_id}": "read_only_run_archive_detail",
+        "/operator/runs/{run_id}/report": "read_only_or_generate_operator_run_report",
+        "/operator/explain/latest": "read_only_decision_explainer",
+        "/operator/explain/decision/{frame_id}": "read_only_decision_explainer_by_frame",
+        "/operator/action-center": "read_only_operator_action_center",
+        "/operator/pnl": "read_only_pnl_truth_summary",
+        "/operator/tca": "read_only_tca_execution_quality_dashboard",
+        "/operator/alerts": "read_only_watchdog_alerts",
+        "/operator/system-map": "read_only_system_map_summary",
+        "/operator/ai/status": "read_only_ai_chief_status",
+        "/operator/ai/recommendations": "read_only_ai_governance_queue",
+        "/operator/ai/analyze": "advisory_ai_analysis_governance_queue_only",
+        "/operator/ai/recommendations/{id}/approve-paper-research": "governance_queue_paper_research_approval_only",
+        "/operator/ai/recommendations/{id}/reject": "governance_queue_reject_only",
     },
     "disabled_intents": {
         "/operator/intent/paper/start": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
@@ -99,6 +125,9 @@ class OperatorSnapshotProvider:
         world_awareness_config: WorldAwarenessConfig | None = None,
         world_awareness_env: dict[str, str] | None = None,
         world_awareness_runtime: WorldAwarenessProviderRuntime | None = None,
+        decision_frames: list[dict[str, Any]] | None = None,
+        ai_config: AIChiefConfig | None = None,
+        ai_queue: GovernanceQueue | None = None,
     ) -> None:
         self.runtime_config = runtime_config or OperatorRuntimeConfig.from_env()
         self.supervisor = supervisor or OperatorPaperSupervisor(
@@ -121,6 +150,19 @@ class OperatorSnapshotProvider:
                 cache=self.world_awareness_cache,
                 env=self.world_awareness_env,
             )
+        self.report_dir = self.runtime_config.operator_state_dir / "reports"
+        self.run_archive = RunArchive(
+            session_store=self.supervisor.session_store,
+            repo_root=self.runtime_config.repo_root,
+            report_dir=self.report_dir,
+        )
+        self.report_generator = RunReportGenerator(report_dir=self.report_dir)
+        self.decision_explainer = DecisionExplainer(decision_frames)
+        self.alert_queue = AlertQueue()
+        self.ai_gateway = AIProviderGateway(ai_config or AIChiefConfig.from_env())
+        self.ai_queue = ai_queue or GovernanceQueue(
+            path=self.runtime_config.operator_state_dir / "ai_governance_queue.jsonl"
+        )
 
     def status(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
@@ -424,6 +466,12 @@ class OperatorSnapshotProvider:
             "fake_tca_allowed": False,
         }
 
+    def pnl(self) -> dict[str, Any]:
+        return build_pnl_summary(fills_summary=self.fills_summary(), tca_summary=self.tca_summary())
+
+    def tca_dashboard(self) -> dict[str, Any]:
+        return build_tca_dashboard(fills_summary=self.fills_summary(), tca_summary=self.tca_summary())
+
     def audit_summary(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
         persisted_events = self.supervisor.session_store.audit_events(limit=1)
@@ -526,6 +574,169 @@ class OperatorSnapshotProvider:
     def latest_run(self) -> dict[str, Any]:
         return self.supervisor.status_snapshot()
 
+    def runs(self) -> dict[str, Any]:
+        return self.run_archive.list_runs()
+
+    def run_detail(self, run_id: str) -> dict[str, Any]:
+        run = self.run_archive.get_run(run_id)
+        if run is None:
+            return {
+                "source": "OPERATOR_SESSION_STORE",
+                "status": "NOT_FOUND",
+                "run_id": run_id,
+                "final_verdict": "UNKNOWN",
+                "reason_codes": ("RUN_ID_NOT_FOUND",),
+                "secrets_values_exposed": False,
+            }
+        return run
+
+    def run_report(self, run_id: str) -> dict[str, Any]:
+        run = self.run_archive.get_run(run_id)
+        if run is None:
+            return {
+                "status": "NOT_FOUND",
+                "run_id": run_id,
+                "reason_code": "RUN_ID_NOT_FOUND",
+                "logs_mutated": False,
+                "secrets_values_exposed": False,
+            }
+        return self.report_generator.generate(run, write_files=True)
+
+    def explain_latest(self) -> dict[str, Any]:
+        return self.decision_explainer.explain_latest()
+
+    def explain_decision(self, frame_id: str) -> dict[str, Any]:
+        return self.decision_explainer.explain_by_id(frame_id)
+
+    def alerts(self) -> dict[str, Any]:
+        alerts = build_watchdog_alerts(
+            status=self.status(),
+            runtime=self.runtime(),
+            health=self.health(),
+            readiness=self.readiness(),
+            storage=self.storage(),
+            orders=self.orders_summary(),
+            fills=self.fills_summary(),
+            tca=self.tca_summary(),
+            world_runtime=self.world_awareness_runtime_status(),
+            archive=self.runs(),
+        )
+        queued_alerts = self.alert_queue.sync(alerts)
+        return {
+            "source": "OPERATOR_WATCHDOG",
+            "alerts": queued_alerts,
+            "alert_count": len(queued_alerts),
+            "local_queue_only": True,
+            "external_delivery_enabled": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
+    def action_center(self) -> dict[str, Any]:
+        alerts = self.alerts()["alerts"]
+        return build_action_center(
+            status=self.status(),
+            readiness=self.readiness(),
+            health=self.health(),
+            storage=self.storage(),
+            fills=self.fills_summary(),
+            world_runtime=self.world_awareness_runtime_status(),
+            archive=self.runs(),
+            alerts=alerts,
+            ai_recommendations=self.ai_queue.list(),
+        )
+
+    def system_map(self) -> dict[str, Any]:
+        return {
+            "source": "OPERATOR_SYSTEM_MAP",
+            "summary": dict(SYSTEM_MAP_SUMMARY),
+            "markdown": render_system_map_markdown(),
+            "report_path": SYSTEM_MAP_SUMMARY["report_path"],
+            "secrets_values_exposed": False,
+        }
+
+    def ai_status(self) -> dict[str, Any]:
+        recs = self.ai_queue.list()
+        return {
+            "source": "AI_CHIEF_OPERATOR",
+            "gateway": self.ai_gateway.status(),
+            "recommendation_count": len(recs),
+            "pending_review_count": sum(1 for rec in recs if rec.get("status") == "PENDING_REVIEW"),
+            "advisory_only": True,
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+
+    def ai_recommendations(self) -> dict[str, Any]:
+        return {
+            "source": "AI_CHIEF_GOVERNANCE_QUEUE",
+            "recommendations": self.ai_queue.list(),
+            "advisory_only": True,
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
+    def _ai_context(self) -> dict[str, Any]:
+        archive = self.runs()
+        alerts = self.alerts()["alerts"]
+        action_center = build_action_center(
+            status=self.status(),
+            readiness=self.readiness(),
+            health=self.health(),
+            storage=self.storage(),
+            fills=self.fills_summary(),
+            world_runtime=self.world_awareness_runtime_status(),
+            archive=archive,
+            alerts=alerts,
+            ai_recommendations=self.ai_queue.list(),
+        )
+        return build_ai_context(
+            run_archive=archive,
+            action_center=action_center,
+            decision_explainer=self.explain_latest(),
+            pnl=self.pnl(),
+            tca=self.tca_dashboard(),
+            world_awareness=self.world_awareness(),
+            readiness=self.readiness(),
+            alerts=alerts,
+        )
+
+    def ai_analyze(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        context = self._ai_context()
+        recommendation = self.ai_gateway.analyze(context, payload)
+        queued = self.ai_queue.add(recommendation)
+        return {
+            "source": "AI_CHIEF_OPERATOR",
+            "status": queued.get("status"),
+            "recommendation": queued,
+            "context": {
+                "context_version": context["context_version"],
+                "raw_logs_included": context["raw_logs_included"],
+                "secrets_values_exposed": context["secrets_values_exposed"],
+                "advisory_only": context["advisory_only"],
+            },
+            "advisory_only": True,
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+        }
+
+    def ai_approve_paper_research(self, recommendation_id: str) -> dict[str, Any]:
+        return self.ai_queue.approve_paper_research(recommendation_id)
+
+    def ai_reject(self, recommendation_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        reason = (payload or {}).get("reason") if isinstance(payload, dict) else None
+        return self.ai_queue.reject(recommendation_id, reason=str(reason) if reason else None)
+
     def refused_intent(self, intent_name: str, reason: str) -> dict[str, Any]:
         return self.supervisor.generic_refusal(intent_name, reason)
 
@@ -618,6 +829,66 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.get("/latest-run")
     def latest_run() -> dict[str, Any]:
         return provider.latest_run()
+
+    @router.get("/runs")
+    def runs() -> dict[str, Any]:
+        return provider.runs()
+
+    @router.get("/runs/{run_id}/report")
+    def run_report(run_id: str) -> dict[str, Any]:
+        return provider.run_report(run_id)
+
+    @router.get("/runs/{run_id}")
+    def run_detail(run_id: str) -> dict[str, Any]:
+        return provider.run_detail(run_id)
+
+    @router.get("/explain/latest")
+    def explain_latest() -> dict[str, Any]:
+        return provider.explain_latest()
+
+    @router.get("/explain/decision/{frame_id}")
+    def explain_decision(frame_id: str) -> dict[str, Any]:
+        return provider.explain_decision(frame_id)
+
+    @router.get("/action-center")
+    def action_center() -> dict[str, Any]:
+        return provider.action_center()
+
+    @router.get("/pnl")
+    def pnl() -> dict[str, Any]:
+        return provider.pnl()
+
+    @router.get("/tca")
+    def tca_dashboard() -> dict[str, Any]:
+        return provider.tca_dashboard()
+
+    @router.get("/alerts")
+    def alerts() -> dict[str, Any]:
+        return provider.alerts()
+
+    @router.get("/system-map")
+    def system_map() -> dict[str, Any]:
+        return provider.system_map()
+
+    @router.get("/ai/status")
+    def ai_status() -> dict[str, Any]:
+        return provider.ai_status()
+
+    @router.get("/ai/recommendations")
+    def ai_recommendations() -> dict[str, Any]:
+        return provider.ai_recommendations()
+
+    @router.post("/ai/analyze")
+    def ai_analyze(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_analyze(payload)
+
+    @router.post("/ai/recommendations/{recommendation_id}/approve-paper-research")
+    def ai_approve_paper_research(recommendation_id: str) -> dict[str, Any]:
+        return provider.ai_approve_paper_research(recommendation_id)
+
+    @router.post("/ai/recommendations/{recommendation_id}/reject")
+    def ai_reject(recommendation_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_reject(recommendation_id, payload)
 
     @router.post("/intent/paper/start")
     def paper_start_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:

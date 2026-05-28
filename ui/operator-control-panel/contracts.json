@@ -356,6 +356,170 @@
       "paper_stop_allowed": false,
       "allowed_durations": [180, 300, 1200, 7200, 10800, 14400]
     },
+    "/operator/runs": {
+      "source": "OPERATOR_SESSION_STORE",
+      "archive_version": "operator-run-archive-v1",
+      "run_count": 0,
+      "runs": [
+        {
+          "run_id": "paper_x",
+          "session_id": "paper_x",
+          "start_time": "ISO-8601 or null",
+          "end_time": "ISO-8601 or null",
+          "duration_seconds": 300,
+          "mode": "PAPER",
+          "profile": "PAPER_EXPLORATION_ALPHA",
+          "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+          "git_commit": "sha or null",
+          "wrapper_log_paths": {"stdout": "path or null", "stderr": "path or null"},
+          "child_log_paths": {"stdout": "path or null", "stderr": "path or null"},
+          "exit_code": 0,
+          "orders": {"submitted": 0, "acknowledged": 0, "canceled": 0},
+          "fills": {
+            "observed": 0,
+            "fill_hydration_observed": false,
+            "broker_fee_hydration_observed": false
+          },
+          "tca": {"status": "OBSERVED | UNKNOWN", "observed": false},
+          "oms_shutdown_accounting": {"status": "OBSERVED | UNKNOWN", "observed": false},
+          "safety_markers": {
+            "live_marker": false,
+            "real_money_marker": false,
+            "unauthorized_mutation_marker": false,
+            "naked_sell_marker": false
+          },
+          "final_verdict": "PASS | CONDITIONAL_PASS | FAIL | UNKNOWN",
+          "reason_codes": [],
+          "report_path": "path or null"
+        }
+      ],
+      "stores_log_contents": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/runs/{run_id}": "same run record shape as /operator/runs entries or NOT_FOUND",
+    "/operator/runs/{run_id}/report": {
+      "report_version": "operator-run-report-v1",
+      "run_id": "paper_x",
+      "markdown": "generated markdown report",
+      "report_path": "state/operator/reports/paper_x.md",
+      "json_report_path": "state/operator/reports/paper_x.json",
+      "logs_mutated": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/explain/latest": {
+      "source": "DECISIONFRAME_SUMMARY | NO_ACTIVE_RUNTIME_ATTACHED",
+      "headline": "plain-English why trade/no-trade summary",
+      "evidence": [],
+      "blockers": [],
+      "next_best_action": "operator-safe next step",
+      "confidence": "LOW | MEDIUM | HIGH",
+      "missing_truth": [],
+      "scoring_changed": false
+    },
+    "/operator/explain/decision/{frame_id}": "same shape as /operator/explain/latest",
+    "/operator/action-center": {
+      "source": "OPERATOR_ACTION_CENTER",
+      "items": [
+        {
+          "action_id": "live_locked",
+          "type": "INFO | WARNING | BLOCKER | NEEDS_APPROVAL | SAFETY_CRITICAL",
+          "title": "operator item",
+          "detail": "safe detail",
+          "source": "readiness",
+          "requires_shan_approval": false,
+          "can_execute": false
+        }
+      ],
+      "safe_mutation_flags": {
+        "broker_call_occurred": false,
+        "trading_mutation_occurred": false,
+        "live_enabled": false,
+        "real_money_enabled": false,
+        "can_execute": false
+      },
+      "secrets_values_exposed": false
+    },
+    "/operator/pnl": {
+      "source": "OPERATOR_READ_ONLY_PNL_SUMMARY",
+      "realized_pnl": {"value": null, "truth_label": "unknown", "broker_confirmed": false},
+      "unrealized_pnl": {"value": null, "truth_label": "unknown", "broker_confirmed": false},
+      "net_pnl": {"value": null, "truth_label": "unknown", "broker_confirmed": false},
+      "fill_count": 0,
+      "fake_pnl_allowed": false,
+      "fake_fees_allowed": false,
+      "fake_tca_allowed": false
+    },
+    "/operator/tca": {
+      "source": "OPERATOR_READ_ONLY_TCA_DASHBOARD",
+      "status": "COMPLETE | PENDING_FEE_DETAIL | UNKNOWN",
+      "records": {"total": 0, "complete": 0, "unknown": 0, "estimated": 0, "fee_pending": 0},
+      "fake_fees_allowed": false,
+      "fake_tca_allowed": false
+    },
+    "/operator/alerts": {
+      "source": "OPERATOR_WATCHDOG",
+      "alerts": [
+        {
+          "alert_id": "no_active_runtime",
+          "severity": "INFO | WARNING | SAFETY_CRITICAL",
+          "title": "alert",
+          "detail": "detail",
+          "source": "watchdog source",
+          "acknowledged": false,
+          "can_execute": false
+        }
+      ],
+      "local_queue_only": true,
+      "external_delivery_enabled": false
+    },
+    "/operator/system-map": {
+      "source": "OPERATOR_SYSTEM_MAP",
+      "report_path": "reports/poverty_killer_system_map_operator_explainer.md",
+      "summary": "plain-English system sections",
+      "secrets_values_exposed": false
+    },
+    "/operator/ai/status": {
+      "source": "AI_CHIEF_OPERATOR",
+      "provider_state": "AI_DISABLED | MOCK_MODE | CREDENTIAL_MISSING | PROVIDER_READY | PROVIDER_ERROR | RATE_LIMITED | TIMEOUT",
+      "advisory_only": true,
+      "can_execute": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false,
+      "live_enabled": false,
+      "real_money_enabled": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/ai/recommendations": {
+      "source": "AI_CHIEF_GOVERNANCE_QUEUE",
+      "recommendations": [
+        {
+          "recommendation_id": "ai_rec_x",
+          "recommendation_type": "OBSERVATION | RISK_WARNING | STRATEGY_REVIEW | EXECUTION_QUALITY_REVIEW | WORLD_AWARENESS_SUMMARY | PAPER_EXPERIMENT_PROPOSAL | LIVE_READINESS_REVIEW | DO_NOT_TRADE_WARNING | SYSTEM_HEALTH_WARNING",
+          "status": "DRAFT | PENDING_REVIEW | APPROVED_FOR_PAPER_RESEARCH | REJECTED | EXPIRED | ESCALATED | LIVE_REQUIRES_SEPARATE_APPROVAL",
+          "can_execute": false,
+          "requires_shan_approval": true,
+          "authority_level": "ADVISORY_ONLY"
+        }
+      ]
+    },
+    "/operator/ai/analyze": {
+      "method": "POST",
+      "external_model_calls_default": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false,
+      "can_execute": false
+    },
+    "/operator/ai/recommendations/{id}/approve-paper-research": {
+      "method": "POST",
+      "paper_started": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false
+    },
+    "/operator/ai/recommendations/{id}/reject": {
+      "method": "POST",
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false
+    },
     "/operator/contracts": {
       "version": "operator-backend-v1",
       "read_only": true,
