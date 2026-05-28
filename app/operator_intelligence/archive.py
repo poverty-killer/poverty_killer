@@ -28,9 +28,59 @@ _FILL = ("FILL_LEDGER_HYDRATION", "fill_hydration_count", "broker_fill_ledger")
 _FEE = ("BROKER_FEE_HYDRATION", "broker_fee_hydration", "FEE_ACTIVITY_MATCHED", "BROKER_CFEE")
 _TCA = ("TCA", "tca_records_count", "realized_vs_modeled_netedge")
 _OMS = ("SHUTDOWN_RECONCILIATION", "OMS shutdown", "shutdown reconciliation")
-_CONFLICT = ("RECONCILIATION_CONFLICT", "FILL_LEDGER_CONFLICT", "FEE_ACTIVITY_CONFLICT", "CONFLICT")
-_LIVE = ("LIVE_ENDPOINT", "live_endpoint_touched", "LIVE_NOT_APPROVED_BYPASS")
-_REAL_MONEY = ("REAL_MONEY", "real_money_touched")
+_RECONCILIATION_CONFLICT_MARKERS = (
+    "RECONCILIATION_CONFLICT",
+    "OMS_RECONCILIATION_CONFLICT",
+    "OPEN_ORDER_CONFLICT",
+    "PENDING_TERMINAL_ORDER",
+    "ZOMBIE_ORDER",
+)
+_RECONCILIATION_CONFLICT_FIELDS = (
+    "reconciliation_conflict_count",
+    "reconciliation_conflicts",
+    "oms_reconciliation_conflict_count",
+    "oms_conflict_count",
+    "open_order_conflict_count",
+    "pending_terminal_order_count",
+    "pending_terminal_count",
+    "zombie_order_count",
+    "zombie_orders",
+    "local_open_without_broker_match_count",
+)
+_RECONCILIATION_CONFLICT_TRUE_FIELDS = (
+    "reconciliation_conflict",
+    "oms_reconciliation_conflict",
+    "oms_conflict",
+    "open_order_conflict",
+    "pending_terminal_order",
+    "zombie_order_detected",
+)
+_BROKER_FEE_CONFLICT_MARKERS = ("BROKER_FEE_HYDRATION_CONFLICT", "FEE_ACTIVITY_CONFLICT")
+_BROKER_FEE_CONFLICT_FIELDS = (
+    "broker_fee_hydration_conflict_count",
+    "broker_fee_activity_conflict_count",
+    "fee_hydration_conflict_count",
+)
+_BROKER_FEE_CONFLICT_TRUE_FIELDS = (
+    "broker_fee_hydration_conflict",
+    "broker_fee_activity_conflict",
+    "fee_hydration_conflict",
+)
+_LIVE_TRUE_MARKERS = (
+    "LIVE_ENDPOINT_USED_TRUE",
+    "LIVE_ENDPOINT_TOUCHED_TRUE",
+    "LIVE_ENDPOINT_MUTATION_TRUE",
+    "LIVE_MONEY_USED_TRUE",
+)
+_LIVE_TRUE_FIELDS = (
+    "live_endpoint_used",
+    "live_endpoint_touched",
+    "live_endpoint_mutation",
+    "live_money_used",
+    "live_money_touched",
+)
+_REAL_MONEY_TRUE_MARKERS = ("REAL_MONEY_USED_TRUE", "REAL_MONEY_TOUCHED_TRUE")
+_REAL_MONEY_TRUE_FIELDS = ("real_money_used", "real_money_touched", "real_money_enabled")
 _UNAUTHORIZED = ("UNAUTHORIZED_MUTATION", "unauthorized mutation", "guardrail bypass")
 _NAKED_SELL = ("NAKED_SELL", "naked SELL", "SELL_WITHOUT_POSITION_TRUTH")
 
@@ -73,6 +123,34 @@ def _count_markers(text: str, markers: tuple[str, ...]) -> int:
 def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
     upper = text.upper()
     return any(marker.upper() in upper for marker in markers)
+
+
+def _has_exact_marker(text: str, markers: tuple[str, ...]) -> bool:
+    upper = text.upper()
+    return any(
+        re.search(rf"(?<![A-Z0-9_]){re.escape(marker.upper())}(?![A-Z0-9_])", upper)
+        for marker in markers
+    )
+
+
+def _field_true(text: str, fields: tuple[str, ...]) -> bool:
+    for field_name in fields:
+        pattern = rf"(?<![A-Za-z0-9_])['\"]?{re.escape(field_name)}['\"]?\s*[:=]\s*(?:true|1|yes)\b"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def _field_positive_count(text: str, fields: tuple[str, ...]) -> bool:
+    for field_name in fields:
+        pattern = rf"(?<![A-Za-z0-9_])['\"]?{re.escape(field_name)}['\"]?\s*[:=]\s*([0-9]+)\b"
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            try:
+                if int(match.group(1)) > 0:
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 def _safe_read_tail(path: Path) -> str:
@@ -122,6 +200,7 @@ class RunLogEvidence:
     fills_observed: int = 0
     fill_hydration_observed: bool = False
     broker_fee_hydration_observed: bool = False
+    broker_fee_hydration_conflict_observed: bool = False
     tca_observed: bool = False
     oms_shutdown_accounting_observed: bool = False
     reconciliation_conflict_observed: bool = False
@@ -139,6 +218,7 @@ class RunLogEvidence:
             "fills_observed": self.fills_observed,
             "fill_hydration_observed": self.fill_hydration_observed,
             "broker_fee_hydration_observed": self.broker_fee_hydration_observed,
+            "broker_fee_hydration_conflict_observed": self.broker_fee_hydration_conflict_observed,
             "tca_observed": self.tca_observed,
             "oms_shutdown_accounting_observed": self.oms_shutdown_accounting_observed,
             "reconciliation_conflict_observed": self.reconciliation_conflict_observed,
@@ -180,13 +260,24 @@ def scan_run_logs(session: dict[str, Any], *, repo_root: Path) -> RunLogEvidence
     evidence.fills_observed = _count_markers(joined, _FILL)
     evidence.fill_hydration_observed = _has_marker(joined, _FILL)
     evidence.broker_fee_hydration_observed = _has_marker(joined, _FEE)
+    evidence.broker_fee_hydration_conflict_observed = (
+        _field_positive_count(joined, _BROKER_FEE_CONFLICT_FIELDS)
+        or _field_true(joined, _BROKER_FEE_CONFLICT_TRUE_FIELDS)
+        or _has_exact_marker(joined, _BROKER_FEE_CONFLICT_MARKERS)
+    )
     evidence.tca_observed = _has_marker(joined, _TCA)
     evidence.oms_shutdown_accounting_observed = _has_marker(joined, _OMS)
-    evidence.reconciliation_conflict_observed = _has_marker(joined, _CONFLICT)
+    evidence.reconciliation_conflict_observed = (
+        _field_positive_count(joined, _RECONCILIATION_CONFLICT_FIELDS)
+        or _field_true(joined, _RECONCILIATION_CONFLICT_TRUE_FIELDS)
+        or _has_exact_marker(joined, _RECONCILIATION_CONFLICT_MARKERS)
+    )
     evidence.fee_detail_pending_observed = "FEE_PENDING" in joined.upper() or "BROKER_FILL_FEE_DETAIL_UNAVAILABLE" in joined.upper()
+    live_true = _field_true(joined, _LIVE_TRUE_FIELDS) or _has_exact_marker(joined, _LIVE_TRUE_MARKERS)
+    real_money_true = _field_true(joined, _REAL_MONEY_TRUE_FIELDS) or _has_exact_marker(joined, _REAL_MONEY_TRUE_MARKERS)
     evidence.safety_markers = {
-        "live_marker": _has_marker(joined, _LIVE),
-        "real_money_marker": _has_marker(joined, _REAL_MONEY),
+        "live_marker": live_true or real_money_true,
+        "real_money_marker": real_money_true,
         "unauthorized_mutation_marker": _has_marker(joined, _UNAUTHORIZED),
         "naked_sell_marker": _has_marker(joined, _NAKED_SELL),
     }
@@ -226,6 +317,9 @@ def _verdict(session: dict[str, Any], evidence: RunLogEvidence) -> tuple[str, li
     if not evidence.oms_shutdown_accounting_observed:
         reason_codes.append("OMS_SHUTDOWN_ACCOUNTING_NOT_OBSERVED")
         conditional = True
+    if evidence.broker_fee_hydration_conflict_observed:
+        reason_codes.append("BROKER_FEE_HYDRATION_CONFLICT")
+        conditional = True
     if evidence.fee_detail_pending_observed or not evidence.broker_fee_hydration_observed:
         reason_codes.append("BROKER_FEE_DETAIL_PENDING_OR_UNOBSERVED")
         conditional = True
@@ -249,7 +343,9 @@ def build_run_record(
     session_id = str(session.get("session_id") or session.get("run_id") or "unknown_run")
     evidence = scan_run_logs(session, repo_root=repo_root)
     verdict, reason_codes = _verdict(session, evidence)
-    duration = _duration_seconds(session.get("started_at") or session.get("requested_at"), session.get("ended_at"))
+    observed_wall_clock_seconds = _duration_seconds(session.get("started_at") or session.get("requested_at"), session.get("ended_at"))
+    requested_duration_seconds = session.get("duration_seconds")
+    archive_updated_at = utc_now_iso()
     report_path = None
     if report_dir is not None:
         candidate = Path(report_dir) / f"{session_id}.md"
@@ -261,7 +357,9 @@ def build_run_record(
         "session_id": session_id,
         "start_time": session.get("started_at") or session.get("requested_at"),
         "end_time": session.get("ended_at"),
-        "duration_seconds": duration if duration is not None else session.get("duration_seconds"),
+        "duration_seconds": requested_duration_seconds if requested_duration_seconds is not None else observed_wall_clock_seconds,
+        "requested_duration_seconds": requested_duration_seconds,
+        "observed_wall_clock_seconds": observed_wall_clock_seconds,
         "mode": "PAPER",
         "profile": session.get("profile"),
         "watchlist": list(session.get("watchlist") or []),
@@ -285,6 +383,7 @@ def build_run_record(
             "observed": evidence.fills_observed,
             "fill_hydration_observed": evidence.fill_hydration_observed,
             "broker_fee_hydration_observed": evidence.broker_fee_hydration_observed,
+            "broker_fee_hydration_conflict_observed": evidence.broker_fee_hydration_conflict_observed,
         },
         "tca": {
             "status": "OBSERVED" if evidence.tca_observed else "UNKNOWN",
@@ -306,7 +405,8 @@ def build_run_record(
             "tca_faked": False,
             "logs_mutated": False,
         },
-        "updated_at": utc_now_iso(),
+        "archive_updated_at": archive_updated_at,
+        "updated_at": archive_updated_at,
     }
     return record
 

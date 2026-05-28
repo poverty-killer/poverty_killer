@@ -12,19 +12,27 @@ from app.operator_intelligence.system_map import render_system_map_markdown
 from app.operator_intelligence.watchdog import build_watchdog_alerts
 
 
-def _session(tmp_path: Path, log_text: str, *, exit_code: int | None = 0) -> dict:
+def _session(
+    tmp_path: Path,
+    log_text: str,
+    *,
+    exit_code: int | None = 0,
+    duration_seconds: int = 300,
+    started_at: str = "2026-05-27T12:00:01+00:00",
+    ended_at: str = "2026-05-27T12:05:01+00:00",
+) -> dict:
     log_path = tmp_path / "logs" / "operator_runs" / "paper.out.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(log_text, encoding="utf-8")
     return {
         "session_id": "paper_fixture",
         "requested_at": "2026-05-27T12:00:00+00:00",
-        "started_at": "2026-05-27T12:00:01+00:00",
-        "ended_at": "2026-05-27T12:05:01+00:00",
+        "started_at": started_at,
+        "ended_at": ended_at,
         "status": "EXITED",
         "profile": "PAPER_EXPLORATION_ALPHA",
         "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
-        "duration_seconds": 300,
+        "duration_seconds": duration_seconds,
         "exit_code": exit_code,
         "wrapper_stdout_path": str(log_path),
     }
@@ -60,6 +68,125 @@ def test_run_archive_parses_session_and_log_evidence(tmp_path):
     assert run["tca"]["status"] == "OBSERVED"
     assert run["oms_shutdown_accounting"]["status"] == "OBSERVED"
     assert run["final_verdict"] == "PASS"
+
+
+def test_run_archive_does_not_flag_live_policy_and_refusal_text_as_live_marker(tmp_path):
+    session = _session(
+        tmp_path,
+        "\n".join(
+            [
+                "live_endpoint_used=false",
+                "live_endpoint_touched=false",
+                "LIVE_LOCKED",
+                "LIVE_NOT_APPROVED",
+                "policy text mentioning live endpoint is not evidence",
+                "real_money_touched=false",
+                "ORDER_SUBMITTED",
+                "BROKER_FEE_HYDRATION",
+                "TCA",
+                "SHUTDOWN_RECONCILIATION",
+            ]
+        ),
+    )
+
+    run = RunArchive(sessions=[session], repo_root=tmp_path).list_runs()["runs"][0]
+
+    assert run["safety_markers"]["live_marker"] is False
+    assert run["safety_markers"]["real_money_marker"] is False
+    assert "LIVE_MARKER" not in run["reason_codes"]
+    assert run["final_verdict"] == "PASS"
+
+
+def test_run_archive_flags_only_explicit_true_live_or_real_money_evidence(tmp_path):
+    live_session = _session(
+        tmp_path,
+        "\n".join(
+            [
+                "live_endpoint_used=true",
+                "BROKER_FEE_HYDRATION",
+                "TCA",
+                "SHUTDOWN_RECONCILIATION",
+            ]
+        ),
+    )
+
+    run = RunArchive(sessions=[live_session], repo_root=tmp_path).list_runs()["runs"][0]
+
+    assert run["safety_markers"]["live_marker"] is True
+    assert "LIVE_MARKER" in run["reason_codes"]
+    assert run["final_verdict"] == "FAIL"
+
+    real_money_path = tmp_path / "logs" / "operator_runs" / "real_money.out.log"
+    real_money_path.write_text(
+        "real_money_touched=true\nBROKER_FEE_HYDRATION\nTCA\nSHUTDOWN_RECONCILIATION\n",
+        encoding="utf-8",
+    )
+    real_money_session = dict(live_session, session_id="paper_real_money", wrapper_stdout_path=str(real_money_path))
+    real_money_run = RunArchive(sessions=[real_money_session], repo_root=tmp_path).list_runs()["runs"][0]
+
+    assert real_money_run["safety_markers"]["live_marker"] is True
+    assert real_money_run["safety_markers"]["real_money_marker"] is True
+    assert "LIVE_MARKER" in real_money_run["reason_codes"]
+    assert "REAL_MONEY_MARKER" in real_money_run["reason_codes"]
+
+
+def test_broker_fee_hydration_conflict_is_conditional_not_reconciliation_failure(tmp_path):
+    session = _session(
+        tmp_path,
+        "\n".join(
+            [
+                "broker_fee_hydration_conflict_count=1",
+                "BROKER_FEE_HYDRATION",
+                "TCA",
+                "SHUTDOWN_RECONCILIATION",
+            ]
+        ),
+    )
+
+    run = RunArchive(sessions=[session], repo_root=tmp_path).list_runs()["runs"][0]
+
+    assert run["log_evidence"]["broker_fee_hydration_conflict_observed"] is True
+    assert run["log_evidence"]["reconciliation_conflict_observed"] is False
+    assert "BROKER_FEE_HYDRATION_CONFLICT" in run["reason_codes"]
+    assert "RECONCILIATION_OR_LEDGER_CONFLICT" not in run["reason_codes"]
+    assert run["final_verdict"] == "CONDITIONAL_PASS"
+
+
+def test_explicit_reconciliation_conflict_still_fails_run_archive(tmp_path):
+    session = _session(
+        tmp_path,
+        "\n".join(
+            [
+                "reconciliation_conflict_count=1",
+                "BROKER_FEE_HYDRATION",
+                "TCA",
+                "SHUTDOWN_RECONCILIATION",
+            ]
+        ),
+    )
+
+    run = RunArchive(sessions=[session], repo_root=tmp_path).list_runs()["runs"][0]
+
+    assert run["log_evidence"]["reconciliation_conflict_observed"] is True
+    assert "RECONCILIATION_OR_LEDGER_CONFLICT" in run["reason_codes"]
+    assert run["final_verdict"] == "FAIL"
+
+
+def test_run_archive_splits_requested_duration_from_observed_wall_clock(tmp_path):
+    session = _session(
+        tmp_path,
+        "BROKER_FEE_HYDRATION\nTCA\nSHUTDOWN_RECONCILIATION\n",
+        duration_seconds=300,
+        started_at="2026-05-27T12:00:00+00:00",
+        ended_at="2026-05-27T12:09:24+00:00",
+    )
+
+    run = RunArchive(sessions=[session], repo_root=tmp_path).list_runs()["runs"][0]
+
+    assert run["duration_seconds"] == 300
+    assert run["requested_duration_seconds"] == 300
+    assert run["observed_wall_clock_seconds"] == 564
+    assert run["archive_updated_at"]
 
 
 def test_report_generator_writes_markdown_and_json_without_mutating_logs(tmp_path):
