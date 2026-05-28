@@ -13,7 +13,8 @@
   "data_source_labels": [
     "MOCK_DATA",
     "READ_ONLY_BACKEND",
-    "OPERATOR_BACKEND"
+    "OPERATOR_BACKEND",
+    "PARTIAL_BACKEND"
   ],
   "readOnlyEndpoints": {
     "/operator/status": {
@@ -101,7 +102,7 @@
       "secrets_values_exposed": false
     },
     "/operator/runtime": {
-      "process_state": "RUNNING | STOPPED | NO_ACTIVE_RUNTIME_ATTACHED",
+      "process_state": "RUNNING | STOPPED | REFUSED | NO_ACTIVE_RUNTIME_ATTACHED",
       "launch_command": "redacted command or null",
       "duration_seconds": 0,
       "started_at": "ISO-8601 or null",

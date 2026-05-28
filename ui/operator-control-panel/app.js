@@ -21,6 +21,13 @@
     ["diagnostics", "Diagnostics"],
     ["live", "Live Readiness"]
   ];
+  const DEFAULT_BACKEND_FETCH_TIMEOUT_MS = 10000;
+  const HEAVY_BACKEND_FETCH_TIMEOUT_MS = 15000;
+  const HEAVY_BACKEND_ENDPOINTS = new Set([
+    "/operator/runs",
+    "/operator/action-center",
+    "/operator/alerts"
+  ]);
 
   function softBreakToken(value) {
     return escapeHtml(String(value))
@@ -60,6 +67,7 @@
 
   function statusColor(value) {
     const v = String(value).toUpperCase();
+    if (v.includes("NO_ACTIVE") || v.includes("REFUSED")) return "yellow";
     if (v.includes("PASS") || v.includes("ALLOW") || v.includes("CLEAN") || v.includes("RUNNING") || v.includes("PAPER")) return "green";
     if (v.includes("UNKNOWN") || v.includes("MISSING") || v.includes("DEGRADED") || v.includes("NO_TRADE") || v.includes("DECLINED")) return "yellow";
     if (v.includes("BLOCK") || v.includes("LOCK") || v.includes("DENY") || v.includes("CONFLICT") || v.includes("LIVE")) return "red";
@@ -67,11 +75,25 @@
   }
 
   function dataSourceColor() {
-    return data.meta.dataSource === "MOCK_DATA" ? "yellow" : "green";
+    if (data.meta.dataSource === "OPERATOR_BACKEND") return "green";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return "yellow";
+    return "yellow";
   }
 
   function sourceLabel() {
-    return data.meta.dataSource === "OPERATOR_BACKEND" ? "OPERATOR_BACKEND / read-only" : "MOCK DATA / sample";
+    if (data.meta.dataSource === "OPERATOR_BACKEND") return "OPERATOR_BACKEND / read-only";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return "PARTIAL_BACKEND / status connected";
+    return "MOCK DATA / sample";
+  }
+
+  function sourceSubtext() {
+    if (data.meta.dataSource === "OPERATOR_BACKEND") return "OPERATOR_BACKEND / runtime truth";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return "PARTIAL_BACKEND / secondary endpoint degraded";
+    return "MOCK DATA / sample fallback";
+  }
+
+  function backendConnected() {
+    return data.meta.dataSource === "OPERATOR_BACKEND" || data.meta.dataSource === "PARTIAL_BACKEND";
   }
 
   function table(headers, rows) {
@@ -123,9 +145,7 @@
     const endpointLabel = String(s.endpoint || "").includes("paper-api") ? "PAPER endpoint" : pick(s.endpoint, "endpoint unknown");
     const brandSubtext = document.querySelector(".brand .muted.mono");
     if (brandSubtext) {
-      brandSubtext.textContent = data.meta.dataSource === "OPERATOR_BACKEND"
-        ? "OPERATOR_BACKEND / runtime truth"
-        : "MOCK DATA / sample fallback";
+      brandSubtext.textContent = sourceSubtext();
     }
     document.querySelector(".status-strip").innerHTML = [
       badge(sourceLabel(), dataSourceColor()),
@@ -306,6 +326,7 @@
 
   function renderActivity() {
     const sup = data.supervisor;
+    const duration = sup.durationSeconds === null || sup.durationSeconds === undefined ? "not active" : `${sup.durationSeconds}s`;
     return `
       ${header("Bot Activity Control", "Governed PAPER intents only. Live and manual trading remain locked.", sourceLabel())}
       <div class="grid">
@@ -319,8 +340,9 @@
         <div class="card span-6"><h3>Supervisor Session</h3>${kv([
           ["Supervisor", badge(sup.state, statusColor(sup.state))],
           ["Session", escapeHtml(sup.sessionId || "none")],
+          ["Paper start", badge(sup.paperStartAllowed ? "allowed" : "blocked", sup.paperStartAllowed ? "green" : "yellow")],
           ["PID", escapeHtml(sup.pid || "none")],
-          ["Duration", escapeHtml(`${sup.durationSeconds || "unknown"}s`)],
+          ["Duration", escapeHtml(duration)],
           ["Wrapper stdout", escapeHtml(sup.wrapperStdoutPath || sup.stdoutPath || "not available")],
           ["Wrapper stderr", escapeHtml(sup.wrapperStderrPath || sup.stderrPath || "not available")],
           ["Child stdout", escapeHtml(sup.childStdoutPath || "not available")],
@@ -337,6 +359,7 @@
             <button class="intent-button paper" disabled>Export run report - future server-authorized intent</button>
             <button class="intent-button live" disabled>Live start locked - LIVE_NOT_APPROVED</button>
             <div class="notice mono">Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
+            <div class="notice mono">Last refused intent: ${sup.lastRefusedIntent ? tokenText(sup.lastRefusedIntent) : "none"}</div>
           </div>
         </div>
       </div>
@@ -448,7 +471,7 @@
         )}</div>
         <div class="card span-12"><h3>Advisory Analyze</h3>
           <div class="stack">
-            <button class="intent-button paper" data-intent="ai-analyze" ${data.meta.dataSource === "OPERATOR_BACKEND" ? "" : "disabled"}>
+            <button class="intent-button paper" data-intent="ai-analyze" ${backendConnected() ? "" : "disabled"}>
               Run advisory AI analysis
             </button>
             <div class="notice mono">Last AI result: ${escapeHtml(ai.lastAnalyzeResult || "none")}</div>
@@ -506,7 +529,7 @@
         )}</div>
         <div class="card span-12"><h3>Manual Read-only Poll</h3>
           <div class="stack">
-            <button class="intent-button paper" data-intent="world-poll" ${data.meta.dataSource === "OPERATOR_BACKEND" ? "" : "disabled"}>
+            <button class="intent-button paper" data-intent="world-poll" ${backendConnected() ? "" : "disabled"}>
               Poll Alpaca News - read-only provider intent
             </button>
             <div class="notice mono">Runtime: ${escapeHtml(data.worldRuntime.manualPollOnly ? "manual poll only" : "unknown")} | Active polling: ${escapeHtml(String(data.worldRuntime.providerPollingActive))} | Last poll: ${escapeHtml(data.worldRuntime.lastPollResult || "none")}</div>
@@ -534,6 +557,9 @@
     return `
       ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", sourceLabel())}
       <div class="card">${kv([
+        ["Backend source", badge(sourceLabel(), dataSourceColor())],
+        ["Backend fetch", escapeHtml(data.meta.backendStatus || "not inspected")],
+        ["Failed endpoints", data.meta.fetchFailures && data.meta.fetchFailures.length ? tokenText(data.meta.fetchFailures.join(", ")) : "none"],
         ["Health", badge(d.healthStatus, statusColor(d.healthStatus))],
         ["Runtime profile", badge(d.runtimeProfile, "cyan")],
         ["Hosted mode", badge(String(d.hostedMode), d.hostedMode ? "yellow" : "gray")],
@@ -630,19 +656,73 @@
     showScreen("command");
   }
 
+  function backendFetchTimeoutMs(path) {
+    return HEAVY_BACKEND_ENDPOINTS.has(path) ? HEAVY_BACKEND_FETCH_TIMEOUT_MS : DEFAULT_BACKEND_FETCH_TIMEOUT_MS;
+  }
+
+  function normalizeFetchError(path, error, timedOut, timeoutMs) {
+    const message = timedOut
+      ? `timeout after ${timeoutMs}ms`
+      : (error && (error.message || error.name) ? (error.message || error.name) : "fetch_failed");
+    const normalized = new Error(message);
+    normalized.endpoint = path;
+    normalized.name = error && error.name ? error.name : "FetchError";
+    normalized.timedOut = timedOut === true;
+    normalized.lifecycleAbort = timedOut !== true && error && error.name === "AbortError";
+    return normalized;
+  }
+
   async function fetchJson(path) {
+    const timeoutMs = backendFetchTimeoutMs(path);
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 1500);
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      try {
+        controller.abort(new Error(`timeout after ${timeoutMs}ms`));
+      } catch (_error) {
+        controller.abort();
+      }
+    }, timeoutMs);
     try {
       const response = await fetch(`${operatorApiBase()}${path}`, {
         cache: "no-store",
         signal: controller.signal
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const error = new Error(`HTTP ${response.status}`);
+        error.endpoint = path;
+        throw error;
+      }
       return await response.json();
+    } catch (error) {
+      throw normalizeFetchError(path, error, timedOut, timeoutMs);
     } finally {
       window.clearTimeout(timeout);
     }
+  }
+
+  function describeFetchFailure(path, error) {
+    const reason = error && (error.message || error.name) ? (error.message || error.name) : "fetch_failed";
+    return `${path}: ${reason}`;
+  }
+
+  function logBackendFetchFailure(path, error) {
+    if (!window.console || !window.console.warn) return;
+    window.console.warn("[operator-ui] backend endpoint fetch failed", {
+      endpoint: path,
+      error: error && error.name ? error.name : "Error",
+      message: error && error.message ? error.message : "fetch_failed"
+    });
+  }
+
+  function logBackendFetchAbort(path, error) {
+    if (!window.console || !window.console.info) return;
+    window.console.info("[operator-ui] backend endpoint fetch aborted without downgrade", {
+      endpoint: path,
+      error: error && error.name ? error.name : "AbortError",
+      message: error && error.message ? error.message : "request aborted"
+    });
   }
 
   function normalizeBackendData(payload) {
@@ -671,15 +751,24 @@
     const systemMap = payload.systemMap || {};
     const aiStatus = payload.aiStatus || {};
     const aiRecommendations = payload.aiRecommendations || {};
+    const endpointFailures = payload.endpointFailures || {};
     const supervisor = status.supervisor || latestRun || {};
-    const activeSession = supervisor.active_session || supervisor.latest_session || {};
+    const activeSession = supervisor.active_session || {};
+    const latestSession = supervisor.latest_session || latestRun.latest_session || {};
+    const hasActiveSession = Boolean(activeSession && activeSession.session_id);
+    const latestRefused = latestSession.status === "REFUSED" || runtime.process_state === "REFUSED";
+    const latestRefusalReason = pick(latestSession.refusal_reason || runtime.refusal_reason, null);
+    const latestRefusedIntent = latestRefused
+      ? `paper_start: ${latestRefusalReason || "REFUSED"}${latestSession.session_id ? ` (${latestSession.session_id})` : ""}`
+      : null;
 
     next.meta.dataSource = "OPERATOR_BACKEND";
     next.meta.buildMode = "operator_backend_supervisor_ready";
     next.meta.runtimeCommit = pick(runtime.runtime_commit, diagnostics.git_commit || "unknown");
     next.meta.lastUpdated = pick(status.updated_at, new Date().toISOString());
 
-    next.status.botStatus = pick(status.bot_status, "NO_ACTIVE_RUNTIME_ATTACHED");
+    const backendBotStatus = pick(status.bot_status, "NO_ACTIVE_RUNTIME_ATTACHED");
+    next.status.botStatus = backendBotStatus === "NO_ACTIVE_RUNTIME_ATTACHED" ? "NO_ACTIVE_PAPER_RUN" : backendBotStatus;
     next.status.runtimeMode = pick(status.runtime_mode, "PAPER");
     next.status.capabilityState = pick(status.capability_state || status.mode_state, "PAPER_ENABLED");
     next.status.activeProfile = pick(status.active_profile || profile.active_threshold_profile, "UNKNOWN_NO_ACTIVE_RUNTIME");
@@ -688,7 +777,9 @@
     next.status.marketData = pick(status.market_data, "UNKNOWN_NO_ACTIVE_RUNTIME");
     next.status.universe = Array.isArray(status.universe) && status.universe.length ? status.universe : pick(universe.symbols, []);
     next.status.assetClasses = Array.isArray(status.asset_classes) && status.asset_classes.length ? status.asset_classes : pick(universe.asset_classes, []);
-    next.status.uptime = runtime.duration_seconds === null || runtime.duration_seconds === undefined ? "no active runtime" : `${runtime.duration_seconds}s`;
+    next.status.uptime = hasActiveSession && runtime.duration_seconds !== null && runtime.duration_seconds !== undefined
+      ? `${runtime.duration_seconds}s`
+      : "no active runtime";
     next.status.lastHeartbeat = pick(status.last_heartbeat_ts, "unknown");
     next.status.liveBlocked = status.live_blocked !== false;
     next.status.realMoneyBlocked = status.real_money_blocked !== false;
@@ -697,24 +788,27 @@
     next.status.mutationAuthorizedCount = pick(status.mutation_authorized_count, 0);
     next.status.safetyVerdict = pick(status.safety_verdict, "READ_ONLY_BACKEND_IDLE");
     next.status.dominantBlocker = pick(status.dominant_blocker, "NO_ACTIVE_RUNTIME_ATTACHED");
-    next.status.lastDecision = runtime.process_state === "NO_ACTIVE_RUNTIME_ATTACHED" ? "No active runtime attached" : next.status.lastDecision;
+    next.status.lastDecision = hasActiveSession
+      ? "Decision detail unavailable from backend summary"
+      : (latestRefusedIntent ? `No active PAPER run; last refused intent ${latestRefusedIntent}` : "No active PAPER run");
     next.supervisor.state = pick(supervisor.state, "UNKNOWN");
-    next.supervisor.sessionId = pick(activeSession.session_id || supervisor.active_session_id, "none");
-    next.supervisor.pid = pick(activeSession.pid || runtime.pid, "none");
-    next.supervisor.processState = pick(activeSession.status || runtime.process_state, "UNKNOWN");
-    next.supervisor.durationSeconds = pick(activeSession.duration_seconds || runtime.duration_seconds, 300);
-    next.supervisor.profile = pick(activeSession.profile || status.active_profile, "PAPER_EXPLORATION_ALPHA");
-    next.supervisor.watchlist = pick(activeSession.watchlist || status.universe, ["BTC/USD", "ETH/USD", "SOL/USD"]);
-    next.supervisor.stdoutPath = pick(activeSession.stdout_path || runtime.stdout_path, "not available");
-    next.supervisor.stderrPath = pick(activeSession.stderr_path || runtime.stderr_path, "not available");
-    next.supervisor.wrapperStdoutPath = pick(activeSession.wrapper_stdout_path || runtime.wrapper_stdout_path, next.supervisor.stdoutPath);
-    next.supervisor.wrapperStderrPath = pick(activeSession.wrapper_stderr_path || runtime.wrapper_stderr_path, next.supervisor.stderrPath);
-    next.supervisor.childStdoutPath = pick(activeSession.child_stdout_path || runtime.child_stdout_path, "not available");
-    next.supervisor.childStderrPath = pick(activeSession.child_stderr_path || runtime.child_stderr_path, "not available");
+    next.supervisor.sessionId = hasActiveSession ? pick(activeSession.session_id || supervisor.active_session_id, "none") : "none";
+    next.supervisor.pid = hasActiveSession ? pick(activeSession.pid || runtime.pid, "none") : "none";
+    next.supervisor.processState = hasActiveSession ? pick(activeSession.status || runtime.process_state, "UNKNOWN") : "NO_ACTIVE_PAPER_RUN";
+    next.supervisor.durationSeconds = hasActiveSession ? pick(activeSession.duration_seconds || runtime.duration_seconds, null) : null;
+    next.supervisor.profile = hasActiveSession ? pick(activeSession.profile || status.active_profile, "UNKNOWN_NO_ACTIVE_RUNTIME") : "UNKNOWN_NO_ACTIVE_RUNTIME";
+    next.supervisor.watchlist = hasActiveSession ? pick(activeSession.watchlist || status.universe, []) : [];
+    next.supervisor.stdoutPath = hasActiveSession ? pick(activeSession.stdout_path || runtime.stdout_path, "not available") : "not available";
+    next.supervisor.stderrPath = hasActiveSession ? pick(activeSession.stderr_path || runtime.stderr_path, "not available") : "not available";
+    next.supervisor.wrapperStdoutPath = hasActiveSession ? pick(activeSession.wrapper_stdout_path || runtime.wrapper_stdout_path, next.supervisor.stdoutPath) : "not available";
+    next.supervisor.wrapperStderrPath = hasActiveSession ? pick(activeSession.wrapper_stderr_path || runtime.wrapper_stderr_path, next.supervisor.stderrPath) : "not available";
+    next.supervisor.childStdoutPath = hasActiveSession ? pick(activeSession.child_stdout_path || runtime.child_stdout_path, "not available") : "not available";
+    next.supervisor.childStderrPath = hasActiveSession ? pick(activeSession.child_stderr_path || runtime.child_stderr_path, "not available") : "not available";
     next.supervisor.paperStartAllowed = supervisor.paper_start_allowed === true || runtime.paper_start_allowed === true;
     next.supervisor.paperStopAllowed = supervisor.paper_stop_allowed === true || runtime.paper_stop_allowed === true;
     next.supervisor.paperStartRefusalReason = pick(supervisor.paper_start_refusal_reason || runtime.paper_start_refusal_reason, null);
     next.supervisor.paperStopRefusalReason = pick(supervisor.paper_stop_refusal_reason || runtime.paper_stop_refusal_reason, null);
+    next.supervisor.lastRefusedIntent = latestRefusedIntent;
 
     next.liveReadiness.state = pick(readiness.live_status, "LIVE_LOCKED");
     next.liveReadiness.refusal = pick(readiness.refusal_reason, "LIVE_NOT_APPROVED");
@@ -753,6 +847,13 @@
       }));
       next.runArchive.latestVerdict = next.runArchive.runs.length ? next.runArchive.runs[0].finalVerdict : "UNKNOWN";
       next.runArchive.reportStatus = "on demand";
+    } else {
+      next.runArchive.runCount = 0;
+      next.runArchive.runs = [];
+      next.runArchive.latestVerdict = "UNKNOWN";
+      next.runArchive.reportStatus = endpointFailures.runs
+        ? `degraded: ${endpointFailures.runs}`
+        : "endpoint not loaded";
     }
     next.explanation = {
       headline: pick(explain.headline, next.explanation.headline),
@@ -780,6 +881,22 @@
         BLOCKER: pick(actionCenter.counts && actionCenter.counts.BLOCKER, 0),
         NEEDS_APPROVAL: pick(actionCenter.counts && actionCenter.counts.NEEDS_APPROVAL, 0),
         SAFETY_CRITICAL: pick(actionCenter.counts && actionCenter.counts.SAFETY_CRITICAL, 0)
+      };
+    } else {
+      const degraded = endpointFailures.actionCenter;
+      next.actionCenter.items = degraded ? [{
+        type: "WARNING",
+        title: "Action Center endpoint degraded",
+        detail: degraded,
+        source: "operator-ui",
+        canExecute: false
+      }] : [];
+      next.actionCenter.counts = {
+        INFO: 0,
+        WARNING: degraded ? 1 : 0,
+        BLOCKER: 0,
+        NEEDS_APPROVAL: 0,
+        SAFETY_CRITICAL: 0
       };
     }
     if (pnlDashboard.source) {
@@ -821,6 +938,15 @@
         acknowledged: alert.acknowledged === true,
         canExecute: alert.can_execute === true
       }));
+    } else {
+      next.alerts = endpointFailures.alerts ? [{
+        severity: "WARNING",
+        title: "Watchdog alerts endpoint degraded",
+        detail: endpointFailures.alerts,
+        source: "operator-ui",
+        acknowledged: false,
+        canExecute: false
+      }] : [];
     }
     if (systemMap.summary) {
       next.systemMap.reportPath = pick(systemMap.report_path || systemMap.summary.report_path, next.systemMap.reportPath);
@@ -922,42 +1048,71 @@
   }
 
   async function loadData() {
+    let status;
     try {
-      const [status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime, runs, explain, actionCenter, pnlDashboard, tcaDashboard, alerts, systemMap, aiStatus, aiRecommendations] = await Promise.all([
-        fetchJson("/operator/status"),
-        fetchJson("/operator/health"),
-        fetchJson("/operator/readiness"),
-        fetchJson("/operator/storage"),
-        fetchJson("/operator/runtime"),
-        fetchJson("/operator/profile"),
-        fetchJson("/operator/universe"),
-        fetchJson("/operator/readiness/live"),
-        fetchJson("/operator/diagnostics"),
-        fetchJson("/operator/contracts"),
-        fetchJson("/operator/latest-run"),
-        fetchJson("/operator/orders-summary"),
-        fetchJson("/operator/fills-summary"),
-        fetchJson("/operator/tca-summary"),
-        fetchJson("/operator/audit-summary"),
-        fetchJson("/operator/world-awareness"),
-        fetchJson("/operator/world-awareness/runtime"),
-        fetchJson("/operator/runs"),
-        fetchJson("/operator/explain/latest"),
-        fetchJson("/operator/action-center"),
-        fetchJson("/operator/pnl"),
-        fetchJson("/operator/tca"),
-        fetchJson("/operator/alerts"),
-        fetchJson("/operator/system-map"),
-        fetchJson("/operator/ai/status"),
-        fetchJson("/operator/ai/recommendations")
-      ]);
-      return normalizeBackendData({ status, health, operatorReadiness, storage, runtime, profile, universe, readiness, diagnostics, contracts, latestRun, orders, fills, tca, audit, world, worldRuntime, runs, explain, actionCenter, pnlDashboard, tcaDashboard, alerts, systemMap, aiStatus, aiRecommendations });
+      status = await fetchJson("/operator/status");
     } catch (error) {
+      logBackendFetchFailure("/operator/status", error);
       const fallback = clone(mockData);
       fallback.meta.dataSource = "MOCK_DATA";
-      fallback.meta.backendStatus = `backend unavailable: ${error.name || "fetch_failed"}`;
+      fallback.meta.backendStatus = `backend unavailable: ${describeFetchFailure("/operator/status", error)}`;
+      fallback.meta.fetchFailures = [describeFetchFailure("/operator/status", error)];
       return fallback;
     }
+
+    const endpoints = [
+      ["health", "/operator/health"],
+      ["operatorReadiness", "/operator/readiness"],
+      ["storage", "/operator/storage"],
+      ["runtime", "/operator/runtime"],
+      ["profile", "/operator/profile"],
+      ["universe", "/operator/universe"],
+      ["readiness", "/operator/readiness/live"],
+      ["diagnostics", "/operator/diagnostics"],
+      ["contracts", "/operator/contracts"],
+      ["latestRun", "/operator/latest-run"],
+      ["orders", "/operator/orders-summary"],
+      ["fills", "/operator/fills-summary"],
+      ["tca", "/operator/tca-summary"],
+      ["audit", "/operator/audit-summary"],
+      ["world", "/operator/world-awareness"],
+      ["worldRuntime", "/operator/world-awareness/runtime"],
+      ["runs", "/operator/runs"],
+      ["explain", "/operator/explain/latest"],
+      ["actionCenter", "/operator/action-center"],
+      ["pnlDashboard", "/operator/pnl"],
+      ["tcaDashboard", "/operator/tca"],
+      ["alerts", "/operator/alerts"],
+      ["systemMap", "/operator/system-map"],
+      ["aiStatus", "/operator/ai/status"],
+      ["aiRecommendations", "/operator/ai/recommendations"]
+    ];
+    const payload = { status };
+    const failures = [];
+    const endpointFailures = {};
+    await Promise.all(endpoints.map(async ([key, path]) => {
+      try {
+        payload[key] = await fetchJson(path);
+      } catch (error) {
+        if (error && error.lifecycleAbort === true) {
+          logBackendFetchAbort(path, error);
+          return;
+        }
+        const failure = describeFetchFailure(path, error);
+        logBackendFetchFailure(path, error);
+        failures.push(failure);
+        endpointFailures[key] = failure;
+      }
+    }));
+    payload.endpointFailures = endpointFailures;
+
+    const normalized = normalizeBackendData(payload);
+    normalized.meta.dataSource = failures.length ? "PARTIAL_BACKEND" : "OPERATOR_BACKEND";
+    normalized.meta.backendStatus = failures.length
+      ? `status connected; ${failures.length} secondary endpoint(s) failed`
+      : "backend connected";
+    normalized.meta.fetchFailures = failures;
+    return normalized;
   }
 
   async function boot() {
@@ -979,7 +1134,7 @@
   }
 
   async function handleIntent(intent) {
-    if (data.meta.dataSource !== "OPERATOR_BACKEND") return;
+    if (!backendConnected()) return;
     try {
       let message = "none";
       if (intent === "paper-start") {
