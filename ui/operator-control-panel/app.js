@@ -22,8 +22,23 @@
     ["live", "Live Readiness"]
   ];
 
+  function softBreakToken(value) {
+    return escapeHtml(String(value))
+      .replaceAll("_", "_<wbr>")
+      .replaceAll("/", "/<wbr>")
+      .replaceAll("-", "-<wbr>")
+      .replaceAll(", ", ", <wbr>");
+  }
+
   function badge(text, color) {
-    return `<span class="badge ${color || "gray"}">${escapeHtml(String(text))}</span>`;
+    const raw = String(text);
+    const sizeClass = raw.length > 18 ? "token-long" : "token-short";
+    return `<span class="badge ${color || "gray"} ${sizeClass}" title="${escapeHtml(raw)}">${softBreakToken(raw)}</span>`;
+  }
+
+  function tokenText(text) {
+    const raw = String(text);
+    return `<span class="token-text" title="${escapeHtml(raw)}">${softBreakToken(raw)}</span>`;
   }
 
   function clone(value) {
@@ -55,14 +70,20 @@
     return data.meta.dataSource === "MOCK_DATA" ? "yellow" : "green";
   }
 
+  function sourceLabel() {
+    return data.meta.dataSource === "OPERATOR_BACKEND" ? "OPERATOR_BACKEND / read-only" : "MOCK DATA / sample";
+  }
+
   function table(headers, rows) {
     return `
-      <table class="table">
-        <thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
-        <tbody>
-          ${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}
-        </tbody>
-      </table>
+      <div class="table-wrap" tabindex="0">
+        <table class="table">
+          <thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
+          <tbody>
+            ${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
     `;
   }
 
@@ -100,8 +121,14 @@
   function renderTopBar() {
     const s = data.status;
     const endpointLabel = String(s.endpoint || "").includes("paper-api") ? "PAPER endpoint" : pick(s.endpoint, "endpoint unknown");
+    const brandSubtext = document.querySelector(".brand .muted.mono");
+    if (brandSubtext) {
+      brandSubtext.textContent = data.meta.dataSource === "OPERATOR_BACKEND"
+        ? "OPERATOR_BACKEND / runtime truth"
+        : "MOCK DATA / sample fallback";
+    }
     document.querySelector(".status-strip").innerHTML = [
-      badge(data.meta.dataSource, dataSourceColor()),
+      badge(sourceLabel(), dataSourceColor()),
       badge(s.runtimeMode, "green"),
       badge(s.activeProfile, "cyan"),
       badge(s.broker, "blue"),
@@ -280,7 +307,7 @@
   function renderActivity() {
     const sup = data.supervisor;
     return `
-      ${header("Bot Activity Control", "Governed PAPER intents only. Live and manual trading remain locked.", data.meta.dataSource)}
+      ${header("Bot Activity Control", "Governed PAPER intents only. Live and manual trading remain locked.", sourceLabel())}
       <div class="grid">
         <div class="card span-6"><h3>Runtime Snapshot</h3>${kv([
           ["Process", badge(data.status.botStatus, statusColor(data.status.botStatus))],
@@ -505,7 +532,7 @@
   function renderDiagnostics() {
     const d = data.diagnostics;
     return `
-      ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", data.meta.dataSource)}
+      ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", sourceLabel())}
       <div class="card">${kv([
         ["Health", badge(d.healthStatus, statusColor(d.healthStatus))],
         ["Runtime profile", badge(d.runtimeProfile, "cyan")],
@@ -549,7 +576,7 @@
     document.querySelector(".rail").innerHTML = `
       <div class="card rail-card"><h3>Current Alerts</h3>
         <div class="stack">
-          ${badge(data.meta.dataSource, dataSourceColor())}
+          ${badge(sourceLabel(), dataSourceColor())}
           ${badge("LIVE_LOCKED", "red")}
           ${badge("REAL_MONEY_BLOCKED", "red")}
           ${badge(`${data.alerts.length} watchdog`, data.alerts.length ? "yellow" : "gray")}
@@ -557,7 +584,7 @@
         </div>
       </div>
       <div class="card rail-card"><h3>Dominant Blocker</h3>
-        <div class="mono">${escapeHtml(data.status.dominantBlocker)}</div>
+        <div class="mono">${tokenText(data.status.dominantBlocker)}</div>
       </div>
       <div class="card rail-card"><h3>Last Decision</h3>
         <div>${escapeHtml(data.status.lastDecision)}</div>
