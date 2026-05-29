@@ -22,7 +22,12 @@ from app.ai_chief_operator.context_builder import build_ai_context, redact_secre
 from app.ai_chief_operator.governance_queue import GovernanceQueue
 from app.ai_chief_operator.models import normalize_recommendation
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
-from app.ai_chief_operator.quant_persona import draft_codex_packet, build_quant_review_recommendation, quant_persona_summary
+from app.ai_chief_operator.quant_persona import (
+    draft_codex_packet,
+    build_quant_review_recommendation,
+    classify_quant_prompt,
+    quant_persona_summary,
+)
 from app.operator_activation.launch_readiness import build_launch_readiness
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
@@ -34,6 +39,7 @@ from app.operator_intelligence.pnl_tca import build_pnl_summary, build_tca_dashb
 from app.operator_intelligence.reports import RunReportGenerator
 from app.operator_intelligence.system_map import SYSTEM_MAP_SUMMARY, render_system_map_markdown
 from app.operator_intelligence.watchdog import AlertQueue, build_watchdog_alerts
+from app.operator_historical_tests.service import HistoricalTestService
 from app.operator_portfolio.snapshot import ReadOnlyBrokerClient, build_portfolio_snapshot
 from app.operator_providers.readiness import provider_readiness_summary, validate_provider_readonly
 from app.operator_research.evidence_graph import build_evidence_graph
@@ -94,6 +100,7 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/system-map": "read_only_system_map_summary",
         "/operator/ai/status": "read_only_ai_chief_status",
         "/operator/ai/recommendations": "read_only_ai_governance_queue",
+        "/operator/ai/ask": "advisory_ai_question_answer_no_execution",
         "/operator/ai/analyze": "advisory_ai_analysis_governance_queue_only",
         "/operator/providers": "read_only_provider_setup_and_credential_readiness",
         "/operator/providers/readiness": "read_only_provider_readiness_summary",
@@ -115,6 +122,10 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/ai/draft-codex-packet": "advisory_ai_codex_packet_draft",
         "/operator/ai/recommendations/{id}/approve-paper-research": "governance_queue_paper_research_approval_only",
         "/operator/ai/recommendations/{id}/reject": "governance_queue_reject_only",
+        "/operator/historical-tests": "read_only_historical_test_registry",
+        "/operator/historical-tests/run": "advisory_historical_test_request_no_trading",
+        "/operator/historical-tests/{test_id}": "read_only_historical_test_detail",
+        "/operator/historical-tests/{test_id}/report": "read_only_historical_test_report",
     },
     "disabled_intents": {
         "/operator/intent/paper/start": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
@@ -158,6 +169,7 @@ class OperatorSnapshotProvider:
         provider_env: dict[str, str] | None = None,
         credential_store: LocalCredentialStore | None = None,
         portfolio_client: ReadOnlyBrokerClient | None = None,
+        historical_tests: HistoricalTestService | None = None,
     ) -> None:
         self.runtime_config = runtime_config or OperatorRuntimeConfig.from_env()
         self.process_env = provider_env if provider_env is not None else dict(os.environ)
@@ -201,6 +213,7 @@ class OperatorSnapshotProvider:
             path=self.runtime_config.operator_state_dir / "ai_governance_queue.jsonl"
         )
         self.research_registry = research_registry or ResearchRegistry()
+        self.historical_tests_service = historical_tests or HistoricalTestService()
 
     def _paper_process_env(self) -> dict[str, str]:
         return {
@@ -556,17 +569,42 @@ class OperatorSnapshotProvider:
         self.provider_env = self.credential_store.effective_env(self.process_env)
         self.supervisor.config.process_env = self._paper_process_env()
         self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(self.provider_env))
+        result.update(
+            {
+                "broker_call_occurred": False,
+                "trading_mutation_occurred": False,
+                "live_enabled": False,
+                "real_money_enabled": False,
+            }
+        )
         return result
 
     def credentials_validate_readonly(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         provider_id = str((payload or {}).get("provider_id") or "alpaca_paper")
-        return self.credential_store.validate_readonly(provider_id, self.process_env)
+        result = self.credential_store.validate_readonly(provider_id, self.process_env)
+        result.update(
+            {
+                "broker_call_occurred": False,
+                "trading_mutation_occurred": False,
+                "live_enabled": False,
+                "real_money_enabled": False,
+            }
+        )
+        return result
 
     def credentials_delete_provider(self, provider_id: str) -> dict[str, Any]:
         result = self.credential_store.delete_provider(provider_id)
         self.provider_env = self.credential_store.effective_env(self.process_env)
         self.supervisor.config.process_env = self._paper_process_env()
         self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(self.provider_env))
+        result.update(
+            {
+                "broker_call_occurred": False,
+                "trading_mutation_occurred": False,
+                "live_enabled": False,
+                "real_money_enabled": False,
+            }
+        )
         return result
 
     def portfolio(self) -> dict[str, Any]:
@@ -669,6 +707,18 @@ class OperatorSnapshotProvider:
             watchdog=self.alerts(),
             provider_readiness=self.providers(),
         )
+
+    def historical_tests(self) -> dict[str, Any]:
+        return self.historical_tests_service.summary()
+
+    def historical_test_run(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.historical_tests_service.run(payload or {})
+
+    def historical_test_detail(self, test_id: str) -> dict[str, Any]:
+        return self.historical_tests_service.detail(test_id)
+
+    def historical_test_report(self, test_id: str) -> dict[str, Any]:
+        return self.historical_tests_service.report(test_id)
 
     def audit_summary(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
@@ -879,6 +929,82 @@ class OperatorSnapshotProvider:
             "can_execute": False,
             "broker_call_occurred": False,
             "trading_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
+    def ai_ask(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        question = str(body.get("question") or body.get("prompt") or "").strip()
+        page_context = redact_secrets(body.get("page_context") if isinstance(body.get("page_context"), dict) else {})
+        context = self._ai_context()
+        gateway_status = self.ai_gateway.status()
+        provider = gateway_status.get("provider") or {}
+        provider_state = str(provider.get("provider_state") or "AI_DISABLED")
+        classification = classify_quant_prompt(question)
+        if not classification["allowed"]:
+            response = (
+                "Refused or redirected. AI Quant Research Chief only answers trading edge, "
+                "execution quality, risk, validation evidence, provider readiness, portfolio state, "
+                "and operator readiness questions. It cannot trade, call broker, enable live, "
+                "change thresholds, or handle secrets."
+            )
+            status = "REFUSED"
+            refusal_reason = classification["reason_code"]
+        else:
+            source_note = (
+                "No external model call was made; this is a deterministic advisory fallback."
+                if provider_state != "MOCK_MODE"
+                else "Mock mode is active; this is a deterministic mock advisory response."
+            )
+            evidence_graph = context.get("evidence_graph") or {}
+            providers = context.get("provider_readiness") or {}
+            action_center = context.get("action_center") or {}
+            items = action_center.get("items") or []
+            missing = evidence_graph.get("missing_evidence") or []
+            response = "\n".join(
+                [
+                    source_note,
+                    f"Question: {question or 'No question supplied.'}",
+                    f"Provider state: {provider_state}.",
+                    f"Operator blockers loaded: {len(items)}.",
+                    f"Provider count: {providers.get('provider_count', 0)}; missing credentials: {providers.get('missing_credentials_count', 0)}.",
+                    f"Missing evidence: {', '.join(str(item) for item in missing[:6]) or 'none loaded'}.",
+                    "Next safest action: review blockers and evidence labels before any bounded PAPER experiment. Unknown P&L, fees, fills, TCA, and market truth remain unknown.",
+                ]
+            )
+            status = "ANSWERED_FALLBACK"
+            refusal_reason = None
+        return {
+            "source": "AI_QUANT_RESEARCH_CHIEF_ASK",
+            "status": status,
+            "provider_state": provider_state,
+            "provider": provider.get("provider") or "disabled",
+            "response_source": "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" if provider_state != "MOCK_MODE" else "MOCK_MODE_DETERMINISTIC",
+            "question": question,
+            "response": response,
+            "classification": classification,
+            "refusal_reason": refusal_reason,
+            "page_context": {
+                "page_id": page_context.get("page_id"),
+                "page_title": page_context.get("page_title"),
+                "data_source": page_context.get("data_source"),
+                "raw_logs_included": False,
+                "secrets_values_exposed": False,
+            },
+            "context": {
+                "context_version": context["context_version"],
+                "scope": context.get("scope"),
+                "raw_logs_included": context["raw_logs_included"],
+                "secrets_values_exposed": context["secrets_values_exposed"],
+                "advisory_only": context["advisory_only"],
+            },
+            "advisory_only": True,
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "raw_logs_included": False,
             "secrets_values_exposed": False,
         }
 
@@ -1184,6 +1310,22 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     def research_evidence_graph() -> dict[str, Any]:
         return provider.research_evidence_graph()
 
+    @router.get("/historical-tests")
+    def historical_tests() -> dict[str, Any]:
+        return provider.historical_tests()
+
+    @router.post("/historical-tests/run")
+    def historical_test_run(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.historical_test_run(payload)
+
+    @router.get("/historical-tests/{test_id}/report")
+    def historical_test_report(test_id: str) -> dict[str, Any]:
+        return provider.historical_test_report(test_id)
+
+    @router.get("/historical-tests/{test_id}")
+    def historical_test_detail(test_id: str) -> dict[str, Any]:
+        return provider.historical_test_detail(test_id)
+
     @router.get("/alerts")
     def alerts() -> dict[str, Any]:
         return provider.alerts()
@@ -1199,6 +1341,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.get("/ai/recommendations")
     def ai_recommendations() -> dict[str, Any]:
         return provider.ai_recommendations()
+
+    @router.post("/ai/ask")
+    def ai_ask(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_ask(payload)
 
     @router.post("/ai/analyze")
     def ai_analyze(payload: dict[str, Any] | None = None) -> dict[str, Any]:

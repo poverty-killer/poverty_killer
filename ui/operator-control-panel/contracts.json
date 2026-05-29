@@ -1,5 +1,5 @@
 {
-  "version": "phase-6-operator-activation",
+  "version": "phase-7-operator-reality-audit-backtest-control",
   "mode": "read_only_operator_contracts",
   "ui_policy": {
     "paper_enabled_first": true,
@@ -20,6 +20,8 @@
     "context_version": "operator-ui-global-ai-context-v1",
     "available_on_all_pages": true,
     "page_aware": true,
+    "visible_freeform_question_box": true,
+    "ask_endpoint": "/operator/ai/ask",
     "advisory_only": true,
     "can_execute": false,
     "broker_call_occurred": false,
@@ -142,6 +144,34 @@
     "force_trade_available": false,
     "live_start_available": false,
     "real_money_available": false
+  },
+  "ui_wiring_audit_contract": {
+    "inventory_visible_in_diagnostics": true,
+    "allowed_control_statuses": [
+      "WIRED",
+      "DISABLED_WITH_REASON",
+      "NOT_IMPLEMENTED_VISIBLE",
+      "BROKEN",
+      "REMOVED"
+    ],
+    "decorative_controls_allowed": false,
+    "silent_clicks_allowed": false
+  },
+  "historical_alpaca_test_contract": {
+    "endpoint": "/operator/historical-tests/run",
+    "default_preset": "last_4_months",
+    "timeframes": ["1Min", "5Min", "15Min", "1Hour", "1Day"],
+    "historical_simulation_only": true,
+    "not_broker_confirmed": true,
+    "not_live_proof": true,
+    "not_future_profit_proof": true,
+    "fake_pnl_allowed": false,
+    "fake_fees_allowed": false,
+    "fake_tca_allowed": false,
+    "broker_trading_call_occurred": false,
+    "paper_started": false,
+    "live_enabled": false,
+    "real_money_enabled": false
   },
   "research_os_contract": {
     "registry_version": "operator-research-registry-v1",
@@ -799,6 +829,18 @@
       "trading_mutation_occurred": false,
       "can_execute": false
     },
+    "/operator/ai/ask": {
+      "method": "POST",
+      "freeform_question_supported": true,
+      "deterministic_fallback_when_provider_disabled": true,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false,
+      "live_enabled": false,
+      "real_money_enabled": false,
+      "raw_logs_included": false,
+      "secrets_values_exposed": false,
+      "can_execute": false
+    },
     "/operator/ai/quant-review": {
       "method": "POST",
       "persona": "AI Quant Research Chief / Trading Edge Advisor",
@@ -828,6 +870,37 @@
       "method": "POST",
       "broker_call_occurred": false,
       "trading_mutation_occurred": false
+    },
+    "/operator/historical-tests": {
+      "source": "OPERATOR_HISTORICAL_TESTS",
+      "presets": ["last_4_months"],
+      "timeframes": ["1Min", "5Min", "15Min", "1Hour", "1Day"],
+      "simulation_harness_attached": false,
+      "read_only_market_data_only": true,
+      "broker_trading_call_occurred": false,
+      "can_execute": false
+    },
+    "/operator/historical-tests/run": {
+      "method": "POST",
+      "status": "NOT_IMPLEMENTED_READY_FOR_HARNESS | DATA_READY_SIMULATION_NOT_AVAILABLE",
+      "fake_performance_numbers_allowed": false,
+      "paper_started": false,
+      "broker_trading_call_occurred": false,
+      "broker_mutation_occurred": false,
+      "live_enabled": false,
+      "real_money_enabled": false,
+      "can_execute": false
+    },
+    "/operator/historical-tests/{test_id}": {
+      "source": "OPERATOR_HISTORICAL_TESTS",
+      "read_only": true,
+      "can_execute": false
+    },
+    "/operator/historical-tests/{test_id}/report": {
+      "source": "OPERATOR_HISTORICAL_TESTS",
+      "logs_mutated": false,
+      "raw_logs_included": false,
+      "secrets_values_exposed": false
     },
     "/operator/contracts": {
       "version": "operator-backend-v1",

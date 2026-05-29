@@ -35,7 +35,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -461,6 +462,7 @@ select {
 
 .form-grid input,
 .form-grid select,
+.form-grid textarea,
 .credential-box input {
   width: 100%;
   min-width: 0;
@@ -470,6 +472,48 @@ select {
   background: #080b11;
   color: var(--text);
   padding: 7px 9px;
+}
+
+.ai-ask-box {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.ai-ask-box label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.ai-ask-box textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 92px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #080b11;
+  color: var(--text);
+  padding: 9px;
+}
+
+.notice.error {
+  border-color: rgba(239, 68, 68, 0.45);
+  color: var(--red);
+}
+
+.credential-feedback {
+  min-height: 36px;
+}
+
+.paper-launch-card,
+.historical-card {
+  border-color: rgba(6, 182, 212, 0.28);
 }
 
 .kv {

@@ -70,6 +70,7 @@ Operator intelligence endpoints:
 - `/operator/alerts`
 - `/operator/system-map`
 - `/operator/ai/status`
+- `/operator/ai/ask`
 - `/operator/ai/recommendations`
 - `/operator/credentials/providers`
 - `/operator/credentials/save`
@@ -79,6 +80,8 @@ Operator intelligence endpoints:
 - `/operator/orders/open`
 - `/operator/positions/intelligence`
 - `/operator/launch-readiness`
+- `/operator/historical-tests`
+- `/operator/historical-tests/run`
 
 AI Chief Operator remains advisory only. `/operator/ai/analyze` queues a
 recommendation through the governance queue; it cannot trade, start PAPER,
@@ -123,3 +126,16 @@ Operator activation:
   invent positions.
 - The bounded PAPER setup flow calls only `/operator/intent/paper/start` with
   PAPER-only/live-locked/real-money-blocked confirmations.
+
+Reality audit / historical test control:
+
+- Diagnostics includes a UI wiring audit so visible controls are classified as
+  wired, disabled with reason, not implemented, or broken.
+- The global AI drawer includes a freeform question box and calls
+  `/operator/ai/ask`. If providers are disabled or config-only, the response is
+  explicitly labeled as deterministic fallback, not a real model answer.
+- Command Center includes the visible bounded PAPER launch form and disabled
+  reason when launch readiness blocks it.
+- Historical Tests provides the 4-month Alpaca historical test control. Until a
+  governed strategy replay/backtest harness exists, it returns honest unavailable
+  status and never invents P&L, fees, TCA, fills, or performance metrics.

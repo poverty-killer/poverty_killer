@@ -10,7 +10,7 @@
       lastUpdated: "2026-05-26T01:38:32Z"
     },
     status: {
-      botStatus: "RUNNING",
+      botStatus: "MOCK_SAMPLE_NO_RUNTIME",
       runtimeMode: "PAPER",
       capabilityState: "PAPER_ENABLED",
       activeProfile: "PAPER_EXPLORATION_ALPHA",
@@ -19,16 +19,16 @@
       marketData: "coinbase_public",
       universe: ["BTC/USD", "ETH/USD", "SOL/USD"],
       assetClasses: ["crypto"],
-      uptime: "02:00:00",
-      lastHeartbeat: "fresh",
+      uptime: "mock sample only",
+      lastHeartbeat: "mock sample",
       liveBlocked: true,
       realMoneyBlocked: true,
-      brokerPostCount: 17,
-      brokerDeleteCount: 15,
+      brokerPostCount: 0,
+      brokerDeleteCount: 0,
       mutationAuthorizedCount: 0,
-      safetyVerdict: "CLEAN",
-      dominantBlocker: "BROKER_FEE_DETAIL_UNAVAILABLE",
-      lastDecision: "BUY -> PAPER order acknowledged -> cancel acknowledged"
+      safetyVerdict: "MOCK_SAMPLE_NOT_RUNTIME_TRUTH",
+      dominantBlocker: "MOCK_DATA_NO_BACKEND",
+      lastDecision: "Mock sample only; connect OPERATOR_BACKEND for runtime truth."
     },
     supervisor: {
       state: "MOCK_ONLY",
@@ -44,6 +44,25 @@
       paperStopAllowed: false,
       paperStartRefusalReason: "MOCK_DATA_NO_BACKEND",
       paperStopRefusalReason: "MOCK_DATA_NO_BACKEND",
+      lastIntentResult: "none"
+    },
+    historicalTests: {
+      source: "MOCK_DATA",
+      status: "READY_FOR_REQUEST_HARNESS_NOT_ATTACHED",
+      presets: [
+        { id: "last_4_months", label: "Last 4 months", start_date: "2026-01-26", end_date: "2026-05-26" }
+      ],
+      timeframes: ["1Min", "5Min", "15Min", "1Hour", "1Day"],
+      feeSlippagePolicies: ["broker_fees_unavailable_unknown", "conservative_estimate_not_broker_truth"],
+      defaultWatchlist: ["BTC/USD", "ETH/USD", "SOL/USD"],
+      lastResults: [],
+      lastRunResult: null,
+      simulationHarnessAttached: false,
+      readOnlyMarketDataOnly: true,
+      brokerTradingCallOccurred: false,
+      brokerMutationOccurred: false,
+      canExecute: false,
+      secretsValuesExposed: false,
       lastIntentResult: "none"
     },
     pnl: {
@@ -123,10 +142,10 @@
     },
     portfolio: {
       source: "MOCK_DATA",
-      dataSource: "BROKER_CONFIRMED",
-      status: "BROKER_CONFIRMED",
+      dataSource: "MOCK_SAMPLE",
+      status: "MOCK_SAMPLE_NOT_BROKER_TRUTH",
       unavailableReason: null,
-      message: "Mock sample PAPER positions. Backend mode uses broker-confirmed data or unavailable.",
+      message: "Mock sample PAPER positions. This is not broker truth; backend mode uses broker-confirmed data or unavailable.",
       empty: false,
       dataFreshnessTs: "2026-05-26T01:38:32Z",
       brokerReadOccurred: false,
@@ -170,8 +189,8 @@
           feesStatus: "UNKNOWN",
           tcaStatus: "UNKNOWN",
           slippage: null,
-          source: "BROKER_CONFIRMED",
-          brokerConfirmed: true,
+          source: "MOCK_SAMPLE",
+          brokerConfirmed: false,
           omsReconciliationStatus: "BROKER_CONFIRMED_OPEN_ORDER_PRESENT",
           dataFreshnessTs: "2026-05-26T01:38:32Z",
           tradabilityStatus: "READ_ONLY_PAPER_POSITION",
@@ -195,7 +214,7 @@
           status: "new",
           submittedAt: "2026-05-26T01:20:00Z",
           updatedAt: "2026-05-26T01:20:00Z",
-          source: "BROKER_CONFIRMED",
+          source: "MOCK_SAMPLE",
           canCancel: false
         }
       ],
@@ -216,7 +235,7 @@
           whyHolding: "Mock sample only.",
           blockersConflicts: ["FEE_STATUS_UNKNOWN", "TCA_STATUS_UNKNOWN"],
           riskStatus: "WARN",
-          source: "BROKER_CONFIRMED"
+          source: "MOCK_SAMPLE"
         }
       ]
     },
@@ -224,24 +243,24 @@
       {
         symbol: "BTC/USD",
         assetClass: "crypto",
-        brokerQuantity: "broker-confirmed",
-        source: "BROKER_CONFIRMED",
+        brokerQuantity: "mock sample",
+        source: "MOCK_SAMPLE",
         movingFloor: "ARMED",
         exitEligibility: "sell_to_close requires broker position truth"
       },
       {
         symbol: "ETH/USD",
         assetClass: "crypto",
-        brokerQuantity: "broker-confirmed",
-        source: "BROKER_CONFIRMED",
+        brokerQuantity: "mock sample",
+        source: "MOCK_SAMPLE",
         movingFloor: "ARMED",
         exitEligibility: "sell_to_close requires broker position truth"
       },
       {
         symbol: "SOL/USD",
         assetClass: "crypto",
-        brokerQuantity: "broker-confirmed",
-        source: "BROKER_CONFIRMED",
+        brokerQuantity: "mock sample",
+        source: "MOCK_SAMPLE",
         movingFloor: "ARMED",
         exitEligibility: "sell_to_close requires broker position truth"
       }

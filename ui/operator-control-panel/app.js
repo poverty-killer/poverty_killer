@@ -7,6 +7,7 @@
     ["command", "Command Center"],
     ["action", "Action Center"],
     ["runs", "Run Archive"],
+    ["historical", "Historical Tests"],
     ["pnl", "P&L / Net Profit"],
     ["positions", "Positions & Orders"],
     ["activity", "Bot Activity Control"],
@@ -86,11 +87,19 @@
       ]
     }
   };
+  const HISTORICAL_TIMEFRAMES = ["1Min", "5Min", "15Min", "1Hour", "1Day"];
+  const HISTORICAL_FEE_POLICIES = [
+    ["broker_fees_unavailable_unknown", "Broker fees unavailable / unknown"],
+    ["conservative_estimate_not_broker_truth", "Conservative estimate - not broker truth"]
+  ];
   let activeScreenId = "command";
   let aiOverlayOpen = false;
   let aiSelectedQuestion = AI_QUICK_PROMPTS[0];
+  let aiQuestionText = AI_QUICK_PROMPTS[0];
   let aiOverlayResponse = "";
+  let aiOverlayError = "";
   let aiOverlayBusy = false;
+  let credentialActionStatus = {};
 
   function softBreakToken(value) {
     return escapeHtml(String(value))
@@ -145,14 +154,20 @@
 
   function sourceLabel() {
     if (data.meta.dataSource === "OPERATOR_BACKEND") return "OPERATOR_BACKEND / read-only";
-    if (data.meta.dataSource === "PARTIAL_BACKEND") return "PARTIAL_BACKEND / status connected";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return `PARTIAL_BACKEND / ${backendDegradedSummary()}`;
     return "MOCK DATA / sample";
   }
 
   function sourceSubtext() {
     if (data.meta.dataSource === "OPERATOR_BACKEND") return "OPERATOR_BACKEND / runtime truth";
-    if (data.meta.dataSource === "PARTIAL_BACKEND") return "PARTIAL_BACKEND / secondary endpoint degraded";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return `PARTIAL_BACKEND / ${backendDegradedSummary()}`;
     return "MOCK DATA / sample fallback";
+  }
+
+  function backendDegradedSummary() {
+    const failures = data.meta.fetchFailures || [];
+    if (!failures.length) return "status connected; secondary status pending";
+    return `${failures.length} degraded: ${failures.slice(0, 2).join(" | ")}${failures.length > 2 ? " | more in Diagnostics" : ""}`;
   }
 
   function backendConnected() {
@@ -229,6 +244,59 @@
     ].join("");
   }
 
+  function paperLaunchDisabledReason() {
+    const launch = data.launchReadiness || {};
+    const sup = data.supervisor || {};
+    if (!backendConnected()) return "Disabled: backend unavailable; mock/sample mode cannot start PAPER.";
+    if ((launch.finalLaunchReadiness || "").includes("BLOCKED")) {
+      const reason = (launch.reasonCodes || [])[0] || "launch readiness blocked";
+      const check = (launch.checks || []).find((item) => item.checkId === reason || item.blocker === true);
+      return `Disabled: ${(check && (check.detail || check.title)) || reason}.`;
+    }
+    if (sup.paperStartAllowed !== true) {
+      return `Disabled: ${sup.paperStartRefusalReason || "supervisor start not allowed"}.`;
+    }
+    return "";
+  }
+
+  function renderPaperLaunchControl(formId) {
+    const launch = data.launchReadiness || {};
+    const sup = data.supervisor || {};
+    const disabledReason = paperLaunchDisabledReason();
+    const startDisabled = disabledReason ? "disabled" : "";
+    const watchlist = (sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"]).join(",");
+    return `
+      <div class="card span-12 paper-launch-card" data-paper-form-card="${escapeHtml(formId)}">
+        <div class="split">
+          <h3>PAPER Launch Control</h3>
+          ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
+        </div>
+        <div class="form-grid">
+          <label>Watchlist
+            <input data-paper-watchlist type="text" value="${escapeHtml(watchlist)}" autocomplete="off">
+          </label>
+          <label>Duration
+            <select data-paper-duration>
+              ${[300, 900, 1800, 3600].map((seconds) => `<option value="${seconds}" ${seconds === 300 ? "selected" : ""}>${seconds} seconds</option>`).join("")}
+            </select>
+          </label>
+          <label class="checkline"><input data-paper-profile-alpha type="checkbox" checked> PAPER_EXPLORATION_ALPHA</label>
+          <label class="checkline"><input data-paper-confirm-paper type="checkbox"> Confirm PAPER-only</label>
+          <label class="checkline"><input data-paper-confirm-live-locked type="checkbox"> Confirm live locked</label>
+          <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox"> Confirm real-money blocked</label>
+        </div>
+        <div class="button-row">
+          <button class="intent-button paper" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" ${startDisabled}>
+            Start Bounded PAPER Run
+          </button>
+          <button class="intent-button live" disabled>No manual trades / force trade unavailable</button>
+        </div>
+        <div class="notice">${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
+        <div class="notice mono">Endpoint target: /operator/intent/paper/start only. Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
+      </div>
+    `;
+  }
+
   function renderNav() {
     const nav = document.querySelector(".nav");
     nav.innerHTML = screens.map(([id, label], index) => `
@@ -272,6 +340,7 @@
         ])}
           <div class="status-strip">${(launch.reasonCodes || []).map((reason) => badge(reason, statusColor(reason))).join("") || badge("no blockers reported", "green")}</div>
         </div>
+        ${renderPaperLaunchControl("command")}
         <div class="card span-6"><h3>Mode & Authority</h3>${kv([
           ["Capability state", badge(s.capabilityState, "green")],
           ["Active profile", badge(s.activeProfile, "cyan")],
@@ -351,6 +420,88 @@
             escapeHtml(run.reportPath || "not generated")
           ])
         )}</div>
+        <div class="card span-12"><h3>Historical Alpaca Test Link</h3>
+          <p class="muted">Use the Historical Tests page for the 4-month Alpaca historical control. It is advisory only and cannot start PAPER or trade.</p>
+          <button class="intent-button paper" data-screen-shortcut="historical">Open Historical Tests</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderHistorical() {
+    const tests = data.historicalTests || {};
+    const presets = tests.presets || [];
+    const last = tests.lastRunResult || (tests.lastResults || [])[0] || null;
+    const defaultPreset = presets[0] || {};
+    return `
+      ${header("Historical Alpaca Test", "4-month historical data test control. Advisory only; not broker truth or future-profit proof.", tests.status || "READY_FOR_REQUEST")}
+      <div class="grid">
+        ${metric("Simulation Harness", tests.simulationHarnessAttached ? "attached" : "not attached", tests.simulationHarnessAttached ? "green" : "yellow")}
+        ${metric("Read-only Market Data", tests.readOnlyMarketDataOnly ? "yes" : "unknown", tests.readOnlyMarketDataOnly ? "green" : "yellow")}
+        ${metric("Can Execute Trades", "false", "gray")}
+        ${metric("Last Status", last ? last.status : "none", last ? statusColor(last.status) : "gray")}
+        <div class="card span-12 historical-card">
+          <div class="split">
+            <h3>Run Historical Test</h3>
+            ${badge("last 4 months preset", "cyan")}
+          </div>
+          <div class="form-grid" data-historical-form>
+            <label>Date range preset
+              <select data-historical-preset>
+                <option value="last_4_months" selected>Last 4 months</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <label>Start date
+              <input data-historical-start type="date" value="${escapeHtml(defaultPreset.start_date || "")}">
+            </label>
+            <label>End date
+              <input data-historical-end type="date" value="${escapeHtml(defaultPreset.end_date || "")}">
+            </label>
+            <label>Watchlist
+              <input data-historical-watchlist type="text" value="${escapeHtml((tests.defaultWatchlist || ["BTC/USD", "ETH/USD", "SOL/USD"]).join(","))}" autocomplete="off">
+            </label>
+            <label>Timeframe
+              <select data-historical-timeframe>
+                ${(tests.timeframes || HISTORICAL_TIMEFRAMES).map((tf) => `<option value="${escapeHtml(tf)}">${escapeHtml(tf)}</option>`).join("")}
+              </select>
+            </label>
+            <label>Starting capital
+              <input data-historical-capital type="number" min="1" step="100" value="10000">
+            </label>
+            <label>Fee/slippage policy
+              <select data-historical-fee-policy>
+                ${HISTORICAL_FEE_POLICIES.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}
+              </select>
+            </label>
+            <label>Strategy/profile
+              <input data-historical-profile type="text" value="PAPER_EXPLORATION_ALPHA" autocomplete="off">
+            </label>
+          </div>
+          <div class="button-row">
+            <button class="intent-button paper" data-intent="historical-run" ${backendConnected() ? "" : "disabled"}>Run Historical Test</button>
+            <button class="intent-button live" disabled>Does not start PAPER / does not trade</button>
+          </div>
+          <div class="notice">If the governed replay/backtest harness is not attached, this returns an honest unavailable status instead of fake P&L.</div>
+          <div class="notice mono">Endpoint target: /operator/historical-tests/run. Market data may be read-only in future; broker trading endpoints are forbidden.</div>
+        </div>
+        <div class="card span-12"><h3>Latest Historical Test Result</h3>
+          ${last ? kv([
+            ["Test", escapeHtml(last.testId || last.test_id || "unknown")],
+            ["Status", badge(last.status || "UNKNOWN", statusColor(last.status || "UNKNOWN"))],
+            ["Final equity", escapeHtml((last.result && last.result.final_equity) || "unknown - no simulation evidence")],
+            ["Total return", escapeHtml((last.result && last.result.total_return) || "unknown - no simulation evidence")],
+            ["Max drawdown", escapeHtml((last.result && last.result.max_drawdown) || "unknown - no simulation evidence")],
+            ["Simulated trades", escapeHtml((last.result && last.result.simulated_trade_count) || 0)],
+            ["Reason codes", escapeHtml(((last.result && last.result.reason_codes) || []).join(", ") || "none")],
+            ["Caveats", escapeHtml(((last.result && last.result.caveats) || []).join(", "))]
+          ]) : `<p class="muted">No historical test has been requested in this UI session.</p>`}
+        </div>
+        <div class="card span-12"><h3>Historical Test Caveats</h3>
+          <div class="status-strip">
+            ${["historical simulation only", "not broker-confirmed", "not live proof", "not future-profit proof", "no fake fees/P&L/TCA"].map((item) => badge(item, item.includes("not") || item.includes("no fake") ? "yellow" : "gray")).join("")}
+          </div>
+        </div>
       </div>
     `;
   }
@@ -505,27 +656,11 @@
           ["Child stdout", escapeHtml(sup.childStdoutPath || "not available")],
           ["Child stderr", escapeHtml(sup.childStderrPath || "not available")]
         ])}</div>
-        <div class="card span-12"><h3>Bounded PAPER Run Setup</h3>
-          <div class="form-grid">
-            <label>Watchlist
-              <input id="paper-watchlist" type="text" value="${escapeHtml((sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"]).join(","))}" autocomplete="off">
-            </label>
-            <label>Duration
-              <select id="paper-duration">
-                ${[300, 900, 1800, 3600].map((seconds) => `<option value="${seconds}" ${seconds === 300 ? "selected" : ""}>${seconds} seconds</option>`).join("")}
-              </select>
-            </label>
-            <label class="checkline"><input id="paper-profile-alpha" type="checkbox" checked> PAPER_EXPLORATION_ALPHA</label>
-            <label class="checkline"><input id="paper-confirm-paper" type="checkbox"> Confirm PAPER-only</label>
-            <label class="checkline"><input id="paper-confirm-live-locked" type="checkbox"> Confirm live locked</label>
-            <label class="checkline"><input id="paper-confirm-real-money-blocked" type="checkbox"> Confirm real-money blocked</label>
-          </div>
-          <div class="notice">This form uses the governed server intent only. It cannot buy, sell, cancel, flatten, enable live, or enable real money.</div>
-        </div>
+        ${renderPaperLaunchControl("activity")}
         <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
-            <button class="intent-button paper" data-intent="paper-start" ${sup.paperStartAllowed ? "" : "disabled"}>
-              Start bounded PAPER - ${sup.paperStartAllowed ? "server-authorized intent" : escapeHtml(sup.paperStartRefusalReason || "disabled")}
+            <button class="intent-button paper" data-intent="paper-start" data-paper-form="activity" ${paperLaunchDisabledReason() ? "disabled" : ""}>
+              Start bounded PAPER - ${paperLaunchDisabledReason() ? escapeHtml(paperLaunchDisabledReason()) : "server-authorized intent"}
             </button>
             <button class="intent-button paper" data-intent="paper-stop" ${sup.paperStopAllowed ? "" : "disabled"}>
               Stop PAPER - ${sup.paperStopAllowed ? "graceful supervisor request" : escapeHtml(sup.paperStopRefusalReason || "disabled")}
@@ -628,7 +763,7 @@
         ${metric("Pending Review", ai.pendingReviewCount || 0, ai.pendingReviewCount ? "yellow" : "gray")}
         ${metric("Can Execute", "false", "gray")}
         <div class="card span-12"><h3>Mission</h3>
-          <div class="notice">I analyze trading edge, execution quality, risk, validation evidence, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
+          <div class="notice">I analyze trading edge, execution quality, risk, validation evidence, provider readiness, portfolio state, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
         </div>
         <div class="card span-6"><h3>Control Tower</h3>${kv([
           ["Identity", escapeHtml("AI Quant Research Chief / Trading Edge Advisor")],
@@ -708,10 +843,11 @@
                   </label>
                 `).join("")}
                 <div class="button-row">
-                  <button class="intent-button paper" data-credential-save="${escapeHtml(providerId)}">Save local credentials</button>
-                  <button class="intent-button paper" data-credential-validate="${escapeHtml(providerId)}">Validate read-only</button>
-                  <button class="intent-button live" data-credential-delete="${escapeHtml(providerId)}">Delete local</button>
+                  <button class="intent-button paper" data-credential-save="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Save local credentials</button>
+                  <button class="intent-button paper" data-credential-validate="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Validate read-only</button>
+                  <button class="intent-button live" data-credential-delete="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Delete local</button>
                 </div>
+                <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus[providerId] || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed from static mock mode"))}</div>
               </div>
             `).join("")}
           </div>
@@ -864,8 +1000,77 @@
     `;
   }
 
+  function buildUiControlInventory() {
+    const disabledPaperReason = paperLaunchDisabledReason();
+    const inventory = [
+      ["global", "snapshot_intent_disabled", "Snapshot intent - disabled", "button", "DISABLED_WITH_REASON", "forbidden", "PAPER_INTENT_NOT_IMPLEMENTED", null, null],
+      ["global", "live_locked", "Live locked", "button", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
+      ["global", "ask_quant_chief", "Ask Quant Chief", "button", "WIRED", "read_only", "", null, "open_ai_drawer"],
+      ["ai_overlay", "ai_question_textarea", "Ask a page-aware question", "input", "WIRED", "read_only", "", null, "local_page_context"],
+      ["ai_overlay", "ai_ask", "Ask Quant Chief", "button", "WIRED", "local_advisory_write", "", "POST", "/operator/ai/ask"],
+      ["ai_overlay", "ai_clear", "Clear", "button", "WIRED", "read_only", "", null, "local_clear"],
+      ["ai_overlay", "ai_close", "Close", "button", "WIRED", "read_only", "", null, "local_close"],
+      ["command", "paper_watchlist", "Watchlist", "input", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
+      ["command", "paper_duration", "Duration", "select", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
+      ["command", "paper_start", "Start Bounded PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
+      ["activity", "paper_stop", "Stop PAPER", "button", data.supervisor.paperStopAllowed ? "WIRED" : "DISABLED_WITH_REASON", "governed_paper_start", data.supervisor.paperStopAllowed ? "" : (data.supervisor.paperStopRefusalReason || "no active PAPER runtime"), "POST", "/operator/intent/paper/stop"],
+      ["activity", "export_run_report", "Export run report - future server-authorized intent", "button", "NOT_IMPLEMENTED_VISIBLE", "read_only", "server-authorized export intent not implemented", null, null],
+      ["activity", "live_start_locked", "Live start locked - LIVE_NOT_APPROVED", "button", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
+      ["world", "world_poll", "Poll Alpaca News - read-only provider intent", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "read_only", backendConnected() ? "" : "backend unavailable", "POST", "/operator/intent/world-awareness/poll"],
+      ["ai", "ai_analyze", "Run advisory AI analysis", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/ai/analyze"],
+      ["ai", "ai_quant_review", "Queue Quant Chief review", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/ai/quant-review"],
+      ["historical", "historical_run", "Run Historical Test", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "read_only", backendConnected() ? "" : "backend unavailable", "POST", "/operator/historical-tests/run"],
+      ["runs", "open_historical_tests", "Open Historical Tests", "button", "WIRED", "read_only", "", null, "local_navigation"],
+    ];
+    screens.forEach(([id, label]) => {
+      inventory.push(["navigation", `nav_${id}`, label, "button", "WIRED", "read_only", "", null, `show:${id}`]);
+    });
+    Object.keys(CREDENTIAL_FORMS).forEach((providerId) => {
+      const disabled = backendConnected() ? "" : "backend unavailable";
+      inventory.push(["providers", `credential_save_${providerId}`, `Save ${providerId} credentials`, "button", disabled ? "DISABLED_WITH_REASON" : "WIRED", "local_secret_write", disabled, "POST", "/operator/credentials/save"]);
+      inventory.push(["providers", `credential_validate_${providerId}`, `Validate ${providerId} read-only`, "button", disabled ? "DISABLED_WITH_REASON" : "WIRED", "read_only", disabled, "POST", "/operator/credentials/validate-readonly"]);
+      inventory.push(["providers", `credential_delete_${providerId}`, `Delete ${providerId} local credentials`, "button", disabled ? "DISABLED_WITH_REASON" : "WIRED", "local_secret_write", disabled, "DELETE", "/operator/credentials/provider/{provider_id}"]);
+    });
+    AI_QUICK_PROMPTS.forEach((prompt, index) => {
+      inventory.push(["ai_overlay", `quick_prompt_${index + 1}`, prompt, "button", "WIRED", "read_only", "", null, "select_prompt"]);
+    });
+    return inventory.map(([pageId, controlId, label, type, status, safetyClass, disabledReason, method, endpoint]) => ({
+      pageId,
+      controlId,
+      label,
+      type,
+      implementationStatus: status,
+      safetyClass,
+      disabledReason,
+      method,
+      endpoint
+    }));
+  }
+
+  function uiWiringSummary() {
+    const inventory = buildUiControlInventory();
+    const counts = inventory.reduce((acc, item) => {
+      acc[item.implementationStatus] = (acc[item.implementationStatus] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      inventory,
+      total: inventory.length,
+      wired: counts.WIRED || 0,
+      disabledWithReason: counts.DISABLED_WITH_REASON || 0,
+      broken: counts.BROKEN || 0,
+      notImplemented: counts.NOT_IMPLEMENTED_VISIBLE || 0,
+      lastAuditResult: (counts.BROKEN || 0) ? "BROKEN_CONTROLS_PRESENT" : "NO_BROKEN_CONTROLS_DECLARED",
+      limitations: [
+        "Static inventory is maintained in app.js; browser-level click validation is covered by focused tests and manual validation.",
+        "Disabled controls remain visible with reasons instead of being removed."
+      ]
+    };
+  }
+
   function renderDiagnostics() {
     const d = data.diagnostics;
+    const wiring = uiWiringSummary();
     return `
       ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", sourceLabel())}
       <div class="card">${kv([
@@ -888,6 +1093,28 @@
         ["Latest child stdout", escapeHtml(d.latestChildStdout)],
         ["Latest child stderr", escapeHtml(d.latestChildStderr)]
       ])}</div>
+      <div class="card" style="margin-top:12px"><h3>UI Wiring Audit</h3>${kv([
+        ["Total controls", escapeHtml(wiring.total)],
+        ["Wired", badge(wiring.wired, wiring.wired ? "green" : "gray")],
+        ["Disabled with reason", badge(wiring.disabledWithReason, wiring.disabledWithReason ? "yellow" : "gray")],
+        ["Broken", badge(wiring.broken, wiring.broken ? "red" : "green")],
+        ["Not implemented visible", badge(wiring.notImplemented, wiring.notImplemented ? "yellow" : "gray")],
+        ["Last audit result", badge(wiring.lastAuditResult, statusColor(wiring.lastAuditResult))]
+      ])}
+      ${table(
+        ["Page", "Control", "Type", "Status", "Safety", "Method", "Endpoint/Action", "Reason"],
+        wiring.inventory.map((item) => [
+          escapeHtml(item.pageId),
+          escapeHtml(item.label),
+          escapeHtml(item.type),
+          badge(item.implementationStatus, statusColor(item.implementationStatus)),
+          badge(item.safetyClass, item.safetyClass === "forbidden" ? "red" : "gray"),
+          escapeHtml(item.method || "local"),
+          escapeHtml(item.endpoint || "local"),
+          escapeHtml(item.disabledReason || "")
+        ])
+      )}
+      <div class="notice mono">Known limitations: ${escapeHtml(wiring.limitations.join(" | "))}</div></div>
     `;
   }
 
@@ -967,6 +1194,7 @@
       command: ["Current page uses summarized runtime state, not raw logs."],
       action: ["Action Center items are advisory or approval workflow items; executable flags must remain false."],
       runs: ["Run archive uses metadata and report paths only; raw log contents are not included."],
+      historical: ["Historical tests are advisory only; performance fields stay unknown until a governed replay/backtest harness exists."],
       pnl: [
         `Realized P&L source: ${p.realizedPnl && p.realizedPnl.source ? p.realizedPnl.source : "unknown"}.`,
         `TCA status: ${tca.status || "UNKNOWN"}.`
@@ -1018,6 +1246,12 @@
             `report=${latestRun.report_path}`
           ]
         : ["No run archive entries loaded."],
+      historical: [
+        `historical_status=${data.historicalTests && data.historicalTests.status ? data.historicalTests.status : "UNKNOWN"}`,
+        `simulation_harness_attached=${data.historicalTests && data.historicalTests.simulationHarnessAttached === true}`,
+        `read_only_market_data_only=${data.historicalTests && data.historicalTests.readOnlyMarketDataOnly !== false}`,
+        "fake_performance_numbers_allowed=false"
+      ],
       pnl: [
         `realized=${p.realizedPnl && p.realizedPnl.source ? p.realizedPnl.source : "unknown"}`,
         `unrealized=${p.unrealizedPnl && p.unrealizedPnl.source ? p.unrealizedPnl.source : "unknown"}`,
@@ -1304,7 +1538,7 @@
     const context = buildAiChiefContext(aiSelectedQuestion);
     const providerState = data.ai.providerState || "AI_DISABLED";
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
-    const response = aiOverlayResponse || buildAiOverlayAdvisory(aiSelectedQuestion);
+    const response = aiOverlayResponse || buildAiOverlayAdvisory(aiQuestionText || aiSelectedQuestion);
     host.innerHTML = `
       <button class="ai-chief-fab ${aiOverlayOpen ? "open" : ""}" type="button" data-ai-chief-open aria-expanded="${aiOverlayOpen ? "true" : "false"}">
         <span>Ask Quant Chief</span>
@@ -1327,7 +1561,7 @@
             ${badge("cannot change thresholds", "red")}
             ${badge("can_execute=false", "gray")}
           </div>
-          <div class="notice ai-mission">I analyze trading edge, execution quality, risk, validation evidence, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
+          <div class="notice ai-mission">I analyze trading edge, execution quality, risk, validation evidence, provider readiness, portfolio state, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
           <div class="ai-chief-body">
             ${renderAiContextPreview(context)}
             <div class="ai-question-bank" aria-label="AI Chief quick questions">
@@ -1336,6 +1570,18 @@
                   ${escapeHtml(prompt)}
                 </button>
               `).join("")}
+            </div>
+            <div class="ai-ask-box">
+              <label for="ai-chief-question">Ask a page-aware question</label>
+              <textarea id="ai-chief-question" data-ai-chief-question rows="4" placeholder="Ask about edge, risk, TCA, provider readiness, launch blockers, or latest run evidence.">${escapeHtml(aiQuestionText || "")}</textarea>
+              <div class="button-row">
+                <button class="intent-button paper" type="button" data-ai-chief-ask ${aiOverlayBusy ? "disabled" : ""}>
+                  ${aiOverlayBusy ? "Asking..." : "Ask Quant Chief"}
+                </button>
+                <button class="intent-button paper" type="button" data-ai-chief-clear ${aiOverlayBusy ? "disabled" : ""}>Clear</button>
+                <button class="intent-button live" type="button" data-ai-chief-close>Close</button>
+              </div>
+              ${aiOverlayError ? `<div class="notice error">Error: ${escapeHtml(aiOverlayError)}</div>` : ""}
             </div>
             <div class="ai-response">
               <div class="split">
@@ -1368,9 +1614,58 @@
 
   function selectAiQuestion(question) {
     aiSelectedQuestion = question;
+    aiQuestionText = question;
     aiOverlayResponse = buildAiOverlayAdvisory(question);
+    aiOverlayError = "";
     aiOverlayOpen = true;
     renderAiChiefOverlay();
+  }
+
+  function clearAiQuestion() {
+    aiQuestionText = "";
+    aiOverlayResponse = "";
+    aiOverlayError = "";
+    aiOverlayOpen = true;
+    renderAiChiefOverlay();
+  }
+
+  async function askAiChiefQuestion() {
+    const input = document.querySelector("[data-ai-chief-question]");
+    const question = String((input && input.value) || aiQuestionText || aiSelectedQuestion || "").trim();
+    aiQuestionText = question;
+    aiSelectedQuestion = AI_QUICK_PROMPTS.includes(question) ? question : aiSelectedQuestion;
+    aiOverlayError = "";
+    if (!backendConnected()) {
+      aiOverlayResponse = buildAiOverlayAdvisory(question);
+      aiOverlayOpen = true;
+      renderAiChiefOverlay();
+      return;
+    }
+    aiOverlayBusy = true;
+    renderAiChiefOverlay();
+    try {
+      const context = buildAiChiefContext(question);
+      const result = await postIntent("/operator/ai/ask", {
+        question,
+        page_id: context.page_id,
+        page_context: context,
+        advisory_only: true
+      });
+      aiOverlayResponse = [
+        `${result.response_source || "DETERMINISTIC_FALLBACK_NO_MODEL_CALL"} / ${result.provider_state || "AI_DISABLED"}`,
+        result.response || "No advisory response returned.",
+        `can_execute=${String(result.can_execute === true ? "true" : "false")}`,
+        `broker_call_occurred=${String(result.broker_call_occurred === true ? "true" : "false")}`,
+        `trading_mutation_occurred=${String(result.trading_mutation_occurred === true ? "true" : "false")}`
+      ].join("\n");
+    } catch (error) {
+      aiOverlayError = error.message || error.name || "ai_ask_failed";
+      aiOverlayResponse = buildAiOverlayAdvisory(question);
+    } finally {
+      aiOverlayBusy = false;
+      aiOverlayOpen = true;
+      renderAiChiefOverlay();
+    }
   }
 
   async function runAiOverlayAnalyze() {
@@ -1462,6 +1757,7 @@
       command: renderCommand,
       action: renderActionCenter,
       runs: renderRuns,
+      historical: renderHistorical,
       pnl: renderPnl,
       positions: renderPositions,
       activity: renderActivity,
@@ -1479,6 +1775,7 @@
       live: renderLive
     };
     main.innerHTML = screens.map(([id]) => `<section class="screen" id="screen-${id}">${renderers[id]()}</section>`).join("");
+    window.PK_OPERATOR_UI_CONTROL_INVENTORY = buildUiControlInventory();
     showScreen(selectedId || activeScreenId || "command");
   }
 
@@ -1649,6 +1946,17 @@
     };
   }
 
+  function normalizeHistoricalRun(run) {
+    if (!run || typeof run !== "object") return null;
+    return {
+      ...run,
+      testId: pick(run.test_id, run.testId || "unknown"),
+      status: pick(run.status, "UNKNOWN"),
+      request: run.request || {},
+      result: run.result || {}
+    };
+  }
+
   function normalizeBackendData(payload) {
     const next = clone(mockData);
     const status = payload.status || {};
@@ -1682,6 +1990,7 @@
     const launchReadiness = payload.launchReadiness || {};
     const research = payload.research || {};
     const evidenceGraph = payload.evidenceGraph || {};
+    const historicalTests = payload.historicalTests || {};
     const endpointFailures = payload.endpointFailures || {};
     const supervisor = status.supervisor || latestRun || {};
     const activeSession = supervisor.active_session || {};
@@ -2042,6 +2351,25 @@
       next.evidenceGraph.missingEvidence = Array.isArray(evidenceGraph.missing_evidence) ? evidenceGraph.missing_evidence : [];
       next.evidenceGraph.promotionBlockers = Array.isArray(evidenceGraph.promotion_blockers) ? evidenceGraph.promotion_blockers : [];
     }
+    if (historicalTests.source) {
+      next.historicalTests = {
+        source: historicalTests.source,
+        status: pick(historicalTests.status, "UNKNOWN"),
+        presets: Array.isArray(historicalTests.presets) ? historicalTests.presets : [],
+        timeframes: Array.isArray(historicalTests.timeframes) ? historicalTests.timeframes : HISTORICAL_TIMEFRAMES,
+        feeSlippagePolicies: Array.isArray(historicalTests.fee_slippage_policies) ? historicalTests.fee_slippage_policies : [],
+        defaultWatchlist: Array.isArray(historicalTests.default_watchlist) ? historicalTests.default_watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"],
+        lastResults: Array.isArray(historicalTests.last_results) ? historicalTests.last_results.map(normalizeHistoricalRun) : [],
+        simulationHarnessAttached: historicalTests.simulation_harness_attached === true,
+        readOnlyMarketDataOnly: historicalTests.read_only_market_data_only !== false,
+        brokerTradingCallOccurred: historicalTests.broker_trading_call_occurred === true,
+        brokerMutationOccurred: historicalTests.broker_mutation_occurred === true,
+        canExecute: historicalTests.can_execute === true,
+        secretsValuesExposed: historicalTests.secrets_values_exposed === true,
+        lastIntentResult: pick(next.historicalTests && next.historicalTests.lastIntentResult, "none")
+      };
+      next.historicalTests.lastRunResult = next.historicalTests.lastResults[0] || null;
+    }
     if (Array.isArray(world.providers)) {
       const runtimeByProvider = {};
       if (Array.isArray(worldRuntime.providers)) {
@@ -2170,7 +2498,8 @@
       ["portfolio", "/operator/portfolio"],
       ["launchReadiness", "/operator/launch-readiness"],
       ["research", "/operator/research"],
-      ["evidenceGraph", "/operator/research/evidence-graph"]
+      ["evidenceGraph", "/operator/research/evidence-graph"],
+      ["historicalTests", "/operator/historical-tests"]
     ];
     const payload = { status };
     const failures = [];
@@ -2224,13 +2553,14 @@
     return requestJson(path, { method: "POST", body });
   }
 
-  function paperRunFormValues() {
-    const watchlistRaw = (document.getElementById("paper-watchlist") || {}).value || "BTC/USD,ETH/USD,SOL/USD";
-    const durationRaw = (document.getElementById("paper-duration") || {}).value || "300";
-    const profileAlpha = (document.getElementById("paper-profile-alpha") || {}).checked !== false;
-    const confirmPaper = (document.getElementById("paper-confirm-paper") || {}).checked === true;
-    const confirmLiveLocked = (document.getElementById("paper-confirm-live-locked") || {}).checked === true;
-    const confirmRealMoneyBlocked = (document.getElementById("paper-confirm-real-money-blocked") || {}).checked === true;
+  function paperRunFormValues(formId) {
+    const card = document.querySelector(`[data-paper-form-card="${formId || "command"}"]`) || document.querySelector("[data-paper-form-card]");
+    const watchlistRaw = ((card && card.querySelector("[data-paper-watchlist]")) || {}).value || "BTC/USD,ETH/USD,SOL/USD";
+    const durationRaw = ((card && card.querySelector("[data-paper-duration]")) || {}).value || "300";
+    const profileAlpha = ((card && card.querySelector("[data-paper-profile-alpha]")) || {}).checked !== false;
+    const confirmPaper = ((card && card.querySelector("[data-paper-confirm-paper]")) || {}).checked === true;
+    const confirmLiveLocked = ((card && card.querySelector("[data-paper-confirm-live-locked]")) || {}).checked === true;
+    const confirmRealMoneyBlocked = ((card && card.querySelector("[data-paper-confirm-real-money-blocked]")) || {}).checked === true;
     return {
       watchlist: watchlistRaw.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean),
       durationSeconds: Number.parseInt(durationRaw, 10) || 300,
@@ -2238,6 +2568,21 @@
       confirmPaper,
       confirmLiveLocked,
       confirmRealMoneyBlocked
+    };
+  }
+
+  function historicalFormValues() {
+    const form = document.querySelector("[data-historical-form]");
+    const value = (selector, fallback) => ((form && form.querySelector(selector)) || {}).value || fallback;
+    return {
+      date_range_preset: value("[data-historical-preset]", "last_4_months"),
+      start_date: value("[data-historical-start]", ""),
+      end_date: value("[data-historical-end]", ""),
+      watchlist: value("[data-historical-watchlist]", "BTC/USD,ETH/USD,SOL/USD").split(",").map((item) => item.trim().toUpperCase()).filter(Boolean),
+      timeframe: value("[data-historical-timeframe]", "1Day"),
+      starting_capital: value("[data-historical-capital]", "10000"),
+      fee_slippage_policy: value("[data-historical-fee-policy]", "broker_fees_unavailable_unknown"),
+      strategy_profile: value("[data-historical-profile]", "PAPER_EXPLORATION_ALPHA")
     };
   }
 
@@ -2262,12 +2607,12 @@
     });
   }
 
-  async function handleIntent(intent) {
+  async function handleIntent(intent, sourceButton) {
     if (!backendConnected()) return;
     try {
       let message = "none";
       if (intent === "paper-start") {
-        const form = paperRunFormValues();
+        const form = paperRunFormValues(sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "command");
         if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked) {
           window.alert("Confirm PAPER-only, live locked, and real-money blocked before requesting the governed PAPER start.");
           return;
@@ -2325,8 +2670,21 @@
         const recommendation = result.recommendation || {};
         message = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "STRATEGY_REVIEW"}`;
       }
+      if (intent === "historical-run") {
+        const form = historicalFormValues();
+        const confirmed = window.confirm(
+          `Run historical Alpaca test request?\n\nRange: ${form.date_range_preset}\nWatchlist: ${form.watchlist.join(", ")}\nTimeframe: ${form.timeframe}\n\nThis does not start PAPER, trade, call broker trading endpoints, or produce fake performance.`
+        );
+        if (!confirmed) return;
+        const result = await postIntent("/operator/historical-tests/run", form);
+        message = `${result.status || "UNKNOWN"}: ${result.test_id || "historical_test"}`;
+        data.historicalTests.lastRunResult = normalizeHistoricalRun(result);
+      }
       const selectedScreen = activeScreenId;
       data = await loadData();
+      if (intent === "historical-run" && message !== "none") {
+        data.historicalTests.lastIntentResult = message;
+      }
       data.supervisor.lastIntentResult = message;
       data.worldRuntime.lastPollResult = message;
       data.ai.lastAnalyzeResult = message;
@@ -2343,7 +2701,16 @@
   }
 
   async function handleCredentialAction(action, providerId) {
-    if (!backendConnected()) return;
+    if (!backendConnected()) {
+      credentialActionStatus[providerId] = "failed: backend unavailable; no local credential write occurred";
+      data.providerReadiness.lastCredentialResult = `${providerId}: FAILED backend unavailable`;
+      renderScreens(activeScreenId);
+      renderRail();
+      renderAiChiefOverlay();
+      return;
+    }
+    credentialActionStatus[providerId] = `${action === "save" ? "saving" : action === "validate" ? "validating" : "deleting"}...`;
+    renderScreens(activeScreenId);
     try {
       let result;
       if (action === "save") {
@@ -2368,13 +2735,17 @@
       }
       const selectedScreen = activeScreenId;
       data = await loadData();
-      data.providerReadiness.lastCredentialResult = `${providerId}: ${(result && (result.status || result.reason_code)) || "OK"}`;
+      const statusText = `${providerId}: ${(result && (result.status || result.reason_code)) || "OK"}`;
+      credentialActionStatus[providerId] = statusText;
+      data.providerReadiness.lastCredentialResult = statusText;
       renderTopBar();
       renderScreens(selectedScreen);
       renderRail();
       renderAiChiefOverlay();
     } catch (error) {
-      data.providerReadiness.lastCredentialResult = `${providerId}: FAILED ${error.message || error.name || "credential_error"}`;
+      const statusText = `${providerId}: FAILED ${error.message || error.name || "credential_error"}`;
+      credentialActionStatus[providerId] = statusText;
+      data.providerReadiness.lastCredentialResult = statusText;
       renderScreens(activeScreenId);
       renderRail();
     }
@@ -2401,6 +2772,16 @@
       runAiOverlayAnalyze();
       return;
     }
+    const aiAsk = event.target.closest("[data-ai-chief-ask]");
+    if (aiAsk && !aiAsk.disabled) {
+      askAiChiefQuestion();
+      return;
+    }
+    const aiClear = event.target.closest("[data-ai-chief-clear]");
+    if (aiClear && !aiClear.disabled) {
+      clearAiQuestion();
+      return;
+    }
     const credentialSave = event.target.closest("[data-credential-save]");
     if (credentialSave) {
       handleCredentialAction("save", credentialSave.dataset.credentialSave);
@@ -2416,9 +2797,14 @@
       handleCredentialAction("delete", credentialDelete.dataset.credentialDelete);
       return;
     }
+    const screenShortcut = event.target.closest("[data-screen-shortcut]");
+    if (screenShortcut) {
+      showScreen(screenShortcut.dataset.screenShortcut);
+      return;
+    }
     const button = event.target.closest("[data-intent]");
     if (!button || button.disabled) return;
-    handleIntent(button.dataset.intent);
+    handleIntent(button.dataset.intent, button);
   });
 
   document.addEventListener("DOMContentLoaded", boot);

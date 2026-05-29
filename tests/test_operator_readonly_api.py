@@ -76,6 +76,11 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/operator/launch-readiness" in paths
     assert "/operator/research" in paths
     assert "/operator/research/evidence-graph" in paths
+    assert "/operator/ai/ask" in paths
+    assert "/operator/historical-tests" in paths
+    assert "/operator/historical-tests/run" in paths
+    assert "/operator/historical-tests/{test_id}" in paths
+    assert "/operator/historical-tests/{test_id}/report" in paths
 
 
 def test_operator_intents_are_refused_without_mutation(tmp_path):
@@ -167,3 +172,60 @@ def test_operator_provider_and_research_endpoints_are_safe(tmp_path):
     assert graph["raw_logs_included"] is False
     assert graph["secrets_values_exposed"] is False
     assert graph["can_execute"] is False
+
+
+def test_operator_endpoint_smoke_matrix_is_safe(tmp_path):
+    app = _app(tmp_path)
+
+    get_paths = [
+        "/operator/status",
+        "/operator/runtime",
+        "/operator/latest-run",
+        "/operator/action-center",
+        "/operator/providers/readiness",
+        "/operator/credentials/providers",
+        "/operator/launch-readiness",
+        "/operator/portfolio",
+        "/operator/positions",
+        "/operator/orders/open",
+        "/operator/positions/intelligence",
+        "/operator/research",
+        "/operator/research/evidence-graph",
+        "/operator/ai/status",
+        "/operator/world-awareness",
+        "/operator/world-awareness/providers",
+        "/operator/world-awareness/events",
+        "/operator/world-awareness/runtime",
+        "/operator/readiness/live",
+        "/operator/health",
+        "/operator/readiness",
+        "/operator/storage",
+        "/operator/runs",
+        "/operator/pnl",
+        "/operator/tca",
+        "/operator/alerts",
+        "/operator/system-map",
+        "/operator/historical-tests",
+    ]
+    for path in get_paths:
+        payload = _endpoint(app, path)()
+        assert isinstance(payload, dict), path
+        assert payload.get("secrets_values_exposed") is not True
+
+    credential_save = _endpoint(app, "/operator/credentials/save", "POST")(
+        {"provider_id": "openai", "credentials": {"OPENAI_API_KEY": "sk-smoke-secret-1234567890"}}
+    )
+    credential_validate = _endpoint(app, "/operator/credentials/validate-readonly", "POST")({"provider_id": "openai"})
+    paper_start = _endpoint(app, "/operator/intent/paper/start", "POST")({})
+    ai_ask = _endpoint(app, "/operator/ai/ask", "POST")({"question": "Review provider/data readiness."})
+    historical = _endpoint(app, "/operator/historical-tests/run", "POST")({"date_range_preset": "last_4_months"})
+    text = str((credential_save, credential_validate, paper_start, ai_ask, historical))
+
+    assert "sk-smoke-secret" not in text
+    assert credential_save["broker_call_occurred"] is False
+    assert credential_validate["broker_call_occurred"] is False
+    assert paper_start["broker_call_occurred"] is False
+    assert paper_start["runtime_mutation_occurred"] is False
+    assert ai_ask["can_execute"] is False
+    assert historical["broker_trading_call_occurred"] is False
+    assert historical["paper_started"] is False
