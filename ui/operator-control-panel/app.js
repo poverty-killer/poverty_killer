@@ -99,6 +99,10 @@
   let aiOverlayResponse = "";
   let aiOverlayError = "";
   let aiOverlayBusy = false;
+  let homeAiQuestionText = "Review launch readiness, portfolio state, and the safest next PAPER step.";
+  let homeAiResponse = "";
+  let homeAiError = "";
+  let homeAiBusy = false;
   let credentialActionStatus = {};
 
   function softBreakToken(value) {
@@ -284,6 +288,7 @@
           <label class="checkline"><input data-paper-confirm-paper type="checkbox"> Confirm PAPER-only</label>
           <label class="checkline"><input data-paper-confirm-live-locked type="checkbox"> Confirm live locked</label>
           <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox"> Confirm real-money blocked</label>
+          <label class="checkline"><input data-paper-confirm-no-manual-trades type="checkbox"> Confirm no manual trades</label>
         </div>
         <div class="button-row">
           <button class="intent-button paper" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" ${startDisabled}>
@@ -293,6 +298,160 @@
         </div>
         <div class="notice">${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
         <div class="notice mono">Endpoint target: /operator/intent/paper/start only. Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
+      </div>
+    `;
+  }
+
+  function renderHomeLaunchReadiness() {
+    const launch = data.launchReadiness || {};
+    const readiness = data.providerReadiness || {};
+    const providerCounts = readiness.counts || {};
+    return `
+      <div class="card span-12" data-home-section="launch-readiness"><h3>Launch Readiness</h3>${kv([
+        ["Can I run PAPER right now?", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
+        ["Exact blockers", tokenText((launch.reasonCodes || []).join(", ") || "none reported")],
+        ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
+        ["Provider status", escapeHtml(`${readiness.readyOrConfiguredCount || 0} ready/configured, ${readiness.missingCredentialsCount || providerCounts.MISSING_CREDENTIALS || 0} missing`)],
+        ["Live", badge("LOCKED", "red")],
+        ["Real money", badge("BLOCKED", "red")],
+        ["Active runtime", badge(data.supervisor.processState || "UNKNOWN", statusColor(data.supervisor.processState || "UNKNOWN"))],
+        ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
+        ["Storage/audit", badge(data.diagnostics.sessionStoreStatus || "UNKNOWN", statusColor(data.diagnostics.sessionStoreStatus || "UNKNOWN"))],
+        ["Portfolio read", badge(launch.portfolioReadAvailability || "UNKNOWN", statusColor(launch.portfolioReadAvailability || "UNKNOWN"))]
+      ])}
+        ${table(
+          ["Check", "Status", "Detail", "Blocker"],
+          (launch.checks || []).map((check) => [
+            escapeHtml(check.title || check.checkId || "unknown"),
+            badge(check.status || "UNKNOWN", statusColor(check.status || "UNKNOWN")),
+            escapeHtml(check.detail || ""),
+            badge(check.blocker ? "yes" : "no", check.blocker ? "red" : "gray")
+          ])
+        )}
+      </div>
+    `;
+  }
+
+  function renderHomePortfolioSnapshot() {
+    const portfolio = data.portfolio || {};
+    const summary = portfolio.summary || {};
+    return `
+      <div class="card span-12" data-home-section="portfolio-snapshot"><h3>Portfolio Snapshot</h3>${kv([
+        ["Broker data status", badge(portfolio.status || "UNKNOWN", statusColor(portfolio.status || "UNKNOWN"))],
+        ["Message", escapeHtml(portfolio.message || "No broker portfolio message loaded.")],
+        ["Total equity", escapeHtml(summary.totalEquity || "unavailable")],
+        ["Cash", escapeHtml(summary.cash || "unavailable")],
+        ["Buying power", escapeHtml(summary.buyingPower || "unavailable")],
+        ["Market value", escapeHtml(summary.totalMarketValue || "unavailable")],
+        ["Unrealized P&L", escapeHtml(summary.totalUnrealizedPnl || "unavailable")],
+        ["Day P&L", escapeHtml(summary.dayPnl || "unavailable")],
+        ["Positions", escapeHtml(summary.positionCount || 0)],
+        ["Open orders", escapeHtml(summary.openOrderCount || 0)],
+        ["Largest position", escapeHtml(summary.largestPosition || "none")],
+        ["Highest-risk/stale/conflicted", escapeHtml(summary.highestRiskPosition || (summary.staleOrConflictedPositionCount ? `${summary.staleOrConflictedPositionCount} flagged` : "none"))],
+        ["Freshness", escapeHtml(portfolio.dataFreshnessTs || "unavailable")]
+      ])}</div>
+    `;
+  }
+
+  function renderHomePositionsPreview() {
+    const portfolio = data.portfolio || {};
+    const positions = (portfolio.positions || []).slice(0, 5);
+    const unavailable = portfolio.status === "BROKER_DATA_UNAVAILABLE";
+    return `
+      <div class="card span-12" data-home-section="positions-preview"><h3>Current Assets / Positions Preview</h3>${positions.length ? table(
+        ["Symbol", "Quantity", "Average Entry", "Current Price", "Market Value", "Unrealized P&L", "Daily Change", "Exposure", "Truth"],
+        positions.map((p) => [
+          escapeHtml(p.symbol || "unknown"),
+          escapeHtml(p.quantity || "unknown"),
+          escapeHtml(p.averageEntryPrice || "unknown"),
+          escapeHtml(p.currentMarketPrice || "unknown"),
+          escapeHtml(p.marketValue || "unknown"),
+          escapeHtml(p.unrealizedPnl || "unknown"),
+          escapeHtml(p.todayPercentChange || p.todayPriceChange || "unavailable"),
+          escapeHtml(p.exposurePercentOfPortfolio || "unknown"),
+          p.brokerConfirmed ? badge("broker-confirmed", "green") : badge(p.source || portfolio.dataSource || "unavailable", statusColor(p.source || portfolio.dataSource || "unavailable"))
+        ])
+      ) : `<p class="muted">${escapeHtml(unavailable ? `No current PAPER positions shown; broker data unavailable: ${portfolio.unavailableReason || "UNKNOWN"}.` : "No current PAPER positions.")}</p>`}</div>
+    `;
+  }
+
+  function renderHomeOpenOrdersPreview() {
+    const orders = ((data.portfolio && data.portfolio.openOrders) || data.orders || []).slice(0, 5);
+    return `
+      <div class="card span-12" data-home-section="open-orders-preview"><h3>Open Orders Preview</h3>${orders.length ? table(
+        ["Symbol", "Side", "Quantity", "Order Type", "Status", "Submitted", "Read-only"],
+        orders.map((o) => [
+          escapeHtml(o.symbol || "unknown"),
+          escapeHtml(o.side || "unknown"),
+          escapeHtml(o.qty || o.quantity || "unknown"),
+          escapeHtml(o.type || o.action || "unknown"),
+          badge(o.status || o.state || "UNKNOWN", statusColor(o.status || o.state || "UNKNOWN")),
+          escapeHtml(o.submittedAt || o.submitted_at || "unavailable"),
+          badge("cancel unavailable", "gray")
+        ])
+      ) : `<p class="muted">No open broker-confirmed orders.</p>`}</div>
+    `;
+  }
+
+  function renderHomeBotActivity() {
+    const explain = data.explanation || {};
+    const blockers = (explain.blockers || []).concat(explain.missingTruth || []);
+    return `
+      <div class="card span-12" data-home-section="bot-activity"><h3>Bot Activity / What It Is Considering</h3>${kv([
+        ["Runtime", badge(data.supervisor.processState || data.status.botStatus || "UNKNOWN", statusColor(data.supervisor.processState || data.status.botStatus || "UNKNOWN"))],
+        ["Latest run", escapeHtml(data.runArchive && data.runArchive.runs && data.runArchive.runs.length ? `${data.runArchive.runs[0].runId}: ${data.runArchive.runs[0].finalVerdict}` : "no latest run loaded")],
+        ["Watchlist", escapeHtml((data.supervisor.watchlist && data.supervisor.watchlist.length ? data.supervisor.watchlist : data.status.universe || []).join(", ") || "unavailable")],
+        ["Decision summary", escapeHtml(explain.headline || data.status.lastDecision || "unavailable")],
+        ["Output", badge(explain.output || "UNKNOWN", statusColor(explain.output || "UNKNOWN"))],
+        ["NetEdge", badge(explain.netEdge || "UNKNOWN", statusColor(explain.netEdge || "UNKNOWN"))],
+        ["Biggest blocker", tokenText(data.status.dominantBlocker || (blockers[0] || "none reported"))],
+        ["Evaluating", escapeHtml(explain.nextBestAction || "No DecisionFrame summary loaded.")]
+      ])}
+        <div class="status-strip">${blockers.length ? blockers.map((item) => badge(item, statusColor(item))).join("") : badge("no blockers loaded", "gray")}</div>
+      </div>
+    `;
+  }
+
+  function renderHomeAiAdvisor() {
+    const providerState = data.ai.providerState || "AI_DISABLED";
+    const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
+    const response = homeAiResponse || "No home-page question asked yet. Ask about readiness, portfolio risk, blockers, PAPER planning, or evidence quality.";
+    return `
+      <div class="card span-12" data-home-section="ai-quant-advisor"><h3>AI Quant Advisor</h3>
+        <div class="notice ai-mission">Advisory only. can_execute=false. No broker calls, no live enablement, no real-money enablement, no threshold mutation, no secrets.</div>
+        <div class="notice mono">Provider: ${escapeHtml(providerLabel)}. If a model key is configured but real model calls are unavailable, /operator/ai/ask returns an honest deterministic fallback.</div>
+        <div class="ai-ask-box">
+          <label for="home-ai-question">Ask a question from the home page</label>
+          <textarea id="home-ai-question" data-home-ai-question rows="4" placeholder="Ask what blocks PAPER, what we own, what risk matters, or what proof is needed next.">${escapeHtml(homeAiQuestionText || "")}</textarea>
+          <div class="ai-question-bank" aria-label="Home AI Advisor suggestions">
+            ${AI_QUICK_PROMPTS.slice(0, 6).map((prompt) => `
+              <button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>
+            `).join("")}
+          </div>
+          <div class="button-row">
+            <button class="intent-button paper" type="button" data-home-ai-ask ${homeAiBusy ? "disabled" : ""}>${homeAiBusy ? "Asking..." : "Ask AI Quant Advisor"}</button>
+            <button class="intent-button paper" type="button" data-home-ai-clear ${homeAiBusy ? "disabled" : ""}>Clear</button>
+            <button class="intent-button paper" type="button" data-ai-chief-open>Open Global Drawer</button>
+          </div>
+          ${homeAiError ? `<div class="notice error">Error: ${escapeHtml(homeAiError)}</div>` : ""}
+        </div>
+        <div class="ai-response"><h3>Home Advisory Response</h3><pre>${escapeHtml(response)}</pre></div>
+      </div>
+    `;
+  }
+
+  function renderHomeWiringSummary() {
+    const wiring = uiWiringSummary();
+    return `
+      <div class="card span-12" data-home-section="ui-wiring-summary"><h3>Buttons / Controls Status</h3>${kv([
+        ["Total audited controls", escapeHtml(wiring.total)],
+        ["Wired", badge(wiring.wired, wiring.wired ? "green" : "gray")],
+        ["Disabled with reason", badge(wiring.disabledWithReason, wiring.disabledWithReason ? "yellow" : "gray")],
+        ["Not implemented visible", badge(wiring.notImplemented, wiring.notImplemented ? "yellow" : "gray")],
+        ["Broken", badge(wiring.broken, wiring.broken ? "red" : "green")]
+      ])}
+        <div class="notice mono">Full button-by-button inventory is available in Diagnostics / UI Wiring Audit.</div>
       </div>
     `;
   }
@@ -330,17 +489,14 @@
         ${metric("Mode", s.runtimeMode, "green")}
         ${metric("Live", "LOCKED", "red")}
         ${metric("Real-money", "BLOCKED", "red")}
-        <div class="card span-12"><h3>Can I Run PAPER Right Now?</h3>${kv([
-          ["Final readiness", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
-          ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
-          ["PAPER endpoint only", badge(launch.paperEndpointOnly ? "confirmed" : "blocked/unknown", launch.paperEndpointOnly ? "green" : "red")],
-          ["No active runtime", badge(data.supervisor.processState === "NO_ACTIVE_PAPER_RUN" ? "yes" : data.supervisor.processState, data.supervisor.processState === "NO_ACTIVE_PAPER_RUN" ? "green" : "yellow")],
-          ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
-          ["Portfolio read", badge(launch.portfolioReadAvailability || "UNKNOWN", statusColor(launch.portfolioReadAvailability || "UNKNOWN"))]
-        ])}
-          <div class="status-strip">${(launch.reasonCodes || []).map((reason) => badge(reason, statusColor(reason))).join("") || badge("no blockers reported", "green")}</div>
-        </div>
+        ${renderHomeLaunchReadiness()}
         ${renderPaperLaunchControl("command")}
+        ${renderHomePortfolioSnapshot()}
+        ${renderHomePositionsPreview()}
+        ${renderHomeOpenOrdersPreview()}
+        ${renderHomeBotActivity()}
+        ${renderHomeAiAdvisor()}
+        ${renderHomeWiringSummary()}
         <div class="card span-6"><h3>Mode & Authority</h3>${kv([
           ["Capability state", badge(s.capabilityState, "green")],
           ["Active profile", badge(s.activeProfile, "cyan")],
@@ -822,9 +978,16 @@
           ["AI secret access", badge("forbidden", "red")],
           ["Browser secret storage", badge("not used", "green")],
           ["Read-only validation", badge("presence / PAPER endpoint only", "yellow")],
-          ["Local store", escapeHtml(credentials.storePath || ".operator_secrets/provider_credentials.json")],
+          ["Visible feedback states", escapeHtml("saving / saved / failed / validation passed / validation failed / configured / missing")],
+          ["Local credential vault", badge(credentials.storeExists ? "stored on this computer only" : "not created yet", credentials.storeExists ? "green" : "yellow")],
+          ["Secrets sent to AI", badge("never", "green")],
           ["Precedence", badge(credentials.precedence || "ENV_PRESENT_OVERRIDES_LOCAL_SECRET", "gray")]
-        ])}</div>
+        ])}
+          <details class="ai-context-details">
+            <summary>Advanced local vault details</summary>
+            <div class="notice mono">Store path: ${escapeHtml(credentials.storePath || ".operator_secrets/provider_credentials.json")}. Raw secrets are hidden and not sent to AI.</div>
+          </details>
+        </div>
         <div class="card span-12"><h3>Enter / Update Credentials</h3>
           <div class="credential-grid">
             ${Object.entries(CREDENTIAL_FORMS).map(([providerId, form]) => `
@@ -877,6 +1040,26 @@
     const configured = provider.configured ? "configured" : "missing";
     const sources = (provider.fields || []).map((field) => `${field.name}:${field.source}`).join(", ");
     return `${configured}; ${sources || "no fields"}`;
+  }
+
+  function credentialActionStatusText(action, providerId, result) {
+    const status = String((result && result.status) || "UNKNOWN");
+    const summary = (result && result.summary) || {};
+    const configured = summary.configured === true || result.configured === true;
+    const sources = Array.isArray(summary.fields)
+      ? summary.fields.map((field) => `${field.name}:${field.source || "NOT_CONFIGURED"}`).join(", ")
+      : "";
+    if (action === "save" && status === "SAVED") {
+      return `${providerId}: saved; ${configured ? "configured" : "missing"}; raw secrets hidden; ${sources || "source pending"}`;
+    }
+    if (action === "validate") {
+      const passed = status === "READY";
+      return `${providerId}: validation ${passed ? "passed" : "failed"}; ${configured ? "configured" : "missing"}; ${(result.reason_codes || []).join(", ") || status}`;
+    }
+    if (action === "delete") {
+      return `${providerId}: ${status === "DELETED" ? "deleted; missing" : status.toLowerCase()}; raw secrets hidden`;
+    }
+    return `${providerId}: ${status}`;
   }
 
   function renderResearch() {
@@ -1013,9 +1196,16 @@
       ["command", "paper_watchlist", "Watchlist", "input", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_duration", "Duration", "select", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_start", "Start Bounded PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
+      ["command", "home_ai_question", "Home AI Quant Advisor question", "input", "WIRED", "read_only", "", null, "local_page_context"],
+      ["command", "home_ai_ask", "Ask AI Quant Advisor", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; deterministic local advisory only", "POST", "/operator/ai/ask"],
+      ["command", "home_ai_clear", "Clear home AI question", "button", "WIRED", "read_only", "", null, "local_clear"],
+      ["command", "home_ui_wiring_summary", "Buttons / Controls Status", "summary", "WIRED", "read_only", "", null, "local_inventory_summary"],
       ["activity", "paper_stop", "Stop PAPER", "button", data.supervisor.paperStopAllowed ? "WIRED" : "DISABLED_WITH_REASON", "governed_paper_start", data.supervisor.paperStopAllowed ? "" : (data.supervisor.paperStopRefusalReason || "no active PAPER runtime"), "POST", "/operator/intent/paper/stop"],
       ["activity", "export_run_report", "Export run report - future server-authorized intent", "button", "NOT_IMPLEMENTED_VISIBLE", "read_only", "server-authorized export intent not implemented", null, null],
       ["activity", "live_start_locked", "Live start locked - LIVE_NOT_APPROVED", "button", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
+      ["positions", "positions_preview_table", "Current PAPER Positions", "table", "WIRED", "read_only", "", "GET", "/operator/positions"],
+      ["positions", "open_orders_preview_table", "Open Orders", "table", "WIRED", "read_only", "cancel/replace unavailable in operator UI", "GET", "/operator/orders/open"],
+      ["positions", "position_intelligence_table", "Position Intelligence", "table", "WIRED", "read_only", "", "GET", "/operator/positions/intelligence"],
       ["world", "world_poll", "Poll Alpaca News - read-only provider intent", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "read_only", backendConnected() ? "" : "backend unavailable", "POST", "/operator/intent/world-awareness/poll"],
       ["ai", "ai_analyze", "Run advisory AI analysis", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/ai/analyze"],
       ["ai", "ai_quant_review", "Queue Quant Chief review", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/ai/quant-review"],
@@ -1598,7 +1788,7 @@
             </div>
             <div class="notice mono">
               ${backendConnected()
-                ? "Analyze uses the governed AI endpoint and governance queue. Provider disabled/mock states remain clearly labeled."
+                ? "Ask uses /operator/ai/ask. If a key is configured but real model calls are not wired, the backend returns DETERMINISTIC_FALLBACK_NO_MODEL_CALL instead of pretending a model answered. Analyze uses the governed AI endpoint and governance queue."
                 : "Backend unreachable: overlay can show sample context only and will not queue runtime recommendations."}
             </div>
           </div>
@@ -1629,6 +1819,18 @@
     renderAiChiefOverlay();
   }
 
+  function formatAiAskResult(result) {
+    return [
+      `${result.response_source || "DETERMINISTIC_FALLBACK_NO_MODEL_CALL"} / ${result.provider_state || "AI_DISABLED"}`,
+      result.response || "No advisory response returned.",
+      `can_execute=${String(result.can_execute === true ? "true" : "false")}`,
+      `broker_call_occurred=${String(result.broker_call_occurred === true ? "true" : "false")}`,
+      `trading_mutation_occurred=${String(result.trading_mutation_occurred === true ? "true" : "false")}`,
+      `live_enabled=${String(result.live_enabled === true ? "true" : "false")}`,
+      `real_money_enabled=${String(result.real_money_enabled === true ? "true" : "false")}`
+    ].join("\n");
+  }
+
   async function askAiChiefQuestion() {
     const input = document.querySelector("[data-ai-chief-question]");
     const question = String((input && input.value) || aiQuestionText || aiSelectedQuestion || "").trim();
@@ -1651,19 +1853,69 @@
         page_context: context,
         advisory_only: true
       });
-      aiOverlayResponse = [
-        `${result.response_source || "DETERMINISTIC_FALLBACK_NO_MODEL_CALL"} / ${result.provider_state || "AI_DISABLED"}`,
-        result.response || "No advisory response returned.",
-        `can_execute=${String(result.can_execute === true ? "true" : "false")}`,
-        `broker_call_occurred=${String(result.broker_call_occurred === true ? "true" : "false")}`,
-        `trading_mutation_occurred=${String(result.trading_mutation_occurred === true ? "true" : "false")}`
-      ].join("\n");
+      aiOverlayResponse = formatAiAskResult(result);
     } catch (error) {
       aiOverlayError = error.message || error.name || "ai_ask_failed";
       aiOverlayResponse = buildAiOverlayAdvisory(question);
     } finally {
       aiOverlayBusy = false;
       aiOverlayOpen = true;
+      renderAiChiefOverlay();
+    }
+  }
+
+  function selectHomeAiQuestion(question) {
+    homeAiQuestionText = question;
+    homeAiError = "";
+    homeAiResponse = buildAiOverlayAdvisory(question);
+    renderScreens(activeScreenId);
+    renderRail();
+    renderAiChiefOverlay();
+  }
+
+  function clearHomeAiQuestion() {
+    homeAiQuestionText = "";
+    homeAiResponse = "";
+    homeAiError = "";
+    renderScreens(activeScreenId);
+    renderRail();
+    renderAiChiefOverlay();
+  }
+
+  async function askHomeAiQuestion() {
+    const input = document.querySelector("[data-home-ai-question]");
+    const question = String((input && input.value) || homeAiQuestionText || "").trim();
+    homeAiQuestionText = question;
+    homeAiError = "";
+    if (!backendConnected()) {
+      homeAiResponse = buildAiOverlayAdvisory(question);
+      renderScreens(activeScreenId);
+      renderRail();
+      renderAiChiefOverlay();
+      return;
+    }
+    homeAiBusy = true;
+    renderScreens(activeScreenId);
+    renderRail();
+    renderAiChiefOverlay();
+    try {
+      const context = buildAiChiefContext(question);
+      context.page_id = "command";
+      context.page_title = "Command Center";
+      const result = await postIntent("/operator/ai/ask", {
+        question,
+        page_id: "command",
+        page_context: context,
+        advisory_only: true
+      });
+      homeAiResponse = formatAiAskResult(result);
+    } catch (error) {
+      homeAiError = error.message || error.name || "home_ai_ask_failed";
+      homeAiResponse = buildAiOverlayAdvisory(question);
+    } finally {
+      homeAiBusy = false;
+      renderScreens(activeScreenId);
+      renderRail();
       renderAiChiefOverlay();
     }
   }
@@ -2561,13 +2813,15 @@
     const confirmPaper = ((card && card.querySelector("[data-paper-confirm-paper]")) || {}).checked === true;
     const confirmLiveLocked = ((card && card.querySelector("[data-paper-confirm-live-locked]")) || {}).checked === true;
     const confirmRealMoneyBlocked = ((card && card.querySelector("[data-paper-confirm-real-money-blocked]")) || {}).checked === true;
+    const confirmNoManualTrades = ((card && card.querySelector("[data-paper-confirm-no-manual-trades]")) || {}).checked === true;
     return {
       watchlist: watchlistRaw.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean),
       durationSeconds: Number.parseInt(durationRaw, 10) || 300,
       profile: profileAlpha ? "PAPER_EXPLORATION_ALPHA" : data.status.activeProfile,
       confirmPaper,
       confirmLiveLocked,
-      confirmRealMoneyBlocked
+      confirmRealMoneyBlocked,
+      confirmNoManualTrades
     };
   }
 
@@ -2613,8 +2867,8 @@
       let message = "none";
       if (intent === "paper-start") {
         const form = paperRunFormValues(sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "command");
-        if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked) {
-          window.alert("Confirm PAPER-only, live locked, and real-money blocked before requesting the governed PAPER start.");
+        if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked || !form.confirmNoManualTrades) {
+          window.alert("Confirm PAPER-only, live locked, real-money blocked, and no manual trades before requesting the governed PAPER start.");
           return;
         }
         const confirmed = window.confirm(
@@ -2716,7 +2970,9 @@
       if (action === "save") {
         const credentials = credentialFormValues(providerId);
         if (!Object.keys(credentials).length) {
+          credentialActionStatus[providerId] = "failed: no credential fields entered";
           window.alert("Enter at least one credential field before saving.");
+          renderScreens(activeScreenId);
           return;
         }
         result = await postIntent("/operator/credentials/save", {
@@ -2735,7 +2991,7 @@
       }
       const selectedScreen = activeScreenId;
       data = await loadData();
-      const statusText = `${providerId}: ${(result && (result.status || result.reason_code)) || "OK"}`;
+      const statusText = credentialActionStatusText(action, providerId, result || {});
       credentialActionStatus[providerId] = statusText;
       data.providerReadiness.lastCredentialResult = statusText;
       renderTopBar();
@@ -2780,6 +3036,21 @@
     const aiClear = event.target.closest("[data-ai-chief-clear]");
     if (aiClear && !aiClear.disabled) {
       clearAiQuestion();
+      return;
+    }
+    const homeAiPrompt = event.target.closest("[data-home-ai-prompt]");
+    if (homeAiPrompt) {
+      selectHomeAiQuestion(homeAiPrompt.dataset.homeAiPrompt);
+      return;
+    }
+    const homeAiAsk = event.target.closest("[data-home-ai-ask]");
+    if (homeAiAsk && !homeAiAsk.disabled) {
+      askHomeAiQuestion();
+      return;
+    }
+    const homeAiClear = event.target.closest("[data-home-ai-clear]");
+    if (homeAiClear && !homeAiClear.disabled) {
+      clearHomeAiQuestion();
       return;
     }
     const credentialSave = event.target.closest("[data-credential-save]");

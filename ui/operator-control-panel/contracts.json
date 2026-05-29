@@ -145,6 +145,37 @@
     "live_start_available": false,
     "real_money_available": false
   },
+  "operator_home_contract": {
+    "first_screen": "Command Center",
+    "answers": [
+      "can_i_run_paper_now",
+      "missing_credentials_and_providers",
+      "current_paper_portfolio",
+      "current_pnl_and_exposure",
+      "open_orders",
+      "bot_considering",
+      "bot_activity",
+      "biggest_blocker",
+      "home_ai_quant_advisor",
+      "control_wiring_status"
+    ],
+    "required_sections": [
+      "Launch Readiness",
+      "PAPER Launch Control",
+      "Portfolio Snapshot",
+      "Current Assets / Positions Preview",
+      "Open Orders Preview",
+      "Bot Activity / What It Is Considering",
+      "AI Quant Advisor",
+      "Buttons / Controls Status"
+    ],
+    "home_ai_endpoint": "/operator/ai/ask",
+    "paper_start_endpoint": "/operator/intent/paper/start",
+    "live_enabled": false,
+    "real_money_enabled": false,
+    "manual_trading_available": false,
+    "fake_broker_truth_allowed": false
+  },
   "ui_wiring_audit_contract": {
     "inventory_visible_in_diagnostics": true,
     "allowed_control_statuses": [
