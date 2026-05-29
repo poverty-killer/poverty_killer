@@ -60,6 +60,32 @@
   ]);
   const AI_SECRET_KEY_PATTERN = /(api[_-]?key|token|password|secret|credential|authorization|bearer)/i;
   const AI_SECRET_VALUE_PATTERN = /(sk-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i;
+  const CREDENTIAL_FORMS = {
+    alpaca_paper: {
+      title: "Alpaca PAPER Broker/Data",
+      fields: [
+        ["APCA_API_KEY_ID", "API key ID", "password", ""],
+        ["APCA_API_SECRET_KEY", "API secret key", "password", ""],
+        ["APCA_API_BASE_URL", "PAPER base URL", "text", "https://paper-api.alpaca.markets"]
+      ]
+    },
+    openai: {
+      title: "OpenAI",
+      fields: [["OPENAI_API_KEY", "OpenAI API key", "password", ""]]
+    },
+    anthropic: {
+      title: "Anthropic / Claude",
+      fields: [["ANTHROPIC_API_KEY", "Anthropic API key", "password", ""]]
+    },
+    alpaca_news: {
+      title: "Alpaca News",
+      fields: [
+        ["APCA_API_KEY_ID", "API key ID", "password", ""],
+        ["APCA_API_SECRET_KEY", "API secret key", "password", ""],
+        ["APCA_API_BASE_URL", "PAPER base URL", "text", "https://paper-api.alpaca.markets"]
+      ]
+    }
+  };
   let activeScreenId = "command";
   let aiOverlayOpen = false;
   let aiSelectedQuestion = AI_QUICK_PROMPTS[0];
@@ -228,6 +254,7 @@
   function renderCommand() {
     const s = data.status;
     const actionCounts = data.actionCenter.counts || {};
+    const launch = data.launchReadiness || {};
     return `
       ${header("Command Center", "Operational truth, authority, and current runtime safety.", s.safetyVerdict)}
       <div class="grid">
@@ -235,6 +262,16 @@
         ${metric("Mode", s.runtimeMode, "green")}
         ${metric("Live", "LOCKED", "red")}
         ${metric("Real-money", "BLOCKED", "red")}
+        <div class="card span-12"><h3>Can I Run PAPER Right Now?</h3>${kv([
+          ["Final readiness", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
+          ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
+          ["PAPER endpoint only", badge(launch.paperEndpointOnly ? "confirmed" : "blocked/unknown", launch.paperEndpointOnly ? "green" : "red")],
+          ["No active runtime", badge(data.supervisor.processState === "NO_ACTIVE_PAPER_RUN" ? "yes" : data.supervisor.processState, data.supervisor.processState === "NO_ACTIVE_PAPER_RUN" ? "green" : "yellow")],
+          ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
+          ["Portfolio read", badge(launch.portfolioReadAvailability || "UNKNOWN", statusColor(launch.portfolioReadAvailability || "UNKNOWN"))]
+        ])}
+          <div class="status-strip">${(launch.reasonCodes || []).map((reason) => badge(reason, statusColor(reason))).join("") || badge("no blockers reported", "green")}</div>
+        </div>
         <div class="card span-6"><h3>Mode & Authority</h3>${kv([
           ["Capability state", badge(s.capabilityState, "green")],
           ["Active profile", badge(s.activeProfile, "cyan")],
@@ -353,27 +390,103 @@
   }
 
   function renderPositions() {
+    const portfolio = data.portfolio || {};
+    const summary = portfolio.summary || {};
+    const positions = portfolio.positions || [];
+    const orders = portfolio.openOrders || data.orders || [];
+    const intelligence = portfolio.positionIntelligence || [];
+    const unavailable = portfolio.status === "BROKER_DATA_UNAVAILABLE";
     return `
-      ${header("Positions & Orders", "Broker-backed position truth, OMS lifecycle, and reconciliation.", "RECONCILED")}
+      ${header("Positions & Orders", "Broker-confirmed PAPER portfolio truth, open orders, and position intelligence.", portfolio.status || "UNKNOWN")}
       <div class="grid">
-        <div class="card span-12"><h3>Broker-backed Positions</h3>${table(
-          ["Symbol", "Asset", "Quantity", "Source", "MovingFloor", "Exit Eligibility"],
-          data.positions.map((p) => [p.symbol, p.assetClass, p.brokerQuantity, badge(p.source, "green"), p.movingFloor, p.exitEligibility])
-        )}</div>
-        <div class="card span-12"><h3>Orders</h3>${table(
-          ["Client Order ID", "Symbol", "Side", "Action", "State", "Broker", "Reconciliation"],
-          data.orders.map((o) => [o.clientOrderId, o.symbol, o.side, o.action, badge(o.state, statusColor(o.state)), o.brokerStatus, badge(o.reconciliation, "green")])
-        )}</div>
+        ${metric("Positions", summary.positionCount || 0, summary.positionCount ? "green" : "gray")}
+        ${metric("Open Orders", summary.openOrderCount || 0, summary.openOrderCount ? "yellow" : "gray")}
+        ${metric("Total Equity", summary.totalEquity || "unknown", summary.totalEquity ? "green" : "yellow")}
+        ${metric("Unrealized P&L", summary.totalUnrealizedPnl || "unknown", summary.totalUnrealizedPnl ? statusColor(summary.totalUnrealizedPnl) : "yellow")}
+        <div class="card span-12"><h3>Portfolio Summary</h3>${kv([
+          ["Source", badge(portfolio.dataSource || "UNAVAILABLE", statusColor(portfolio.dataSource || "UNAVAILABLE"))],
+          ["Status", badge(portfolio.status || "UNKNOWN", statusColor(portfolio.status || "UNKNOWN"))],
+          ["Message", escapeHtml(portfolio.message || "")],
+          ["Cash", escapeHtml(summary.cash || "unknown")],
+          ["Buying power", escapeHtml(summary.buyingPower || "unknown")],
+          ["Market value", escapeHtml(summary.totalMarketValue || "unknown")],
+          ["Gross exposure", escapeHtml(summary.grossExposure || "unknown")],
+          ["Net exposure", escapeHtml(summary.netExposure || "unknown")],
+          ["Largest position", escapeHtml(summary.largestPosition || "none")],
+          ["Highest risk", escapeHtml(summary.highestRiskPosition || "none")],
+          ["Reconciliation", badge(summary.brokerLocalReconciliationStatus || "UNKNOWN", statusColor(summary.brokerLocalReconciliationStatus || "UNKNOWN"))],
+          ["Freshness", escapeHtml(portfolio.dataFreshnessTs || "unavailable")]
+        ])}</div>
+        ${unavailable ? `<div class="card span-12"><h3>Broker Data Unavailable</h3><p class="muted">Reason: ${escapeHtml(portfolio.unavailableReason || "UNKNOWN")}. No positions are invented and local-only state is not shown as broker truth.</p></div>` : ""}
+        <div class="card span-12"><h3>Current PAPER Positions</h3>${positions.length ? table(
+          ["Symbol", "Asset", "Qty", "Side", "Avg Entry", "Current", "Market Value", "Unrealized", "P&L %", "Exposure", "Fees", "TCA", "Source", "Risk"],
+          positions.map((p) => [
+            escapeHtml(p.symbol),
+            escapeHtml(p.assetClass),
+            escapeHtml(p.quantity || "unknown"),
+            escapeHtml(p.side || "unknown"),
+            escapeHtml(p.averageEntryPrice || "unknown"),
+            escapeHtml(p.currentMarketPrice || "unknown"),
+            escapeHtml(p.marketValue || "unknown"),
+            escapeHtml(p.unrealizedPnl || "unknown"),
+            escapeHtml(p.unrealizedPnlPercent || "unknown"),
+            escapeHtml(p.exposurePercentOfPortfolio || "unknown"),
+            badge(p.feesStatus || "UNKNOWN", statusColor(p.feesStatus || "UNKNOWN")),
+            badge(p.tcaStatus || "UNKNOWN", statusColor(p.tcaStatus || "UNKNOWN")),
+            badge(p.source || "UNAVAILABLE", statusColor(p.source || "UNAVAILABLE")),
+            badge(p.riskStatus || "UNKNOWN", statusColor(p.riskStatus || "UNKNOWN"))
+          ])
+        ) : `<p class="muted">${escapeHtml(portfolio.empty ? "No current PAPER positions." : "No broker-confirmed positions available.")}</p>`}</div>
+        <div class="card span-12"><h3>Open Orders</h3>${orders.length ? table(
+          ["Order ID", "Client ID", "Symbol", "Side", "Type", "Qty", "Filled", "Limit", "Status", "Source", "Cancel"],
+          orders.map((o) => [
+            escapeHtml(o.orderId || o.clientOrderId || "unknown"),
+            escapeHtml(o.clientOrderId || "unknown"),
+            escapeHtml(o.symbol || "unknown"),
+            escapeHtml(o.side || "unknown"),
+            escapeHtml(o.type || o.action || "unknown"),
+            escapeHtml(o.qty || "unknown"),
+            escapeHtml(o.filledQty || "0"),
+            escapeHtml(o.limitPrice || "none"),
+            badge(o.status || o.state || "UNKNOWN", statusColor(o.status || o.state || "UNKNOWN")),
+            badge(o.source || "READ_ONLY", statusColor(o.source || "READ_ONLY")),
+            badge(o.canCancel ? "available" : "not available", o.canCancel ? "red" : "gray")
+          ])
+        ) : `<p class="muted">No open broker-confirmed orders.</p>`}</div>
+        <div class="card span-12"><h3>Position Intelligence</h3>${intelligence.length ? table(
+          ["Symbol", "Exposure", "Concentration", "Fee Drag", "Slippage", "Freshness", "Exit Logic", "Blockers"],
+          intelligence.map((item) => [
+            escapeHtml(item.symbol),
+            escapeHtml(item.exposurePercentOfPortfolio || "unknown"),
+            badge(item.concentrationWarning ? "warning" : "ok/unknown", item.concentrationWarning ? "yellow" : "gray"),
+            badge(item.feeDragWarning || "UNKNOWN", statusColor(item.feeDragWarning || "UNKNOWN")),
+            badge(item.slippageWarning || "UNKNOWN", statusColor(item.slippageWarning || "UNKNOWN")),
+            badge(item.staleDataWarning ? "stale" : "fresh/read", item.staleDataWarning ? "yellow" : "green"),
+            escapeHtml(item.exitLogicStatus || "UNKNOWN"),
+            escapeHtml((item.blockersConflicts || []).join(", ") || "none")
+          ])
+        ) : `<p class="muted">No position intelligence available without broker-confirmed positions.</p>`}</div>
       </div>
     `;
   }
 
   function renderActivity() {
     const sup = data.supervisor;
+    const launch = data.launchReadiness || {};
     const duration = sup.durationSeconds === null || sup.durationSeconds === undefined ? "not active" : `${sup.durationSeconds}s`;
     return `
       ${header("Bot Activity Control", "Governed PAPER intents only. Live and manual trading remain locked.", sourceLabel())}
       <div class="grid">
+        <div class="card span-12"><h3>Launch Readiness</h3>${kv([
+          ["Final", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
+          ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
+          ["PAPER endpoint", badge(launch.paperEndpointOnly ? "confirmed" : "blocked/unknown", launch.paperEndpointOnly ? "green" : "red")],
+          ["Paper start", badge(launch.paperStartAllowed ? "allowed" : "blocked", launch.paperStartAllowed ? "green" : "red")],
+          ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
+          ["Backend degraded reasons", escapeHtml((launch.backendDegradedReasons || []).join(", ") || "none")]
+        ])}
+          <div class="status-strip">${(launch.checks || []).map((check) => badge(`${check.checkId}:${check.status}`, statusColor(check.status))).join("")}</div>
+        </div>
         <div class="card span-6"><h3>Runtime Snapshot</h3>${kv([
           ["Process", badge(data.status.botStatus, statusColor(data.status.botStatus))],
           ["Profile", badge(data.status.activeProfile, "cyan")],
@@ -392,6 +505,23 @@
           ["Child stdout", escapeHtml(sup.childStdoutPath || "not available")],
           ["Child stderr", escapeHtml(sup.childStderrPath || "not available")]
         ])}</div>
+        <div class="card span-12"><h3>Bounded PAPER Run Setup</h3>
+          <div class="form-grid">
+            <label>Watchlist
+              <input id="paper-watchlist" type="text" value="${escapeHtml((sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"]).join(","))}" autocomplete="off">
+            </label>
+            <label>Duration
+              <select id="paper-duration">
+                ${[300, 900, 1800, 3600].map((seconds) => `<option value="${seconds}" ${seconds === 300 ? "selected" : ""}>${seconds} seconds</option>`).join("")}
+              </select>
+            </label>
+            <label class="checkline"><input id="paper-profile-alpha" type="checkbox" checked> PAPER_EXPLORATION_ALPHA</label>
+            <label class="checkline"><input id="paper-confirm-paper" type="checkbox"> Confirm PAPER-only</label>
+            <label class="checkline"><input id="paper-confirm-live-locked" type="checkbox"> Confirm live locked</label>
+            <label class="checkline"><input id="paper-confirm-real-money-blocked" type="checkbox"> Confirm real-money blocked</label>
+          </div>
+          <div class="notice">This form uses the governed server intent only. It cannot buy, sell, cancel, flatten, enable live, or enable real money.</div>
+        </div>
         <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
             <button class="intent-button paper" data-intent="paper-start" ${sup.paperStartAllowed ? "" : "disabled"}>
@@ -543,8 +673,10 @@
 
   function renderProviders() {
     const readiness = data.providerReadiness;
+    const credentials = data.credentials || {};
+    const credentialProviders = credentials.providers || [];
     return `
-      ${header("Provider Setup / Credential Readiness", "Status, env-var presence, and setup guidance without secret values.", "NO SECRET VALUES")}
+      ${header("Provider Setup / Credential Readiness", "Enter local credentials, validate readiness, and keep raw secrets out of UI responses.", "NO SECRET VALUES")}
       <div class="grid">
         ${metric("Providers", readiness.providerCount || 0, readiness.providerCount ? "green" : "gray")}
         ${metric("Ready/Configured", readiness.readyOrConfiguredCount || 0, readiness.readyOrConfiguredCount ? "green" : "gray")}
@@ -554,16 +686,46 @@
           ["Raw secret values", badge("not exposed", "green")],
           ["AI secret access", badge("forbidden", "red")],
           ["Browser secret storage", badge("not used", "green")],
-          ["Read-only validation", badge("env presence only", "yellow")]
+          ["Read-only validation", badge("presence / PAPER endpoint only", "yellow")],
+          ["Local store", escapeHtml(credentials.storePath || ".operator_secrets/provider_credentials.json")],
+          ["Precedence", badge(credentials.precedence || "ENV_PRESENT_OVERRIDES_LOCAL_SECRET", "gray")]
         ])}</div>
+        <div class="card span-12"><h3>Enter / Update Credentials</h3>
+          <div class="credential-grid">
+            ${Object.entries(CREDENTIAL_FORMS).map(([providerId, form]) => `
+              <div class="credential-box" data-credential-card="${escapeHtml(providerId)}">
+                <h4>${escapeHtml(form.title)}</h4>
+                <div class="muted">${escapeHtml(credentialSummaryLine(credentialProviders, providerId))}</div>
+                ${form.fields.map(([name, label, type, placeholder]) => `
+                  <label>${escapeHtml(label)}
+                    <input
+                      type="${escapeHtml(type)}"
+                      placeholder="${escapeHtml(placeholder || "enter value")}"
+                      data-credential-provider="${escapeHtml(providerId)}"
+                      data-credential-field="${escapeHtml(name)}"
+                      autocomplete="off"
+                    >
+                  </label>
+                `).join("")}
+                <div class="button-row">
+                  <button class="intent-button paper" data-credential-save="${escapeHtml(providerId)}">Save local credentials</button>
+                  <button class="intent-button paper" data-credential-validate="${escapeHtml(providerId)}">Validate read-only</button>
+                  <button class="intent-button live" data-credential-delete="${escapeHtml(providerId)}">Delete local</button>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+          <div class="notice mono">Last credential action: ${escapeHtml(readiness.lastCredentialResult || "none")}</div>
+        </div>
         <div class="card span-12"><h3>Providers</h3>${table(
-          ["Provider", "Category", "Status", "Configured", "Required Env", "Fingerprint", "Can Trade", "Setup"],
+          ["Provider", "Category", "Status", "Configured", "Required Env", "Source", "Fingerprint", "Can Trade", "Setup"],
           readiness.providers.map((provider) => [
             escapeHtml(provider.displayName || provider.providerId),
             badge(provider.category || "unknown", "gray"),
             badge(provider.status || "UNKNOWN", statusColor(provider.status || "UNKNOWN")),
             badge(String(provider.configured === true), provider.configured ? "green" : "yellow"),
             escapeHtml((provider.requiredEnvVars || []).join(", ") || "none"),
+            escapeHtml((provider.envStatus || []).map((row) => row.source || "NOT_CONFIGURED").join(", ") || "none"),
             escapeHtml((provider.envStatus || []).map((row) => row.fingerprint || "missing").join(", ") || "none"),
             badge(String(provider.canTrade === true), provider.canTrade ? "red" : "gray"),
             escapeHtml(provider.setupInstructions || "")
@@ -571,6 +733,14 @@
         )}</div>
       </div>
     `;
+  }
+
+  function credentialSummaryLine(providers, providerId) {
+    const provider = (providers || []).find((item) => item.providerId === providerId);
+    if (!provider) return "not loaded";
+    const configured = provider.configured ? "configured" : "missing";
+    const sources = (provider.fields || []).map((field) => `${field.name}:${field.source}`).join(", ");
+    return `${configured}; ${sources || "no fields"}`;
   }
 
   function renderResearch() {
@@ -1381,6 +1551,104 @@
     });
   }
 
+  function normalizePortfolio(portfolio) {
+    const summary = portfolio.summary || {};
+    return {
+      source: pick(portfolio.source, "OPERATOR_PORTFOLIO_READ_ONLY"),
+      dataSource: pick(portfolio.data_source, "UNAVAILABLE"),
+      status: pick(portfolio.status, "UNKNOWN"),
+      unavailableReason: pick(portfolio.unavailable_reason, null),
+      message: pick(portfolio.message, ""),
+      empty: portfolio.empty === true,
+      dataFreshnessTs: pick(portfolio.data_freshness_ts, null),
+      brokerReadOccurred: portfolio.broker_read_occurred === true,
+      brokerMutationOccurred: portfolio.broker_mutation_occurred === true,
+      summary: {
+        totalEquity: pick(summary.total_equity, null),
+        cash: pick(summary.cash, null),
+        buyingPower: pick(summary.buying_power, null),
+        totalMarketValue: pick(summary.total_market_value, null),
+        totalUnrealizedPnl: pick(summary.total_unrealized_pnl, null),
+        totalRealizedPnl: pick(summary.total_realized_pnl, null),
+        dayPnl: pick(summary.day_pnl, null),
+        grossExposure: pick(summary.gross_exposure, null),
+        netExposure: pick(summary.net_exposure, null),
+        positionCount: pick(summary.position_count, 0),
+        openOrderCount: pick(summary.open_order_count, 0),
+        largestPosition: pick(summary.largest_position, null),
+        highestRiskPosition: pick(summary.highest_risk_position, null),
+        staleOrConflictedPositionCount: pick(summary.stale_or_conflicted_position_count, 0),
+        brokerLocalReconciliationStatus: pick(summary.broker_local_reconciliation_status, "UNKNOWN")
+      },
+      positions: Array.isArray(portfolio.positions) ? portfolio.positions.map((position) => ({
+        symbol: pick(position.symbol, "unknown"),
+        assetClass: pick(position.asset_class, "unknown"),
+        quantity: pick(position.quantity, null),
+        side: pick(position.side, "unknown"),
+        averageEntryPrice: pick(position.average_entry_price, null),
+        currentMarketPrice: pick(position.current_market_price, null),
+        costBasis: pick(position.cost_basis, null),
+        marketValue: pick(position.market_value, null),
+        unrealizedPnl: pick(position.unrealized_pnl, null),
+        unrealizedPnlPercent: pick(position.unrealized_pnl_percent, null),
+        realizedPnl: pick(position.realized_pnl, null),
+        todayPriceChange: pick(position.today_price_change, null),
+        todayPercentChange: pick(position.today_percent_change, null),
+        positionAge: pick(position.position_age, "UNKNOWN"),
+        openedTime: pick(position.opened_time, null),
+        latestFillTime: pick(position.latest_fill_time, null),
+        latestFillPrice: pick(position.latest_fill_price, null),
+        openOrderCount: pick(position.open_order_count, 0),
+        feesStatus: pick(position.fees_status, "UNKNOWN"),
+        tcaStatus: pick(position.tca_status, "UNKNOWN"),
+        slippage: pick(position.slippage, null),
+        source: pick(position.source, "UNAVAILABLE"),
+        brokerConfirmed: position.broker_confirmed === true,
+        omsReconciliationStatus: pick(position.oms_reconciliation_status, "UNKNOWN"),
+        dataFreshnessTs: pick(position.data_freshness_ts, null),
+        tradabilityStatus: pick(position.tradability_status, "UNKNOWN"),
+        riskStatus: pick(position.risk_status, "UNKNOWN"),
+        exposurePercentOfPortfolio: pick(position.intelligence && position.intelligence.exposure_percent_of_portfolio, null)
+      })) : [],
+      openOrders: Array.isArray(portfolio.open_orders) ? portfolio.open_orders.map((order) => ({
+        orderId: pick(order.order_id, null),
+        clientOrderId: pick(order.client_order_id, null),
+        symbol: pick(order.symbol, "unknown"),
+        assetClass: pick(order.asset_class, "unknown"),
+        qty: pick(order.qty, null),
+        filledQty: pick(order.filled_qty, "0"),
+        side: pick(order.side, "unknown"),
+        type: pick(order.type, "unknown"),
+        timeInForce: pick(order.time_in_force, "unknown"),
+        limitPrice: pick(order.limit_price, null),
+        stopPrice: pick(order.stop_price, null),
+        status: pick(order.status, "UNKNOWN"),
+        submittedAt: pick(order.submitted_at, null),
+        updatedAt: pick(order.updated_at, null),
+        source: pick(order.source, "BROKER_CONFIRMED"),
+        canCancel: order.can_cancel === true
+      })) : [],
+      positionIntelligence: Array.isArray(portfolio.position_intelligence) ? portfolio.position_intelligence.map((item) => ({
+        symbol: pick(item.symbol, "unknown"),
+        exposurePercentOfPortfolio: pick(item.exposure_percent_of_portfolio, null),
+        concentrationWarning: item.concentration_warning === true,
+        volatilityRangeWarning: pick(item.volatility_range_warning, "UNKNOWN"),
+        feeDragWarning: pick(item.fee_drag_warning, "UNKNOWN"),
+        slippageWarning: pick(item.slippage_warning, "UNKNOWN"),
+        staleDataWarning: item.stale_data_warning === true,
+        spreadLiquidityWarning: pick(item.spread_liquidity_warning, "UNKNOWN"),
+        correlationClusterWarning: pick(item.correlation_cluster_warning, "UNKNOWN"),
+        movingFloorStatus: pick(item.moving_floor_status, "UNKNOWN"),
+        protectiveFloorStatus: pick(item.protective_floor_status, "UNKNOWN"),
+        exitLogicStatus: pick(item.exit_logic_status, "UNKNOWN"),
+        whyHolding: pick(item.why_holding, ""),
+        blockersConflicts: Array.isArray(item.blockers_conflicts) ? item.blockers_conflicts : [],
+        riskStatus: pick(item.risk_status, "UNKNOWN"),
+        source: pick(item.source, "UNAVAILABLE")
+      })) : []
+    };
+  }
+
   function normalizeBackendData(payload) {
     const next = clone(mockData);
     const status = payload.status || {};
@@ -1409,6 +1677,9 @@
     const aiRecommendations = payload.aiRecommendations || {};
     const providers = payload.providers || {};
     const providerReadiness = payload.providerReadiness || {};
+    const credentialsProviders = payload.credentialsProviders || {};
+    const portfolio = payload.portfolio || {};
+    const launchReadiness = payload.launchReadiness || {};
     const research = payload.research || {};
     const evidenceGraph = payload.evidenceGraph || {};
     const endpointFailures = payload.endpointFailures || {};
@@ -1639,7 +1910,8 @@
         envStatus: Array.isArray(provider.env_status) ? provider.env_status.map((row) => ({
           name: pick(row.name, "unknown"),
           configured: row.configured === true,
-          fingerprint: pick(row.fingerprint, null)
+          fingerprint: pick(row.fingerprint, null),
+          source: pick(row.source, "NOT_CONFIGURED")
         })) : [],
         configured: provider.configured === true,
         readOnlyValidationSupported: provider.read_only_validation_supported === true,
@@ -1660,6 +1932,54 @@
       next.providerReadiness.readyOrConfiguredCount = (providers.counts.READY || 0) + (providers.counts.CONFIGURED || 0);
       next.providerReadiness.missingCredentialsCount = providers.counts.MISSING_CREDENTIALS || 0;
       next.providerReadiness.notImplementedCount = providers.counts.NOT_IMPLEMENTED || 0;
+    }
+    if (credentialsProviders.source) {
+      next.credentials = {
+        source: credentialsProviders.source,
+        storePath: pick(credentialsProviders.store_path, ".operator_secrets/provider_credentials.json"),
+        storeExists: credentialsProviders.store_exists === true,
+        configuredCount: pick(credentialsProviders.configured_count, 0),
+        providerCount: pick(credentialsProviders.provider_count, 0),
+        precedence: pick(credentialsProviders.precedence, "ENV_PRESENT_OVERRIDES_LOCAL_SECRET"),
+        providers: Array.isArray(credentialsProviders.providers) ? credentialsProviders.providers.map((provider) => ({
+          providerId: pick(provider.provider_id, "unknown"),
+          displayName: pick(provider.display_name, provider.provider_id || "unknown"),
+          configured: provider.configured === true,
+          source: pick(provider.source, "NOT_CONFIGURED"),
+          fields: Array.isArray(provider.fields) ? provider.fields.map((field) => ({
+            name: pick(field.name, "unknown"),
+            configured: field.configured === true,
+            source: pick(field.source, "NOT_CONFIGURED"),
+            fingerprint: pick(field.fingerprint, null)
+          })) : []
+        })) : []
+      };
+    }
+    if (portfolio.source) {
+      next.portfolio = normalizePortfolio(portfolio);
+      next.positions = next.portfolio.positions;
+      next.orders = next.portfolio.openOrders;
+    }
+    if (launchReadiness.source) {
+      next.launchReadiness = {
+        source: launchReadiness.source,
+        finalLaunchReadiness: pick(launchReadiness.final_launch_readiness, "UNKNOWN"),
+        checks: Array.isArray(launchReadiness.checks) ? launchReadiness.checks.map((check) => ({
+          checkId: pick(check.check_id, "unknown"),
+          title: pick(check.title, "unknown"),
+          status: pick(check.status, "UNKNOWN"),
+          detail: pick(check.detail, ""),
+          blocker: check.blocker === true,
+          warning: check.warning === true
+        })) : [],
+        reasonCodes: Array.isArray(launchReadiness.reason_codes) ? launchReadiness.reason_codes : [],
+        alpacaPaperCredentialsConfigured: launchReadiness.alpaca_paper_credentials_configured === true,
+        paperEndpointOnly: launchReadiness.paper_endpoint_only === true,
+        paperStartAllowed: launchReadiness.paper_start_allowed === true,
+        safeStopStatus: pick(launchReadiness.safe_stop_status, "UNKNOWN"),
+        portfolioReadAvailability: pick(launchReadiness.portfolio_read_availability, "UNKNOWN"),
+        backendDegradedReasons: Array.isArray(launchReadiness.backend_degraded_reasons) ? launchReadiness.backend_degraded_reasons : []
+      };
     }
     if (research.source) {
       next.research.hypotheses = Array.isArray(research.hypotheses) ? research.hypotheses.map((item) => ({
@@ -1773,17 +2093,19 @@
       }));
     }
 
-    next.orders = [
-      {
-        clientOrderId: "read_only_backend_summary",
-        symbol: "all",
-        side: "none",
-        action: "read_only_summary",
-        state: `broker_open=${pick(orders.broker_confirmed_open_orders, 0)}`,
-        brokerStatus: `terminal=${pick(orders.terminal_orders, 0)}`,
-        reconciliation: `conflicts=${pick(orders.reconciliation_conflicts, 0)}`
-      }
-    ];
+    if (!portfolio.source) {
+      next.orders = [
+        {
+          clientOrderId: "read_only_backend_summary",
+          symbol: "all",
+          side: "none",
+          action: "read_only_summary",
+          state: `broker_open=${pick(orders.broker_confirmed_open_orders, 0)}`,
+          brokerStatus: `terminal=${pick(orders.terminal_orders, 0)}`,
+          reconciliation: `conflicts=${pick(orders.reconciliation_conflicts, 0)}`
+        }
+      ];
+    }
     next.fills = [
       {
         fillId: "read_only_backend_summary",
@@ -1844,6 +2166,9 @@
       ["aiRecommendations", "/operator/ai/recommendations"],
       ["providers", "/operator/providers"],
       ["providerReadiness", "/operator/providers/readiness"],
+      ["credentialsProviders", "/operator/credentials/providers"],
+      ["portfolio", "/operator/portfolio"],
+      ["launchReadiness", "/operator/launch-readiness"],
       ["research", "/operator/research"],
       ["evidenceGraph", "/operator/research/evidence-graph"]
     ];
@@ -1884,14 +2209,57 @@
     renderAiChiefOverlay();
   }
 
-  async function postIntent(path, body) {
+  async function requestJson(path, options) {
+    const opts = options || {};
     const response = await fetch(`${operatorApiBase()}${path}`, {
-      method: "POST",
+      method: opts.method || "GET",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {})
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body || {})
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
+  }
+
+  async function postIntent(path, body) {
+    return requestJson(path, { method: "POST", body });
+  }
+
+  function paperRunFormValues() {
+    const watchlistRaw = (document.getElementById("paper-watchlist") || {}).value || "BTC/USD,ETH/USD,SOL/USD";
+    const durationRaw = (document.getElementById("paper-duration") || {}).value || "300";
+    const profileAlpha = (document.getElementById("paper-profile-alpha") || {}).checked !== false;
+    const confirmPaper = (document.getElementById("paper-confirm-paper") || {}).checked === true;
+    const confirmLiveLocked = (document.getElementById("paper-confirm-live-locked") || {}).checked === true;
+    const confirmRealMoneyBlocked = (document.getElementById("paper-confirm-real-money-blocked") || {}).checked === true;
+    return {
+      watchlist: watchlistRaw.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean),
+      durationSeconds: Number.parseInt(durationRaw, 10) || 300,
+      profile: profileAlpha ? "PAPER_EXPLORATION_ALPHA" : data.status.activeProfile,
+      confirmPaper,
+      confirmLiveLocked,
+      confirmRealMoneyBlocked
+    };
+  }
+
+  function credentialFormValues(providerId) {
+    const fields = {};
+    const escapedProvider = window.CSS && CSS.escape ? CSS.escape(providerId) : String(providerId).replaceAll('"', '\\"');
+    document.querySelectorAll(`[data-credential-provider="${escapedProvider}"][data-credential-field]`).forEach((input) => {
+      const name = input.dataset.credentialField;
+      const value = String(input.value || "").trim();
+      if (value) fields[name] = value;
+    });
+    if ((providerId === "alpaca_paper" || providerId === "alpaca_news") && !fields.APCA_API_BASE_URL) {
+      fields.APCA_API_BASE_URL = "https://paper-api.alpaca.markets";
+    }
+    return fields;
+  }
+
+  function clearCredentialInputs(providerId) {
+    const escapedProvider = window.CSS && CSS.escape ? CSS.escape(providerId) : String(providerId).replaceAll('"', '\\"');
+    document.querySelectorAll(`[data-credential-provider="${escapedProvider}"][data-credential-field]`).forEach((input) => {
+      input.value = "";
+    });
   }
 
   async function handleIntent(intent) {
@@ -1899,15 +2267,20 @@
     try {
       let message = "none";
       if (intent === "paper-start") {
+        const form = paperRunFormValues();
+        if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked) {
+          window.alert("Confirm PAPER-only, live locked, and real-money blocked before requesting the governed PAPER start.");
+          return;
+        }
         const confirmed = window.confirm(
-          "Request bounded PAPER start?\n\nProfile: PAPER_EXPLORATION_ALPHA\nWatchlist: BTC/USD, ETH/USD, SOL/USD\nDuration: 300 seconds\n\nNo live trading or manual order will be sent by the UI."
+          `Request bounded PAPER start?\n\nProfile: ${form.profile}\nWatchlist: ${form.watchlist.join(", ")}\nDuration: ${form.durationSeconds} seconds\n\nNo live trading or manual order will be sent by the UI.`
         );
         if (!confirmed) return;
         const result = await postIntent("/operator/intent/paper/start", {
           mode: "PAPER",
-          profile: "PAPER_EXPLORATION_ALPHA",
-          duration_seconds: 300,
-          watchlist: ["BTC/USD", "ETH/USD", "SOL/USD"],
+          profile: form.profile,
+          duration_seconds: form.durationSeconds,
+          watchlist: form.watchlist,
           approve_autonomous_paper: true,
           real_money: false,
           live: false
@@ -1969,6 +2342,44 @@
     }
   }
 
+  async function handleCredentialAction(action, providerId) {
+    if (!backendConnected()) return;
+    try {
+      let result;
+      if (action === "save") {
+        const credentials = credentialFormValues(providerId);
+        if (!Object.keys(credentials).length) {
+          window.alert("Enter at least one credential field before saving.");
+          return;
+        }
+        result = await postIntent("/operator/credentials/save", {
+          provider_id: providerId,
+          credentials
+        });
+        clearCredentialInputs(providerId);
+      } else if (action === "validate") {
+        result = await postIntent("/operator/credentials/validate-readonly", {
+          provider_id: providerId
+        });
+      } else if (action === "delete") {
+        const confirmed = window.confirm(`Delete local credentials for ${providerId}? This only mutates the local gitignored secret store.`);
+        if (!confirmed) return;
+        result = await requestJson(`/operator/credentials/provider/${encodeURIComponent(providerId)}`, { method: "DELETE" });
+      }
+      const selectedScreen = activeScreenId;
+      data = await loadData();
+      data.providerReadiness.lastCredentialResult = `${providerId}: ${(result && (result.status || result.reason_code)) || "OK"}`;
+      renderTopBar();
+      renderScreens(selectedScreen);
+      renderRail();
+      renderAiChiefOverlay();
+    } catch (error) {
+      data.providerReadiness.lastCredentialResult = `${providerId}: FAILED ${error.message || error.name || "credential_error"}`;
+      renderScreens(activeScreenId);
+      renderRail();
+    }
+  }
+
   document.addEventListener("click", (event) => {
     const aiOpen = event.target.closest("[data-ai-chief-open]");
     if (aiOpen) {
@@ -1988,6 +2399,21 @@
     const aiAnalyze = event.target.closest("[data-ai-chief-analyze]");
     if (aiAnalyze && !aiAnalyze.disabled) {
       runAiOverlayAnalyze();
+      return;
+    }
+    const credentialSave = event.target.closest("[data-credential-save]");
+    if (credentialSave) {
+      handleCredentialAction("save", credentialSave.dataset.credentialSave);
+      return;
+    }
+    const credentialValidate = event.target.closest("[data-credential-validate]");
+    if (credentialValidate) {
+      handleCredentialAction("validate", credentialValidate.dataset.credentialValidate);
+      return;
+    }
+    const credentialDelete = event.target.closest("[data-credential-delete]");
+    if (credentialDelete) {
+      handleCredentialAction("delete", credentialDelete.dataset.credentialDelete);
       return;
     }
     const button = event.target.closest("[data-intent]");

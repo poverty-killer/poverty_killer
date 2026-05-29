@@ -25,7 +25,7 @@ from app.api.operator_session_store import OperatorSessionStore
 SUPERVISOR_VERSION = "operator-paper-supervisor-v1"
 PAPER_PROFILE = "PAPER_EXPLORATION_ALPHA"
 DEFAULT_WATCHLIST = ("BTC/USD", "ETH/USD", "SOL/USD")
-DEFAULT_ALLOWED_DURATIONS = frozenset({180, 300, 1200, 7200, 10800, 14400})
+DEFAULT_ALLOWED_DURATIONS = frozenset({180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400})
 
 
 def utc_now_iso() -> str:
@@ -43,6 +43,7 @@ class ProcessStartSpec:
     stdout_path: str
     stderr_path: str
     command_summary: str
+    env: dict[str, str] = field(default_factory=dict)
 
 
 class PaperProcessHandle(Protocol):
@@ -89,6 +90,8 @@ class SubprocessPaperRunner:
         stdout_file = open(spec.stdout_path, "a", encoding="utf-8")
         stderr_file = open(spec.stderr_path, "a", encoding="utf-8")
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        process_env = os.environ.copy()
+        process_env.update(spec.env)
         try:
             return subprocess.Popen(
                 list(spec.command),
@@ -97,6 +100,7 @@ class SubprocessPaperRunner:
                 stderr=stderr_file,
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
+                env=process_env,
             )
         finally:
             stdout_file.close()
@@ -189,6 +193,7 @@ class PaperSupervisorConfig:
     max_session_history: int = 250
     script_path: str = "scripts/run_bounded_paper.ps1"
     powershell_executable: str = "powershell.exe"
+    process_env: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_runtime_config(cls, runtime_config: OperatorRuntimeConfig) -> "PaperSupervisorConfig":
@@ -502,6 +507,7 @@ class OperatorPaperSupervisor:
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
             command_summary=command_summary,
+            env=dict(self.config.process_env),
         )
 
     def _build_refused_session(self, request: dict[str, Any], reason: str) -> PaperRunSession:

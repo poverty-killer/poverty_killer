@@ -60,6 +60,166 @@
       winLoss: "not computed without complete broker fill economics",
       maxDrawdown: "broker/account truth required"
     },
+    launchReadiness: {
+      source: "MOCK_DATA",
+      finalLaunchReadiness: "BLOCKED",
+      checks: [
+        { checkId: "alpaca_paper_credentials", title: "Alpaca PAPER credentials", status: "BLOCKED", detail: "mock sample credentials missing", blocker: true, warning: false },
+        { checkId: "paper_endpoint_only", title: "PAPER endpoint only", status: "PASS", detail: "paper endpoint only", blocker: false, warning: false },
+        { checkId: "live_blocked", title: "Live blocked", status: "PASS", detail: "LIVE_LOCKED", blocker: false, warning: false }
+      ],
+      reasonCodes: ["alpaca_paper_credentials"],
+      alpacaPaperCredentialsConfigured: false,
+      paperEndpointOnly: true,
+      paperStartAllowed: false,
+      safeStopStatus: "NO_ACTIVE_RUNTIME",
+      portfolioReadAvailability: "UNAVAILABLE_MISSING_CREDENTIALS",
+      backendDegradedReasons: []
+    },
+    credentials: {
+      source: "MOCK_DATA",
+      storePath: ".operator_secrets/provider_credentials.json",
+      storeExists: false,
+      configuredCount: 0,
+      providerCount: 4,
+      precedence: "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+      providers: [
+        {
+          providerId: "alpaca_paper",
+          displayName: "Alpaca PAPER Broker/Data",
+          configured: false,
+          source: "NOT_CONFIGURED",
+          fields: [
+            { name: "APCA_API_KEY_ID", configured: false, source: "NOT_CONFIGURED", fingerprint: null },
+            { name: "APCA_API_SECRET_KEY", configured: false, source: "NOT_CONFIGURED", fingerprint: null },
+            { name: "APCA_API_BASE_URL", configured: false, source: "NOT_CONFIGURED", fingerprint: null }
+          ]
+        },
+        {
+          providerId: "openai",
+          displayName: "OpenAI",
+          configured: false,
+          source: "NOT_CONFIGURED",
+          fields: [{ name: "OPENAI_API_KEY", configured: false, source: "NOT_CONFIGURED", fingerprint: null }]
+        },
+        {
+          providerId: "anthropic",
+          displayName: "Anthropic / Claude",
+          configured: false,
+          source: "NOT_CONFIGURED",
+          fields: [{ name: "ANTHROPIC_API_KEY", configured: false, source: "NOT_CONFIGURED", fingerprint: null }]
+        },
+        {
+          providerId: "alpaca_news",
+          displayName: "Alpaca News",
+          configured: false,
+          source: "NOT_CONFIGURED",
+          fields: [
+            { name: "APCA_API_KEY_ID", configured: false, source: "NOT_CONFIGURED", fingerprint: null },
+            { name: "APCA_API_SECRET_KEY", configured: false, source: "NOT_CONFIGURED", fingerprint: null }
+          ]
+        }
+      ]
+    },
+    portfolio: {
+      source: "MOCK_DATA",
+      dataSource: "BROKER_CONFIRMED",
+      status: "BROKER_CONFIRMED",
+      unavailableReason: null,
+      message: "Mock sample PAPER positions. Backend mode uses broker-confirmed data or unavailable.",
+      empty: false,
+      dataFreshnessTs: "2026-05-26T01:38:32Z",
+      brokerReadOccurred: false,
+      brokerMutationOccurred: false,
+      summary: {
+        totalEquity: "10000",
+        cash: "7500",
+        buyingPower: "15000",
+        totalMarketValue: "2500",
+        totalUnrealizedPnl: "100",
+        totalRealizedPnl: null,
+        dayPnl: null,
+        grossExposure: "2500",
+        netExposure: "2500",
+        positionCount: 1,
+        openOrderCount: 1,
+        largestPosition: "BTC/USD",
+        highestRiskPosition: "BTC/USD",
+        staleOrConflictedPositionCount: 1,
+        brokerLocalReconciliationStatus: "BROKER_CONFIRMED_NO_LOCAL_TRUTH_PROMOTED"
+      },
+      positions: [
+        {
+          symbol: "BTC/USD",
+          assetClass: "crypto",
+          quantity: "0.05",
+          side: "long",
+          averageEntryPrice: "50000",
+          currentMarketPrice: "52000",
+          costBasis: "2500",
+          marketValue: "2600",
+          unrealizedPnl: "100",
+          unrealizedPnlPercent: "0.04",
+          realizedPnl: null,
+          todayPriceChange: "1000",
+          todayPercentChange: "0.0196",
+          positionAge: "UNKNOWN",
+          latestFillTime: "2026-05-26T01:00:00Z",
+          latestFillPrice: "50000",
+          openOrderCount: 1,
+          feesStatus: "UNKNOWN",
+          tcaStatus: "UNKNOWN",
+          slippage: null,
+          source: "BROKER_CONFIRMED",
+          brokerConfirmed: true,
+          omsReconciliationStatus: "BROKER_CONFIRMED_OPEN_ORDER_PRESENT",
+          dataFreshnessTs: "2026-05-26T01:38:32Z",
+          tradabilityStatus: "READ_ONLY_PAPER_POSITION",
+          riskStatus: "WARN",
+          exposurePercentOfPortfolio: "26.00%"
+        }
+      ],
+      openOrders: [
+        {
+          orderId: "mock-order-1",
+          clientOrderId: "mock-client-1",
+          symbol: "BTC/USD",
+          assetClass: "crypto",
+          qty: "0.01",
+          filledQty: "0",
+          side: "buy",
+          type: "limit",
+          timeInForce: "gtc",
+          limitPrice: "50000",
+          stopPrice: null,
+          status: "new",
+          submittedAt: "2026-05-26T01:20:00Z",
+          updatedAt: "2026-05-26T01:20:00Z",
+          source: "BROKER_CONFIRMED",
+          canCancel: false
+        }
+      ],
+      positionIntelligence: [
+        {
+          symbol: "BTC/USD",
+          exposurePercentOfPortfolio: "26.00%",
+          concentrationWarning: true,
+          volatilityRangeWarning: "UNKNOWN",
+          feeDragWarning: "UNKNOWN_FEE_DETAIL",
+          slippageWarning: "UNKNOWN_SLIPPAGE_DETAIL",
+          staleDataWarning: false,
+          spreadLiquidityWarning: "UNKNOWN",
+          correlationClusterWarning: "UNKNOWN",
+          movingFloorStatus: "UNKNOWN_NOT_EXPOSED_TO_OPERATOR_PORTFOLIO",
+          protectiveFloorStatus: "UNKNOWN_NOT_EXPOSED_TO_OPERATOR_PORTFOLIO",
+          exitLogicStatus: "READ_ONLY_NO_MANUAL_EXIT_CONTROL",
+          whyHolding: "Mock sample only.",
+          blockersConflicts: ["FEE_STATUS_UNKNOWN", "TCA_STATUS_UNKNOWN"],
+          riskStatus: "WARN",
+          source: "BROKER_CONFIRMED"
+        }
+      ]
+    },
     positions: [
       {
         symbol: "BTC/USD",
@@ -419,8 +579,8 @@
           requiredEnvVars: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
           optionalEnvVars: ["APCA_API_BASE_URL"],
           envStatus: [
-            { name: "APCA_API_KEY_ID", configured: false, fingerprint: null },
-            { name: "APCA_API_SECRET_KEY", configured: false, fingerprint: null }
+            { name: "APCA_API_KEY_ID", configured: false, source: "NOT_CONFIGURED", fingerprint: null },
+            { name: "APCA_API_SECRET_KEY", configured: false, source: "NOT_CONFIGURED", fingerprint: null }
           ],
           configured: false,
           readOnlyValidationSupported: true,
@@ -455,7 +615,7 @@
           status: "NOT_IMPLEMENTED",
           requiredEnvVars: ["OPENAI_API_KEY"],
           optionalEnvVars: ["OPENAI_MODEL"],
-          envStatus: [{ name: "OPENAI_API_KEY", configured: false, fingerprint: null }],
+          envStatus: [{ name: "OPENAI_API_KEY", configured: false, source: "NOT_CONFIGURED", fingerprint: null }],
           configured: false,
           readOnlyValidationSupported: true,
           canTrade: false,

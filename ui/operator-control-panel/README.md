@@ -9,10 +9,12 @@ Scope:
 - If `/operator/*` endpoints are unavailable, it uses mock data.
 - If `/operator/*` endpoints are available, it reads status/readiness/contracts
   and supervisor state and labels the source as `OPERATOR_BACKEND`.
-- No broker calls.
+- No broker mutation calls. Portfolio pages may request read-only PAPER broker
+  account/positions/orders truth through governed `/operator/portfolio`.
 - No runtime mutation calls except future server-authorized bounded PAPER
   start/stop intents through `/operator/intent/paper/*`.
-- No state, DB, log, or secret reads.
+- No DB/log reads from the UI. Credential forms send secrets only to the local
+  backend secret store and never store raw values in the browser.
 - No manual trade controls.
 - No live controls active.
 
@@ -69,6 +71,14 @@ Operator intelligence endpoints:
 - `/operator/system-map`
 - `/operator/ai/status`
 - `/operator/ai/recommendations`
+- `/operator/credentials/providers`
+- `/operator/credentials/save`
+- `/operator/credentials/validate-readonly`
+- `/operator/portfolio`
+- `/operator/positions`
+- `/operator/orders/open`
+- `/operator/positions/intelligence`
+- `/operator/launch-readiness`
 
 AI Chief Operator remains advisory only. `/operator/ai/analyze` queues a
 recommendation through the governance queue; it cannot trade, start PAPER,
@@ -97,3 +107,19 @@ AI Quant Research Chief / Research OS:
   recommendations, and a lightweight evidence graph.
 - Research and AI recommendations cannot start PAPER automatically and cannot
   trade, call broker, enable live, enable real money, or change thresholds.
+
+Operator activation:
+
+- Provider Setup includes local credential forms for Alpaca PAPER, OpenAI,
+  Anthropic, and Alpaca News.
+- Saved credentials go only to `.operator_secrets/provider_credentials.json`,
+  which is gitignored. GET responses show configured status and masked
+  fingerprints only.
+- Launch Readiness answers whether bounded PAPER can run now, with explicit
+  blockers for missing credentials, non-paper endpoints, active runtime,
+  storage, safe stop, and portfolio read availability.
+- Positions & Orders uses broker-confirmed PAPER data when credentials are
+  available; otherwise it displays unavailable/degraded truth and does not
+  invent positions.
+- The bounded PAPER setup flow calls only `/operator/intent/paper/start` with
+  PAPER-only/live-locked/real-money-blocked confirmations.

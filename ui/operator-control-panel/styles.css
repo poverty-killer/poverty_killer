@@ -409,6 +409,69 @@ select {
   border-color: rgba(239, 68, 68, 0.35);
 }
 
+.button-row,
+.form-grid,
+.credential-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.button-row {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.form-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-bottom: 10px;
+}
+
+.credential-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.credential-box {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1118;
+}
+
+.credential-box h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.form-grid label,
+.credential-box label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.checkline {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.form-grid input,
+.form-grid select,
+.credential-box input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #080b11;
+  color: var(--text);
+  padding: 7px 9px;
+}
+
 .kv {
   display: grid;
   grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1fr);

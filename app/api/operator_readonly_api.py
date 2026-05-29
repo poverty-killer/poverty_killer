@@ -18,13 +18,15 @@ from fastapi import APIRouter, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.ai_chief_operator.config import AIChiefConfig
-from app.ai_chief_operator.context_builder import build_ai_context
+from app.ai_chief_operator.context_builder import build_ai_context, redact_secrets
 from app.ai_chief_operator.governance_queue import GovernanceQueue
 from app.ai_chief_operator.models import normalize_recommendation
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
 from app.ai_chief_operator.quant_persona import draft_codex_packet, build_quant_review_recommendation, quant_persona_summary
+from app.operator_activation.launch_readiness import build_launch_readiness
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.operator_credentials.store import LocalCredentialStore, default_credential_store_path
 from app.operator_intelligence.action_center import build_action_center
 from app.operator_intelligence.archive import RunArchive
 from app.operator_intelligence.decision_explainer import DecisionExplainer
@@ -32,6 +34,7 @@ from app.operator_intelligence.pnl_tca import build_pnl_summary, build_tca_dashb
 from app.operator_intelligence.reports import RunReportGenerator
 from app.operator_intelligence.system_map import SYSTEM_MAP_SUMMARY, render_system_map_markdown
 from app.operator_intelligence.watchdog import AlertQueue, build_watchdog_alerts
+from app.operator_portfolio.snapshot import ReadOnlyBrokerClient, build_portfolio_snapshot
 from app.operator_providers.readiness import provider_readiness_summary, validate_provider_readonly
 from app.operator_research.evidence_graph import build_evidence_graph
 from app.operator_research.registry import ResearchRegistry
@@ -95,6 +98,15 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/providers": "read_only_provider_setup_and_credential_readiness",
         "/operator/providers/readiness": "read_only_provider_readiness_summary",
         "/operator/providers/validate-readonly": "read_only_env_presence_validation_only",
+        "/operator/credentials/providers": "read_only_local_credential_provider_status",
+        "/operator/credentials/save": "local_secret_store_update_only",
+        "/operator/credentials/validate-readonly": "read_only_local_credential_validation_only",
+        "/operator/credentials/provider/{provider_id}": "local_secret_store_delete_only",
+        "/operator/portfolio": "read_only_paper_portfolio_summary",
+        "/operator/positions": "read_only_paper_positions",
+        "/operator/orders/open": "read_only_open_orders",
+        "/operator/positions/intelligence": "read_only_position_intelligence",
+        "/operator/launch-readiness": "read_only_bounded_paper_launch_readiness",
         "/operator/research": "advisory_research_registry",
         "/operator/research/hypotheses": "advisory_research_hypothesis_queue_only",
         "/operator/research/experiments": "advisory_research_experiment_queue_only",
@@ -144,12 +156,21 @@ class OperatorSnapshotProvider:
         ai_queue: GovernanceQueue | None = None,
         research_registry: ResearchRegistry | None = None,
         provider_env: dict[str, str] | None = None,
+        credential_store: LocalCredentialStore | None = None,
+        portfolio_client: ReadOnlyBrokerClient | None = None,
     ) -> None:
         self.runtime_config = runtime_config or OperatorRuntimeConfig.from_env()
-        self.supervisor = supervisor or OperatorPaperSupervisor(
-            config=PaperSupervisorConfig.from_runtime_config(self.runtime_config)
+        self.process_env = provider_env if provider_env is not None else dict(os.environ)
+        self.credential_store = credential_store or LocalCredentialStore(
+            default_credential_store_path(self.runtime_config.repo_root)
         )
-        self.world_awareness_env = world_awareness_env if world_awareness_env is not None else dict(os.environ)
+        self.provider_env = self.credential_store.effective_env(self.process_env)
+        self.portfolio_client = portfolio_client
+        supervisor_config = PaperSupervisorConfig.from_runtime_config(self.runtime_config)
+        supervisor_config.process_env = self._paper_process_env()
+        self.supervisor = supervisor or OperatorPaperSupervisor(config=supervisor_config)
+        self.supervisor.config.process_env = self._paper_process_env()
+        self.world_awareness_env = world_awareness_env if world_awareness_env is not None else dict(self.provider_env)
         if world_awareness_runtime is not None:
             self.world_awareness_runtime = world_awareness_runtime
             self.world_awareness_cache = world_awareness_runtime.cache
@@ -175,12 +196,22 @@ class OperatorSnapshotProvider:
         self.report_generator = RunReportGenerator(report_dir=self.report_dir)
         self.decision_explainer = DecisionExplainer(decision_frames)
         self.alert_queue = AlertQueue()
-        self.ai_gateway = AIProviderGateway(ai_config or AIChiefConfig.from_env())
+        self.ai_gateway = AIProviderGateway(ai_config or AIChiefConfig.from_env(self.provider_env))
         self.ai_queue = ai_queue or GovernanceQueue(
             path=self.runtime_config.operator_state_dir / "ai_governance_queue.jsonl"
         )
         self.research_registry = research_registry or ResearchRegistry()
-        self.provider_env = provider_env if provider_env is not None else dict(os.environ)
+
+    def _paper_process_env(self) -> dict[str, str]:
+        return {
+            key: str(value)
+            for key, value in self.provider_env.items()
+            if key in {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"} and str(value).strip()
+        }
+
+    def _alpaca_paper_configured(self) -> bool:
+        summary = self.credential_store.provider_summary("alpaca_paper", self.process_env)
+        return bool(summary["configured"])
 
     def status(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
@@ -255,8 +286,8 @@ class OperatorSnapshotProvider:
         health = self.health()
         missing: list[str] = []
         warnings: list[str] = list(health.get("degraded_reasons") or [])
-        if not self.runtime_config.alpaca_credentials_present:
-            missing.append("APCA_PAPER_CREDENTIALS_NOT_VISIBLE_TO_OPERATOR_ENV")
+        if not self._alpaca_paper_configured():
+            missing.append("APCA_PAPER_CREDENTIALS_NOT_CONFIGURED")
         if health["session_store_status"] != "READY":
             missing.append("SESSION_STORE_NOT_READY")
         if health["world_awareness_cache_status"] != "READY":
@@ -384,8 +415,8 @@ class OperatorSnapshotProvider:
             "dirty_worktree": "UNKNOWN_NOT_INSPECTED",
             "python_version": "UNKNOWN_NOT_INSPECTED",
             "credentials_present": "NOT_INSPECTED_NO_SECRET_ACCESS",
-            "alpaca_credentials_present": self.runtime_config.alpaca_credentials_present,
-            "world_awareness_credentials_present": self.runtime_config.world_awareness_credentials_present,
+            "alpaca_credentials_present": self._alpaca_paper_configured(),
+            "world_awareness_credentials_present": self._alpaca_paper_configured(),
             "logs": str(self.runtime_config.log_dir),
             "db": "NO_DB_RUNTIME_FILE_STAGED_JSONL_METADATA_ONLY",
             "runtime_profile": self.runtime_config.runtime_profile,
@@ -403,7 +434,7 @@ class OperatorSnapshotProvider:
             "live_status": "LIVE_LOCKED",
             "refusal_reason": "LIVE_NOT_APPROVED",
             "broker_endpoint_authority": "PAPER_ONLY_FOR_CURRENT_OPERATOR_API",
-            "credential_authority": "NOT_INSPECTED_NO_SECRET_ACCESS",
+            "credential_authority": "CONFIGURED_OR_MISSING_STATUS_ONLY_NO_SECRET_VALUES",
             "real_money_authority": "BLOCKED",
             "physical_fuse": "REQUIRED_BEFORE_LIVE",
             "risk_governor_status": "REQUIRED_BEFORE_LIVE",
@@ -491,7 +522,7 @@ class OperatorSnapshotProvider:
         return build_tca_dashboard(fills_summary=self.fills_summary(), tca_summary=self.tca_summary())
 
     def providers(self) -> dict[str, Any]:
-        return provider_readiness_summary(self.provider_env)
+        return provider_readiness_summary(self.process_env, credential_store=self.credential_store)
 
     def providers_readiness(self) -> dict[str, Any]:
         summary = self.providers()
@@ -512,7 +543,99 @@ class OperatorSnapshotProvider:
 
     def validate_provider_readonly(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         provider_id = str((payload or {}).get("provider_id") or "alpaca_paper")
-        return validate_provider_readonly(provider_id, self.provider_env)
+        return validate_provider_readonly(provider_id, self.process_env, credential_store=self.credential_store)
+
+    def credentials_providers(self) -> dict[str, Any]:
+        return self.credential_store.providers_summary(self.process_env)
+
+    def credentials_save(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        provider_id = str(body.get("provider_id") or "").strip().lower()
+        credentials = body.get("credentials") if isinstance(body.get("credentials"), dict) else {}
+        result = self.credential_store.save_provider(provider_id, credentials)
+        self.provider_env = self.credential_store.effective_env(self.process_env)
+        self.supervisor.config.process_env = self._paper_process_env()
+        self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(self.provider_env))
+        return result
+
+    def credentials_validate_readonly(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        provider_id = str((payload or {}).get("provider_id") or "alpaca_paper")
+        return self.credential_store.validate_readonly(provider_id, self.process_env)
+
+    def credentials_delete_provider(self, provider_id: str) -> dict[str, Any]:
+        result = self.credential_store.delete_provider(provider_id)
+        self.provider_env = self.credential_store.effective_env(self.process_env)
+        self.supervisor.config.process_env = self._paper_process_env()
+        self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(self.provider_env))
+        return result
+
+    def portfolio(self) -> dict[str, Any]:
+        return build_portfolio_snapshot(self.provider_env, client=self.portfolio_client)
+
+    def positions(self) -> dict[str, Any]:
+        portfolio = self.portfolio()
+        return {
+            "source": portfolio["source"],
+            "data_source": portfolio["data_source"],
+            "status": portfolio["status"],
+            "positions": portfolio["positions"],
+            "position_count": len(portfolio["positions"]),
+            "message": portfolio["message"],
+            "data_freshness_ts": portfolio["data_freshness_ts"],
+            "broker_read_occurred": portfolio["broker_read_occurred"],
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "liquidation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
+    def orders_open(self) -> dict[str, Any]:
+        portfolio = self.portfolio()
+        return {
+            "source": portfolio["source"],
+            "data_source": portfolio["data_source"],
+            "status": portfolio["status"],
+            "open_orders": portfolio["open_orders"],
+            "open_order_count": len(portfolio["open_orders"]),
+            "read_only": True,
+            "can_cancel": False,
+            "can_replace": False,
+            "can_liquidate": False,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "liquidation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
+    def positions_intelligence(self) -> dict[str, Any]:
+        portfolio = self.portfolio()
+        return {
+            "source": "OPERATOR_POSITION_INTELLIGENCE",
+            "data_source": portfolio["data_source"],
+            "status": portfolio["status"],
+            "position_intelligence": portfolio["position_intelligence"],
+            "position_count": len(portfolio["position_intelligence"]),
+            "raw_logs_included": False,
+            "secrets_values_exposed": False,
+            "can_execute": False,
+            "broker_mutation_occurred": False,
+            "trading_mutation_occurred": False,
+        }
+
+    def launch_readiness(self) -> dict[str, Any]:
+        supervisor = self.supervisor.status_snapshot()
+        return build_launch_readiness(
+            provider_readiness=self.providers(),
+            credentials=self.credentials_providers(),
+            health=self.health(),
+            storage=self.storage(),
+            runtime=self.runtime(),
+            supervisor=supervisor,
+            ai_status=self.ai_status(),
+            effective_env=self.provider_env,
+        )
 
     def research(self) -> dict[str, Any]:
         return self.research_registry.snapshot()
@@ -790,7 +913,7 @@ class OperatorSnapshotProvider:
         context["can_execute"] = False
         context["broker_call_occurred"] = False
         context["trading_mutation_occurred"] = False
-        return context
+        return redact_secrets(context)
 
     def ai_analyze(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         context = self._ai_context()
@@ -1008,6 +1131,42 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.post("/providers/validate-readonly")
     def validate_provider_readonly_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return provider.validate_provider_readonly(payload)
+
+    @router.get("/credentials/providers")
+    def credentials_providers() -> dict[str, Any]:
+        return provider.credentials_providers()
+
+    @router.post("/credentials/save")
+    def credentials_save(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.credentials_save(payload)
+
+    @router.post("/credentials/validate-readonly")
+    def credentials_validate_readonly(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.credentials_validate_readonly(payload)
+
+    @router.delete("/credentials/provider/{provider_id}")
+    def credentials_delete_provider(provider_id: str) -> dict[str, Any]:
+        return provider.credentials_delete_provider(provider_id)
+
+    @router.get("/portfolio")
+    def portfolio() -> dict[str, Any]:
+        return provider.portfolio()
+
+    @router.get("/positions")
+    def positions() -> dict[str, Any]:
+        return provider.positions()
+
+    @router.get("/orders/open")
+    def orders_open() -> dict[str, Any]:
+        return provider.orders_open()
+
+    @router.get("/positions/intelligence")
+    def positions_intelligence() -> dict[str, Any]:
+        return provider.positions_intelligence()
+
+    @router.get("/launch-readiness")
+    def launch_readiness() -> dict[str, Any]:
+        return provider.launch_readiness()
 
     @router.get("/research")
     def research() -> dict[str, Any]:

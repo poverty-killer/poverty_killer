@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime, timezone
 from typing import Mapping
 
+from app.operator_credentials.store import LocalCredentialStore, fingerprint_secret
 from app.operator_providers.models import EnvVarStatus, ProviderProfile, ProviderReadiness
 from app.operator_providers.registry import list_provider_profiles
 
@@ -14,31 +14,53 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _configured(env: Mapping[str, str], name: str) -> bool:
-    return bool(str(env.get(name, "")).strip())
+def _credential_value(
+    *,
+    name: str,
+    env: Mapping[str, str],
+    local_env: Mapping[str, str],
+) -> tuple[str, str]:
+    env_value = str(env.get(name, "") or "").strip()
+    if env_value:
+        return env_value, "ENV_PRESENT"
+    local_value = str(local_env.get(name, "") or "").strip()
+    if local_value:
+        return local_value, "LOCAL_SECRET_PRESENT"
+    return "", "NOT_CONFIGURED"
 
 
-def _fingerprint(value: str) -> str | None:
-    text = str(value or "")
-    if not text:
-        return None
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-    return f"sha256:{digest}:len={len(text)}"
+def _configured(env: Mapping[str, str], local_env: Mapping[str, str], name: str) -> bool:
+    value, _source = _credential_value(name=name, env=env, local_env=local_env)
+    return bool(value)
 
 
-def _env_status(profile: ProviderProfile, env: Mapping[str, str]) -> tuple[EnvVarStatus, ...]:
+def _env_status(profile: ProviderProfile, env: Mapping[str, str], local_env: Mapping[str, str]) -> tuple[EnvVarStatus, ...]:
     rows: list[EnvVarStatus] = []
     for name in (*profile.required_env_vars, *profile.optional_env_vars):
-        value = str(env.get(name, "") or "")
-        rows.append(EnvVarStatus(name=name, configured=bool(value.strip()), fingerprint=_fingerprint(value)))
+        value, source = _credential_value(name=name, env=env, local_env=local_env)
+        rows.append(
+            EnvVarStatus(
+                name=name,
+                configured=bool(value),
+                fingerprint=fingerprint_secret(value),
+                source=source,
+            )
+        )
     return tuple(rows)
 
 
-def build_provider_readiness(profile: ProviderProfile, env: Mapping[str, str]) -> ProviderReadiness:
-    env_rows = _env_status(profile, env)
-    missing_required = [name for name in profile.required_env_vars if not _configured(env, name)]
+def build_provider_readiness(
+    profile: ProviderProfile,
+    env: Mapping[str, str],
+    *,
+    credential_store: LocalCredentialStore | None = None,
+) -> ProviderReadiness:
+    local_env = credential_store.local_env() if credential_store else {}
+    env_rows = _env_status(profile, env, local_env)
+    missing_required = [name for name in profile.required_env_vars if not _configured(env, local_env, name)]
     configured = not missing_required
     reason_codes: list[str] = []
+    configured_sources = {row.source for row in env_rows if row.configured}
 
     if not profile.implemented:
         status = "NOT_IMPLEMENTED"
@@ -56,6 +78,7 @@ def build_provider_readiness(profile: ProviderProfile, env: Mapping[str, str]) -
         status = "READY"
         reason_codes.append("NO_CREDENTIALS_REQUIRED")
 
+    reason_codes.extend(f"CREDENTIAL_SOURCE:{source}" for source in sorted(configured_sources))
     return ProviderReadiness(
         provider_id=profile.provider_id,
         display_name=profile.display_name,
@@ -76,8 +99,15 @@ def build_provider_readiness(profile: ProviderProfile, env: Mapping[str, str]) -
     )
 
 
-def provider_readiness_summary(env: Mapping[str, str]) -> dict[str, object]:
-    providers = [build_provider_readiness(profile, env).to_dict() for profile in list_provider_profiles()]
+def provider_readiness_summary(
+    env: Mapping[str, str],
+    *,
+    credential_store: LocalCredentialStore | None = None,
+) -> dict[str, object]:
+    providers = [
+        build_provider_readiness(profile, env, credential_store=credential_store).to_dict()
+        for profile in list_provider_profiles()
+    ]
     counts: dict[str, int] = {}
     for provider in providers:
         status = str(provider["status"])
@@ -93,6 +123,7 @@ def provider_readiness_summary(env: Mapping[str, str]) -> dict[str, object]:
         "broker_call_occurred": False,
         "external_mutation_occurred": False,
         "can_execute": False,
+        "credential_precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
     }
 
 
@@ -101,6 +132,7 @@ def validate_provider_readonly(
     env: Mapping[str, str],
     *,
     profiles: tuple[ProviderProfile, ...] | None = None,
+    credential_store: LocalCredentialStore | None = None,
 ) -> dict[str, object]:
     profile_map = {profile.provider_id: profile for profile in (profiles or list_provider_profiles())}
     profile = profile_map.get(str(provider_id))
@@ -116,7 +148,7 @@ def validate_provider_readonly(
             "secrets_values_exposed": False,
         }
 
-    readiness = build_provider_readiness(profile, env).to_dict()
+    readiness = build_provider_readiness(profile, env, credential_store=credential_store).to_dict()
     if not profile.read_only_validation_supported:
         validation_status = "NOT_IMPLEMENTED"
         reason_code = "READ_ONLY_VALIDATION_NOT_IMPLEMENTED"

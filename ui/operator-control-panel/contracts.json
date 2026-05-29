@@ -1,5 +1,5 @@
 {
-  "version": "phase-5-quant-chief-research-os",
+  "version": "phase-6-operator-activation",
   "mode": "read_only_operator_contracts",
   "ui_policy": {
     "paper_enabled_first": true,
@@ -88,6 +88,9 @@
     "secrets_values_exposed": false,
     "browser_secret_storage": false,
     "read_only_validation_only": true,
+    "local_credential_entry_supported": true,
+    "local_secret_store": ".operator_secrets/provider_credentials.json",
+    "credential_precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
     "categories": [
       "broker",
       "market_data",
@@ -106,6 +109,39 @@
       "READY",
       "NOT_IMPLEMENTED"
     ]
+  },
+  "local_credential_manager_contract": {
+    "raw_secret_values_in_get_responses": false,
+    "browser_local_storage_for_secrets": false,
+    "ai_context_receives_raw_secrets": false,
+    "gitignored_secret_store_required": true,
+    "supported_providers": ["alpaca_paper", "openai", "anthropic", "alpaca_news"],
+    "post_save_mutates_only_local_secret_store": true,
+    "delete_mutates_only_local_secret_store": true,
+    "broker_call_occurred": false,
+    "trading_mutation_occurred": false,
+    "live_enabled": false,
+    "real_money_enabled": false
+  },
+  "paper_portfolio_contract": {
+    "broker_confirmed_when_available": true,
+    "fake_positions_allowed": false,
+    "local_only_state_promoted_to_broker_truth": false,
+    "read_only_broker_gets_only": true,
+    "order_submission_available": false,
+    "cancel_available": false,
+    "flatten_or_liquidate_available": false,
+    "live_enabled": false,
+    "real_money_enabled": false
+  },
+  "launch_readiness_contract": {
+    "answers_can_i_run_paper_now": true,
+    "final_states": ["READY_FOR_BOUNDED_PAPER", "BLOCKED", "DEGRADED_BUT_RUNNABLE", "UNKNOWN"],
+    "uses_existing_governed_start_intent": "/operator/intent/paper/start",
+    "manual_trading_available": false,
+    "force_trade_available": false,
+    "live_start_available": false,
+    "real_money_available": false
   },
   "research_os_contract": {
     "registry_version": "operator-research-registry-v1",
@@ -573,7 +609,7 @@
           "status": "CONFIGURED | MISSING_CREDENTIALS | DISABLED | VALIDATION_FAILED | READY | NOT_IMPLEMENTED",
           "required_env_vars": [],
           "optional_env_vars": [],
-          "env_status": [{"name": "ENV_VAR", "configured": false, "fingerprint": "masked hash only or null"}],
+          "env_status": [{"name": "ENV_VAR", "configured": false, "source": "ENV_PRESENT | LOCAL_SECRET_PRESENT | NOT_CONFIGURED", "fingerprint": "masked hash only or null"}],
           "configured": false,
           "read_only_validation_supported": true,
           "can_trade": false,
@@ -600,6 +636,81 @@
       "broker_call_occurred": false,
       "external_mutation_occurred": false,
       "secrets_values_exposed": false
+    },
+    "/operator/credentials/providers": {
+      "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",
+      "store_path": ".operator_secrets/provider_credentials.json",
+      "providers": [],
+      "precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+      "raw_secret_values_included": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/credentials/save": {
+      "method": "POST",
+      "mutates": "local gitignored secret store only",
+      "returns_raw_secret_values": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false,
+      "live_enabled": false,
+      "real_money_enabled": false
+    },
+    "/operator/credentials/validate-readonly": {
+      "method": "POST",
+      "read_only_validation": true,
+      "returns_raw_secret_values": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false
+    },
+    "/operator/credentials/provider/{provider_id}": {
+      "method": "DELETE",
+      "mutates": "local gitignored secret store only",
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false
+    },
+    "/operator/portfolio": {
+      "source": "OPERATOR_PORTFOLIO_READ_ONLY",
+      "status": "BROKER_CONFIRMED | BROKER_CONFIRMED_EMPTY | BROKER_DATA_UNAVAILABLE",
+      "positions": [],
+      "open_orders": [],
+      "position_intelligence": [],
+      "fake_positions_allowed": false,
+      "broker_mutation_occurred": false,
+      "order_submission_occurred": false,
+      "cancel_occurred": false,
+      "liquidation_occurred": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/positions": {
+      "source": "OPERATOR_PORTFOLIO_READ_ONLY",
+      "positions": [],
+      "broker_confirmed_or_unavailable_only": true,
+      "broker_mutation_occurred": false
+    },
+    "/operator/orders/open": {
+      "source": "OPERATOR_PORTFOLIO_READ_ONLY",
+      "open_orders": [],
+      "read_only": true,
+      "can_cancel": false,
+      "can_replace": false,
+      "can_liquidate": false
+    },
+    "/operator/positions/intelligence": {
+      "source": "OPERATOR_POSITION_INTELLIGENCE",
+      "position_intelligence": [],
+      "can_execute": false,
+      "broker_mutation_occurred": false,
+      "trading_mutation_occurred": false
+    },
+    "/operator/launch-readiness": {
+      "source": "OPERATOR_LAUNCH_READINESS",
+      "final_launch_readiness": "READY_FOR_BOUNDED_PAPER | BLOCKED | DEGRADED_BUT_RUNNABLE | UNKNOWN",
+      "checks": [],
+      "live_blocked": true,
+      "real_money_blocked": true,
+      "uses_existing_governed_start_intent": true,
+      "can_execute": false,
+      "broker_mutation_occurred": false,
+      "trading_mutation_occurred": false
     },
     "/operator/research": {
       "source": "OPERATOR_RESEARCH_REGISTRY",

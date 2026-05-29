@@ -68,6 +68,12 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/operator/status" in paths
     assert "/operator/readiness/live" in paths
     assert "/operator/providers" in paths
+    assert "/operator/credentials/providers" in paths
+    assert "/operator/portfolio" in paths
+    assert "/operator/positions" in paths
+    assert "/operator/orders/open" in paths
+    assert "/operator/positions/intelligence" in paths
+    assert "/operator/launch-readiness" in paths
     assert "/operator/research" in paths
     assert "/operator/research/evidence-graph" in paths
 

@@ -7,6 +7,7 @@ __pycache__/
 logs/
 .aider*
 .secrets/
+.operator_secrets/
 _repo_quarantine/
 .pytest_cache/
 data/*.db*

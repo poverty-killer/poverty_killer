@@ -52,6 +52,7 @@ class EnvVarStatus:
     name: str
     configured: bool
     fingerprint: str | None = None
+    source: str = "NOT_CONFIGURED"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

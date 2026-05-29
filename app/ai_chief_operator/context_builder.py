@@ -8,7 +8,17 @@ from typing import Any
 from app.ai_chief_operator.quant_persona import quant_persona_summary
 
 
-SECRET_KEY_PARTS = ("secret", "token", "password", "api_key", "apikey", "key_id", "private", "credential")
+SECRET_KEY_PARTS = (
+    "secret",
+    "token",
+    "password",
+    "api_key",
+    "apikey",
+    "key_id",
+    "private",
+    "credential",
+    "fingerprint",
+)
 SECRET_VALUE_RE = re.compile(
     r"(sk-[A-Za-z0-9_\-]{8,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9\-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
