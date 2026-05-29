@@ -399,6 +399,136 @@
         }
       ]
     },
+    providerReadiness: {
+      providerCount: 5,
+      readyOrConfiguredCount: 2,
+      missingCredentialsCount: 1,
+      notImplementedCount: 2,
+      counts: {
+        READY: 2,
+        MISSING_CREDENTIALS: 1,
+        NOT_IMPLEMENTED: 2
+      },
+      providers: [
+        {
+          providerId: "alpaca_paper",
+          displayName: "Alpaca Paper Broker/Data",
+          category: "broker",
+          purpose: "Governed PAPER broker and account/order/fill truth source.",
+          status: "MISSING_CREDENTIALS",
+          requiredEnvVars: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
+          optionalEnvVars: ["APCA_API_BASE_URL"],
+          envStatus: [
+            { name: "APCA_API_KEY_ID", configured: false, fingerprint: null },
+            { name: "APCA_API_SECRET_KEY", configured: false, fingerprint: null }
+          ],
+          configured: false,
+          readOnlyValidationSupported: true,
+          canTrade: false,
+          canMutateExternalSystem: false,
+          lastValidationStatus: "NOT_RUN",
+          lastValidationAt: null,
+          setupInstructions: "Set Alpaca PAPER env vars in the runtime environment. UI never sees raw values."
+        },
+        {
+          providerId: "coinbase_public",
+          displayName: "Coinbase Public",
+          category: "market_data",
+          purpose: "Public crypto market-data route.",
+          status: "READY",
+          requiredEnvVars: [],
+          optionalEnvVars: [],
+          envStatus: [],
+          configured: true,
+          readOnlyValidationSupported: false,
+          canTrade: false,
+          canMutateExternalSystem: false,
+          lastValidationStatus: "NOT_RUN",
+          lastValidationAt: null,
+          setupInstructions: "No credentials required. MarketTruthSnapshot still decides executability."
+        },
+        {
+          providerId: "openai",
+          displayName: "OpenAI Placeholder",
+          category: "ai_provider",
+          purpose: "Future AI Quant Research Chief model provider.",
+          status: "NOT_IMPLEMENTED",
+          requiredEnvVars: ["OPENAI_API_KEY"],
+          optionalEnvVars: ["OPENAI_MODEL"],
+          envStatus: [{ name: "OPENAI_API_KEY", configured: false, fingerprint: null }],
+          configured: false,
+          readOnlyValidationSupported: true,
+          canTrade: false,
+          canMutateExternalSystem: false,
+          lastValidationStatus: "NOT_RUN",
+          lastValidationAt: null,
+          setupInstructions: "Future provider setup only. Tests make no real model calls."
+        }
+      ]
+    },
+    research: {
+      counts: {
+        hypotheses: 0,
+        experiments: 0,
+        recommendations: 1,
+        promotionGates: 3
+      },
+      hypotheses: [],
+      experiments: [],
+      promotionGates: [
+        {
+          gateId: "idea_to_offline_research",
+          stage: "IDEA",
+          requiredEvidence: ["clear thesis", "falsifiable invalidation condition"],
+          currentStatus: "NEEDS_REVIEW",
+          blocksPromotion: true,
+          liveRequiresSeparateApproval: false
+        },
+        {
+          gateId: "replay_to_bounded_paper",
+          stage: "REPLAY_REVIEW",
+          requiredEvidence: ["DecisionFrame", "MarketTruthSnapshot", "NetEdge/TCA"],
+          currentStatus: "NEEDS_REVIEW",
+          blocksPromotion: true,
+          liveRequiresSeparateApproval: false
+        },
+        {
+          gateId: "any_live_transition",
+          stage: "LIVE_REQUIRES_SEPARATE_APPROVAL",
+          requiredEvidence: ["separate live governance packet"],
+          currentStatus: "BLOCKED",
+          blocksPromotion: true,
+          liveRequiresSeparateApproval: true
+        }
+      ],
+      recommendations: [
+        {
+          id: "mock-research-rec",
+          title: "Review latest run evidence before expanding PAPER",
+          summary: "Check DecisionFrame, NetEdge, fees, fills, TCA, OMS, watchdog, and provider readiness before the next PAPER experiment.",
+          status: "NEEDS_REVIEW",
+          promotionStage: "IDEA",
+          canExecute: false
+        }
+      ]
+    },
+    evidenceGraph: {
+      nodes: [
+        { nodeId: "latest_run", label: "Latest Run", truthLabel: "operator_archive", summary: "CONDITIONAL_PASS", runId: "mock-paper-run", reportPath: "not generated in mock mode" },
+        { nodeId: "decision_explainer", label: "Decision Explainer", truthLabel: "decisionframe_summary", summary: "Mock BUY explanation" },
+        { nodeId: "fills_tca_fees", label: "Fills / TCA / Fees", truthLabel: "broker_confirmed_when_available", summary: "fee detail pending" }
+      ],
+      edges: [
+        { from: "latest_run", to: "decision_explainer", relationship: "run_decision_context" }
+      ],
+      latestRunId: "mock-paper-run",
+      reportPath: "not generated in mock mode",
+      reasonCodes: ["MOCK_DATA_SAMPLE", "BROKER_FEE_DETAIL_PENDING"],
+      missingEvidence: ["BROKER_CONFIRMED_REALIZED_PNL_UNAVAILABLE", "TCA_COMPLETE_EVIDENCE_UNAVAILABLE"],
+      promotionBlockers: ["BROKER_FEE_DETAIL_PENDING"],
+      rawLogsIncluded: false,
+      secretsValuesExposed: false
+    },
     systemMap: {
       reportPath: "reports/poverty_killer_system_map_operator_explainer.md",
       sections: [

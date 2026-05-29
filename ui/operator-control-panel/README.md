@@ -85,3 +85,15 @@ Global AI Chief overlay:
   and does not present it as runtime truth.
 - Queueing analysis uses the governed AI advisory endpoint and governance queue;
   recommendations remain `can_execute=false`.
+
+AI Quant Research Chief / Research OS:
+
+- The AI identity is constrained to trading edge, execution quality, risk,
+  validation evidence, provider readiness, PAPER experiment design, and Codex
+  packet drafting.
+- Provider Setup shows env-var readiness and masked fingerprints only; raw
+  credentials are never sent to the browser.
+- Research OS shows advisory hypotheses, experiments, promotion gates,
+  recommendations, and a lightweight evidence graph.
+- Research and AI recommendations cannot start PAPER automatically and cannot
+  trade, call broker, enable live, enable real money, or change thresholds.

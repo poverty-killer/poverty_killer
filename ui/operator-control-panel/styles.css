@@ -559,6 +559,11 @@ select {
   background: #0d1118;
 }
 
+.ai-mission {
+  margin: 10px 14px 0;
+  color: #cbd5e1;
+}
+
 .ai-chief-body {
   display: grid;
   gap: 12px;

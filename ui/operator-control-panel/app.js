@@ -15,6 +15,8 @@
     ["risk", "Risk & Governor"],
     ["alerts", "Watchdog Alerts"],
     ["ai", "AI Chief Operator"],
+    ["providers", "Provider Setup"],
+    ["research", "Research OS"],
     ["system", "System Map"],
     ["audit", "Audit Log"],
     ["world", "World Awareness"],
@@ -30,13 +32,17 @@
   ]);
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
   const AI_QUICK_PROMPTS = [
-    "Explain this page",
-    "What should I care about?",
-    "What is unsafe or missing?",
-    "What is the next safest action?",
-    "Draft Codex packet",
-    "Review latest run",
-    "Critique TCA/NetEdge evidence"
+    "Where is the edge?",
+    "What is the weakest assumption?",
+    "Is this signal statistically believable?",
+    "What would invalidate this strategy?",
+    "What is the safest next PAPER experiment?",
+    "Where are fees/slippage hurting us?",
+    "What evidence blocks live readiness?",
+    "Critique latest run.",
+    "Compare latest run to expected behavior.",
+    "Draft a Codex packet.",
+    "Review provider/data readiness."
   ];
   const AI_PRESERVED_BOOLEAN_KEYS = new Set([
     "secrets_values_exposed",
@@ -99,7 +105,7 @@
   function statusColor(value) {
     const v = String(value).toUpperCase();
     if (v.includes("NO_ACTIVE") || v.includes("REFUSED")) return "yellow";
-    if (v.includes("PASS") || v.includes("ALLOW") || v.includes("CLEAN") || v.includes("RUNNING") || v.includes("PAPER")) return "green";
+    if (v.includes("PASS") || v.includes("ALLOW") || v.includes("CLEAN") || v.includes("RUNNING") || v.includes("PAPER") || v.includes("READY") || v.includes("CONFIGURED")) return "green";
     if (v.includes("UNKNOWN") || v.includes("MISSING") || v.includes("DEGRADED") || v.includes("NO_TRADE") || v.includes("DECLINED")) return "yellow";
     if (v.includes("BLOCK") || v.includes("LOCK") || v.includes("DENY") || v.includes("CONFLICT") || v.includes("LIVE")) return "red";
     return "gray";
@@ -483,13 +489,26 @@
 
   function renderAI() {
     const ai = data.ai;
+    const research = data.research.counts || {};
     return `
-      ${header("AI Chief Operator", "Advisory-only model gateway and governance queue.", ai.providerState)}
+      ${header("AI Quant Research Chief", "Trading edge advisor for strategy, risk, TCA, provider readiness, and Codex packets.", ai.providerState)}
       <div class="grid">
         ${metric("Provider", ai.provider, statusColor(ai.providerState))}
         ${metric("State", ai.providerState, statusColor(ai.providerState))}
         ${metric("Pending Review", ai.pendingReviewCount || 0, ai.pendingReviewCount ? "yellow" : "gray")}
         ${metric("Can Execute", "false", "gray")}
+        <div class="card span-12"><h3>Mission</h3>
+          <div class="notice">I analyze trading edge, execution quality, risk, validation evidence, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
+        </div>
+        <div class="card span-6"><h3>Control Tower</h3>${kv([
+          ["Identity", escapeHtml("AI Quant Research Chief / Trading Edge Advisor")],
+          ["Roles", escapeHtml("Strategy Decoder, Risk/Skeptic Officer, Execution/TCA Auditor, Paper Experiment Designer, Codex Packet Drafter")],
+          ["Research items", escapeHtml(`${research.hypotheses || 0} hypotheses / ${research.experiments || 0} experiments`)],
+          ["Promotion gates", escapeHtml(research.promotionGates || 0)]
+        ])}</div>
+        <div class="card span-6"><h3>Focused Quant Prompts</h3>
+          <div class="stack">${AI_QUICK_PROMPTS.slice(0, 7).map((prompt) => badge(prompt, "gray")).join("")}</div>
+        </div>
         <div class="card span-12"><h3>Advisory Boundary</h3>${kv([
           ["AI direct broker calls", badge("forbidden", "red")],
           ["AI order submit/cancel/liquidate", badge("forbidden", "red")],
@@ -512,7 +531,92 @@
             <button class="intent-button paper" data-intent="ai-analyze" ${backendConnected() ? "" : "disabled"}>
               Run advisory AI analysis
             </button>
+            <button class="intent-button paper" data-intent="ai-quant-review" ${backendConnected() ? "" : "disabled"}>
+              Queue Quant Chief review
+            </button>
             <div class="notice mono">Last AI result: ${escapeHtml(ai.lastAnalyzeResult || "none")}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderProviders() {
+    const readiness = data.providerReadiness;
+    return `
+      ${header("Provider Setup / Credential Readiness", "Status, env-var presence, and setup guidance without secret values.", "NO SECRET VALUES")}
+      <div class="grid">
+        ${metric("Providers", readiness.providerCount || 0, readiness.providerCount ? "green" : "gray")}
+        ${metric("Ready/Configured", readiness.readyOrConfiguredCount || 0, readiness.readyOrConfiguredCount ? "green" : "gray")}
+        ${metric("Missing Credentials", readiness.missingCredentialsCount || 0, readiness.missingCredentialsCount ? "yellow" : "gray")}
+        ${metric("Can Trade", "false", "gray")}
+        <div class="card span-12"><h3>Credential Safety</h3>${kv([
+          ["Raw secret values", badge("not exposed", "green")],
+          ["AI secret access", badge("forbidden", "red")],
+          ["Browser secret storage", badge("not used", "green")],
+          ["Read-only validation", badge("env presence only", "yellow")]
+        ])}</div>
+        <div class="card span-12"><h3>Providers</h3>${table(
+          ["Provider", "Category", "Status", "Configured", "Required Env", "Fingerprint", "Can Trade", "Setup"],
+          readiness.providers.map((provider) => [
+            escapeHtml(provider.displayName || provider.providerId),
+            badge(provider.category || "unknown", "gray"),
+            badge(provider.status || "UNKNOWN", statusColor(provider.status || "UNKNOWN")),
+            badge(String(provider.configured === true), provider.configured ? "green" : "yellow"),
+            escapeHtml((provider.requiredEnvVars || []).join(", ") || "none"),
+            escapeHtml((provider.envStatus || []).map((row) => row.fingerprint || "missing").join(", ") || "none"),
+            badge(String(provider.canTrade === true), provider.canTrade ? "red" : "gray"),
+            escapeHtml(provider.setupInstructions || "")
+          ])
+        )}</div>
+      </div>
+    `;
+  }
+
+  function renderResearch() {
+    const research = data.research;
+    const graph = data.evidenceGraph;
+    return `
+      ${header("Research OS / Evidence Graph", "Lightweight quant research registry, promotion gates, and evidence links.", "ADVISORY ONLY")}
+      <div class="grid">
+        ${metric("Hypotheses", research.counts.hypotheses || 0, research.counts.hypotheses ? "yellow" : "gray")}
+        ${metric("Experiments", research.counts.experiments || 0, research.counts.experiments ? "yellow" : "gray")}
+        ${metric("Promotion Gates", research.counts.promotionGates || 0, "yellow")}
+        ${metric("Can Execute", "false", "gray")}
+        <div class="card span-12"><h3>Promotion Gates</h3>${table(
+          ["Gate", "Stage", "Status", "Blocks", "Required Evidence"],
+          research.promotionGates.map((gate) => [
+            escapeHtml(gate.gateId),
+            badge(gate.stage, statusColor(gate.stage)),
+            badge(gate.currentStatus, statusColor(gate.currentStatus)),
+            badge(String(gate.blocksPromotion === true), gate.blocksPromotion ? "yellow" : "green"),
+            escapeHtml((gate.requiredEvidence || []).join(", "))
+          ])
+        )}</div>
+        <div class="card span-12"><h3>Research Recommendations</h3>${table(
+          ["ID", "Title", "Stage", "Status", "Summary", "Executable"],
+          research.recommendations.map((rec) => [
+            escapeHtml(rec.id),
+            escapeHtml(rec.title),
+            badge(rec.promotionStage, statusColor(rec.promotionStage)),
+            badge(rec.status, statusColor(rec.status)),
+            escapeHtml(rec.summary),
+            badge(rec.canExecute ? "yes" : "no", rec.canExecute ? "red" : "gray")
+          ])
+        )}</div>
+        <div class="card span-12"><h3>Evidence Graph</h3>${table(
+          ["Node", "Truth Label", "Summary", "Run/Path"],
+          graph.nodes.map((node) => [
+            escapeHtml(node.label || node.nodeId),
+            badge(node.truthLabel || "advisory", "gray"),
+            escapeHtml(node.summary || "unknown"),
+            escapeHtml(node.runId || node.reportPath || "none")
+          ])
+        )}</div>
+        <div class="card span-12"><h3>Missing Evidence / Promotion Blockers</h3>
+          <div class="status-strip">
+            ${(graph.missingEvidence || []).map((item) => badge(item, "yellow")).join("") || badge("none loaded", "gray")}
+            ${(graph.promotionBlockers || []).map((item) => badge(item, statusColor(item))).join("")}
           </div>
         </div>
       </div>
@@ -707,6 +811,8 @@
       risk: ["Risk gates are explanatory only; AI cannot override hard or economic gates."],
       alerts: ["Watchdog queue is local-only; no external alert delivery is enabled from this panel."],
       ai: ["AI recommendations route through governance and remain can_execute=false."],
+      providers: ["Provider readiness is env-var presence only; secret values are never sent to the browser or AI context."],
+      research: ["Research registry is advisory only; PAPER proposals require Shan approval and do not start runtime."],
       system: ["System map is explanatory; it is not an authority source for changing engine behavior."],
       audit: ["Audit page uses summarized events only; no raw runtime logs are included."],
       world: ["World Awareness is advisory only and cannot feed executable trade authority."],
@@ -787,6 +893,18 @@
         `provider_state=${data.ai.providerState}`,
         `pending_review=${data.ai.pendingReviewCount || 0}`,
         "can_execute=false"
+      ],
+      providers: [
+        `providers=${data.providerReadiness.providerCount || 0}`,
+        `ready_or_configured=${data.providerReadiness.readyOrConfiguredCount || 0}`,
+        `missing_credentials=${data.providerReadiness.missingCredentialsCount || 0}`,
+        "secrets_values_exposed=false"
+      ],
+      research: [
+        `hypotheses=${data.research.counts.hypotheses || 0}`,
+        `experiments=${data.research.counts.experiments || 0}`,
+        `promotion_gates=${data.research.counts.promotionGates || 0}`,
+        `missing_evidence=${(data.evidenceGraph.missingEvidence || []).join(", ") || "none"}`
       ],
       system: [
         `report=${data.systemMap.reportPath}`,
@@ -884,6 +1002,27 @@
         last_refused_intent: data.supervisor.lastRefusedIntent || "none"
       },
       selected_run: latestRun,
+      provider_readiness: {
+        provider_count: data.providerReadiness.providerCount || 0,
+        ready_or_configured_count: data.providerReadiness.readyOrConfiguredCount || 0,
+        missing_credentials_count: data.providerReadiness.missingCredentialsCount || 0,
+        not_implemented_count: data.providerReadiness.notImplementedCount || 0,
+        secrets_values_exposed: false
+      },
+      research_registry: {
+        hypotheses: data.research.counts.hypotheses || 0,
+        experiments: data.research.counts.experiments || 0,
+        recommendations: data.research.counts.recommendations || 0,
+        promotion_gates: data.research.counts.promotionGates || 0,
+        can_execute: false
+      },
+      evidence_graph: {
+        latest_run_id: data.evidenceGraph.latestRunId || null,
+        missing_evidence: data.evidenceGraph.missingEvidence || [],
+        promotion_blockers: data.evidenceGraph.promotionBlockers || [],
+        raw_logs_included: false,
+        secrets_values_exposed: false
+      },
       blockers: aiBlockers(),
       missing_evidence: aiMissingEvidence(activeScreenId),
       page_summary: pageSummaryForAi(activeScreenId)
@@ -928,7 +1067,7 @@
     const missing = context.missing_evidence.length ? context.missing_evidence.slice(0, 3).join("; ") : "No page-specific missing evidence is loaded.";
     const latestRun = context.selected_run;
 
-    if (question === "Draft Codex packet") {
+    if (question === "Draft a Codex packet.") {
       return [
         "Local redacted context preview, not a real model response.",
         sourceWarning,
@@ -938,7 +1077,7 @@
       ].join("\n");
     }
 
-    if (question === "Review latest run") {
+    if (question === "Critique latest run." || question === "Compare latest run to expected behavior.") {
       return [
         "Local redacted context preview, not a real model response.",
         sourceWarning,
@@ -950,13 +1089,32 @@
       ].join("\n");
     }
 
-    if (question === "Critique TCA/NetEdge evidence") {
+    if (question === "Where are fees/slippage hurting us?") {
       return [
         "Local redacted context preview, not a real model response.",
         sourceWarning,
         `NetEdge summary: ${data.pnl.netEdge || "UNKNOWN"}; TCA status: ${data.tcaDashboard.status || "UNKNOWN"}.`,
         `Fee/P&L truth labels: realized=${data.pnl.realizedPnl.source}, fees=${data.pnl.fees.source}.`,
         "Do not invent P&L, fees, fills, slippage, or TCA. Unknown must remain unknown."
+      ].join("\n");
+    }
+
+    if (question === "Where is the edge?") {
+      return [
+        "Local redacted context preview, not a real model response.",
+        sourceWarning,
+        `Candidate edge evidence: ${context.page_summary.slice(0, 5).join("; ")}.`,
+        `Current blockers/missing evidence: ${blockers}; ${missing}`,
+        "Treat edge as unproven until DecisionFrame, MarketTruthSnapshot, NetEdge, TCA, fees, and replay/PAPER evidence agree."
+      ].join("\n");
+    }
+
+    if (question === "Review provider/data readiness.") {
+      return [
+        "Local redacted context preview, not a real model response.",
+        sourceWarning,
+        `Providers loaded: ${context.provider_readiness.provider_count}; ready/configured: ${context.provider_readiness.ready_or_configured_count}; missing credentials: ${context.provider_readiness.missing_credentials_count}.`,
+        "Provider context is env-var presence only. No secret values are visible to the UI or AI."
       ].join("\n");
     }
 
@@ -979,7 +1137,7 @@
     const response = aiOverlayResponse || buildAiOverlayAdvisory(aiSelectedQuestion);
     host.innerHTML = `
       <button class="ai-chief-fab ${aiOverlayOpen ? "open" : ""}" type="button" data-ai-chief-open aria-expanded="${aiOverlayOpen ? "true" : "false"}">
-        <span>Ask AI Chief</span>
+        <span>Ask Quant Chief</span>
         <span class="ai-chief-fab-sub">${escapeHtml(screenTitle(activeScreenId))}</span>
       </button>
       <div class="ai-chief-backdrop ${aiOverlayOpen ? "open" : ""}" data-ai-chief-close></div>
@@ -987,7 +1145,7 @@
         <div class="ai-chief-panel">
           <div class="ai-chief-header">
             <div>
-              <div class="ai-chief-title">AI Chief Operator</div>
+              <div class="ai-chief-title">AI Quant Research Chief</div>
               <div class="muted mono">${escapeHtml(providerLabel)} / ADVISORY_ONLY</div>
             </div>
             <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Close</button>
@@ -999,6 +1157,7 @@
             ${badge("cannot change thresholds", "red")}
             ${badge("can_execute=false", "gray")}
           </div>
+          <div class="notice ai-mission">I analyze trading edge, execution quality, risk, validation evidence, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
           <div class="ai-chief-body">
             ${renderAiContextPreview(context)}
             <div class="ai-question-bank" aria-label="AI Chief quick questions">
@@ -1057,7 +1216,10 @@
     const selectedScreen = activeScreenId;
     try {
       const context = buildAiChiefContext(aiSelectedQuestion);
-      const result = await postIntent("/operator/ai/analyze", {
+      const path = aiSelectedQuestion === "Draft a Codex packet."
+        ? "/operator/ai/draft-codex-packet"
+        : "/operator/ai/quant-review";
+      const result = await postIntent(path, {
         requested_by: "operator_ui_global_overlay",
         advisory_only: true,
         prompt: aiSelectedQuestion,
@@ -1066,13 +1228,14 @@
       });
       const recommendation = result.recommendation || {};
       aiOverlayResponse = [
-        "Governed AI endpoint returned through the advisory queue.",
+        "Governed AI Quant Chief endpoint returned through the advisory queue.",
         `Status: ${result.status || "QUEUED"}.`,
         `Recommendation: ${recommendation.recommendation_type || "OBSERVATION"}.`,
         `Summary: ${recommendation.summary || "No summary returned."}`,
+        result.draft_packet ? `Draft packet:\n${result.draft_packet}` : "",
         `can_execute=${String(recommendation.can_execute === true ? "true" : "false")}.`,
         "Approving a PAPER research recommendation does not start PAPER automatically."
-      ].join("\n");
+      ].filter(Boolean).join("\n");
       data = await loadData();
       data.ai.lastAnalyzeResult = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "OBSERVATION"}`;
       renderTopBar();
@@ -1137,6 +1300,8 @@
       risk: renderRisk,
       alerts: renderAlerts,
       ai: renderAI,
+      providers: renderProviders,
+      research: renderResearch,
       system: renderSystem,
       audit: renderAudit,
       world: renderWorld,
@@ -1242,6 +1407,10 @@
     const systemMap = payload.systemMap || {};
     const aiStatus = payload.aiStatus || {};
     const aiRecommendations = payload.aiRecommendations || {};
+    const providers = payload.providers || {};
+    const providerReadiness = payload.providerReadiness || {};
+    const research = payload.research || {};
+    const evidenceGraph = payload.evidenceGraph || {};
     const endpointFailures = payload.endpointFailures || {};
     const supervisor = status.supervisor || latestRun || {};
     const activeSession = supervisor.active_session || {};
@@ -1458,6 +1627,101 @@
         canExecute: rec.can_execute === true
       }));
     }
+    if (Array.isArray(providers.providers)) {
+      next.providerReadiness.providers = providers.providers.map((provider) => ({
+        providerId: pick(provider.provider_id, "unknown"),
+        displayName: pick(provider.display_name, provider.provider_id || "unknown"),
+        category: pick(provider.category, "unknown"),
+        purpose: pick(provider.purpose, ""),
+        status: pick(provider.status, "UNKNOWN"),
+        requiredEnvVars: Array.isArray(provider.required_env_vars) ? provider.required_env_vars : [],
+        optionalEnvVars: Array.isArray(provider.optional_env_vars) ? provider.optional_env_vars : [],
+        envStatus: Array.isArray(provider.env_status) ? provider.env_status.map((row) => ({
+          name: pick(row.name, "unknown"),
+          configured: row.configured === true,
+          fingerprint: pick(row.fingerprint, null)
+        })) : [],
+        configured: provider.configured === true,
+        readOnlyValidationSupported: provider.read_only_validation_supported === true,
+        canTrade: provider.can_trade === true,
+        canMutateExternalSystem: provider.can_mutate_external_system === true,
+        lastValidationStatus: pick(provider.last_validation_status, "NOT_RUN"),
+        lastValidationAt: pick(provider.last_validation_at, null),
+        setupInstructions: pick(provider.setup_instructions, "")
+      }));
+      next.providerReadiness.providerCount = pick(providers.provider_count, next.providerReadiness.providers.length);
+      next.providerReadiness.counts = providers.counts || {};
+    }
+    if (providerReadiness.source) {
+      next.providerReadiness.readyOrConfiguredCount = pick(providerReadiness.ready_or_configured_count, next.providerReadiness.readyOrConfiguredCount);
+      next.providerReadiness.missingCredentialsCount = pick(providerReadiness.missing_credentials_count, next.providerReadiness.missingCredentialsCount);
+      next.providerReadiness.notImplementedCount = pick(providerReadiness.not_implemented_count, next.providerReadiness.notImplementedCount);
+    } else if (providers.counts) {
+      next.providerReadiness.readyOrConfiguredCount = (providers.counts.READY || 0) + (providers.counts.CONFIGURED || 0);
+      next.providerReadiness.missingCredentialsCount = providers.counts.MISSING_CREDENTIALS || 0;
+      next.providerReadiness.notImplementedCount = providers.counts.NOT_IMPLEMENTED || 0;
+    }
+    if (research.source) {
+      next.research.hypotheses = Array.isArray(research.hypotheses) ? research.hypotheses.map((item) => ({
+        id: pick(item.id, "unknown"),
+        title: pick(item.title, "untitled"),
+        thesis: pick(item.thesis, ""),
+        symbolsAssets: Array.isArray(item.symbols_assets) ? item.symbols_assets : [],
+        strategyArea: pick(item.strategy_area, "UNKNOWN"),
+        expectedEdge: pick(item.expected_edge, "UNKNOWN_UNPROVEN"),
+        status: pick(item.status, "NEEDS_REVIEW"),
+        promotionStage: pick(item.promotion_stage, "IDEA"),
+        canExecute: item.can_execute === true
+      })) : [];
+      next.research.experiments = Array.isArray(research.experiments) ? research.experiments.map((item) => ({
+        id: pick(item.id, "unknown"),
+        title: pick(item.title, "untitled"),
+        thesis: pick(item.thesis, ""),
+        status: pick(item.status, "NEEDS_REVIEW"),
+        promotionStage: pick(item.promotion_stage, "OFFLINE_RESEARCH"),
+        canExecute: item.can_execute === true,
+        paperStarted: item.paper_started === true
+      })) : [];
+      next.research.promotionGates = Array.isArray(research.promotion_gates) ? research.promotion_gates.map((gate) => ({
+        gateId: pick(gate.gate_id, "unknown"),
+        stage: pick(gate.stage, "IDEA"),
+        requiredEvidence: Array.isArray(gate.required_evidence) ? gate.required_evidence : [],
+        currentStatus: pick(gate.current_status, "NEEDS_REVIEW"),
+        blocksPromotion: gate.blocks_promotion !== false,
+        liveRequiresSeparateApproval: gate.live_requires_separate_approval === true
+      })) : [];
+      next.research.recommendations = Array.isArray(research.recommendations) ? research.recommendations.map((rec) => ({
+        id: pick(rec.id, "unknown"),
+        title: pick(rec.title, "untitled"),
+        summary: pick(rec.summary, ""),
+        status: pick(rec.status, "NEEDS_REVIEW"),
+        promotionStage: pick(rec.promotion_stage, "IDEA"),
+        canExecute: rec.can_execute === true
+      })) : [];
+      const counts = research.counts || {};
+      next.research.counts = {
+        hypotheses: pick(counts.hypotheses, next.research.hypotheses.length),
+        experiments: pick(counts.experiments, next.research.experiments.length),
+        recommendations: pick(counts.recommendations, next.research.recommendations.length),
+        promotionGates: pick(counts.promotion_gates, next.research.promotionGates.length)
+      };
+    }
+    if (evidenceGraph.source) {
+      next.evidenceGraph.nodes = Array.isArray(evidenceGraph.nodes) ? evidenceGraph.nodes.map((node) => ({
+        nodeId: pick(node.node_id, "unknown"),
+        label: pick(node.label, "unknown"),
+        truthLabel: pick(node.truth_label, "advisory"),
+        summary: pick(node.summary, ""),
+        runId: pick(node.run_id, null),
+        reportPath: pick(node.report_path, null)
+      })) : [];
+      next.evidenceGraph.edges = Array.isArray(evidenceGraph.edges) ? evidenceGraph.edges : [];
+      next.evidenceGraph.latestRunId = pick(evidenceGraph.latest_run_id, null);
+      next.evidenceGraph.reportPath = pick(evidenceGraph.report_path, null);
+      next.evidenceGraph.reasonCodes = Array.isArray(evidenceGraph.reason_codes) ? evidenceGraph.reason_codes : [];
+      next.evidenceGraph.missingEvidence = Array.isArray(evidenceGraph.missing_evidence) ? evidenceGraph.missing_evidence : [];
+      next.evidenceGraph.promotionBlockers = Array.isArray(evidenceGraph.promotion_blockers) ? evidenceGraph.promotion_blockers : [];
+    }
     if (Array.isArray(world.providers)) {
       const runtimeByProvider = {};
       if (Array.isArray(worldRuntime.providers)) {
@@ -1577,7 +1841,11 @@
       ["alerts", "/operator/alerts"],
       ["systemMap", "/operator/system-map"],
       ["aiStatus", "/operator/ai/status"],
-      ["aiRecommendations", "/operator/ai/recommendations"]
+      ["aiRecommendations", "/operator/ai/recommendations"],
+      ["providers", "/operator/providers"],
+      ["providerReadiness", "/operator/providers/readiness"],
+      ["research", "/operator/research"],
+      ["evidenceGraph", "/operator/research/evidence-graph"]
     ];
     const payload = { status };
     const failures = [];
@@ -1672,6 +1940,17 @@
         });
         const recommendation = result.recommendation || {};
         message = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "OBSERVATION"}`;
+      }
+      if (intent === "ai-quant-review") {
+        const confirmed = window.confirm("Queue AI Quant Research Chief review? This cannot trade, start PAPER, enable live, call broker execution, or change thresholds.");
+        if (!confirmed) return;
+        const result = await postIntent("/operator/ai/quant-review", {
+          requested_by: "operator_ui",
+          advisory_only: true,
+          prompt: "What is the safest next PAPER experiment?"
+        });
+        const recommendation = result.recommendation || {};
+        message = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "STRATEGY_REVIEW"}`;
       }
       const selectedScreen = activeScreenId;
       data = await loadData();

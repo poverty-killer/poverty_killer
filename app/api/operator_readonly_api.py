@@ -20,7 +20,9 @@ from fastapi.staticfiles import StaticFiles
 from app.ai_chief_operator.config import AIChiefConfig
 from app.ai_chief_operator.context_builder import build_ai_context
 from app.ai_chief_operator.governance_queue import GovernanceQueue
+from app.ai_chief_operator.models import normalize_recommendation
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
+from app.ai_chief_operator.quant_persona import draft_codex_packet, build_quant_review_recommendation, quant_persona_summary
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_intelligence.action_center import build_action_center
@@ -30,6 +32,9 @@ from app.operator_intelligence.pnl_tca import build_pnl_summary, build_tca_dashb
 from app.operator_intelligence.reports import RunReportGenerator
 from app.operator_intelligence.system_map import SYSTEM_MAP_SUMMARY, render_system_map_markdown
 from app.operator_intelligence.watchdog import AlertQueue, build_watchdog_alerts
+from app.operator_providers.readiness import provider_readiness_summary, validate_provider_readonly
+from app.operator_research.evidence_graph import build_evidence_graph
+from app.operator_research.registry import ResearchRegistry
 from app.world_awareness.config import WorldAwarenessConfig
 from app.world_awareness.feed_spine import WorldAwarenessEventCache
 from app.world_awareness.persistent_cache import PersistentWorldAwarenessEventCache
@@ -87,6 +92,15 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/ai/status": "read_only_ai_chief_status",
         "/operator/ai/recommendations": "read_only_ai_governance_queue",
         "/operator/ai/analyze": "advisory_ai_analysis_governance_queue_only",
+        "/operator/providers": "read_only_provider_setup_and_credential_readiness",
+        "/operator/providers/readiness": "read_only_provider_readiness_summary",
+        "/operator/providers/validate-readonly": "read_only_env_presence_validation_only",
+        "/operator/research": "advisory_research_registry",
+        "/operator/research/hypotheses": "advisory_research_hypothesis_queue_only",
+        "/operator/research/experiments": "advisory_research_experiment_queue_only",
+        "/operator/research/evidence-graph": "read_only_research_evidence_graph",
+        "/operator/ai/quant-review": "advisory_ai_quant_research_review",
+        "/operator/ai/draft-codex-packet": "advisory_ai_codex_packet_draft",
         "/operator/ai/recommendations/{id}/approve-paper-research": "governance_queue_paper_research_approval_only",
         "/operator/ai/recommendations/{id}/reject": "governance_queue_reject_only",
     },
@@ -128,6 +142,8 @@ class OperatorSnapshotProvider:
         decision_frames: list[dict[str, Any]] | None = None,
         ai_config: AIChiefConfig | None = None,
         ai_queue: GovernanceQueue | None = None,
+        research_registry: ResearchRegistry | None = None,
+        provider_env: dict[str, str] | None = None,
     ) -> None:
         self.runtime_config = runtime_config or OperatorRuntimeConfig.from_env()
         self.supervisor = supervisor or OperatorPaperSupervisor(
@@ -163,6 +179,8 @@ class OperatorSnapshotProvider:
         self.ai_queue = ai_queue or GovernanceQueue(
             path=self.runtime_config.operator_state_dir / "ai_governance_queue.jsonl"
         )
+        self.research_registry = research_registry or ResearchRegistry()
+        self.provider_env = provider_env if provider_env is not None else dict(os.environ)
 
     def status(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
@@ -472,6 +490,63 @@ class OperatorSnapshotProvider:
     def tca_dashboard(self) -> dict[str, Any]:
         return build_tca_dashboard(fills_summary=self.fills_summary(), tca_summary=self.tca_summary())
 
+    def providers(self) -> dict[str, Any]:
+        return provider_readiness_summary(self.provider_env)
+
+    def providers_readiness(self) -> dict[str, Any]:
+        summary = self.providers()
+        return {
+            "source": "OPERATOR_PROVIDER_READINESS",
+            "provider_registry_version": summary["provider_registry_version"],
+            "provider_count": summary["provider_count"],
+            "counts": summary["counts"],
+            "ready_or_configured_count": int(summary["counts"].get("READY", 0)) + int(summary["counts"].get("CONFIGURED", 0)),
+            "missing_credentials_count": int(summary["counts"].get("MISSING_CREDENTIALS", 0)),
+            "not_implemented_count": int(summary["counts"].get("NOT_IMPLEMENTED", 0)),
+            "secrets_values_exposed": False,
+            "raw_secret_values_included": False,
+            "broker_call_occurred": False,
+            "external_mutation_occurred": False,
+            "can_execute": False,
+        }
+
+    def validate_provider_readonly(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        provider_id = str((payload or {}).get("provider_id") or "alpaca_paper")
+        return validate_provider_readonly(provider_id, self.provider_env)
+
+    def research(self) -> dict[str, Any]:
+        return self.research_registry.snapshot()
+
+    def research_hypothesis(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.research_registry.create_hypothesis(payload or {})
+
+    def research_experiment(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.research_registry.create_experiment(payload or {})
+
+    def research_evidence_graph(self) -> dict[str, Any]:
+        pnl_summary = self.pnl()
+        tca_dashboard = self.tca_dashboard()
+        return build_evidence_graph(
+            run_archive=self.runs(),
+            decision_explainer=self.explain_latest(),
+            market_truth={
+                "source": "OPERATOR_BACKEND_STATUS_SUMMARY",
+                "summary": self.status().get("market_data", "UNKNOWN_NO_ACTIVE_RUNTIME"),
+            },
+            netedge={
+                "status": tca_dashboard.get("status", "UNKNOWN"),
+                "net_edge": "UNKNOWN_NO_ACTIVE_RUNTIME",
+            },
+            pnl=pnl_summary,
+            orders=self.orders_summary(),
+            fills=self.fills_summary(),
+            tca=tca_dashboard,
+            oms={"status": "UNKNOWN_NO_ACTIVE_RUNTIME"},
+            action_center=self.action_center(),
+            watchdog=self.alerts(),
+            provider_readiness=self.providers(),
+        )
+
     def audit_summary(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
         persisted_events = self.supervisor.session_store.audit_events(limit=1)
@@ -660,6 +735,7 @@ class OperatorSnapshotProvider:
         recs = self.ai_queue.list()
         return {
             "source": "AI_CHIEF_OPERATOR",
+            "persona": quant_persona_summary(),
             "gateway": self.ai_gateway.status(),
             "recommendation_count": len(recs),
             "pending_review_count": sum(1 for rec in recs if rec.get("status") == "PENDING_REVIEW"),
@@ -697,7 +773,7 @@ class OperatorSnapshotProvider:
             alerts=alerts,
             ai_recommendations=self.ai_queue.list(),
         )
-        return build_ai_context(
+        context = build_ai_context(
             run_archive=archive,
             action_center=action_center,
             decision_explainer=self.explain_latest(),
@@ -707,6 +783,14 @@ class OperatorSnapshotProvider:
             readiness=self.readiness(),
             alerts=alerts,
         )
+        context["provider_readiness"] = self.providers()
+        context["research_registry"] = self.research()
+        context["evidence_graph"] = self.research_evidence_graph()
+        context["persona"] = quant_persona_summary()
+        context["can_execute"] = False
+        context["broker_call_occurred"] = False
+        context["trading_mutation_occurred"] = False
+        return context
 
     def ai_analyze(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         context = self._ai_context()
@@ -728,6 +812,57 @@ class OperatorSnapshotProvider:
             "trading_mutation_occurred": False,
             "live_enabled": False,
             "real_money_enabled": False,
+        }
+
+    def ai_quant_review(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        prompt = str(body.get("prompt") or body.get("question") or "Review current operator state as Quant Research Chief.")
+        context = self._ai_context()
+        raw = build_quant_review_recommendation(prompt, context)
+        recommendation = normalize_recommendation(raw, provider="operator_quant_persona", role="AI_QUANT_RESEARCH_CHIEF")
+        queued = self.ai_queue.add(recommendation)
+        return {
+            "source": "AI_QUANT_RESEARCH_CHIEF",
+            "status": queued.get("status"),
+            "recommendation": queued,
+            "persona": quant_persona_summary(),
+            "context": {
+                "context_version": context["context_version"],
+                "scope": context.get("scope"),
+                "raw_logs_included": context["raw_logs_included"],
+                "secrets_values_exposed": context["secrets_values_exposed"],
+                "advisory_only": context["advisory_only"],
+                "provider_count": context["provider_readiness"]["provider_count"],
+            },
+            "advisory_only": True,
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+        }
+
+    def ai_draft_codex_packet(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        prompt = str(body.get("prompt") or body.get("question") or "Draft a governed quant research Codex packet.")
+        context = self._ai_context()
+        raw = draft_codex_packet(prompt, context)
+        draft_packet = raw.pop("draft_packet", "")
+        recommendation = normalize_recommendation(raw, provider="operator_quant_persona", role="CODEX_PACKET_DRAFTER")
+        queued = self.ai_queue.add(recommendation)
+        return {
+            "source": "AI_QUANT_RESEARCH_CHIEF",
+            "status": queued.get("status"),
+            "recommendation": queued,
+            "draft_packet": draft_packet,
+            "advisory_only": True,
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "raw_logs_included": False,
+            "secrets_values_exposed": False,
         }
 
     def ai_approve_paper_research(self, recommendation_id: str) -> dict[str, Any]:
@@ -862,6 +997,34 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     def tca_dashboard() -> dict[str, Any]:
         return provider.tca_dashboard()
 
+    @router.get("/providers")
+    def providers() -> dict[str, Any]:
+        return provider.providers()
+
+    @router.get("/providers/readiness")
+    def providers_readiness() -> dict[str, Any]:
+        return provider.providers_readiness()
+
+    @router.post("/providers/validate-readonly")
+    def validate_provider_readonly_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.validate_provider_readonly(payload)
+
+    @router.get("/research")
+    def research() -> dict[str, Any]:
+        return provider.research()
+
+    @router.post("/research/hypotheses")
+    def research_hypothesis(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.research_hypothesis(payload)
+
+    @router.post("/research/experiments")
+    def research_experiment(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.research_experiment(payload)
+
+    @router.get("/research/evidence-graph")
+    def research_evidence_graph() -> dict[str, Any]:
+        return provider.research_evidence_graph()
+
     @router.get("/alerts")
     def alerts() -> dict[str, Any]:
         return provider.alerts()
@@ -881,6 +1044,14 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.post("/ai/analyze")
     def ai_analyze(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return provider.ai_analyze(payload)
+
+    @router.post("/ai/quant-review")
+    def ai_quant_review(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_quant_review(payload)
+
+    @router.post("/ai/draft-codex-packet")
+    def ai_draft_codex_packet(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_draft_codex_packet(payload)
 
     @router.post("/ai/recommendations/{recommendation_id}/approve-paper-research")
     def ai_approve_paper_research(recommendation_id: str) -> dict[str, Any]:

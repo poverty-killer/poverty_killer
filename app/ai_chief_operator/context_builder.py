@@ -5,9 +5,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.ai_chief_operator.quant_persona import quant_persona_summary
+
 
 SECRET_KEY_PARTS = ("secret", "token", "password", "api_key", "apikey", "key_id", "private", "credential")
-SECRET_VALUE_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{8,}|[A-Za-z0-9_\-]{32,})")
+SECRET_VALUE_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{8,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9\-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+)
+HIGH_ENTROPY_VALUE_RE = re.compile(r"\b(?=[A-Za-z0-9_\-]{32,}\b)(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])[A-Za-z0-9_\-]+\b")
 BOOLEAN_STATUS_KEYS = {
     "secrets_values_exposed",
     "raw_logs_included",
@@ -31,7 +36,8 @@ def redact_secrets(value: Any, *, key: str = "") -> Any:
     if isinstance(value, tuple):
         return tuple(redact_secrets(item) for item in value[:100])
     if isinstance(value, str):
-        return SECRET_VALUE_RE.sub("REDACTED", value)
+        text = SECRET_VALUE_RE.sub("REDACTED", value)
+        return HIGH_ENTROPY_VALUE_RE.sub("REDACTED", text)
     return value
 
 
@@ -58,6 +64,8 @@ def build_ai_context(
     latest_runs = run_archive.get("runs") or []
     context = {
         "context_version": "ai-chief-context-v1",
+        "persona": quant_persona_summary(),
+        "scope": "trading_quant_operator_research_only",
         "latest_run_archive_summary": _small(latest_runs[:3]),
         "action_center": _small(action_center),
         "decision_explainer": _small(decision_explainer),

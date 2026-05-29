@@ -1,5 +1,5 @@
 {
-  "version": "phase-4-global-ai-overlay",
+  "version": "phase-5-quant-chief-research-os",
   "mode": "read_only_operator_contracts",
   "ui_policy": {
     "paper_enabled_first": true,
@@ -40,13 +40,17 @@
       "MOCK_DATA"
     ],
     "quick_prompts": [
-      "Explain this page",
-      "What should I care about?",
-      "What is unsafe or missing?",
-      "What is the next safest action?",
-      "Draft Codex packet",
-      "Review latest run",
-      "Critique TCA/NetEdge evidence"
+      "Where is the edge?",
+      "What is the weakest assumption?",
+      "Is this signal statistically believable?",
+      "What would invalidate this strategy?",
+      "What is the safest next PAPER experiment?",
+      "Where are fees/slippage hurting us?",
+      "What evidence blocks live readiness?",
+      "Critique latest run.",
+      "Compare latest run to expected behavior.",
+      "Draft a Codex packet.",
+      "Review provider/data readiness."
     ],
     "forbidden_ai_authority": [
       "trade",
@@ -58,6 +62,64 @@
       "liquidate positions",
       "change thresholds",
       "bypass hard gates"
+    ]
+  },
+  "ai_quant_research_chief": {
+    "identity": "AI Quant Research Chief / Trading Edge Advisor",
+    "roles": [
+      "Quant Research Chief",
+      "Strategy Decoder",
+      "Risk/Skeptic Officer",
+      "Execution/TCA Auditor",
+      "Paper Experiment Designer",
+      "Codex Packet Drafter"
+    ],
+    "domain_scope": "trading_edge_execution_quality_risk_validation_operator_readiness",
+    "general_chatbot": false,
+    "advisory_only": true,
+    "can_execute": false,
+    "broker_call_occurred": false,
+    "trading_mutation_occurred": false,
+    "live_enabled": false,
+    "real_money_enabled": false
+  },
+  "provider_setup_contract": {
+    "raw_secret_values_included": false,
+    "secrets_values_exposed": false,
+    "browser_secret_storage": false,
+    "read_only_validation_only": true,
+    "categories": [
+      "broker",
+      "market_data",
+      "news",
+      "economic_calendar",
+      "ai_provider",
+      "alternative_data",
+      "execution_analytics",
+      "asset_class_data"
+    ],
+    "statuses": [
+      "CONFIGURED",
+      "MISSING_CREDENTIALS",
+      "DISABLED",
+      "VALIDATION_FAILED",
+      "READY",
+      "NOT_IMPLEMENTED"
+    ]
+  },
+  "research_os_contract": {
+    "registry_version": "operator-research-registry-v1",
+    "advisory_only": true,
+    "can_execute": false,
+    "paper_started_by_approval": false,
+    "promotion_stages": [
+      "IDEA",
+      "OFFLINE_RESEARCH",
+      "BACKTEST_REVIEW",
+      "REPLAY_REVIEW",
+      "BOUNDED_PAPER",
+      "LONGER_PAPER",
+      "LIVE_REQUIRES_SEPARATE_APPROVAL"
     ]
   },
   "readOnlyEndpoints": {
@@ -501,6 +563,78 @@
       "fake_fees_allowed": false,
       "fake_tca_allowed": false
     },
+    "/operator/providers": {
+      "source": "OPERATOR_PROVIDER_READINESS",
+      "providers": [
+        {
+          "provider_id": "alpaca_paper",
+          "display_name": "Alpaca Paper Broker/Data",
+          "category": "broker | market_data | news | economic_calendar | ai_provider | alternative_data | execution_analytics | asset_class_data",
+          "status": "CONFIGURED | MISSING_CREDENTIALS | DISABLED | VALIDATION_FAILED | READY | NOT_IMPLEMENTED",
+          "required_env_vars": [],
+          "optional_env_vars": [],
+          "env_status": [{"name": "ENV_VAR", "configured": false, "fingerprint": "masked hash only or null"}],
+          "configured": false,
+          "read_only_validation_supported": true,
+          "can_trade": false,
+          "can_mutate_external_system": false,
+          "secrets_values_exposed": false
+        }
+      ],
+      "raw_secret_values_included": false,
+      "broker_call_occurred": false,
+      "external_mutation_occurred": false,
+      "can_execute": false
+    },
+    "/operator/providers/readiness": {
+      "source": "OPERATOR_PROVIDER_READINESS",
+      "provider_count": 0,
+      "ready_or_configured_count": 0,
+      "missing_credentials_count": 0,
+      "not_implemented_count": 0,
+      "secrets_values_exposed": false
+    },
+    "/operator/providers/validate-readonly": {
+      "method": "POST",
+      "read_only_validation": true,
+      "broker_call_occurred": false,
+      "external_mutation_occurred": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/research": {
+      "source": "OPERATOR_RESEARCH_REGISTRY",
+      "hypotheses": [],
+      "experiments": [],
+      "promotion_gates": [],
+      "recommendations": [],
+      "advisory_only": true,
+      "can_execute": false,
+      "paper_started": false
+    },
+    "/operator/research/hypotheses": {
+      "method": "POST",
+      "advisory_only": true,
+      "can_execute": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false
+    },
+    "/operator/research/experiments": {
+      "method": "POST",
+      "requires_shan_approval": true,
+      "paper_started": false,
+      "can_execute": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false
+    },
+    "/operator/research/evidence-graph": {
+      "source": "OPERATOR_RESEARCH_EVIDENCE_GRAPH",
+      "nodes": [],
+      "edges": [],
+      "missing_evidence": [],
+      "raw_logs_included": false,
+      "secrets_values_exposed": false,
+      "can_execute": false
+    },
     "/operator/alerts": {
       "source": "OPERATOR_WATCHDOG",
       "alerts": [
@@ -552,6 +686,25 @@
       "external_model_calls_default": false,
       "broker_call_occurred": false,
       "trading_mutation_occurred": false,
+      "can_execute": false
+    },
+    "/operator/ai/quant-review": {
+      "method": "POST",
+      "persona": "AI Quant Research Chief / Trading Edge Advisor",
+      "domain_scoped": true,
+      "external_model_calls_default": false,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false,
+      "live_enabled": false,
+      "real_money_enabled": false,
+      "can_execute": false
+    },
+    "/operator/ai/draft-codex-packet": {
+      "method": "POST",
+      "draft_only": true,
+      "broker_call_occurred": false,
+      "trading_mutation_occurred": false,
+      "paper_started": false,
       "can_execute": false
     },
     "/operator/ai/recommendations/{id}/approve-paper-research": {

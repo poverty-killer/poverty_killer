@@ -88,7 +88,22 @@ def normalize_recommendation(raw: dict[str, Any], *, provider: str, role: str = 
     proposed_action = str(payload.get("proposed_action") or "NO_ACTION")
     summary = str(payload.get("summary") or "No advisory summary was provided.")
     can_execute_requested = bool(payload.get("can_execute"))
-    unsafe_live_action = any(token in proposed_action.upper() for token in ("LIVE", "REAL_MONEY", "REAL MONEY", "BROKER_ORDER", "CANCEL", "LIQUIDATE"))
+    unsafe_live_action = any(
+        token in proposed_action.upper()
+        for token in (
+            "LIVE",
+            "REAL_MONEY",
+            "REAL MONEY",
+            "BROKER_ORDER",
+            "SUBMIT_ORDER",
+            "CANCEL",
+            "LIQUIDATE",
+            "START_PAPER",
+            "START PAPER",
+            "TRADE_NOW",
+            "ENABLE_REAL_MONEY",
+        )
+    )
 
     if rec_type not in ALLOWED_RECOMMENDATION_TYPES:
         rec_type = "OBSERVATION"

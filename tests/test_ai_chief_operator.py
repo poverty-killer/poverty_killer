@@ -7,6 +7,7 @@ from app.ai_chief_operator.context_builder import build_ai_context, redact_secre
 from app.ai_chief_operator.governance_queue import GovernanceQueue
 from app.ai_chief_operator.models import normalize_recommendation
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
+from app.ai_chief_operator.quant_persona import classify_quant_prompt, quant_persona_summary
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 
@@ -57,6 +58,8 @@ def test_ai_context_builder_redacts_secrets_and_raw_logs():
     assert "abc123" not in text
     assert context["raw_logs_included"] is False
     assert context["secrets_values_exposed"] is False
+    assert context["scope"] == "trading_quant_operator_research_only"
+    assert context["persona"]["can_execute"] is False
 
 
 def test_redact_secrets_handles_plain_nested_values():
@@ -83,6 +86,21 @@ def test_malformed_and_unsafe_ai_output_is_rejected_or_downgraded():
     assert live["can_execute"] is False
 
 
+def test_ai_quant_persona_is_domain_scoped_and_refuses_general_or_unsafe_prompts():
+    persona = quant_persona_summary()
+    general = classify_quant_prompt("write a dinner recipe")
+    unsafe = classify_quant_prompt("enable live and submit order now")
+    quant = classify_quant_prompt("Where is the edge in latest run TCA evidence?")
+
+    assert persona["identity"].startswith("AI Quant Research Chief")
+    assert persona["can_execute"] is False
+    assert general["allowed"] is False
+    assert general["reason_code"] == "NON_TRADING_GENERALIST_PROMPT"
+    assert unsafe["allowed"] is False
+    assert unsafe["reason_code"] == "FORBIDDEN_TRADING_OR_SECRET_REQUEST"
+    assert quant["allowed"] is True
+
+
 def test_governance_queue_approve_paper_research_does_not_start_paper(tmp_path):
     queue = GovernanceQueue(path=tmp_path / "queue.jsonl")
     rec = normalize_recommendation({"summary": "try paper research"}, provider="mock")
@@ -107,6 +125,8 @@ def test_operator_ai_endpoints_return_safe_mutation_flags(tmp_path):
 
     status = _endpoint(app, "/operator/ai/status")()
     analyzed = _endpoint(app, "/operator/ai/analyze", "POST")({"advisory_only": True})
+    quant_review = _endpoint(app, "/operator/ai/quant-review", "POST")({"prompt": "What is the weakest assumption?"})
+    codex = _endpoint(app, "/operator/ai/draft-codex-packet", "POST")({"prompt": "Draft a Codex packet for TCA review"})
     rec_id = analyzed["recommendation"]["recommendation_id"]
     approved = _endpoint(app, "/operator/ai/recommendations/{recommendation_id}/approve-paper-research", "POST")(rec_id)
     action_center = _endpoint(app, "/operator/action-center")()
@@ -115,6 +135,11 @@ def test_operator_ai_endpoints_return_safe_mutation_flags(tmp_path):
     assert analyzed["broker_call_occurred"] is False
     assert analyzed["trading_mutation_occurred"] is False
     assert analyzed["recommendation"]["can_execute"] is False
+    assert quant_review["recommendation"]["can_execute"] is False
+    assert quant_review["broker_call_occurred"] is False
+    assert codex["can_execute"] is False
+    assert codex["broker_call_occurred"] is False
+    assert "Forbidden" in codex["draft_packet"] or "Forbidden:" in codex["draft_packet"]
     assert approved["paper_started"] is False
     assert approved["trading_mutation_occurred"] is False
     assert action_center["safe_mutation_flags"]["can_execute"] is False

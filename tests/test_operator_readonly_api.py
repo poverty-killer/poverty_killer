@@ -67,6 +67,9 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/api/flatten" not in paths
     assert "/operator/status" in paths
     assert "/operator/readiness/live" in paths
+    assert "/operator/providers" in paths
+    assert "/operator/research" in paths
+    assert "/operator/research/evidence-graph" in paths
 
 
 def test_operator_intents_are_refused_without_mutation(tmp_path):
@@ -133,3 +136,28 @@ def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     assert diagnostics["operator_config"]["live_enabled"] is False
     assert diagnostics["operator_config"]["real_money_enabled"] is False
     assert diagnostics["storage"]["secrets_values_exposed"] is False
+
+
+def test_operator_provider_and_research_endpoints_are_safe(tmp_path):
+    app = _app(tmp_path)
+
+    providers = _endpoint(app, "/operator/providers")()
+    readiness = _endpoint(app, "/operator/providers/readiness")()
+    validation = _endpoint(app, "/operator/providers/validate-readonly", "POST")({"provider_id": "alpaca_paper"})
+    research = _endpoint(app, "/operator/research")()
+    hypothesis = _endpoint(app, "/operator/research/hypotheses", "POST")({"title": "test", "thesis": "edge review"})
+    experiment = _endpoint(app, "/operator/research/experiments", "POST")({"title": "paper", "thesis": "paper review"})
+    graph = _endpoint(app, "/operator/research/evidence-graph")()
+
+    assert providers["secrets_values_exposed"] is False
+    assert providers["raw_secret_values_included"] is False
+    assert readiness["can_execute"] is False
+    assert validation["broker_call_occurred"] is False
+    assert validation["external_mutation_occurred"] is False
+    assert research["can_execute"] is False
+    assert hypothesis["hypothesis"]["can_execute"] is False
+    assert experiment["paper_started"] is False
+    assert experiment["broker_call_occurred"] is False
+    assert graph["raw_logs_included"] is False
+    assert graph["secrets_values_exposed"] is False
+    assert graph["can_execute"] is False
