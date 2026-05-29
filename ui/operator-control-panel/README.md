@@ -73,3 +73,15 @@ Operator intelligence endpoints:
 AI Chief Operator remains advisory only. `/operator/ai/analyze` queues a
 recommendation through the governance queue; it cannot trade, start PAPER,
 enable live, or call broker execution.
+
+Global AI Chief overlay:
+
+- The `Ask AI Chief` drawer is available from every operator page.
+- It builds a small page-aware context preview from redacted operator summaries.
+- The preview includes source label, page id/title, runtime summary, selected
+  latest run id when available, blockers, missing evidence, and safety booleans.
+- It never includes raw logs, secret values, API keys, tokens, or passwords.
+- If the backend is unavailable, the overlay labels the context as mock/sample
+  and does not present it as runtime truth.
+- Queueing analysis uses the governed AI advisory endpoint and governance queue;
+  recommendations remain `can_execute=false`.

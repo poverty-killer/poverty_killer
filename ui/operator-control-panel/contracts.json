@@ -1,5 +1,5 @@
 {
-  "version": "phase-4-readonly-backend-ready",
+  "version": "phase-4-global-ai-overlay",
   "mode": "read_only_operator_contracts",
   "ui_policy": {
     "paper_enabled_first": true,
@@ -16,6 +16,50 @@
     "OPERATOR_BACKEND",
     "PARTIAL_BACKEND"
   ],
+  "global_ai_chief_overlay": {
+    "context_version": "operator-ui-global-ai-context-v1",
+    "available_on_all_pages": true,
+    "page_aware": true,
+    "advisory_only": true,
+    "can_execute": false,
+    "broker_call_occurred": false,
+    "trading_mutation_occurred": false,
+    "raw_logs_included": false,
+    "secrets_values_exposed": false,
+    "preserved_boolean_safety_fields": [
+      "secrets_values_exposed",
+      "raw_logs_included",
+      "broker_call_occurred",
+      "real_money_blocked",
+      "live_ready",
+      "local_paper_ready"
+    ],
+    "allowed_source_labels": [
+      "OPERATOR_BACKEND",
+      "PARTIAL_BACKEND",
+      "MOCK_DATA"
+    ],
+    "quick_prompts": [
+      "Explain this page",
+      "What should I care about?",
+      "What is unsafe or missing?",
+      "What is the next safest action?",
+      "Draft Codex packet",
+      "Review latest run",
+      "Critique TCA/NetEdge evidence"
+    ],
+    "forbidden_ai_authority": [
+      "trade",
+      "call broker",
+      "enable live",
+      "enable real money",
+      "submit orders",
+      "cancel orders",
+      "liquidate positions",
+      "change thresholds",
+      "bypass hard gates"
+    ]
+  },
   "readOnlyEndpoints": {
     "/operator/status": {
       "api_version": "operator-backend-v1",

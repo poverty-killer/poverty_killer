@@ -325,6 +325,7 @@
           ordersCanceled: 1,
           fillsObserved: 1,
           tcaStatus: "UNKNOWN",
+          reasonCodes: ["MOCK_DATA_SAMPLE", "BROKER_FEE_DETAIL_PENDING"],
           reportPath: "not generated in mock mode"
         }
       ]

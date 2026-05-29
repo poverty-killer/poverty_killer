@@ -28,6 +28,37 @@
     "/operator/action-center",
     "/operator/alerts"
   ]);
+  const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
+  const AI_QUICK_PROMPTS = [
+    "Explain this page",
+    "What should I care about?",
+    "What is unsafe or missing?",
+    "What is the next safest action?",
+    "Draft Codex packet",
+    "Review latest run",
+    "Critique TCA/NetEdge evidence"
+  ];
+  const AI_PRESERVED_BOOLEAN_KEYS = new Set([
+    "secrets_values_exposed",
+    "secretsValuesExposed",
+    "raw_logs_included",
+    "rawLogsIncluded",
+    "broker_call_occurred",
+    "brokerCallOccurred",
+    "real_money_blocked",
+    "realMoneyBlocked",
+    "live_ready",
+    "liveReady",
+    "local_paper_ready",
+    "localPaperReady"
+  ]);
+  const AI_SECRET_KEY_PATTERN = /(api[_-]?key|token|password|secret|credential|authorization|bearer)/i;
+  const AI_SECRET_VALUE_PATTERN = /(sk-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i;
+  let activeScreenId = "command";
+  let aiOverlayOpen = false;
+  let aiSelectedQuestion = AI_QUICK_PROMPTS[0];
+  let aiOverlayResponse = "";
+  let aiOverlayBusy = false;
 
   function softBreakToken(value) {
     return escapeHtml(String(value))
@@ -94,6 +125,11 @@
 
   function backendConnected() {
     return data.meta.dataSource === "OPERATOR_BACKEND" || data.meta.dataSource === "PARTIAL_BACKEND";
+  }
+
+  function screenTitle(id) {
+    const found = screens.find(([screenId]) => screenId === id);
+    return found ? found[1] : "Command Center";
   }
 
   function table(headers, rows) {
@@ -177,8 +213,10 @@
   }
 
   function showScreen(id) {
+    activeScreenId = id;
     document.querySelectorAll(".screen").forEach((el) => el.classList.toggle("active", el.id === `screen-${id}`));
     document.querySelectorAll(".nav-button").forEach((el) => el.classList.toggle("active", el.dataset.screen === id));
+    renderAiChiefOverlay();
   }
 
   function renderCommand() {
@@ -596,6 +634,459 @@
     `;
   }
 
+  function uniqueList(items) {
+    const seen = new Set();
+    const result = [];
+    (items || []).forEach((item) => {
+      const value = String(item || "").trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      result.push(value);
+    });
+    return result;
+  }
+
+  function latestRunForAi() {
+    const run = (data.runArchive.runs || [])[0];
+    if (!run) return null;
+    return {
+      run_id: run.runId,
+      status: run.status,
+      final_verdict: run.finalVerdict,
+      profile: run.profile || "unknown",
+      duration_seconds: run.durationSeconds || "unknown",
+      orders: `${run.ordersSubmitted}/${run.ordersAcknowledged}/${run.ordersCanceled}`,
+      fills_observed: run.fillsObserved,
+      tca_status: run.tcaStatus,
+      report_path: run.reportPath || "not generated",
+      reason_codes: Array.isArray(run.reasonCodes) ? run.reasonCodes.slice(0, 8) : []
+    };
+  }
+
+  function aiBlockers() {
+    const actionItems = (data.actionCenter.items || [])
+      .filter((item) => ["BLOCKER", "SAFETY_CRITICAL", "WARNING", "NEEDS_APPROVAL"].includes(item.type))
+      .map((item) => `${item.type}: ${item.title}${item.detail ? ` - ${item.detail}` : ""}`);
+    const liveMissing = (data.liveReadiness.missing || []).map((item) => `LIVE_MISSING: ${item}`);
+    const alertItems = (data.alerts || [])
+      .filter((alert) => alert.severity === "SAFETY_CRITICAL" || alert.severity === "WARNING")
+      .map((alert) => `${alert.severity}: ${alert.title}`);
+    return uniqueList([
+      data.status.dominantBlocker,
+      ...actionItems,
+      ...alertItems,
+      ...liveMissing
+    ]).slice(0, 10);
+  }
+
+  function aiMissingEvidence(pageId) {
+    const p = data.pnl || {};
+    const explain = data.explanation || {};
+    const tca = data.tcaDashboard || {};
+    const defaults = [];
+    if ((data.meta.fetchFailures || []).length) defaults.push("Some secondary operator endpoints are degraded.");
+    if (!backendConnected()) defaults.push("Backend is unreachable; current state is sample/mock only.");
+    if (data.supervisor.state === "IDLE" || data.status.botStatus === "NO_ACTIVE_PAPER_RUN") defaults.push("No active PAPER runtime is attached.");
+    if (data.ai.providerState === "AI_DISABLED" || data.ai.providerState === "CREDENTIAL_MISSING") defaults.push(`AI provider state is ${data.ai.providerState}.`);
+
+    const pageSpecific = {
+      command: ["Current page uses summarized runtime state, not raw logs."],
+      action: ["Action Center items are advisory or approval workflow items; executable flags must remain false."],
+      runs: ["Run archive uses metadata and report paths only; raw log contents are not included."],
+      pnl: [
+        `Realized P&L source: ${p.realizedPnl && p.realizedPnl.source ? p.realizedPnl.source : "unknown"}.`,
+        `TCA status: ${tca.status || "UNKNOWN"}.`
+      ],
+      positions: ["Positions and orders are summarized; broker account detail is not embedded in AI context."],
+      activity: ["Supervisor paths are referenced as paths only; log contents are excluded."],
+      decision: [
+        `Decision confidence: ${explain.confidence || "LOW"}.`,
+        ...(explain.missingTruth || []).map((item) => `Missing truth: ${item}`)
+      ],
+      market: ["MarketTruthSnapshot rows are summaries; stale/conflict states must stay non-executable."],
+      risk: ["Risk gates are explanatory only; AI cannot override hard or economic gates."],
+      alerts: ["Watchdog queue is local-only; no external alert delivery is enabled from this panel."],
+      ai: ["AI recommendations route through governance and remain can_execute=false."],
+      system: ["System map is explanatory; it is not an authority source for changing engine behavior."],
+      audit: ["Audit page uses summarized events only; no raw runtime logs are included."],
+      world: ["World Awareness is advisory only and cannot feed executable trade authority."],
+      diagnostics: ["Diagnostics expose statuses and paths only; no raw secrets or environment values are included."],
+      live: ["Live readiness is locked and requires separate approval outside this UI."]
+    };
+    return uniqueList([...(pageSpecific[pageId] || []), ...defaults]).slice(0, 10);
+  }
+
+  function pageSummaryForAi(pageId) {
+    const latestRun = latestRunForAi();
+    const p = data.pnl || {};
+    const explain = data.explanation || {};
+    const summaries = {
+      command: [
+        `bot=${data.status.botStatus}`,
+        `mode=${data.status.runtimeMode}`,
+        `supervisor=${data.supervisor.state}`,
+        `dominant_blocker=${data.status.dominantBlocker}`,
+        `last_decision=${data.status.lastDecision}`
+      ],
+      action: [
+        `blockers=${data.actionCenter.counts.BLOCKER || 0}`,
+        `warnings=${data.actionCenter.counts.WARNING || 0}`,
+        `needs_approval=${data.actionCenter.counts.NEEDS_APPROVAL || 0}`,
+        `safety_critical=${data.actionCenter.counts.SAFETY_CRITICAL || 0}`
+      ],
+      runs: latestRun
+        ? [
+            `latest_run=${latestRun.run_id}`,
+            `verdict=${latestRun.final_verdict}`,
+            `duration=${latestRun.duration_seconds}`,
+            `report=${latestRun.report_path}`
+          ]
+        : ["No run archive entries loaded."],
+      pnl: [
+        `realized=${p.realizedPnl && p.realizedPnl.source ? p.realizedPnl.source : "unknown"}`,
+        `unrealized=${p.unrealizedPnl && p.unrealizedPnl.source ? p.unrealizedPnl.source : "unknown"}`,
+        `fees=${p.fees && p.fees.source ? p.fees.source : "unknown"}`,
+        `tca=${data.tcaDashboard.status || "UNKNOWN"}`,
+        "fake_pnl=false"
+      ],
+      positions: [
+        `positions=${(data.positions || []).length}`,
+        `orders=${(data.orders || []).length}`,
+        "broker_mutation_from_ui=false"
+      ],
+      activity: [
+        `supervisor=${data.supervisor.state}`,
+        `session=${data.supervisor.sessionId || "none"}`,
+        `paper_start_allowed=${data.supervisor.paperStartAllowed === true}`,
+        `last_refused_intent=${data.supervisor.lastRefusedIntent || "none"}`
+      ],
+      decision: [
+        `headline=${explain.headline}`,
+        `output=${explain.output || "UNKNOWN"}`,
+        `netedge=${explain.netEdge || "UNKNOWN"}`,
+        `confidence=${explain.confidence || "LOW"}`,
+        `blockers=${(explain.blockers || []).join(", ") || "none"}`
+      ],
+      market: [
+        `snapshot_rows=${(data.marketTruth || []).length}`,
+        `executable_rows=${(data.marketTruth || []).filter((row) => row[5] === true).length}`,
+        "market_truth_bypass_allowed=false"
+      ],
+      risk: [
+        `risk_gates=${(data.risk || []).length}`,
+        `blocked_gates=${(data.risk || []).filter((row) => String(row[2]).includes("BLOCK")).length}`,
+        "risk_override_allowed=false"
+      ],
+      alerts: [
+        `alert_count=${(data.alerts || []).length}`,
+        `critical=${(data.alerts || []).filter((alert) => alert.severity === "SAFETY_CRITICAL").length}`,
+        "external_delivery_enabled=false"
+      ],
+      ai: [
+        `provider=${data.ai.provider}`,
+        `provider_state=${data.ai.providerState}`,
+        `pending_review=${data.ai.pendingReviewCount || 0}`,
+        "can_execute=false"
+      ],
+      system: [
+        `report=${data.systemMap.reportPath}`,
+        `sections=${(data.systemMap.sections || []).join(", ")}`,
+        "safe_touch_requires_board_packet=true"
+      ],
+      audit: [
+        `events=${(data.auditLog || []).length}`,
+        "raw_logs_included=false"
+      ],
+      world: [
+        `providers=${(data.worldAwareness || []).length}`,
+        `active_polling=${data.worldRuntime.providerPollingActive === true}`,
+        "feed_can_trade=false"
+      ],
+      diagnostics: [
+        `source=${sourceLabel()}`,
+        `backend_status=${data.meta.backendStatus || "not inspected"}`,
+        `failed_endpoints=${(data.meta.fetchFailures || []).join("; ") || "none"}`,
+        `runtime_profile=${data.diagnostics.runtimeProfile}`
+      ],
+      live: [
+        `state=${data.liveReadiness.state}`,
+        `refusal=${data.liveReadiness.refusal}`,
+        `missing=${(data.liveReadiness.missing || []).join(", ") || "none"}`,
+        "live_start_enabled=false"
+      ]
+    };
+    return uniqueList(summaries[pageId] || summaries.command).slice(0, 10);
+  }
+
+  function redactAiContext(value, key) {
+    const normalizedKey = String(key || "");
+    if (AI_PRESERVED_BOOLEAN_KEYS.has(normalizedKey) && typeof value === "boolean") return value;
+    if (AI_SECRET_KEY_PATTERN.test(normalizedKey)) return "REDACTED";
+    if (typeof value === "string") {
+      return AI_SECRET_VALUE_PATTERN.test(value) ? "REDACTED" : value;
+    }
+    if (Array.isArray(value)) {
+      return value.slice(0, 30).map((item) => redactAiContext(item, normalizedKey));
+    }
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+        childKey,
+        redactAiContext(childValue, childKey)
+      ]));
+    }
+    return value;
+  }
+
+  function buildAiChiefContext(question) {
+    const latestRun = latestRunForAi();
+    const liveLocked = data.status.liveBlocked !== false;
+    const realMoneyBlocked = data.status.realMoneyBlocked !== false;
+    const context = {
+      context_version: AI_CONTEXT_VERSION,
+      page_id: activeScreenId,
+      page_title: screenTitle(activeScreenId),
+      requested_question: question || aiSelectedQuestion,
+      backend_source: sourceLabel(),
+      data_source: data.meta.dataSource,
+      source_integrity: backendConnected()
+        ? (data.meta.dataSource === "PARTIAL_BACKEND" ? "backend status connected; secondary context may be degraded" : "backend connected")
+        : "sample/mock fallback only; cannot inspect live operator state",
+      advisory_only: true,
+      can_execute: false,
+      ai_cannot: [
+        "trade",
+        "call broker",
+        "enable live",
+        "enable real money",
+        "submit/cancel/liquidate orders",
+        "change thresholds",
+        "bypass MarketTruthSnapshot, NetEdge, Risk, BrokerBoundary, OMS, or hard gates"
+      ],
+      safety_flags: {
+        secrets_values_exposed: data.ai.secretsValuesExposed === true,
+        raw_logs_included: false,
+        broker_call_occurred: false,
+        trading_mutation_occurred: false,
+        real_money_blocked: realMoneyBlocked,
+        live_ready: data.liveReadiness.state === "LIVE_READY_BUT_DISABLED" || data.liveReadiness.state === "LIVE_ENABLED",
+        local_paper_ready: data.supervisor.paperStartAllowed === true || data.status.capabilityState === "PAPER_ENABLED"
+      },
+      runtime: {
+        bot_status: data.status.botStatus,
+        mode: data.status.runtimeMode,
+        profile: data.status.activeProfile,
+        supervisor_state: data.supervisor.state,
+        process_state: data.supervisor.processState,
+        session_id: data.supervisor.sessionId || "none",
+        uptime: data.status.uptime,
+        paper_start_allowed: data.supervisor.paperStartAllowed === true,
+        paper_stop_allowed: data.supervisor.paperStopAllowed === true,
+        last_refused_intent: data.supervisor.lastRefusedIntent || "none"
+      },
+      selected_run: latestRun,
+      blockers: aiBlockers(),
+      missing_evidence: aiMissingEvidence(activeScreenId),
+      page_summary: pageSummaryForAi(activeScreenId)
+    };
+    return redactAiContext(context);
+  }
+
+  function renderAiContextPreview(context) {
+    const latestRun = context.selected_run || {};
+    return `
+      <div class="ai-context-preview">
+        <div class="split">
+          <h3>Allowed Context Preview</h3>
+          ${badge(context.data_source || "UNKNOWN", dataSourceColor())}
+        </div>
+        ${kv([
+          ["Page", escapeHtml(`${context.page_title} (${context.page_id})`)],
+          ["Source", escapeHtml(context.backend_source)],
+          ["Live locked", badge(String(data.status.liveBlocked !== false), data.status.liveBlocked !== false ? "red" : "yellow")],
+          ["Real-money blocked", badge(String(context.safety_flags.real_money_blocked), context.safety_flags.real_money_blocked ? "red" : "yellow")],
+          ["Runtime", escapeHtml(`${context.runtime.bot_status} / ${context.runtime.supervisor_state}`)],
+          ["Selected run", escapeHtml(latestRun.run_id || "none")],
+          ["Major blockers", escapeHtml(context.blockers.slice(0, 3).join(" | ") || "none")],
+          ["Missing evidence", escapeHtml(context.missing_evidence.slice(0, 3).join(" | ") || "none")],
+          ["Secrets exposed", badge(String(context.safety_flags.secrets_values_exposed), context.safety_flags.secrets_values_exposed ? "red" : "green")],
+          ["Raw logs included", badge(String(context.safety_flags.raw_logs_included), context.safety_flags.raw_logs_included ? "red" : "green")]
+        ])}
+        <details class="ai-context-details">
+          <summary>Redacted JSON preview</summary>
+          <pre class="code ai-context-json">${escapeHtml(JSON.stringify(context, null, 2))}</pre>
+        </details>
+      </div>
+    `;
+  }
+
+  function buildAiOverlayAdvisory(question) {
+    const context = buildAiChiefContext(question);
+    const sourceWarning = backendConnected()
+      ? `${context.backend_source}.`
+      : "Backend is unreachable; this is sample context and cannot be treated as runtime truth.";
+    const blockers = context.blockers.length ? context.blockers.slice(0, 3).join("; ") : "No major blocker is loaded for this page.";
+    const missing = context.missing_evidence.length ? context.missing_evidence.slice(0, 3).join("; ") : "No page-specific missing evidence is loaded.";
+    const latestRun = context.selected_run;
+
+    if (question === "Draft Codex packet") {
+      return [
+        "Local redacted context preview, not a real model response.",
+        sourceWarning,
+        `Draft packet focus: inspect ${context.page_title}, preserve live/real-money locks, keep can_execute=false, do not touch broker/execution/OMS/strategy, and use only redacted operator summaries.`,
+        `Primary evidence to include: ${context.page_summary.slice(0, 4).join("; ")}.`,
+        "Next safest action: ask for a scoped frontend/advisory repair unless backend truth is missing."
+      ].join("\n");
+    }
+
+    if (question === "Review latest run") {
+      return [
+        "Local redacted context preview, not a real model response.",
+        sourceWarning,
+        latestRun
+          ? `Latest run ${latestRun.run_id} is ${latestRun.final_verdict} with TCA ${latestRun.tca_status} and report ${latestRun.report_path}.`
+          : "No run archive entry is loaded.",
+        `Missing evidence: ${missing}`,
+        "Next safest action: review the generated report path and reason codes without opening raw logs in AI context."
+      ].join("\n");
+    }
+
+    if (question === "Critique TCA/NetEdge evidence") {
+      return [
+        "Local redacted context preview, not a real model response.",
+        sourceWarning,
+        `NetEdge summary: ${data.pnl.netEdge || "UNKNOWN"}; TCA status: ${data.tcaDashboard.status || "UNKNOWN"}.`,
+        `Fee/P&L truth labels: realized=${data.pnl.realizedPnl.source}, fees=${data.pnl.fees.source}.`,
+        "Do not invent P&L, fees, fills, slippage, or TCA. Unknown must remain unknown."
+      ].join("\n");
+    }
+
+    return [
+      "Local redacted context preview, not a real model response.",
+      sourceWarning,
+      `Current page: ${context.page_title}.`,
+      `Care about: ${context.page_summary.slice(0, 4).join("; ")}.`,
+      `Unsafe or missing: ${blockers}; ${missing}`,
+      "Next safest action: keep this advisory-only, review blockers, and route any recommendation through governance. AI cannot trade, call broker, enable live, or change thresholds."
+    ].join("\n");
+  }
+
+  function renderAiChiefOverlay() {
+    const host = document.querySelector(".ai-chief-global");
+    if (!host) return;
+    const context = buildAiChiefContext(aiSelectedQuestion);
+    const providerState = data.ai.providerState || "AI_DISABLED";
+    const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
+    const response = aiOverlayResponse || buildAiOverlayAdvisory(aiSelectedQuestion);
+    host.innerHTML = `
+      <button class="ai-chief-fab ${aiOverlayOpen ? "open" : ""}" type="button" data-ai-chief-open aria-expanded="${aiOverlayOpen ? "true" : "false"}">
+        <span>Ask AI Chief</span>
+        <span class="ai-chief-fab-sub">${escapeHtml(screenTitle(activeScreenId))}</span>
+      </button>
+      <div class="ai-chief-backdrop ${aiOverlayOpen ? "open" : ""}" data-ai-chief-close></div>
+      <section class="ai-chief-drawer ${aiOverlayOpen ? "open" : ""}" aria-hidden="${aiOverlayOpen ? "false" : "true"}" aria-label="Global AI Chief advisory drawer">
+        <div class="ai-chief-panel">
+          <div class="ai-chief-header">
+            <div>
+              <div class="ai-chief-title">AI Chief Operator</div>
+              <div class="muted mono">${escapeHtml(providerLabel)} / ADVISORY_ONLY</div>
+            </div>
+            <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Close</button>
+          </div>
+          <div class="ai-boundary">
+            ${badge("cannot trade", "red")}
+            ${badge("cannot call broker", "red")}
+            ${badge("cannot enable live", "red")}
+            ${badge("cannot change thresholds", "red")}
+            ${badge("can_execute=false", "gray")}
+          </div>
+          <div class="ai-chief-body">
+            ${renderAiContextPreview(context)}
+            <div class="ai-question-bank" aria-label="AI Chief quick questions">
+              ${AI_QUICK_PROMPTS.map((prompt) => `
+                <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
+                  ${escapeHtml(prompt)}
+                </button>
+              `).join("")}
+            </div>
+            <div class="ai-response">
+              <div class="split">
+                <h3>Advisory Response</h3>
+                ${badge(providerState, statusColor(providerState))}
+              </div>
+              <pre>${escapeHtml(response)}</pre>
+            </div>
+            <div class="ai-chief-actions">
+              <button class="intent-button paper" type="button" data-ai-chief-analyze ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>
+                ${aiOverlayBusy ? "Queueing advisory analysis..." : "Queue advisory analysis"}
+              </button>
+              <button class="intent-button live" type="button" disabled>Broker execution unavailable to AI</button>
+            </div>
+            <div class="notice mono">
+              ${backendConnected()
+                ? "Analyze uses the governed AI endpoint and governance queue. Provider disabled/mock states remain clearly labeled."
+                : "Backend unreachable: overlay can show sample context only and will not queue runtime recommendations."}
+            </div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  function setAiOverlayOpen(open) {
+    aiOverlayOpen = open;
+    renderAiChiefOverlay();
+  }
+
+  function selectAiQuestion(question) {
+    aiSelectedQuestion = question;
+    aiOverlayResponse = buildAiOverlayAdvisory(question);
+    aiOverlayOpen = true;
+    renderAiChiefOverlay();
+  }
+
+  async function runAiOverlayAnalyze() {
+    if (!backendConnected() || aiOverlayBusy) {
+      aiOverlayResponse = buildAiOverlayAdvisory(aiSelectedQuestion);
+      renderAiChiefOverlay();
+      return;
+    }
+    const confirmed = window.confirm("Queue advisory AI Chief analysis with redacted page context? This cannot trade, start PAPER, enable live, or call broker execution.");
+    if (!confirmed) return;
+    aiOverlayBusy = true;
+    renderAiChiefOverlay();
+    const selectedScreen = activeScreenId;
+    try {
+      const context = buildAiChiefContext(aiSelectedQuestion);
+      const result = await postIntent("/operator/ai/analyze", {
+        requested_by: "operator_ui_global_overlay",
+        advisory_only: true,
+        prompt: aiSelectedQuestion,
+        page_id: context.page_id,
+        page_context: context
+      });
+      const recommendation = result.recommendation || {};
+      aiOverlayResponse = [
+        "Governed AI endpoint returned through the advisory queue.",
+        `Status: ${result.status || "QUEUED"}.`,
+        `Recommendation: ${recommendation.recommendation_type || "OBSERVATION"}.`,
+        `Summary: ${recommendation.summary || "No summary returned."}`,
+        `can_execute=${String(recommendation.can_execute === true ? "true" : "false")}.`,
+        "Approving a PAPER research recommendation does not start PAPER automatically."
+      ].join("\n");
+      data = await loadData();
+      data.ai.lastAnalyzeResult = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "OBSERVATION"}`;
+      renderTopBar();
+      renderScreens(selectedScreen);
+      renderRail();
+    } catch (error) {
+      aiOverlayResponse = `FAILED: ${error.message || error.name || "ai_analyze_error"}\nNo broker or trading mutation was requested by the UI.`;
+    } finally {
+      aiOverlayBusy = false;
+      aiOverlayOpen = true;
+      renderAiChiefOverlay();
+    }
+  }
+
   function renderRail() {
     const critical = data.alerts.filter((alert) => alert.severity === "SAFETY_CRITICAL").length;
     const pendingAI = data.ai.pendingReviewCount || 0;
@@ -632,7 +1123,7 @@
     `;
   }
 
-  function renderScreens() {
+  function renderScreens(selectedId) {
     const main = document.querySelector(".main");
     const renderers = {
       command: renderCommand,
@@ -653,7 +1144,7 @@
       live: renderLive
     };
     main.innerHTML = screens.map(([id]) => `<section class="screen" id="screen-${id}">${renderers[id]()}</section>`).join("");
-    showScreen("command");
+    showScreen(selectedId || activeScreenId || "command");
   }
 
   function backendFetchTimeoutMs(path) {
@@ -843,6 +1334,7 @@
         ordersCanceled: pick(run.orders && run.orders.canceled, 0),
         fillsObserved: pick(run.fills && run.fills.observed, 0),
         tcaStatus: pick(run.tca && run.tca.status, "UNKNOWN"),
+        reasonCodes: Array.isArray(run.reason_codes) ? run.reason_codes : [],
         reportPath: pick(run.report_path, "")
       }));
       next.runArchive.latestVerdict = next.runArchive.runs.length ? next.runArchive.runs[0].finalVerdict : "UNKNOWN";
@@ -1119,8 +1611,9 @@
     data = await loadData();
     renderTopBar();
     renderNav();
-    renderScreens();
+    renderScreens("command");
     renderRail();
+    renderAiChiefOverlay();
   }
 
   async function postIntent(path, body) {
@@ -1180,21 +1673,44 @@
         const recommendation = result.recommendation || {};
         message = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "OBSERVATION"}`;
       }
+      const selectedScreen = activeScreenId;
       data = await loadData();
       data.supervisor.lastIntentResult = message;
       data.worldRuntime.lastPollResult = message;
       data.ai.lastAnalyzeResult = message;
       renderTopBar();
-      renderScreens();
+      renderScreens(selectedScreen);
       renderRail();
+      renderAiChiefOverlay();
     } catch (error) {
       data.supervisor.lastIntentResult = `FAILED: ${error.message || error.name || "intent_error"}`;
-      renderScreens();
+      renderScreens(activeScreenId);
       renderRail();
+      renderAiChiefOverlay();
     }
   }
 
   document.addEventListener("click", (event) => {
+    const aiOpen = event.target.closest("[data-ai-chief-open]");
+    if (aiOpen) {
+      setAiOverlayOpen(true);
+      return;
+    }
+    const aiClose = event.target.closest("[data-ai-chief-close]");
+    if (aiClose) {
+      setAiOverlayOpen(false);
+      return;
+    }
+    const aiPrompt = event.target.closest("[data-ai-chief-prompt]");
+    if (aiPrompt) {
+      selectAiQuestion(aiPrompt.dataset.aiChiefPrompt);
+      return;
+    }
+    const aiAnalyze = event.target.closest("[data-ai-chief-analyze]");
+    if (aiAnalyze && !aiAnalyze.disabled) {
+      runAiOverlayAnalyze();
+      return;
+    }
     const button = event.target.closest("[data-intent]");
     if (!button || button.disabled) return;
     handleIntent(button.dataset.intent);
