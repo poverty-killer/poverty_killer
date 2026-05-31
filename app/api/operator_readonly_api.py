@@ -31,7 +31,12 @@ from app.ai_chief_operator.quant_persona import (
 from app.operator_activation.launch_readiness import build_launch_readiness
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
-from app.operator_credentials.store import LocalCredentialStore, default_credential_store_path
+from app.operator_credentials.store import (
+    DEFAULT_RELATIVE_STORE_PATH,
+    PROVIDER_CREDENTIAL_FIELDS,
+    LocalCredentialStore,
+    default_credential_store_path,
+)
 from app.operator_intelligence.action_center import build_action_center
 from app.operator_intelligence.archive import RunArchive
 from app.operator_intelligence.decision_explainer import DecisionExplainer
@@ -106,6 +111,7 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/providers/readiness": "read_only_provider_readiness_summary",
         "/operator/providers/validate-readonly": "read_only_env_presence_validation_only",
         "/operator/credentials/providers": "read_only_local_credential_provider_status",
+        "/operator/credentials/diagnostics": "debug_safe_credential_path_and_source_status",
         "/operator/credentials/save": "local_secret_store_update_only",
         "/operator/credentials/validate-readonly": "read_only_local_credential_validation_only",
         "/operator/credentials/provider/{provider_id}": "local_secret_store_delete_only",
@@ -179,7 +185,7 @@ class OperatorSnapshotProvider:
         self.provider_env = self.credential_store.effective_env(self.process_env)
         self.portfolio_client = portfolio_client
         supervisor_config = PaperSupervisorConfig.from_runtime_config(self.runtime_config)
-        supervisor_config.process_env = self._paper_process_env()
+        supervisor_config.process_env = self._paper_process_env(self.provider_env)
         self.supervisor = supervisor or OperatorPaperSupervisor(config=supervisor_config)
         self.supervisor.config.process_env = self._paper_process_env()
         self.world_awareness_env = world_awareness_env if world_awareness_env is not None else dict(self.provider_env)
@@ -208,19 +214,31 @@ class OperatorSnapshotProvider:
         self.report_generator = RunReportGenerator(report_dir=self.report_dir)
         self.decision_explainer = DecisionExplainer(decision_frames)
         self.alert_queue = AlertQueue()
-        self.ai_gateway = AIProviderGateway(ai_config or AIChiefConfig.from_env(self.provider_env))
+        self.ai_gateway = AIProviderGateway(
+            ai_config or AIChiefConfig.from_env(self.provider_env),
+            credential_env=self.provider_env,
+        )
         self.ai_queue = ai_queue or GovernanceQueue(
             path=self.runtime_config.operator_state_dir / "ai_governance_queue.jsonl"
         )
         self.research_registry = research_registry or ResearchRegistry()
         self.historical_tests_service = historical_tests or HistoricalTestService()
 
-    def _paper_process_env(self) -> dict[str, str]:
+    def _paper_process_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
+        effective_env = env if env is not None else self.provider_env
         return {
             key: str(value)
-            for key, value in self.provider_env.items()
+            for key, value in effective_env.items()
             if key in {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"} and str(value).strip()
         }
+
+    def _refresh_provider_env(self) -> dict[str, str]:
+        refreshed = self.credential_store.effective_env(self.process_env)
+        if refreshed != self.provider_env:
+            self.provider_env = refreshed
+            self.supervisor.config.process_env = self._paper_process_env(refreshed)
+            self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(refreshed), credential_env=refreshed)
+        return self.provider_env
 
     def _alpaca_paper_configured(self) -> bool:
         summary = self.credential_store.provider_summary("alpaca_paper", self.process_env)
@@ -392,6 +410,8 @@ class OperatorSnapshotProvider:
             "paper_stop_allowed": supervisor["paper_stop_allowed"],
             "paper_start_refusal_reason": supervisor["paper_start_refusal_reason"],
             "paper_stop_refusal_reason": supervisor["paper_stop_refusal_reason"],
+            "min_paper_duration_seconds": supervisor.get("min_paper_duration_seconds"),
+            "max_paper_duration_seconds": supervisor.get("max_paper_duration_seconds"),
         }
 
     def profile(self) -> dict[str, Any]:
@@ -535,6 +555,7 @@ class OperatorSnapshotProvider:
         return build_tca_dashboard(fills_summary=self.fills_summary(), tca_summary=self.tca_summary())
 
     def providers(self) -> dict[str, Any]:
+        self._refresh_provider_env()
         return provider_readiness_summary(self.process_env, credential_store=self.credential_store)
 
     def providers_readiness(self) -> dict[str, Any]:
@@ -559,16 +580,78 @@ class OperatorSnapshotProvider:
         return validate_provider_readonly(provider_id, self.process_env, credential_store=self.credential_store)
 
     def credentials_providers(self) -> dict[str, Any]:
+        self._refresh_provider_env()
         return self.credential_store.providers_summary(self.process_env)
+
+    def credentials_diagnostics(self) -> dict[str, Any]:
+        effective_env = self._refresh_provider_env()
+        raw = self.credential_store.load_raw()
+        raw_providers = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}
+        provider_ids_present = sorted(str(provider_id) for provider_id in raw_providers)
+        diagnostics: dict[str, Any] = {
+            "source": "OPERATOR_CREDENTIAL_DIAGNOSTICS",
+            "backend_cwd": os.getcwd(),
+            "backend_repo_root": str(self.runtime_config.repo_root),
+            "credential_vault_relative_path": DEFAULT_RELATIVE_STORE_PATH,
+            "vault_file_exists": self.credential_store.exists(),
+            "provider_ids_present": provider_ids_present,
+            "providers": {},
+            "secrets_values_exposed": False,
+            "raw_secret_values_included": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+        }
+        readiness = self.providers()
+        readiness_by_id = {
+            str(provider.get("provider_id")): provider
+            for provider in readiness.get("providers") or []
+            if isinstance(provider, dict)
+        }
+        for provider_id, schema in PROVIDER_CREDENTIAL_FIELDS.items():
+            summary = self.credential_store.provider_summary(provider_id, self.process_env)
+            fields = summary.get("fields") if isinstance(summary.get("fields"), list) else []
+            field_map = {str(field.get("name")): field for field in fields if isinstance(field, dict)}
+            required = tuple(str(name) for name in schema.get("required", ()))
+            required_present = {
+                name: bool(field_map.get(name, {}).get("configured"))
+                for name in required
+            }
+            configured_sources = sorted(
+                {
+                    str(field.get("source"))
+                    for field in fields
+                    if isinstance(field, dict) and field.get("configured") is True
+                }
+            ) or ["NOT_CONFIGURED"]
+            readiness_row = readiness_by_id.get(provider_id, {})
+            diagnostics["providers"][provider_id] = {
+                "configured": summary.get("configured") is True,
+                "required_field_names_present": required_present,
+                "summary_source": summary.get("source") or "NOT_CONFIGURED",
+                "source_used_by_provider_readiness": "+".join(configured_sources),
+                "provider_readiness_status": readiness_row.get("status") or "UNKNOWN",
+            }
+        alpaca_sources = diagnostics["providers"]["alpaca_paper"]["source_used_by_provider_readiness"]
+        diagnostics["source_used_by_launch_readiness"] = alpaca_sources
+        diagnostics["source_used_by_portfolio_broker_read"] = alpaca_sources if (
+            str(effective_env.get("APCA_API_KEY_ID") or "").strip()
+            and str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()
+        ) else "NOT_CONFIGURED"
+        diagnostics["portfolio_required_field_names_present"] = {
+            "APCA_API_KEY_ID": bool(str(effective_env.get("APCA_API_KEY_ID") or "").strip()),
+            "APCA_API_SECRET_KEY": bool(str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()),
+            "APCA_API_BASE_URL": bool(str(effective_env.get("APCA_API_BASE_URL") or "").strip()),
+        }
+        return diagnostics
 
     def credentials_save(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = payload or {}
         provider_id = str(body.get("provider_id") or "").strip().lower()
         credentials = body.get("credentials") if isinstance(body.get("credentials"), dict) else {}
         result = self.credential_store.save_provider(provider_id, credentials)
-        self.provider_env = self.credential_store.effective_env(self.process_env)
-        self.supervisor.config.process_env = self._paper_process_env()
-        self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(self.provider_env))
+        self._refresh_provider_env()
         result.update(
             {
                 "broker_call_occurred": False,
@@ -594,9 +677,7 @@ class OperatorSnapshotProvider:
 
     def credentials_delete_provider(self, provider_id: str) -> dict[str, Any]:
         result = self.credential_store.delete_provider(provider_id)
-        self.provider_env = self.credential_store.effective_env(self.process_env)
-        self.supervisor.config.process_env = self._paper_process_env()
-        self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(self.provider_env))
+        self._refresh_provider_env()
         result.update(
             {
                 "broker_call_occurred": False,
@@ -608,7 +689,7 @@ class OperatorSnapshotProvider:
         return result
 
     def portfolio(self) -> dict[str, Any]:
-        return build_portfolio_snapshot(self.provider_env, client=self.portfolio_client)
+        return build_portfolio_snapshot(self._refresh_provider_env(), client=self.portfolio_client)
 
     def positions(self) -> dict[str, Any]:
         portfolio = self.portfolio()
@@ -663,6 +744,7 @@ class OperatorSnapshotProvider:
         }
 
     def launch_readiness(self) -> dict[str, Any]:
+        effective_env = self._refresh_provider_env()
         supervisor = self.supervisor.status_snapshot()
         return build_launch_readiness(
             provider_readiness=self.providers(),
@@ -672,7 +754,7 @@ class OperatorSnapshotProvider:
             runtime=self.runtime(),
             supervisor=supervisor,
             ai_status=self.ai_status(),
-            effective_env=self.provider_env,
+            effective_env=effective_env,
         )
 
     def research(self) -> dict[str, Any]:
@@ -951,35 +1033,41 @@ class OperatorSnapshotProvider:
             status = "REFUSED"
             refusal_reason = classification["reason_code"]
         else:
-            source_note = (
-                "No external model call was made; this is a deterministic advisory fallback."
-                if provider_state != "MOCK_MODE"
-                else "Mock mode is active; this is a deterministic mock advisory response."
-            )
-            evidence_graph = context.get("evidence_graph") or {}
-            providers = context.get("provider_readiness") or {}
-            action_center = context.get("action_center") or {}
-            items = action_center.get("items") or []
-            missing = evidence_graph.get("missing_evidence") or []
-            response = "\n".join(
-                [
-                    source_note,
-                    f"Question: {question or 'No question supplied.'}",
-                    f"Provider state: {provider_state}.",
-                    f"Operator blockers loaded: {len(items)}.",
-                    f"Provider count: {providers.get('provider_count', 0)}; missing credentials: {providers.get('missing_credentials_count', 0)}.",
-                    f"Missing evidence: {', '.join(str(item) for item in missing[:6]) or 'none loaded'}.",
-                    "Next safest action: review blockers and evidence labels before any bounded PAPER experiment. Unknown P&L, fees, fills, TCA, and market truth remain unknown.",
-                ]
-            )
-            status = "ANSWERED_FALLBACK"
+            gateway_answer = self.ai_gateway.ask(question, context, page_context)
+            response = str(gateway_answer.get("response") or "")
+            status = str(gateway_answer.get("status") or "ANSWERED_FALLBACK")
+            provider_state = str(gateway_answer.get("provider_state") or provider_state)
+            provider = dict(provider)
+            provider["provider"] = gateway_answer.get("provider") or provider.get("provider")
+            provider["response_source"] = gateway_answer.get("response_source")
+            provider["model"] = gateway_answer.get("model")
+            if not response.strip():
+                evidence_graph = context.get("evidence_graph") or {}
+                providers = context.get("provider_readiness") or {}
+                action_center = context.get("action_center") or {}
+                items = action_center.get("items") or []
+                missing = evidence_graph.get("missing_evidence") or []
+                response = "\n".join(
+                    [
+                        "No external model answer was available; this is a deterministic advisory fallback.",
+                        f"Question: {question or 'No question supplied.'}",
+                        f"Provider state: {provider_state}.",
+                        f"Operator blockers loaded: {len(items)}.",
+                        f"Provider count: {providers.get('provider_count', 0)}; missing credentials: {providers.get('missing_credentials_count', 0)}.",
+                        f"Missing evidence: {', '.join(str(item) for item in missing[:6]) or 'none loaded'}.",
+                        "Next safest action: review blockers and evidence labels before any bounded PAPER experiment. Unknown P&L, fees, fills, TCA, and market truth remain unknown.",
+                    ]
+                )
             refusal_reason = None
         return {
             "source": "AI_QUANT_RESEARCH_CHIEF_ASK",
             "status": status,
             "provider_state": provider_state,
             "provider": provider.get("provider") or "disabled",
-            "response_source": "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" if provider_state != "MOCK_MODE" else "MOCK_MODE_DETERMINISTIC",
+            "response_source": provider.get("response_source") or (
+                "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" if provider_state != "MOCK_MODE" else "MOCK_MODE_DETERMINISTIC"
+            ),
+            "model": provider.get("model"),
             "question": question,
             "response": response,
             "classification": classification,
@@ -1261,6 +1349,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.get("/credentials/providers")
     def credentials_providers() -> dict[str, Any]:
         return provider.credentials_providers()
+
+    @router.get("/credentials/diagnostics")
+    def credentials_diagnostics() -> dict[str, Any]:
+        return provider.credentials_diagnostics()
 
     @router.post("/credentials/save")
     def credentials_save(payload: dict[str, Any] | None = None) -> dict[str, Any]:

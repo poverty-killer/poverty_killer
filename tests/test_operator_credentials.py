@@ -91,6 +91,49 @@ def test_provider_readiness_reads_local_secret_presence(tmp_path):
     assert "local-secret" not in str(readiness)
 
 
+def test_alpaca_save_refreshes_credentials_readiness_launch_and_diagnostics(tmp_path):
+    store = _store(tmp_path)
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    app = create_operator_app(provider=provider)
+
+    saved = _endpoint(app, "/operator/credentials/save", "POST")(
+        {
+            "provider_id": "alpaca_paper",
+            "credentials": {
+                "APCA_API_KEY_ID": "alpaca-local-key",
+                "APCA_API_SECRET_KEY": "alpaca-local-secret",
+                "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+            },
+        }
+    )
+    credentials = _endpoint(app, "/operator/credentials/providers")()
+    readiness = _endpoint(app, "/operator/providers/readiness")()
+    launch = _endpoint(app, "/operator/launch-readiness")()
+    diagnostics = _endpoint(app, "/operator/credentials/diagnostics")()
+    text = str(saved) + str(credentials) + str(readiness) + str(launch) + str(diagnostics)
+
+    alpaca = next(row for row in credentials["providers"] if row["provider_id"] == "alpaca_paper")
+    assert saved["status"] == "SAVED"
+    assert alpaca["configured"] is True
+    assert "LOCAL_SECRET_PRESENT" in alpaca["source"]
+    assert readiness["ready_or_configured_count"] >= 1
+    assert launch["alpaca_paper_credentials_configured"] is True
+    assert "alpaca_paper_credentials" not in launch["reason_codes"]
+    assert diagnostics["vault_file_exists"] is True
+    assert diagnostics["providers"]["alpaca_paper"]["required_field_names_present"] == {
+        "APCA_API_KEY_ID": True,
+        "APCA_API_SECRET_KEY": True,
+    }
+    assert diagnostics["source_used_by_portfolio_broker_read"] == "LOCAL_SECRET_PRESENT"
+    assert "alpaca-local-secret" not in text
+    assert "alpaca-local-key" not in text
+    assert diagnostics["secrets_values_exposed"] is False
+
+
 def test_env_credentials_override_local_credentials_safely(tmp_path):
     store = _store(tmp_path)
     store.save_provider(
@@ -138,3 +181,13 @@ def test_mock_data_contains_no_raw_secret_values():
     assert "sk-" not in text
     assert "alpaca-secret" not in text
     assert "raw_secret" not in text.lower()
+
+
+def test_desktop_launcher_checks_backend_cwd_and_credential_diagnostics():
+    text = Path("scripts/open_operator_console_hidden.ps1").read_text(encoding="utf-8")
+
+    assert 'cd /d `"$RepoRoot`"' in text
+    assert "WorkingDirectory $RepoRoot" in text
+    assert "/operator/credentials/diagnostics" in text
+    assert "credential_vault_relative_path" in text
+    assert ".operator_secrets/provider_credentials.json" in text

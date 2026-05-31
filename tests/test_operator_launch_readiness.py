@@ -52,6 +52,24 @@ def test_launch_readiness_allows_bounded_paper_when_required_checks_pass(tmp_pat
     assert payload["can_execute"] is False
 
 
+def test_launch_readiness_refreshes_local_vault_saved_after_backend_start(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    app = create_operator_app(provider=provider)
+
+    before = _endpoint(app, "/operator/launch-readiness")()
+    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    after = _endpoint(app, "/operator/launch-readiness")()
+
+    assert before["alpaca_paper_credentials_configured"] is False
+    assert after["alpaca_paper_credentials_configured"] is True
+    assert "alpaca_paper_credentials" not in after["reason_codes"]
+
+
 def test_launch_readiness_blocks_live_endpoint_even_with_local_credentials(tmp_path):
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})

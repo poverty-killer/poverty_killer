@@ -65,6 +65,21 @@ function Test-OperatorApi {
         if ($payload.real_money_status -ne "BLOCKED") {
             return $false
         }
+        $diagnosticsResponse = Invoke-WebRequest -Uri "$BaseUrl/operator/credentials/diagnostics" -UseBasicParsing -TimeoutSec 2
+        if ([int]$diagnosticsResponse.StatusCode -ne 200) {
+            return $false
+        }
+        $diagnostics = $diagnosticsResponse.Content | ConvertFrom-Json
+        $expectedRoot = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\')
+        $actualRoot = [System.IO.Path]::GetFullPath([string]$diagnostics.backend_repo_root).TrimEnd('\')
+        if ($actualRoot -ne $expectedRoot) {
+            Write-LaunchLog "Existing backend repo root mismatch. expected=$expectedRoot actual=$actualRoot"
+            return $false
+        }
+        if ($diagnostics.credential_vault_relative_path -ne ".operator_secrets/provider_credentials.json") {
+            Write-LaunchLog "Existing backend credential vault path mismatch: $($diagnostics.credential_vault_relative_path)"
+            return $false
+        }
         return $true
     } catch {
         return $false

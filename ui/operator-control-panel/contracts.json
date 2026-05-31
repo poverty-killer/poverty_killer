@@ -146,8 +146,10 @@
     "real_money_available": false
   },
   "operator_home_contract": {
-    "first_screen": "Command Center",
+    "first_screen": "Portfolio Home",
     "answers": [
+      "what_i_own_now",
+      "current_cash_equity_buying_power",
       "can_i_run_paper_now",
       "missing_credentials_and_providers",
       "current_paper_portfolio",
@@ -160,6 +162,9 @@
       "control_wiring_status"
     ],
     "required_sections": [
+      "What You Own Right Now",
+      "Next Useful Action",
+      "Operator Shortcuts",
       "Launch Readiness",
       "PAPER Launch Control",
       "Portfolio Snapshot",
@@ -558,7 +563,9 @@
       },
       "paper_start_allowed": true,
       "paper_stop_allowed": false,
-      "allowed_durations": [180, 300, 1200, 7200, 10800, 14400]
+      "allowed_durations": [180, 300, 1200, 7200, 10800, 14400],
+      "min_paper_duration_seconds": 60,
+      "max_paper_duration_seconds": 604800
     },
     "/operator/runs": {
       "source": "OPERATOR_SESSION_STORE",
@@ -698,15 +705,28 @@
       "external_mutation_occurred": false,
       "secrets_values_exposed": false
     },
-    "/operator/credentials/providers": {
-      "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",
-      "store_path": ".operator_secrets/provider_credentials.json",
-      "providers": [],
-      "precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
-      "raw_secret_values_included": false,
-      "secrets_values_exposed": false
-    },
-    "/operator/credentials/save": {
+        "/operator/credentials/providers": {
+            "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",
+            "store_path": ".operator_secrets/provider_credentials.json",
+            "providers": [],
+            "precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+            "raw_secret_values_included": false,
+            "secrets_values_exposed": false
+        },
+        "/operator/credentials/diagnostics": {
+            "source": "OPERATOR_CREDENTIAL_DIAGNOSTICS",
+            "backend_cwd": "current backend working directory",
+            "credential_vault_relative_path": ".operator_secrets/provider_credentials.json",
+            "vault_file_exists": false,
+            "provider_ids_present": [],
+            "required_field_names_present_only": true,
+            "source_used_by_provider_readiness": "ENV_PRESENT | LOCAL_SECRET_PRESENT | NOT_CONFIGURED",
+            "source_used_by_launch_readiness": "ENV_PRESENT | LOCAL_SECRET_PRESENT | NOT_CONFIGURED",
+            "source_used_by_portfolio_broker_read": "ENV_PRESENT | LOCAL_SECRET_PRESENT | NOT_CONFIGURED",
+            "raw_secret_values_included": false,
+            "secrets_values_exposed": false
+        },
+        "/operator/credentials/save": {
       "method": "POST",
       "mutates": "local gitignored secret store only",
       "returns_raw_secret_values": false,
@@ -950,7 +970,7 @@
       "required_body": {
         "mode": "PAPER",
         "profile": "PAPER_EXPLORATION_ALPHA",
-        "duration_seconds": "one of allowed durations",
+        "duration_seconds": "bounded seconds from 60 to 604800",
         "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
         "approve_autonomous_paper": true,
         "real_money": false,
@@ -963,7 +983,8 @@
         "REAL_MONEY_NOT_APPROVED",
         "UNSUPPORTED_PAPER_PROFILE",
         "UNSUPPORTED_WATCHLIST_SYMBOL",
-        "UNSUPPORTED_DURATION_SECONDS"
+        "DURATION_BELOW_MINIMUM_SECONDS",
+        "DURATION_ABOVE_MAXIMUM_SECONDS"
       ]
     },
     "/operator/intent/paper/stop": {

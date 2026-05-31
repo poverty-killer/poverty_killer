@@ -160,3 +160,54 @@ def test_operator_portfolio_endpoints_are_read_only(tmp_path):
     assert intelligence["can_execute"] is False
     assert intelligence["position_intelligence"][0]["source"] == "BROKER_CONFIRMED"
     assert all(method == "GET" for method, _path in client.calls)
+
+
+def test_operator_portfolio_refreshes_local_vault_saved_after_backend_start(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    client = FakeReadOnlyClient(_broker_payloads())
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+        portfolio_client=client,
+    )
+    app = create_operator_app(provider=provider)
+
+    before = _endpoint(app, "/operator/portfolio")()
+    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    after = _endpoint(app, "/operator/portfolio")()
+
+    assert before["unavailable_reason"] == "MISSING_ALPACA_PAPER_CREDENTIALS"
+    assert after["status"] == "BROKER_CONFIRMED"
+    assert after["broker_read_occurred"] is True
+    assert all(method == "GET" for method, _path in client.calls)
+
+
+def test_operator_portfolio_uses_local_vault_and_reports_broker_failure_not_missing_credentials(tmp_path):
+    class FailingReadOnlyClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_json(self, path, headers):
+            self.calls.append(("GET", path))
+            raise RuntimeError("broker unavailable")
+
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    client = FailingReadOnlyClient()
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+            provider_env={},
+            credential_store=store,
+            portfolio_client=client,
+        )
+    )
+
+    payload = _endpoint(app, "/operator/portfolio")()
+
+    assert payload["status"] == "BROKER_DATA_UNAVAILABLE"
+    assert payload["unavailable_reason"] == "BROKER_READ_FAILED"
+    assert payload["detail"] == "RuntimeError"
+    assert client.calls == [("GET", "/v2/account")]
+    assert payload["broker_mutation_occurred"] is False
