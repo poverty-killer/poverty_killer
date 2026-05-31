@@ -1045,20 +1045,24 @@ class OperatorSnapshotProvider:
         body = payload or {}
         question = str(body.get("question") or body.get("prompt") or "").strip()
         page_context = redact_secrets(body.get("page_context") if isinstance(body.get("page_context"), dict) else {})
+        page_id = str(body.get("page_id") or page_context.get("page_id") or "")
         context = self._ai_context()
         gateway_status = self.ai_gateway.status()
         provider = gateway_status.get("provider") or {}
+        model_policy = gateway_status.get("model_policy") or {}
         provider_state = str(provider.get("provider_state") or "AI_DISABLED")
-        classification = classify_quant_prompt(question)
+        classification = classify_quant_prompt(question, page_id=page_id)
+        mode = str(classification.get("mode") or "OPERATOR_GUIDE")
+        evidence_level = str(classification.get("evidence_level") or "UNKNOWN")
         if not classification["allowed"]:
             response = (
-                "Refused or redirected. AI Quant Research Chief only answers trading edge, "
-                "execution quality, risk, validation evidence, provider readiness, portfolio state, "
-                "and operator readiness questions. It cannot trade, call broker, enable live, "
-                "change thresholds, or handle secrets."
+                "Refused or redirected. The Chief Quant Advisor cannot trade, call broker, enable live, "
+                "handle secrets, bypass safety gates, submit/cancel/liquidate orders, or mutate strategy. "
+                "Safe path: use governed PAPER readiness, Provider Setup, Portfolio Home, or ask for a Codex packet."
             )
             status = "REFUSED"
             refusal_reason = classification["reason_code"]
+            gateway_answer: dict[str, Any] = {}
         else:
             gateway_answer = self.ai_gateway.ask(question, context, page_context)
             response = str(gateway_answer.get("response") or "")
@@ -1068,6 +1072,12 @@ class OperatorSnapshotProvider:
             provider["provider"] = gateway_answer.get("provider") or provider.get("provider")
             provider["response_source"] = gateway_answer.get("response_source")
             provider["model"] = gateway_answer.get("model")
+            provider["provider_mode"] = gateway_answer.get("provider_mode") or provider.get("provider_mode")
+            provider["model_name"] = gateway_answer.get("model_name") or gateway_answer.get("model") or provider.get("model_name")
+            provider["model_quality"] = gateway_answer.get("model_quality") or provider.get("model_quality")
+            provider["reasoning_policy"] = gateway_answer.get("reasoning_policy") or provider.get("reasoning_policy")
+            provider["model_suitable_for_governance"] = gateway_answer.get("model_suitable_for_governance")
+            provider["model_quality_warning"] = gateway_answer.get("model_quality_warning") or provider.get("model_quality_warning")
             if not response.strip():
                 evidence_graph = context.get("evidence_graph") or {}
                 providers = context.get("provider_readiness") or {}
@@ -1086,17 +1096,62 @@ class OperatorSnapshotProvider:
                     ]
                 )
             refusal_reason = None
+        provider_mode = str(provider.get("provider_mode") or model_policy.get("provider_mode") or "DETERMINISTIC_FALLBACK")
+        if status == "REFUSED":
+            provider_mode = "DETERMINISTIC_FALLBACK"
+        model_name = provider.get("model_name") or provider.get("model") or model_policy.get("model_name")
+        model_quality = str(provider.get("model_quality") or model_policy.get("model_quality") or "FALLBACK_ONLY")
+        reasoning_policy = str(provider.get("reasoning_policy") or model_policy.get("reasoning_policy") or "FALLBACK_ONLY_LIMITED")
+        model_suitable = provider.get("model_suitable_for_governance")
+        if model_suitable is None:
+            model_suitable = model_policy.get("model_suitable_for_governance") is True
+        if model_quality != "HIGH_REASONING" and classification.get("allowed") is True:
+            limited = "I can give a limited operational answer, but final quant/risk/governance judgment requires the high-reasoning model."
+            if limited not in response:
+                response = f"{limited}\n{response}".strip()
+        known_facts, unknowns = self._ai_answer_facts(mode, context)
+        next_step = self._ai_next_step(mode, context, page_id)
+        empty_model_answer = response.strip() == "Provider returned an empty advisory response."
+        if empty_model_answer:
+            status = "PROVIDER_ERROR"
+            provider_state = "PROVIDER_ERROR"
+            provider_mode = "PROVIDER_ERROR"
+            model_quality = "UNKNOWN"
+            reasoning_policy = "FALLBACK_ONLY_LIMITED"
+            model_suitable = False
+            provider["response_source"] = "PROVIDER_ERROR_EMPTY_MODEL_RESPONSE"
+            response = self._ai_limited_operational_answer(mode, question, known_facts, unknowns, next_step)
+        needs_codex = mode in {"CODEX_PACKET_ADVISOR", "QUANT_ENGINEER", "TRADING_SYSTEMS_AUDITOR"} or "codex" in question.lower()
+        codex_summary = (
+            "Draft a scoped Codex packet preserving no-live/no-broker-mutation rules and asking for evidence-backed operator/quant repair."
+            if needs_codex else None
+        )
         return {
             "source": "AI_QUANT_RESEARCH_CHIEF_ASK",
             "status": status,
             "provider_state": provider_state,
             "provider": provider.get("provider") or "disabled",
+            "provider_mode": provider_mode,
             "response_source": provider.get("response_source") or (
                 "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" if provider_state != "MOCK_MODE" else "MOCK_MODE_DETERMINISTIC"
             ),
-            "model": provider.get("model"),
+            "model": provider.get("model") or model_name,
+            "model_name": model_name,
+            "model_quality": model_quality,
+            "reasoning_policy": reasoning_policy,
+            "model_suitable_for_governance": bool(model_suitable),
             "question": question,
+            "answer": response,
             "response": response,
+            "mode": mode,
+            "evidence_level": evidence_level,
+            "known_facts": known_facts,
+            "unknowns": unknowns,
+            "next_step_label": next_step["label"],
+            "next_step_page": next_step["page"],
+            "next_step_control_id": next_step["control_id"],
+            "needs_codex_packet": needs_codex,
+            "suggested_codex_packet_summary": codex_summary,
             "classification": classification,
             "refusal_reason": refusal_reason,
             "page_context": {
@@ -1121,7 +1176,74 @@ class OperatorSnapshotProvider:
             "real_money_enabled": False,
             "raw_logs_included": False,
             "secrets_values_exposed": False,
+            "secrets_exposed": False,
         }
+
+    def _ai_answer_facts(self, mode: str, context: dict[str, Any]) -> tuple[list[str], list[str]]:
+        readiness = context.get("launch_readiness") or {}
+        portfolio = context.get("portfolio") or {}
+        providers = context.get("provider_readiness") or {}
+        facts = [
+            "AI is advisory-only and can_execute=false.",
+            f"Live status is {context.get('live_status') or 'LIVE_LOCKED'}; real-money remains blocked.",
+            f"Provider readiness loaded: {providers.get('provider_count', 0)} providers, {providers.get('missing_credentials_count', 0)} missing credentials.",
+        ]
+        unknowns = [
+            "Future profit is unknown and cannot be inferred from PAPER or historical tests alone.",
+            "Unknown broker-confirmed fees, slippage, and TCA must stay unknown until evidence exists.",
+        ]
+        if mode == "PORTFOLIO_REVIEW":
+            summary = portfolio.get("summary") if isinstance(portfolio.get("summary"), dict) else {}
+            facts.append(f"Portfolio status: {portfolio.get('status') or 'UNKNOWN'}; positions={summary.get('position_count', 0)}; open_orders={summary.get('open_order_count', 0)}.")
+            if portfolio.get("status") == "BROKER_DATA_UNAVAILABLE":
+                unknowns.append(f"Broker portfolio truth unavailable: {portfolio.get('unavailable_reason') or 'UNKNOWN'}.")
+        if mode == "RUN_PLANNER":
+            facts.append(f"Launch readiness: {readiness.get('final_launch_readiness') or 'UNKNOWN'}.")
+            if readiness.get("reason_codes"):
+                unknowns.append(f"Run blockers/warnings: {', '.join(str(item) for item in readiness.get('reason_codes') or [])}.")
+        return facts[:8], unknowns[:8]
+
+    def _ai_limited_operational_answer(
+        self,
+        mode: str,
+        question: str,
+        known_facts: list[str],
+        unknowns: list[str],
+        next_step: dict[str, str | None],
+    ) -> str:
+        return "\n".join(
+            [
+                "PROVIDER ERROR - the configured high-reasoning model returned no usable text, so this is a limited operational fallback.",
+                "I can give a limited operational answer, but final quant/risk/governance judgment requires the high-reasoning model.",
+                f"Question: {question or 'No question supplied.'}",
+                f"Mode: {mode}.",
+                "Known facts:",
+                *[f"- {item}" for item in known_facts[:6]],
+                "Unknowns / missing evidence:",
+                *[f"- {item}" for item in unknowns[:6]],
+                f"Next step: {next_step.get('label') or 'Review the current page.'}",
+                f"Go to: {next_step.get('page') or 'current page'} / control: {next_step.get('control_id') or 'unknown'}.",
+                "Do not treat this as final quant/risk/live-readiness judgment.",
+            ]
+        )
+
+    def _ai_next_step(self, mode: str, context: dict[str, Any], page_id: str) -> dict[str, str | None]:
+        readiness = context.get("launch_readiness") or {}
+        credentials = context.get("credentials") or {}
+        alpaca_missing = "alpaca_paper_credentials" in set(readiness.get("reason_codes") or [])
+        if mode == "SETUP_HELP" or alpaca_missing:
+            return {"label": "Open Keys & Providers and save/validate Alpaca PAPER credentials.", "page": "providers", "control_id": "credential_save_alpaca_paper"}
+        if mode == "PORTFOLIO_REVIEW":
+            return {"label": "Review Portfolio Home positions, exposure, open orders, and unavailable broker truth.", "page": "positions", "control_id": "positions_preview_table"}
+        if mode == "RUN_PLANNER":
+            return {"label": "Use Run PAPER only after readiness blockers are cleared and safety confirmations are checked.", "page": "command", "control_id": "paper_start"}
+        if mode == "CODEX_PACKET_ADVISOR":
+            return {"label": "Draft a scoped Codex packet with exact blocker, file area, tests, and safety limits.", "page": "ai", "control_id": "ai_ask"}
+        if mode == "TRADING_SYSTEMS_AUDITOR":
+            return {"label": "Audit readiness, provider status, portfolio truth, P&L/TCA, and blocked controls before any run.", "page": page_id or "diagnostics", "control_id": "ai_ask"}
+        if credentials.get("configured_count") == 0:
+            return {"label": "Configure required providers before relying on model or broker answers.", "page": "providers", "control_id": "credential_save_alpaca_paper"}
+        return {"label": "Review the current page summary and ask a narrower follow-up if evidence is missing.", "page": page_id or "positions", "control_id": "ai_ask"}
 
     def _ai_context(self) -> dict[str, Any]:
         archive = self.runs()
@@ -1148,6 +1270,15 @@ class OperatorSnapshotProvider:
             alerts=alerts,
         )
         context["provider_readiness"] = self.providers()
+        context["credentials"] = self.credentials_providers()
+        context["launch_readiness"] = self.launch_readiness()
+        context["portfolio"] = {
+            "status": "PAGE_CONTEXT_OR_PORTFOLIO_ENDPOINT_REQUIRED",
+            "detail": "AI context does not call broker. Use existing UI page context or /operator/portfolio endpoint output.",
+            "broker_read_occurred": False,
+            "broker_mutation_occurred": False,
+        }
+        context["model_policy"] = self.ai_gateway.status().get("model_policy")
         context["research_registry"] = self.research()
         context["evidence_graph"] = self.research_evidence_graph()
         context["persona"] = quant_persona_summary()

@@ -21,6 +21,11 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     assert "/operator/ai/ask" in text
     assert "Ask a page-aware question" in text
     assert "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" in text
+    assert "provider_mode=" in text
+    assert "model_quality=" in text
+    assert "reasoning_policy=" in text
+    assert "governance_suitable=" in text
+    assert "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide" in text
 
 
 def test_command_center_has_paper_launch_control_and_safe_duration_options():
@@ -82,6 +87,35 @@ def test_provider_setup_uses_beginner_safe_credential_labels():
     assert "/operator/credentials/save" in text
     assert "reason=${reason}" in text
     assert "received_field_presence" in text
+
+
+def test_ai_panel_shows_model_quality_and_lower_reasoning_warning():
+    text = _app_text()
+
+    assert "Provider Mode" in text
+    assert "Model Quality" in text
+    assert "Model Policy" in text
+    assert "Model quality tier" in text
+    assert "Suitable for governance" in text
+    assert "High-reasoning model not configured. Quant/governance answers are limited." in text
+    assert "Lower-reasoning model active. Do not use this for final quant/risk/live-readiness decisions." in text
+    assert "HIGH_REASONING" in text
+    assert "FALLBACK_ONLY_LIMITED" in text
+
+
+def test_ai_prompt_chips_exist_for_required_operator_workflows():
+    text = _app_text()
+
+    for prompt in [
+        "Explain this page.",
+        "What do I do next?",
+        "Why is PAPER run blocked?",
+        "Explain my positions.",
+        "Plan my PAPER run.",
+        "Audit readiness.",
+        "Draft Codex packet request.",
+    ]:
+        assert prompt in text
 
 
 def test_credential_save_captures_inputs_before_saving_rerender():

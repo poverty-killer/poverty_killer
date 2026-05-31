@@ -5,6 +5,7 @@ import inspect
 from app.ai_chief_operator.config import AIChiefConfig
 from app.ai_chief_operator.context_builder import build_ai_context, redact_secrets
 from app.ai_chief_operator.governance_queue import GovernanceQueue
+from app.ai_chief_operator.model_policy import classify_model_quality
 from app.ai_chief_operator.models import normalize_recommendation
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
 from app.ai_chief_operator.quant_persona import classify_quant_prompt, quant_persona_summary
@@ -26,6 +27,125 @@ def test_ai_provider_disabled_by_default():
     assert config.provider_state() == "AI_DISABLED"
     assert gateway.status()["provider"]["provider_state"] == "AI_DISABLED"
     assert gateway.status()["can_execute"] is False
+
+
+def test_ai_provider_auto_selects_openai_when_key_is_configured():
+    config = AIChiefConfig.from_env({"OPENAI_API_KEY": "sk-hidden1234567890"})
+
+    assert config.provider == "openai"
+    assert config.provider_state() == "PROVIDER_READY"
+    assert config.openai_configured is True
+    assert config.openai_model == "gpt-5.5-pro"
+    assert config.safe_summary()["model_quality"] == "HIGH_REASONING"
+    assert config.safe_summary()["model_suitable_for_governance"] is True
+
+
+def test_model_quality_registry_classifies_high_and_low_reasoning_models():
+    assert classify_model_quality("openai", "gpt-5.5-pro") == "HIGH_REASONING"
+    assert classify_model_quality("openai", "gpt-5.5-thinking") == "HIGH_REASONING"
+    assert classify_model_quality("openai", "gpt-5-mini") == "LOW_REASONING"
+    assert classify_model_quality("anthropic", "claude-opus-4.7") == "HIGH_REASONING"
+    assert classify_model_quality("anthropic", "claude-haiku-4") == "LOW_REASONING"
+    assert classify_model_quality("anthropic", "claude-sonnet-4") == "STANDARD"
+
+
+def test_serious_quant_prompt_does_not_call_low_reasoning_model():
+    calls = []
+
+    def fake_post(url, headers, body, timeout):
+        calls.append({"url": url, "headers": headers, "body": body, "timeout": timeout})
+        return {"output_text": "This should not be called."}
+
+    env = {"OPENAI_API_KEY": "sk-hidden1234567890", "PK_AI_CHIEF_OPENAI_MODEL": "gpt-5-mini"}
+    gateway = AIProviderGateway(AIChiefConfig.from_env(env), credential_env=env, http_post=fake_post)
+
+    answer = gateway.ask("Is this strategy statistically believable?", {}, {"page_id": "research"})
+
+    assert calls == []
+    assert answer["provider_mode"] == "DETERMINISTIC_FALLBACK"
+    assert answer["model_name"] == "gpt-5-mini"
+    assert answer["model_quality"] == "LOW_REASONING"
+    assert answer["reasoning_policy"] == "LOWER_MODEL_WARNING"
+    assert answer["model_suitable_for_governance"] is False
+    assert "LOWER-REASONING MODEL ACTIVE" in answer["response"]
+
+
+def test_openai_ai_ask_uses_real_provider_path_without_exposing_secrets():
+    calls = []
+
+    def fake_post(url, headers, body, timeout):
+        calls.append({"url": url, "headers": headers, "body": body, "timeout": timeout})
+        return {"output_text": "Model advisory: Alpaca credentials are the first blocker."}
+
+    env = {"OPENAI_API_KEY": "sk-hidden1234567890", "PK_AI_CHIEF_TIMEOUT_SECONDS": "2"}
+    gateway = AIProviderGateway(AIChiefConfig.from_env(env), credential_env=env, http_post=fake_post)
+
+    answer = gateway.ask(
+        "Can I run PAPER?",
+        {
+            "provider_readiness": {"OPENAI_API_KEY": "sk-hidden1234567890", "fingerprint": "sha256:abc123"},
+            "latest_run_archive_summary": [{"report_path": r"C:\Users\shahn\OneDrive\Desktop\poverty_killer\state\operator\reports\paper.md"}],
+        },
+        {"page_id": "positions"},
+    )
+
+    assert answer["status"] == "ANSWERED_MODEL"
+    assert answer["response_source"] == "OPENAI_RESPONSES_API"
+    assert answer["provider_mode"] == "LIVE_OPENAI"
+    assert answer["model_name"] == "gpt-5.5-pro"
+    assert answer["model_quality"] == "HIGH_REASONING"
+    assert answer["reasoning_policy"] == "HIGHEST_AVAILABLE_REQUIRED"
+    assert answer["model_suitable_for_governance"] is True
+    assert answer["can_execute"] is False
+    assert answer["broker_call_occurred"] is False
+    assert calls[0]["url"].endswith("/responses")
+    assert calls[0]["headers"]["Authorization"].startswith("Bearer ")
+    assert "sk-hidden" not in str(calls[0]["body"])
+    assert "sha256:abc123" not in str(calls[0]["body"])
+    assert "C:\\Users" not in str(calls[0]["body"])
+    assert "state\\operator" not in str(calls[0]["body"])
+    assert "sk-hidden" not in str(answer)
+
+
+def test_unavailable_high_reasoning_model_returns_clear_provider_error():
+    def failing_post(url, headers, body, timeout):
+        del url, headers, body, timeout
+        raise RuntimeError("provider_http_404: model_not_found")
+
+    env = {"OPENAI_API_KEY": "sk-hidden1234567890", "OPENAI_HIGH_REASONING_MODEL": "gpt-5.5-pro"}
+    gateway = AIProviderGateway(AIChiefConfig.from_env(env), credential_env=env, http_post=failing_post)
+
+    answer = gateway.ask("What evidence blocks live readiness?", {}, {"page_id": "research"})
+
+    assert answer["status"] == "PROVIDER_ERROR"
+    assert answer["provider_mode"] == "PROVIDER_ERROR"
+    assert answer["model_quality"] == "UNKNOWN"
+    assert answer["reasoning_policy"] == "FALLBACK_ONLY_LIMITED"
+    assert answer["model_suitable_for_governance"] is False
+    assert "no model answer is being faked" in answer["response"]
+    assert "provider_http_404" in answer["response"]
+    assert "OPENAI_HIGH_REASONING_MODEL" in answer["response"]
+
+
+def test_empty_high_reasoning_response_is_provider_error_not_fake_answer():
+    def empty_post(url, headers, body, timeout):
+        del url, headers, body, timeout
+        return {"id": "resp_empty", "output": []}
+
+    env = {"OPENAI_API_KEY": "sk-hidden1234567890", "OPENAI_HIGH_REASONING_MODEL": "gpt-5.5-pro"}
+    gateway = AIProviderGateway(AIChiefConfig.from_env(env), credential_env=env, http_post=empty_post)
+
+    answer = gateway.ask("Why is PAPER run blocked?", {}, {"page_id": "command"})
+
+    assert answer["status"] == "PROVIDER_ERROR"
+    assert answer["provider_state"] == "PROVIDER_ERROR"
+    assert answer["response_source"] == "PROVIDER_ERROR_EMPTY_MODEL_RESPONSE"
+    assert answer["provider_mode"] == "PROVIDER_ERROR"
+    assert answer["model_name"] == "gpt-5.5-pro"
+    assert answer["model_quality"] == "UNKNOWN"
+    assert answer["reasoning_policy"] == "FALLBACK_ONLY_LIMITED"
+    assert answer["model_suitable_for_governance"] is False
+    assert "no expert model answer is being faked" in answer["response"]
 
 
 def test_mock_ai_provider_returns_structured_recommendation():
@@ -91,14 +211,23 @@ def test_ai_quant_persona_is_domain_scoped_and_refuses_general_or_unsafe_prompts
     general = classify_quant_prompt("write a dinner recipe")
     unsafe = classify_quant_prompt("enable live and submit order now")
     quant = classify_quant_prompt("Where is the edge in latest run TCA evidence?")
+    setup = classify_quant_prompt("Where do I enter Alpaca keys?", page_id="providers")
+    portfolio = classify_quant_prompt("What do I own right now?", page_id="positions")
+    codex = classify_quant_prompt("What should I ask Codex to fix?", page_id="ai")
 
-    assert persona["identity"].startswith("AI Quant Research Chief")
+    assert persona["identity"].startswith("Chief Quant Advisor")
+    assert "You are the Chief Quant Advisor" in persona["system_policy"]
     assert persona["can_execute"] is False
     assert general["allowed"] is False
     assert general["reason_code"] == "NON_TRADING_GENERALIST_PROMPT"
     assert unsafe["allowed"] is False
     assert unsafe["reason_code"] == "FORBIDDEN_TRADING_OR_SECRET_REQUEST"
+    assert unsafe["mode"] == "UNSAFE_REQUEST_REFUSAL"
     assert quant["allowed"] is True
+    assert quant["mode"] == "QUANT_ADVISOR"
+    assert setup["mode"] == "SETUP_HELP"
+    assert portfolio["mode"] == "PORTFOLIO_REVIEW"
+    assert codex["mode"] == "CODEX_PACKET_ADVISOR"
 
 
 def test_governance_queue_approve_paper_research_does_not_start_paper(tmp_path):

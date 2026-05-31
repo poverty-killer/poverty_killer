@@ -37,6 +37,13 @@
   ]);
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
   const AI_QUICK_PROMPTS = [
+    "Explain this page.",
+    "What do I do next?",
+    "Why is this blocked?",
+    "Why is PAPER run blocked?",
+    "Explain my positions.",
+    "Plan my PAPER run.",
+    "Audit readiness.",
     "Where is the edge?",
     "What is the weakest assumption?",
     "Is this signal statistically believable?",
@@ -47,6 +54,7 @@
     "Critique latest run.",
     "Compare latest run to expected behavior.",
     "Draft a Codex packet.",
+    "Draft Codex packet request.",
     "Review provider/data readiness."
   ];
   const AI_PRESERVED_BOOLEAN_KEYS = new Set([
@@ -152,6 +160,38 @@
     if (v.includes("UNKNOWN") || v.includes("MISSING") || v.includes("DEGRADED") || v.includes("NO_TRADE") || v.includes("DECLINED")) return "yellow";
     if (v.includes("BLOCK") || v.includes("LOCK") || v.includes("DENY") || v.includes("CONFLICT") || v.includes("LIVE")) return "red";
     return "gray";
+  }
+
+  function modelQualityColor(value) {
+    const v = String(value || "").toUpperCase();
+    if (v === "HIGH_REASONING") return "green";
+    if (v === "STANDARD") return "yellow";
+    if (v === "LOW_REASONING" || v === "FALLBACK_ONLY" || v === "UNKNOWN") return "red";
+    return statusColor(v);
+  }
+
+  function aiModelWarning() {
+    const quality = String(data.ai.modelQuality || "FALLBACK_ONLY").toUpperCase();
+    if (quality === "HIGH_REASONING" && data.ai.modelSuitableForGovernance === true) return "";
+    if (quality === "LOW_REASONING" || quality === "STANDARD") {
+      return "Lower-reasoning model active. Do not use this for final quant/risk/live-readiness decisions.";
+    }
+    return "High-reasoning model not configured. Quant/governance answers are limited.";
+  }
+
+  function pageAwareAiPrompts(pageId) {
+    const common = ["Explain this page.", "What do I do next?"];
+    const byPage = {
+      positions: ["Explain my positions.", "What is my exposure?", "What is risky in my portfolio?"],
+      command: ["Why is PAPER run blocked?", "Plan my PAPER run.", "How do I start a 7-day PAPER run?"],
+      providers: ["Where do I enter Alpaca keys?", "Why is Alpaca missing if I entered keys?", "What does Local credential vault mean?"],
+      activity: ["Why is this blocked?", "Plan my PAPER run.", "What should be monitored during the run?"],
+      ai: ["Audit readiness.", "Draft Codex packet request.", "What should I ask Codex to fix?"],
+      system: ["Draft Codex packet request.", "Is this a code issue, config issue, broker issue, UI issue, or strategy issue?"],
+      pnl: ["Where are fees/slippage hurting us?", "What evidence is missing before live?"],
+      research: ["Is this strategy statistically believable?", "What could be overfit?", "Does this look like real edge or noise?"]
+    };
+    return [...common, ...(byPage[pageId] || ["Why is this blocked?", "Audit readiness."])];
   }
 
   function dataSourceColor() {
@@ -452,15 +492,17 @@
     const providerState = data.ai.providerState || "AI_DISABLED";
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
     const response = homeAiResponse || "No home-page question asked yet. Ask about readiness, portfolio risk, blockers, PAPER planning, or evidence quality.";
+    const warning = aiModelWarning();
     return `
       <div class="card span-12" data-home-section="ai-quant-advisor"><h3>AI Quant Advisor</h3>
-        <div class="notice ai-mission">Advisory only. can_execute=false. No broker calls, no live enablement, no real-money enablement, no threshold mutation, no secrets.</div>
-        <div class="notice mono">Provider: ${escapeHtml(providerLabel)}. With a saved OpenAI or Anthropic key, /operator/ai/ask attempts a real advisory model call; if the provider is unavailable, it returns an honest fallback.</div>
+        <div class="notice ai-mission">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. Advisory only. can_execute=false. No broker calls, no live enablement, no real-money enablement, no threshold mutation, no secrets.</div>
+        <div class="notice mono">Provider mode: ${escapeHtml(data.ai.providerMode || "NOT_CONFIGURED")} / Provider: ${escapeHtml(providerLabel)} / Model: ${escapeHtml(data.ai.modelName || "none")} / Quality: ${escapeHtml(data.ai.modelQuality || "FALLBACK_ONLY")} / Policy: ${escapeHtml(data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED")}.</div>
+        ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
         <div class="ai-ask-box">
           <label for="home-ai-question">Ask a question from the home page</label>
           <textarea id="home-ai-question" data-home-ai-question rows="4" placeholder="Ask what blocks PAPER, what we own, what risk matters, or what proof is needed next.">${escapeHtml(homeAiQuestionText || "")}</textarea>
           <div class="ai-question-bank" aria-label="Home AI Advisor suggestions">
-            ${AI_QUICK_PROMPTS.slice(0, 6).map((prompt) => `
+            ${pageAwareAiPrompts(activeScreenId || "positions").map((prompt) => `
               <button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>
             `).join("")}
           </div>
@@ -1015,24 +1057,39 @@
   function renderAI() {
     const ai = data.ai;
     const research = data.research.counts || {};
+    const warning = aiModelWarning();
     return `
-      ${header("AI Advisor", "Ask for advisory-only help on strategy, risk, TCA, provider readiness, and proof.", ai.providerState)}
+      ${header("AI Advisor", "Highest-reasoning Chief Quant Advisor for strategy, risk, TCA, provider readiness, operation, and proof.", ai.providerState)}
       <div class="grid">
         ${metric("Provider", ai.provider, statusColor(ai.providerState))}
         ${metric("State", ai.providerState, statusColor(ai.providerState))}
+        ${metric("Provider Mode", ai.providerMode || "NOT_CONFIGURED", statusColor(ai.providerMode || "NOT_CONFIGURED"))}
+        ${metric("Model Quality", ai.modelQuality || "FALLBACK_ONLY", modelQualityColor(ai.modelQuality || "FALLBACK_ONLY"))}
         ${metric("Pending Review", ai.pendingReviewCount || 0, ai.pendingReviewCount ? "yellow" : "gray")}
         ${metric("Can Execute", "false", "gray")}
         <div class="card span-12"><h3>Mission</h3>
-          <div class="notice">I analyze trading edge, execution quality, risk, validation evidence, provider readiness, portfolio state, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
+          <div class="notice">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. I analyze trading edge, market structure, execution quality, portfolio exposure, risk, validation evidence, provider readiness, PAPER plans, and live-readiness proof. I cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass safety gates.</div>
+          ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
         </div>
+        <div class="card span-6"><h3>Model Policy</h3>${kv([
+          ["Provider mode", badge(ai.providerMode || "NOT_CONFIGURED", statusColor(ai.providerMode || "NOT_CONFIGURED"))],
+          ["Selected model", escapeHtml(ai.modelName || "none")],
+          ["Model quality tier", badge(ai.modelQuality || "FALLBACK_ONLY", modelQualityColor(ai.modelQuality || "FALLBACK_ONLY"))],
+          ["Reasoning policy", badge(ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED", statusColor(ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED"))],
+          ["Suitable for governance", badge(String(ai.modelSuitableForGovernance === true), ai.modelSuitableForGovernance ? "green" : "red")],
+          ["Live model/fallback", badge((ai.providerMode || "").startsWith("LIVE_") ? "live model path" : "fallback/not configured", (ai.providerMode || "").startsWith("LIVE_") ? "green" : "red")]
+        ])}</div>
         <div class="card span-6"><h3>Control Tower</h3>${kv([
-          ["Identity", escapeHtml("AI Quant Research Chief / Trading Edge Advisor")],
-          ["Roles", escapeHtml("Strategy Decoder, Risk/Skeptic Officer, Execution/TCA Auditor, Paper Experiment Designer, Codex Packet Drafter")],
+          ["Identity", escapeHtml("Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide")],
+          ["Roles", escapeHtml("Quant Advisor, Quant Engineer, Trading Systems Auditor, Operator Guide, Run Planner, Portfolio Reviewer, Codex Packet Advisor")],
           ["Research items", escapeHtml(`${research.hypotheses || 0} hypotheses / ${research.experiments || 0} experiments`)],
           ["Promotion gates", escapeHtml(research.promotionGates || 0)]
         ])}</div>
-        <div class="card span-6"><h3>Focused Quant Prompts</h3>
-          <div class="stack">${AI_QUICK_PROMPTS.slice(0, 7).map((prompt) => badge(prompt, "gray")).join("")}</div>
+        <div class="card span-12"><h3>Expert Prompt Modes</h3>
+          <div class="stack">${["QUANT_ADVISOR", "QUANT_ENGINEER", "TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE", "RUN_PLANNER", "PORTFOLIO_REVIEW", "SETUP_HELP", "CODEX_PACKET_ADVISOR", "UNSAFE_REQUEST_REFUSAL"].map((prompt) => badge(prompt, "gray")).join("")}</div>
+        </div>
+        <div class="card span-12"><h3>Focused Quant Prompts</h3>
+          <div class="stack">${AI_QUICK_PROMPTS.slice(0, 14).map((prompt) => badge(prompt, "gray")).join("")}</div>
         </div>
         <div class="card span-12"><h3>Advisory Boundary</h3>${kv([
           ["AI direct broker calls", badge("forbidden", "red")],
@@ -1714,6 +1771,14 @@
         last_refused_intent: data.supervisor.lastRefusedIntent || "none"
       },
       selected_run: latestRun,
+      model_policy: {
+        provider_mode: data.ai.providerMode || "NOT_CONFIGURED",
+        model_name: data.ai.modelName || null,
+        model_quality: data.ai.modelQuality || "FALLBACK_ONLY",
+        reasoning_policy: data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED",
+        model_suitable_for_governance: data.ai.modelSuitableForGovernance === true,
+        warning: aiModelWarning()
+      },
       provider_readiness: {
         provider_count: data.providerReadiness.providerCount || 0,
         ready_or_configured_count: data.providerReadiness.readyOrConfiguredCount || 0,
@@ -1734,6 +1799,39 @@
         promotion_blockers: data.evidenceGraph.promotionBlockers || [],
         raw_logs_included: false,
         secrets_values_exposed: false
+      },
+      launch_readiness: {
+        final: data.launchReadiness.finalLaunchReadiness || "UNKNOWN",
+        reason_codes: data.launchReadiness.reasonCodes || [],
+        alpaca_paper_credentials_configured: data.launchReadiness.alpacaPaperCredentialsConfigured === true,
+        paper_start_allowed: data.launchReadiness.paperStartAllowed === true,
+        safe_stop_status: data.launchReadiness.safeStopStatus || "UNKNOWN"
+      },
+      portfolio: {
+        status: data.portfolio.status || "UNKNOWN",
+        data_source: data.portfolio.dataSource || "UNKNOWN",
+        unavailable_reason: data.portfolio.unavailableReason || null,
+        summary: data.portfolio.summary || {},
+        positions: (data.portfolio.positions || []).slice(0, 10).map((p) => ({
+          symbol: p.symbol,
+          quantity: p.quantity,
+          market_value: p.marketValue,
+          unrealized_pnl: p.unrealizedPnl,
+          exposure: p.exposurePercentOfPortfolio,
+          source: p.source,
+          broker_confirmed: p.brokerConfirmed === true,
+          risk_status: p.riskStatus
+        })),
+        open_orders: (data.portfolio.openOrders || []).slice(0, 10).map((o) => ({
+          symbol: o.symbol,
+          side: o.side,
+          qty: o.qty,
+          type: o.type,
+          status: o.status,
+          read_only: true,
+          can_cancel: false
+        })),
+        broker_mutation_occurred: false
       },
       blockers: aiBlockers(),
       missing_evidence: aiMissingEvidence(activeScreenId),
@@ -1756,6 +1854,8 @@
           ["Live locked", badge(String(data.status.liveBlocked !== false), data.status.liveBlocked !== false ? "red" : "yellow")],
           ["Real-money blocked", badge(String(context.safety_flags.real_money_blocked), context.safety_flags.real_money_blocked ? "red" : "yellow")],
           ["Runtime", escapeHtml(`${context.runtime.bot_status} / ${context.runtime.supervisor_state}`)],
+          ["Model", escapeHtml(`${context.model_policy.model_name || "none"} / ${context.model_policy.model_quality}`)],
+          ["Provider mode", badge(context.model_policy.provider_mode || "NOT_CONFIGURED", statusColor(context.model_policy.provider_mode || "NOT_CONFIGURED"))],
           ["Selected run", escapeHtml(latestRun.run_id || "none")],
           ["Major blockers", escapeHtml(context.blockers.slice(0, 3).join(" | ") || "none")],
           ["Missing evidence", escapeHtml(context.missing_evidence.slice(0, 3).join(" | ") || "none")],
@@ -1847,6 +1947,8 @@
     const providerState = data.ai.providerState || "AI_DISABLED";
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
     const response = aiOverlayResponse || buildAiOverlayAdvisory(aiQuestionText || aiSelectedQuestion);
+    const prompts = pageAwareAiPrompts(activeScreenId || "positions");
+    const warning = aiModelWarning();
     host.innerHTML = `
       <button class="ai-chief-fab ${aiOverlayOpen ? "open" : ""}" type="button" data-ai-chief-open aria-expanded="${aiOverlayOpen ? "true" : "false"}">
         <span>Ask Quant Chief</span>
@@ -1857,8 +1959,8 @@
         <div class="ai-chief-panel">
           <div class="ai-chief-header">
             <div>
-              <div class="ai-chief-title">AI Quant Research Chief</div>
-              <div class="muted mono">${escapeHtml(providerLabel)} / ADVISORY_ONLY</div>
+              <div class="ai-chief-title">Chief Quant Advisor</div>
+              <div class="muted mono">${escapeHtml(providerLabel)} / ${escapeHtml(data.ai.providerMode || "NOT_CONFIGURED")} / ${escapeHtml(data.ai.modelQuality || "FALLBACK_ONLY")} / ADVISORY_ONLY</div>
             </div>
             <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Close</button>
           </div>
@@ -1869,11 +1971,19 @@
             ${badge("cannot change thresholds", "red")}
             ${badge("can_execute=false", "gray")}
           </div>
-          <div class="notice ai-mission">I analyze trading edge, execution quality, risk, validation evidence, provider readiness, portfolio state, and operator readiness. I cannot trade, call broker, enable live, or change thresholds.</div>
+          <div class="notice ai-mission">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. I separate broker-confirmed truth, market truth, local system state, model inference, missing evidence, and speculation. I cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass gates.</div>
+          ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
           <div class="ai-chief-body">
+            <div class="cardless-model-strip">
+              ${badge(`provider_mode=${data.ai.providerMode || "NOT_CONFIGURED"}`, statusColor(data.ai.providerMode || "NOT_CONFIGURED"))}
+              ${badge(`model=${data.ai.modelName || "none"}`, "gray")}
+              ${badge(`quality=${data.ai.modelQuality || "FALLBACK_ONLY"}`, modelQualityColor(data.ai.modelQuality || "FALLBACK_ONLY"))}
+              ${badge(`policy=${data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED"}`, statusColor(data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED"))}
+              ${badge(`governance=${String(data.ai.modelSuitableForGovernance === true)}`, data.ai.modelSuitableForGovernance ? "green" : "red")}
+            </div>
             ${renderAiContextPreview(context)}
             <div class="ai-question-bank" aria-label="AI Chief quick questions">
-              ${AI_QUICK_PROMPTS.map((prompt) => `
+              ${prompts.concat(AI_QUICK_PROMPTS).filter((prompt, index, arr) => arr.indexOf(prompt) === index).map((prompt) => `
                 <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
                   ${escapeHtml(prompt)}
                 </button>
@@ -1938,9 +2048,17 @@
   }
 
   function formatAiAskResult(result) {
+    const knownFacts = Array.isArray(result.known_facts) ? result.known_facts : [];
+    const unknowns = Array.isArray(result.unknowns) ? result.unknowns : [];
     return [
-      `${result.response_source || "DETERMINISTIC_FALLBACK_NO_MODEL_CALL"} / ${result.provider_state || "AI_DISABLED"}`,
-      result.response || "No advisory response returned.",
+      `provider_mode=${result.provider_mode || "DETERMINISTIC_FALLBACK"} / provider_state=${result.provider_state || "AI_DISABLED"}`,
+      `model=${result.model_name || result.model || "none"} / model_quality=${result.model_quality || "FALLBACK_ONLY"} / reasoning_policy=${result.reasoning_policy || "FALLBACK_ONLY_LIMITED"} / governance_suitable=${String(result.model_suitable_for_governance === true)}`,
+      `mode=${result.mode || "OPERATOR_GUIDE"} / evidence_level=${result.evidence_level || "UNKNOWN"} / source=${result.response_source || "DETERMINISTIC_FALLBACK_NO_MODEL_CALL"}`,
+      result.answer || result.response || "No advisory response returned.",
+      knownFacts.length ? `known_facts:\n- ${knownFacts.join("\n- ")}` : "known_facts: none returned",
+      unknowns.length ? `unknowns:\n- ${unknowns.join("\n- ")}` : "unknowns: none returned",
+      `next_step=${result.next_step_label || "review current page"} / page=${result.next_step_page || "unknown"} / control=${result.next_step_control_id || "unknown"}`,
+      `needs_codex_packet=${String(result.needs_codex_packet === true)}${result.suggested_codex_packet_summary ? ` / ${result.suggested_codex_packet_summary}` : ""}`,
       `can_execute=${String(result.can_execute === true ? "true" : "false")}`,
       `broker_call_occurred=${String(result.broker_call_occurred === true ? "true" : "false")}`,
       `trading_mutation_occurred=${String(result.trading_mutation_occurred === true ? "true" : "false")}`,
@@ -2567,6 +2685,15 @@
     }
     next.ai.provider = pick(aiStatus.gateway && aiStatus.gateway.provider && aiStatus.gateway.provider.provider, next.ai.provider);
     next.ai.providerState = pick(aiStatus.gateway && aiStatus.gateway.provider && aiStatus.gateway.provider.provider_state, next.ai.providerState);
+    const aiGateway = aiStatus.gateway || {};
+    const aiProvider = aiGateway.provider || {};
+    const aiPolicy = aiGateway.model_policy || {};
+    next.ai.providerMode = pick(aiProvider.provider_mode || aiPolicy.provider_mode, next.ai.providerMode || "NOT_CONFIGURED");
+    next.ai.modelName = pick(aiProvider.model_name || aiProvider.model || aiPolicy.model_name, next.ai.modelName || null);
+    next.ai.modelQuality = pick(aiProvider.model_quality || aiPolicy.model_quality, next.ai.modelQuality || "FALLBACK_ONLY");
+    next.ai.reasoningPolicy = pick(aiProvider.reasoning_policy || aiPolicy.reasoning_policy, next.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED");
+    next.ai.modelSuitableForGovernance = aiProvider.model_suitable_for_governance === true || aiPolicy.model_suitable_for_governance === true;
+    next.ai.modelQualityWarning = pick(aiProvider.model_quality_warning || aiPolicy.warning, next.ai.modelQualityWarning || "");
     next.ai.pendingReviewCount = pick(aiStatus.pending_review_count, next.ai.pendingReviewCount);
     next.ai.secretsValuesExposed = aiStatus.secrets_values_exposed === true;
     if (Array.isArray(aiRecommendations.recommendations)) {

@@ -5,15 +5,26 @@ from __future__ import annotations
 from typing import Any
 
 
-AI_QUANT_IDENTITY = "AI Quant Research Chief / Trading Edge Advisor"
+AI_QUANT_IDENTITY = "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide"
 
 AI_QUANT_ROLES = (
-    "Quant Research Chief",
-    "Strategy Decoder",
-    "Risk/Skeptic Officer",
-    "Execution/TCA Auditor",
-    "Paper Experiment Designer",
-    "Codex Packet Drafter",
+    "Chief Quant Advisor",
+    "Quant Engineer",
+    "Trading Systems Auditor",
+    "Operator Guide",
+    "Run Planner",
+    "Portfolio Reviewer",
+    "Codex Packet Advisor",
+)
+
+AI_SYSTEM_POLICY = (
+    "You are the Chief Quant Advisor, Quant Engineer, Trading Systems Auditor, and Operator Guide for POVERTY_KILLER. "
+    "You are not a general chatbot. Your job is to help Shan operate and improve this trading engine, interpret "
+    "portfolio/risk/P&L/execution evidence, critique strategy validity, identify missing proof, design safe PAPER "
+    "validation plans, and guide safe operation. You must use expert-level quant, trading, systems, and risk reasoning "
+    "while explaining clearly to a non-coder operator. You cannot trade, call broker, enable live, expose secrets, "
+    "mutate strategy, or bypass safety gates. You must separate broker-confirmed truth, market truth, local engine "
+    "state, model inference, missing evidence, and speculation."
 )
 
 QUANT_PROMPTS = (
@@ -84,10 +95,102 @@ FORBIDDEN_TERMS = (
     "guaranteed profit",
 )
 
+MODE_KEYWORDS = {
+    "SETUP_HELP": (
+        "alpaca key",
+        "alpaca missing",
+        "openai configured",
+        "credential",
+        "local credential vault",
+        "provider",
+        "launcher",
+        "backend",
+        "setup",
+        "where do i enter",
+    ),
+    "PORTFOLIO_REVIEW": (
+        "own",
+        "position",
+        "portfolio",
+        "exposure",
+        "concentrated",
+        "p&l",
+        "pnl",
+        "open order",
+        "riskiest",
+        "holding",
+    ),
+    "RUN_PLANNER": (
+        "7-day",
+        "7 day",
+        "paper run",
+        "duration",
+        "watchlist",
+        "stop condition",
+        "monitor",
+        "run plan",
+        "sunday",
+    ),
+    "CODEX_PACKET_ADVISOR": (
+        "codex",
+        "supreme board",
+        "packet",
+        "ask codex",
+        "fix",
+        "code issue",
+    ),
+    "TRADING_SYSTEMS_AUDITOR": (
+        "audit",
+        "readiness",
+        "blocked",
+        "broker truth",
+        "market truth",
+        "netedge",
+        "oms",
+        "reconciliation",
+        "stale",
+        "mutation",
+        "safety gate",
+    ),
+    "QUANT_ENGINEER": (
+        "architecture",
+        "data flow",
+        "strategy module",
+        "execution plumbing",
+        "system behavior",
+        "engine",
+        "wiring",
+    ),
+    "QUANT_ADVISOR": (
+        "edge",
+        "alpha",
+        "strategy",
+        "statistically",
+        "overfit",
+        "noise",
+        "market structure",
+        "signal",
+        "regime",
+        "hypothesis",
+        "invalidate",
+        "assumption",
+    ),
+    "OPERATOR_GUIDE": (
+        "explain this page",
+        "what do i do next",
+        "what page",
+        "what does this button",
+        "warning mean",
+        "not a coder",
+        "how do i",
+    ),
+}
+
 
 def quant_persona_summary() -> dict[str, Any]:
     return {
         "identity": AI_QUANT_IDENTITY,
+        "system_policy": AI_SYSTEM_POLICY,
         "roles": list(AI_QUANT_ROLES),
         "mission": [
             "find edge",
@@ -118,27 +221,70 @@ def quant_persona_summary() -> dict[str, Any]:
     }
 
 
-def classify_quant_prompt(prompt: str) -> dict[str, Any]:
+def classify_ai_mode(prompt: str, *, page_id: str | None = None) -> str:
+    lowered = str(prompt or "").strip().lower()
+    page = str(page_id or "").strip().lower()
+    for mode, keywords in MODE_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return mode
+    if page in {"positions", "portfolio"}:
+        return "PORTFOLIO_REVIEW"
+    if page in {"command", "activity"}:
+        return "RUN_PLANNER" if "paper" in lowered or "run" in lowered else "OPERATOR_GUIDE"
+    if page in {"providers", "diagnostics"}:
+        return "SETUP_HELP"
+    if page in {"ai", "system"}:
+        return "CODEX_PACKET_ADVISOR" if "codex" in lowered or "packet" in lowered else "OPERATOR_GUIDE"
+    if page in {"risk", "pnl", "decision", "research"}:
+        return "TRADING_SYSTEMS_AUDITOR" if "audit" in lowered or "readiness" in lowered else "QUANT_ADVISOR"
+    return "OPERATOR_GUIDE" if lowered in {"", "explain this page", "what do i do next"} else "QUANT_ADVISOR"
+
+
+def evidence_level_for_mode(mode: str) -> str:
+    if mode == "PORTFOLIO_REVIEW":
+        return "BROKER_CONFIRMED"
+    if mode in {"QUANT_ADVISOR", "RUN_PLANNER", "CODEX_PACKET_ADVISOR"}:
+        return "MISSING_EVIDENCE"
+    if mode in {"TRADING_SYSTEMS_AUDITOR", "QUANT_ENGINEER", "SETUP_HELP", "OPERATOR_GUIDE"}:
+        return "SYSTEM_STATE"
+    return "UNKNOWN"
+
+
+def classify_quant_prompt(prompt: str, *, page_id: str | None = None) -> dict[str, Any]:
     text = str(prompt or "").strip()
     lowered = text.lower()
     forbidden = [term for term in FORBIDDEN_TERMS if term in lowered]
-    in_domain = any(term in lowered for term in DOMAIN_TERMS) or not text
+    operator_phrases = ("explain this page", "what do i do next", "what page", "button", "warning", "where do i enter")
+    mode_terms = tuple(term for keywords in MODE_KEYWORDS.values() for term in keywords)
+    in_domain = (
+        any(term in lowered for term in DOMAIN_TERMS)
+        or any(term in lowered for term in operator_phrases)
+        or any(term in lowered for term in mode_terms)
+        or not text
+    )
+    mode = "UNSAFE_REQUEST_REFUSAL" if forbidden else classify_ai_mode(text, page_id=page_id)
     if forbidden:
         return {
             "allowed": False,
             "reason_code": "FORBIDDEN_TRADING_OR_SECRET_REQUEST",
             "matched_terms": forbidden,
+            "mode": mode,
+            "evidence_level": "SYSTEM_STATE",
         }
     if not in_domain:
         return {
             "allowed": False,
             "reason_code": "NON_TRADING_GENERALIST_PROMPT",
             "matched_terms": [],
+            "mode": "OPERATOR_GUIDE",
+            "evidence_level": "UNKNOWN",
         }
     return {
         "allowed": True,
         "reason_code": "QUANT_RESEARCH_PROMPT_ACCEPTED",
         "matched_terms": [],
+        "mode": mode,
+        "evidence_level": evidence_level_for_mode(mode),
     }
 
 

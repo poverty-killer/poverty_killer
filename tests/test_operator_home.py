@@ -15,6 +15,10 @@ def test_command_center_home_contains_operator_answer_sections():
     text = _app_text()
 
     required_sections = [
+        "Portfolio Home",
+        "What You Own Right Now",
+        "Next Useful Action",
+        "Operator Shortcuts",
         "Launch Readiness",
         "PAPER Launch Control",
         "Portfolio Snapshot",
@@ -41,7 +45,10 @@ def test_home_paper_launch_control_requires_all_safety_confirmations():
 
     assert "data-paper-watchlist" in text
     assert "BTC/USD\", \"ETH/USD\", \"SOL/USD" in text
-    assert "[300, 900, 1800, 3600]" in text
+    assert "data-paper-duration-amount" in text
+    assert "data-paper-duration-unit" in text
+    assert "7 days" in text
+    assert "604800" in text
     assert "data-paper-confirm-paper" in text
     assert "data-paper-confirm-live-locked" in text
     assert "data-paper-confirm-real-money-blocked" in text
@@ -74,6 +81,10 @@ def test_home_ai_advisor_is_visible_and_uses_safe_ai_ask_endpoint():
     assert "data-home-ai-clear" in text
     assert "data-home-ai-prompt" in text
     assert "Ask AI Quant Advisor" in text
+    assert "Provider mode:" in text
+    assert "Model:" in text
+    assert "Quality:" in text
+    assert "High-reasoning model not configured. Quant/governance answers are limited." in text
     assert "/operator/ai/ask" in text
     assert "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" in text
     assert "can_execute=false" in text
@@ -88,6 +99,8 @@ def test_home_control_inventory_covers_required_pages_and_forbidden_controls_abs
     required_inventory_fragments = [
         '["command", "paper_start"',
         '["command", "home_ai_ask"',
+        '["positions", "open_run_paper"',
+        '["positions", "open_keys_providers"',
         '["activity", "paper_stop"',
         '["positions", "positions_preview_table"',
         '["positions", "open_orders_preview_table"',
@@ -115,7 +128,7 @@ def test_operator_home_contract_is_recorded():
     text = CONTRACTS_JSON.read_text(encoding="utf-8")
 
     assert '"operator_home_contract"' in text
-    assert '"first_screen": "Command Center"' in text
+    assert '"first_screen": "Portfolio Home"' in text
     assert '"home_ai_endpoint": "/operator/ai/ask"' in text
     assert '"paper_start_endpoint": "/operator/intent/paper/start"' in text
     assert '"fake_broker_truth_allowed": false' in text

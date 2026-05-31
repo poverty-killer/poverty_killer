@@ -516,6 +516,15 @@ textarea {
   border-color: rgba(6, 182, 212, 0.28);
 }
 
+.portfolio-primary {
+  border-color: rgba(34, 197, 94, 0.32);
+  background: #101720;
+}
+
+.operator-flow-actions {
+  margin-top: 8px;
+}
+
 .kv {
   display: grid;
   grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1fr);
@@ -671,6 +680,13 @@ textarea {
   color: #cbd5e1;
 }
 
+.cardless-model-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
 .ai-chief-body {
   display: grid;
   gap: 12px;
@@ -705,11 +721,21 @@ textarea {
 
 .ai-context-details {
   margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #0d1118;
 }
 
 .ai-context-details summary {
   color: var(--cyan);
   cursor: pointer;
+  min-height: 28px;
+  font-weight: 600;
+}
+
+.ai-context-details[open] summary {
+  margin-bottom: 10px;
 }
 
 .ai-context-json {

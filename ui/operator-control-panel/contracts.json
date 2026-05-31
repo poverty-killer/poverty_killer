@@ -42,6 +42,12 @@
       "MOCK_DATA"
     ],
     "quick_prompts": [
+      "Explain this page.",
+      "What do I do next?",
+      "Why is PAPER run blocked?",
+      "Explain my positions.",
+      "Plan my PAPER run.",
+      "Audit readiness.",
       "Where is the edge?",
       "What is the weakest assumption?",
       "Is this signal statistically believable?",
@@ -53,6 +59,23 @@
       "Compare latest run to expected behavior.",
       "Draft a Codex packet.",
       "Review provider/data readiness."
+    ],
+    "response_contract_fields": [
+      "answer",
+      "mode",
+      "provider_mode",
+      "model_name",
+      "model_quality",
+      "reasoning_policy",
+      "model_suitable_for_governance",
+      "evidence_level",
+      "known_facts",
+      "unknowns",
+      "next_step_label",
+      "next_step_page",
+      "next_step_control_id",
+      "needs_codex_packet",
+      "can_execute"
     ],
     "forbidden_ai_authority": [
       "trade",
@@ -67,14 +90,35 @@
     ]
   },
   "ai_quant_research_chief": {
-    "identity": "AI Quant Research Chief / Trading Edge Advisor",
+    "identity": "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide",
     "roles": [
-      "Quant Research Chief",
-      "Strategy Decoder",
-      "Risk/Skeptic Officer",
-      "Execution/TCA Auditor",
-      "Paper Experiment Designer",
-      "Codex Packet Drafter"
+      "Chief Quant Advisor",
+      "Quant Engineer",
+      "Trading Systems Auditor",
+      "Operator Guide",
+      "Run Planner",
+      "Portfolio Reviewer",
+      "Codex Packet Advisor"
+    ],
+    "model_policy": {
+      "preferred_openai": ["GPT-5.5 Pro", "GPT-5.5 Thinking"],
+      "preferred_anthropic": ["Claude Opus 4.7", "strongest configured Claude Opus"],
+      "required_quality_for_quant_governance": "HIGH_REASONING",
+      "fallback_label": "DETERMINISTIC FALLBACK - not a full AI quant reasoning response",
+      "no_silent_downgrade": true,
+      "model_quality_labels": ["HIGH_REASONING", "STANDARD", "LOW_REASONING", "FALLBACK_ONLY", "UNKNOWN"],
+      "reasoning_policy_labels": ["HIGHEST_AVAILABLE_REQUIRED", "LOWER_MODEL_WARNING", "FALLBACK_ONLY_LIMITED"]
+    },
+    "expert_modes": [
+      "QUANT_ADVISOR",
+      "QUANT_ENGINEER",
+      "TRADING_SYSTEMS_AUDITOR",
+      "OPERATOR_GUIDE",
+      "RUN_PLANNER",
+      "PORTFOLIO_REVIEW",
+      "SETUP_HELP",
+      "CODEX_PACKET_ADVISOR",
+      "UNSAFE_REQUEST_REFUSAL"
     ],
     "domain_scope": "trading_edge_execution_quality_risk_validation_operator_readiness",
     "general_chatbot": false,

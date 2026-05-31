@@ -29,6 +29,16 @@ def test_ai_ask_returns_advisory_fallback_and_cannot_execute(tmp_path):
 
     assert payload["status"] == "ANSWERED_FALLBACK"
     assert payload["response_source"] == "MOCK_MODE_DETERMINISTIC"
+    assert payload["provider_mode"] == "DETERMINISTIC_FALLBACK"
+    assert payload["model_name"] is None
+    assert payload["model_quality"] == "FALLBACK_ONLY"
+    assert payload["reasoning_policy"] == "FALLBACK_ONLY_LIMITED"
+    assert payload["model_suitable_for_governance"] is False
+    assert payload["mode"] == "QUANT_ADVISOR"
+    assert payload["evidence_level"] == "MISSING_EVIDENCE"
+    assert isinstance(payload["known_facts"], list)
+    assert isinstance(payload["unknowns"], list)
+    assert payload["next_step_page"]
     assert payload["can_execute"] is False
     assert payload["broker_call_occurred"] is False
     assert payload["trading_mutation_occurred"] is False
@@ -49,8 +59,42 @@ def test_ai_ask_refuses_live_or_secret_request(tmp_path):
 
     assert payload["status"] == "REFUSED"
     assert payload["refusal_reason"] == "FORBIDDEN_TRADING_OR_SECRET_REQUEST"
+    assert payload["mode"] == "UNSAFE_REQUEST_REFUSAL"
+    assert payload["provider_mode"] in {"DETERMINISTIC_FALLBACK", "NOT_CONFIGURED"}
     assert payload["can_execute"] is False
     assert "cannot trade" in payload["response"]
+
+
+def test_ai_ask_explains_blocked_paper_run_with_next_step(tmp_path):
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    )
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {"question": "Why is PAPER run blocked?", "page_context": {"page_id": "command", "page_title": "Run PAPER"}}
+    )
+
+    assert payload["mode"] == "RUN_PLANNER"
+    assert payload["next_step_page"] == "providers"
+    assert payload["next_step_control_id"] == "credential_save_alpaca_paper"
+    assert "alpaca_paper_credentials" in " ".join(payload["unknowns"]) or "Alpaca" in payload["next_step_label"]
+    assert payload["broker_call_occurred"] is False
+
+
+def test_ai_ask_portfolio_review_uses_safe_context_without_broker_call(tmp_path):
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    )
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {"question": "What do I own right now?", "page_context": {"page_id": "positions", "page_title": "Portfolio Home"}}
+    )
+
+    assert payload["mode"] == "PORTFOLIO_REVIEW"
+    assert payload["evidence_level"] == "BROKER_CONFIRMED"
+    assert payload["next_step_page"] in {"positions", "providers"}
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
 
 
 def test_ai_ask_does_not_expose_local_secrets_or_fingerprints(tmp_path):
@@ -60,6 +104,7 @@ def test_ai_ask_does_not_expose_local_secrets_or_fingerprints(tmp_path):
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
         provider_env={},
         credential_store=store,
+        ai_config=AIChiefConfig(provider="disabled", enabled=False),
     )
     app = create_operator_app(provider=provider)
 
