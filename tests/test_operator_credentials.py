@@ -42,6 +42,102 @@ def test_credentials_save_and_get_redacts_raw_values(tmp_path):
     assert summary["raw_secret_values_included"] is False
 
 
+def test_alpaca_paper_save_valid_shaped_values_succeeds_with_schema_diagnostics(tmp_path):
+    store = _store(tmp_path)
+
+    saved = store.save_provider(
+        "alpaca_paper",
+        {
+            "APCA_API_KEY_ID": "PKFAKEALPACAKEY123",
+            "APCA_API_SECRET_KEY": "fake-alpaca-secret-value-123",
+            "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+        },
+    )
+
+    assert saved["status"] == "SAVED"
+    assert saved["provider_id"] == "alpaca_paper"
+    assert saved["required_fields"] == ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"]
+    assert saved["received_field_presence"] == {
+        "APCA_API_KEY_ID": True,
+        "APCA_API_SECRET_KEY": True,
+        "APCA_API_BASE_URL": True,
+    }
+    assert saved["vault_parent_writable"] is True
+    assert saved["summary"]["configured"] is True
+    assert "fake-alpaca-secret-value" not in str(saved)
+    assert "PKFAKEALPACAKEY" not in str(saved)
+
+
+def test_alpaca_paper_missing_api_key_refuses_with_exact_reason(tmp_path):
+    store = _store(tmp_path)
+
+    result = store.save_provider(
+        "alpaca_paper",
+        {"APCA_API_SECRET_KEY": "fake-alpaca-secret-value-123"},
+    )
+
+    assert result["status"] == "REFUSED"
+    assert result["reason_code"] == "MISSING_REQUIRED_CREDENTIAL_FIELDS"
+    assert result["missing_fields"] == ["APCA_API_KEY_ID"]
+    assert result["received_field_presence"]["APCA_API_KEY_ID"] is False
+    assert result["received_field_presence"]["APCA_API_SECRET_KEY"] is True
+    assert "fake-alpaca-secret-value" not in str(result)
+
+
+def test_alpaca_paper_missing_secret_refuses_with_exact_reason(tmp_path):
+    store = _store(tmp_path)
+
+    result = store.save_provider(
+        "alpaca_paper",
+        {"APCA_API_KEY_ID": "PKFAKEALPACAKEY123"},
+    )
+
+    assert result["status"] == "REFUSED"
+    assert result["reason_code"] == "MISSING_REQUIRED_CREDENTIAL_FIELDS"
+    assert result["missing_fields"] == ["APCA_API_SECRET_KEY"]
+    assert result["received_field_presence"]["APCA_API_KEY_ID"] is True
+    assert result["received_field_presence"]["APCA_API_SECRET_KEY"] is False
+    assert "PKFAKEALPACAKEY" not in str(result)
+
+
+def test_alpaca_base_url_defaults_to_paper_endpoint_when_blank(tmp_path):
+    store = _store(tmp_path)
+
+    saved = store.save_provider(
+        "alpaca_paper",
+        {
+            "APCA_API_KEY_ID": "PKFAKEALPACAKEY123",
+            "APCA_API_SECRET_KEY": "fake-alpaca-secret-value-123",
+            "APCA_API_BASE_URL": "",
+        },
+    )
+    summary = store.provider_summary("alpaca_paper", {})
+    base_row = next(row for row in summary["fields"] if row["name"] == "APCA_API_BASE_URL")
+
+    assert saved["status"] == "SAVED"
+    assert saved["received_field_presence"]["APCA_API_BASE_URL"] is False
+    assert base_row["source"] == "LOCAL_SECRET_PRESENT"
+    assert base_row["configured"] is True
+
+
+def test_wrong_provider_id_refuses_with_reason_and_accepted_ids(tmp_path):
+    store = _store(tmp_path)
+
+    result = store.save_provider(
+        "alpaca_real_money",
+        {
+            "APCA_API_KEY_ID": "PKFAKEALPACAKEY123",
+            "APCA_API_SECRET_KEY": "fake-alpaca-secret-value-123",
+        },
+    )
+
+    assert result["status"] == "REFUSED"
+    assert result["reason_code"] == "UNKNOWN_PROVIDER"
+    assert "alpaca_paper" in result["accepted_provider_ids"]
+    assert result["received_field_presence"] == {}
+    assert "fake-alpaca-secret-value" not in str(result)
+
+
 def test_credential_endpoints_return_only_fingerprints_and_delete_safely(tmp_path):
     store = _store(tmp_path)
     runtime_config = OperatorRuntimeConfig.from_env({}, repo_root=tmp_path)
@@ -124,6 +220,16 @@ def test_alpaca_save_refreshes_credentials_readiness_launch_and_diagnostics(tmp_
     assert launch["alpaca_paper_credentials_configured"] is True
     assert "alpaca_paper_credentials" not in launch["reason_codes"]
     assert diagnostics["vault_file_exists"] is True
+    assert diagnostics["vault_writable"] is True
+    assert "alpaca_paper" in diagnostics["accepted_provider_ids"]
+    assert diagnostics["received_provider_id_last_save"] == "alpaca_paper"
+    assert diagnostics["last_save_status"] == "SAVED"
+    assert diagnostics["last_save_refusal_reason"] is None
+    assert diagnostics["last_save_received_field_presence"] == {
+        "APCA_API_KEY_ID": True,
+        "APCA_API_SECRET_KEY": True,
+        "APCA_API_BASE_URL": True,
+    }
     assert diagnostics["providers"]["alpaca_paper"]["required_field_names_present"] == {
         "APCA_API_KEY_ID": True,
         "APCA_API_SECRET_KEY": True,
@@ -132,6 +238,36 @@ def test_alpaca_save_refreshes_credentials_readiness_launch_and_diagnostics(tmp_
     assert "alpaca-local-secret" not in text
     assert "alpaca-local-key" not in text
     assert diagnostics["secrets_values_exposed"] is False
+
+
+def test_credential_diagnostics_records_last_refusal_reason_without_raw_values(tmp_path):
+    store = _store(tmp_path)
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    app = create_operator_app(provider=provider)
+
+    refused = _endpoint(app, "/operator/credentials/save", "POST")(
+        {
+            "provider_id": "alpaca_paper",
+            "credentials": {"APCA_API_KEY_ID": "PKFAKEALPACAKEY123"},
+        }
+    )
+    diagnostics = _endpoint(app, "/operator/credentials/diagnostics")()
+    text = str(refused) + str(diagnostics)
+
+    assert refused["status"] == "REFUSED"
+    assert refused["reason_code"] == "MISSING_REQUIRED_CREDENTIAL_FIELDS"
+    assert diagnostics["received_provider_id_last_save"] == "alpaca_paper"
+    assert diagnostics["last_save_status"] == "REFUSED"
+    assert diagnostics["last_save_refusal_reason"] == "MISSING_REQUIRED_CREDENTIAL_FIELDS"
+    assert diagnostics["last_save_missing_fields"] == ["APCA_API_SECRET_KEY"]
+    assert diagnostics["last_save_received_field_presence"]["APCA_API_KEY_ID"] is True
+    assert diagnostics["last_save_received_field_presence"]["APCA_API_SECRET_KEY"] is False
+    assert "PKFAKEALPACAKEY" not in text
+    assert diagnostics["raw_secret_values_included"] is False
 
 
 def test_env_credentials_override_local_credentials_safely(tmp_path):

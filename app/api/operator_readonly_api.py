@@ -36,6 +36,7 @@ from app.operator_credentials.store import (
     PROVIDER_CREDENTIAL_FIELDS,
     LocalCredentialStore,
     default_credential_store_path,
+    normalize_provider_id,
 )
 from app.operator_intelligence.action_center import build_action_center
 from app.operator_intelligence.archive import RunArchive
@@ -223,6 +224,7 @@ class OperatorSnapshotProvider:
         )
         self.research_registry = research_registry or ResearchRegistry()
         self.historical_tests_service = historical_tests or HistoricalTestService()
+        self.last_credential_save_diagnostic: dict[str, Any] | None = None
 
     def _paper_process_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
         effective_env = env if env is not None else self.provider_env
@@ -588,13 +590,26 @@ class OperatorSnapshotProvider:
         raw = self.credential_store.load_raw()
         raw_providers = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}
         provider_ids_present = sorted(str(provider_id) for provider_id in raw_providers)
+        vault_status = self.credential_store.vault_status()
+        last_save = self.last_credential_save_diagnostic or {}
         diagnostics: dict[str, Any] = {
             "source": "OPERATOR_CREDENTIAL_DIAGNOSTICS",
             "backend_cwd": os.getcwd(),
             "backend_repo_root": str(self.runtime_config.repo_root),
             "credential_vault_relative_path": DEFAULT_RELATIVE_STORE_PATH,
-            "vault_file_exists": self.credential_store.exists(),
+            "vault_file_exists": vault_status["vault_file_exists"],
+            "vault_writable": vault_status["vault_parent_writable"],
+            "vault_parent_exists": vault_status["vault_parent_exists"],
+            "vault_parent_writable": vault_status["vault_parent_writable"],
             "provider_ids_present": provider_ids_present,
+            "accepted_provider_ids": sorted(PROVIDER_CREDENTIAL_FIELDS),
+            "received_provider_id_last_save": last_save.get("received_provider_id"),
+            "normalized_provider_id_last_save": last_save.get("provider_id"),
+            "last_save_status": last_save.get("status"),
+            "last_save_refusal_reason": last_save.get("reason_code"),
+            "last_save_missing_fields": last_save.get("missing_fields") or [],
+            "last_save_received_field_names": last_save.get("received_field_names") or [],
+            "last_save_received_field_presence": last_save.get("received_field_presence") or {},
             "providers": {},
             "secrets_values_exposed": False,
             "raw_secret_values_included": False,
@@ -648,9 +663,10 @@ class OperatorSnapshotProvider:
 
     def credentials_save(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = payload or {}
-        provider_id = str(body.get("provider_id") or "").strip().lower()
+        received_provider_id = str(body.get("provider_id") or "").strip()
+        provider_id = normalize_provider_id(received_provider_id)
         credentials = body.get("credentials") if isinstance(body.get("credentials"), dict) else {}
-        result = self.credential_store.save_provider(provider_id, credentials)
+        result = self.credential_store.save_provider(received_provider_id, credentials)
         self._refresh_provider_env()
         result.update(
             {
@@ -660,6 +676,17 @@ class OperatorSnapshotProvider:
                 "real_money_enabled": False,
             }
         )
+        self.last_credential_save_diagnostic = {
+            "received_provider_id": received_provider_id,
+            "provider_id": result.get("provider_id") or provider_id,
+            "status": result.get("status"),
+            "reason_code": result.get("reason_code"),
+            "missing_fields": result.get("missing_fields") or [],
+            "received_field_names": result.get("received_field_names") or [],
+            "received_field_presence": result.get("received_field_presence") or {},
+            "vault_writable": result.get("vault_parent_writable"),
+            "accepted_provider_ids": result.get("accepted_provider_ids") or sorted(PROVIDER_CREDENTIAL_FIELDS),
+        }
         return result
 
     def credentials_validate_readonly(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:

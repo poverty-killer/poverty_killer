@@ -49,6 +49,17 @@ PROVIDER_CREDENTIAL_FIELDS: dict[str, dict[str, object]] = {
     },
 }
 
+PROVIDER_ID_ALIASES = {
+    "alpaca": "alpaca_paper",
+    "alpaca-paper": "alpaca_paper",
+    "alpaca paper": "alpaca_paper",
+    "alpaca_paper_broker": "alpaca_paper",
+    "alpaca-paper-broker": "alpaca_paper",
+    "alpaca broker": "alpaca_paper",
+    "alpaca-news": "alpaca_news",
+    "alpaca news": "alpaca_news",
+}
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -66,15 +77,22 @@ def fingerprint_secret(value: str | None) -> str | None:
     return f"sha256:{digest}:len={len(text)}"
 
 
+def normalize_provider_id(provider_id: str) -> str:
+    raw = str(provider_id or "").strip()
+    normalized = raw.replace("-", "_").replace(" ", "_").lower()
+    return PROVIDER_ID_ALIASES.get(raw.lower(), PROVIDER_ID_ALIASES.get(normalized, normalized))
+
+
 def _provider_fields(provider_id: str) -> dict[str, object]:
-    fields = PROVIDER_CREDENTIAL_FIELDS.get(str(provider_id))
+    fields = PROVIDER_CREDENTIAL_FIELDS.get(normalize_provider_id(provider_id))
     if fields is None:
         raise ValueError("UNKNOWN_PROVIDER")
     return fields
 
 
 def _clean_credentials(provider_id: str, credentials: Mapping[str, Any]) -> dict[str, str]:
-    fields = _provider_fields(provider_id)
+    provider = normalize_provider_id(provider_id)
+    fields = _provider_fields(provider)
     allowed = set(fields["required"]) | set(fields["optional"])  # type: ignore[arg-type]
     defaults = dict(fields.get("defaults") or {})
     clean: dict[str, str] = {}
@@ -83,9 +101,22 @@ def _clean_credentials(provider_id: str, credentials: Mapping[str, Any]) -> dict
         value = str(raw or "").strip()
         if value:
             clean[name] = value
-    if provider_id in {"alpaca_paper", "alpaca_news"} and "APCA_API_BASE_URL" not in clean:
+    if provider in {"alpaca_paper", "alpaca_news"} and "APCA_API_BASE_URL" not in clean:
         clean["APCA_API_BASE_URL"] = ALPACA_PAPER_ENDPOINT
     return clean
+
+
+def credential_field_presence(provider_id: str, credentials: Mapping[str, Any]) -> dict[str, bool]:
+    provider = normalize_provider_id(provider_id)
+    try:
+        fields = _provider_fields(provider)
+    except ValueError:
+        return {}
+    ordered = [str(name) for name in (*fields["required"], *fields["optional"])]  # type: ignore[index]
+    return {
+        name: bool(str(credentials.get(name, "") or "").strip())
+        for name in ordered
+    }
 
 
 @dataclass(frozen=True)
@@ -113,6 +144,32 @@ class LocalCredentialStore:
     def exists(self) -> bool:
         return self.path.exists()
 
+    def vault_status(self) -> dict[str, Any]:
+        parent = self.path.parent
+        nearest_existing = parent
+        while not nearest_existing.exists() and nearest_existing.parent != nearest_existing:
+            nearest_existing = nearest_existing.parent
+        return {
+            "vault_path": str(self.path),
+            "vault_file_exists": self.path.exists(),
+            "vault_parent_exists": parent.exists(),
+            "vault_parent_writable": bool(
+                (parent.exists() and os.access(parent, os.W_OK))
+                or (nearest_existing.exists() and os.access(nearest_existing, os.W_OK))
+            ),
+        }
+
+    def credential_schema(self, provider_id: str) -> dict[str, Any]:
+        provider = normalize_provider_id(provider_id)
+        fields = _provider_fields(provider)
+        return {
+            "provider_id": provider,
+            "display_name": fields["display_name"],
+            "required_fields": [str(name) for name in fields["required"]],  # type: ignore[index]
+            "optional_fields": [str(name) for name in fields["optional"]],  # type: ignore[index]
+            "defaulted_fields": sorted(str(name) for name in dict(fields.get("defaults") or {})),
+        }
+
     def load_raw(self) -> dict[str, Any]:
         if not self.path.exists():
             return {"version": STORE_VERSION, "providers": {}}
@@ -128,58 +185,81 @@ class LocalCredentialStore:
         return {"version": STORE_VERSION, "providers": providers}
 
     def save_provider(self, provider_id: str, credentials: Mapping[str, Any]) -> dict[str, Any]:
-        provider = str(provider_id).strip().lower()
+        provider = normalize_provider_id(provider_id)
+        received_field_names = sorted(str(key) for key in credentials)
+        base_result: dict[str, Any] = {
+            "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",
+            "provider_id": provider,
+            "received_provider_id": str(provider_id or "").strip(),
+            "accepted_provider_ids": sorted(PROVIDER_CREDENTIAL_FIELDS),
+            "received_field_names": received_field_names,
+            "secrets_values_exposed": False,
+            "raw_secret_values_included": False,
+            **self.vault_status(),
+        }
         try:
             fields = _provider_fields(provider)
         except ValueError:
             return {
-                "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",
-                "provider_id": provider,
+                **base_result,
                 "status": "REFUSED",
                 "reason_code": "UNKNOWN_PROVIDER",
+                "required_fields": [],
+                "optional_fields": [],
+                "received_field_presence": {},
                 "saved": False,
-                "secrets_values_exposed": False,
-                "raw_secret_values_included": False,
             }
+        base_result.update(
+            {
+                "required_fields": [str(name) for name in fields["required"]],  # type: ignore[index]
+                "optional_fields": [str(name) for name in fields["optional"]],  # type: ignore[index]
+                "received_field_presence": credential_field_presence(provider, credentials),
+            }
+        )
         clean = _clean_credentials(provider, credentials)
         missing = [name for name in fields["required"] if not clean.get(str(name))]  # type: ignore[index]
         if missing:
             return {
-                "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",
-                "provider_id": provider,
+                **base_result,
                 "status": "REFUSED",
                 "reason_code": "MISSING_REQUIRED_CREDENTIAL_FIELDS",
                 "missing_fields": missing,
                 "saved": False,
-                "secrets_values_exposed": False,
-                "raw_secret_values_included": False,
             }
 
-        data = self.load_raw()
-        providers = dict(data.get("providers") or {})
-        providers[provider] = {
-            "provider_id": provider,
-            "updated_at": utc_now_iso(),
-            "values": clean,
-        }
-        payload = {"version": STORE_VERSION, "providers": providers}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp_path, self.path)
+        try:
+            data = self.load_raw()
+            providers = dict(data.get("providers") or {})
+            providers[provider] = {
+                "provider_id": provider,
+                "updated_at": utc_now_iso(),
+                "values": clean,
+            }
+            payload = {"version": STORE_VERSION, "providers": providers}
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp_path, self.path)
+        except OSError as exc:
+            return {
+                **base_result,
+                **self.vault_status(),
+                "status": "REFUSED",
+                "reason_code": "LOCAL_CREDENTIAL_STORE_WRITE_FAILED",
+                "error_type": type(exc).__name__,
+                "saved": False,
+            }
         return {
-            "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",
-            "provider_id": provider,
+            **base_result,
+            **self.vault_status(),
             "status": "SAVED",
             "saved": True,
             "configured": True,
             "summary": self.provider_summary(provider),
-            "secrets_values_exposed": False,
-            "raw_secret_values_included": False,
         }
 
     def delete_provider(self, provider_id: str) -> dict[str, Any]:
-        provider = str(provider_id).strip().lower()
+        provider = normalize_provider_id(provider_id)
         data = self.load_raw()
         providers = dict(data.get("providers") or {})
         existed = provider in providers
@@ -198,7 +278,7 @@ class LocalCredentialStore:
         }
 
     def provider_values(self, provider_id: str) -> dict[str, str]:
-        provider = str(provider_id).strip().lower()
+        provider = normalize_provider_id(provider_id)
         data = self.load_raw()
         row = (data.get("providers") or {}).get(provider)
         if not isinstance(row, dict):
@@ -224,7 +304,7 @@ class LocalCredentialStore:
         return effective
 
     def provider_summary(self, provider_id: str, process_env: Mapping[str, str] | None = None) -> dict[str, Any]:
-        provider = str(provider_id).strip().lower()
+        provider = normalize_provider_id(provider_id)
         try:
             fields = _provider_fields(provider)
         except ValueError:
@@ -299,7 +379,7 @@ class LocalCredentialStore:
         }
 
     def validate_readonly(self, provider_id: str, process_env: Mapping[str, str] | None = None) -> dict[str, Any]:
-        provider = str(provider_id).strip().lower()
+        provider = normalize_provider_id(provider_id)
         if provider not in PROVIDER_CREDENTIAL_FIELDS:
             return {
                 "source": "OPERATOR_LOCAL_CREDENTIAL_STORE",

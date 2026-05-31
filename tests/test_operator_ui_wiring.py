@@ -29,8 +29,11 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "PAPER Launch Control" in text
     assert "data-paper-watchlist" in text
     assert "data-paper-duration" in text
+    assert "data-paper-duration-amount" in text
+    assert "data-paper-duration-unit" in text
     assert "data-paper-confirm-no-manual-trades" in text
-    assert "[300, 900, 1800, 3600]" in text
+    assert "7 days" in text
+    assert "604800" in text
     assert "/operator/intent/paper/start" in text
     assert "Start Bounded PAPER Run" in text
     assert "Portfolio Snapshot" in text
@@ -41,7 +44,7 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
 def test_historical_test_control_is_visible_and_honest():
     text = _app_text()
 
-    assert "[\"historical\", \"Historical Tests\"]" in text
+    assert "[\"historical\", \"4-Month Test\"]" in text
     assert "Historical Alpaca Test" in text
     assert "data-historical-preset" in text
     assert "last_4_months" in text
@@ -59,6 +62,7 @@ def test_ui_control_inventory_declares_statuses_and_no_broken_defaults():
     assert "NO_BROKEN_CONTROLS_DECLARED" in text
     assert '["global", "ask_quant_chief"' in text
     assert '["command", "home_ai_ask"' in text
+    assert '["positions", "open_run_paper"' in text
     assert '["positions", "open_orders_preview_table"' in text
 
 
@@ -71,6 +75,33 @@ def test_provider_setup_uses_beginner_safe_credential_labels():
     assert "Local store" not in text
     assert "validation passed" in text
     assert "validation failed" in text
+    assert "alpaca_paper" in text
+    assert "APCA_API_KEY_ID" in text
+    assert "APCA_API_SECRET_KEY" in text
+    assert "APCA_API_BASE_URL" in text
+    assert "/operator/credentials/save" in text
+    assert "reason=${reason}" in text
+    assert "received_field_presence" in text
+
+
+def test_credential_save_captures_inputs_before_saving_rerender():
+    text = _app_text()
+    start = text.index("async function handleCredentialAction")
+    capture = text.index("pendingCredentials = credentialFormValues(providerId)", start)
+    saving_status = text.index("credentialActionStatus[providerId] = `${action === \"save\" ? \"saving\"", start)
+    saving_render = text.index("renderScreens(activeScreenId);", saving_status)
+
+    assert capture < saving_status < saving_render
+    assert "credentials: pendingCredentials" in text
+
+
+def test_evidence_graph_timeout_is_optional_for_provider_setup():
+    text = _app_text()
+
+    assert "OPTIONAL_BACKEND_ENDPOINTS" in text
+    assert '"/operator/research/evidence-graph"' in text
+    assert "EVIDENCE_GRAPH_DEGRADED" in text
+    assert "Research OS evidence graph degraded; credential setup remains usable." in text
 
 
 def test_visible_mutating_controls_are_governed_or_disabled_not_direct_trades():
