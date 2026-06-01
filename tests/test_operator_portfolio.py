@@ -183,6 +183,28 @@ def test_operator_portfolio_refreshes_local_vault_saved_after_backend_start(tmp_
     assert all(method == "GET" for method, _path in client.calls)
 
 
+def test_broker_confirmed_portfolio_and_launch_readiness_share_alpaca_truth(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider("alpaca_news", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    client = FakeReadOnlyClient(_broker_payloads())
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+            provider_env={},
+            credential_store=store,
+            portfolio_client=client,
+        )
+    )
+
+    portfolio = _endpoint(app, "/operator/portfolio")()
+    launch = _endpoint(app, "/operator/launch-readiness")()
+
+    assert portfolio["status"] == "BROKER_CONFIRMED"
+    assert portfolio["broker_read_occurred"] is True
+    assert launch["alpaca_paper_credentials_configured"] is True
+    assert "alpaca_paper_credentials" not in launch["reason_codes"]
+
+
 def test_operator_portfolio_uses_local_vault_and_reports_broker_failure_not_missing_credentials(tmp_path):
     class FailingReadOnlyClient:
         def __init__(self) -> None:

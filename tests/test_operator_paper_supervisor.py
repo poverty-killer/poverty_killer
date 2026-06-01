@@ -53,9 +53,21 @@ def _valid_request() -> dict:
     }
 
 
+def _paper_env() -> dict[str, str]:
+    return {
+        "APCA_API_KEY_ID": "test-paper-key",
+        "APCA_API_SECRET_KEY": "test-paper-secret",
+        "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+    }
+
+
+def _supervisor_config(runner: FakeRunner, **overrides) -> PaperSupervisorConfig:
+    return PaperSupervisorConfig(repo_root=runner.repo_root, process_env=_paper_env(), **overrides)
+
+
 def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
 
     result = supervisor.start_paper(_valid_request())
 
@@ -80,7 +92,7 @@ def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
 
 def test_supervisor_rejects_duplicate_active_run():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
     first = supervisor.start_paper(_valid_request())
     second = supervisor.start_paper(_valid_request())
 
@@ -106,21 +118,32 @@ def test_supervisor_rejects_live_real_money_unknown_profile_and_watchlist():
     assert runner.started_specs == []
 
 
-def test_supervisor_rejects_missing_approval_and_unsupported_duration():
+def test_supervisor_rejects_missing_approval_and_out_of_range_duration():
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
 
     missing_approval = dict(_valid_request(), approve_autonomous_paper=False)
-    duration = dict(_valid_request(), duration_seconds=999)
+    duration = dict(_valid_request(), duration_seconds=604801)
 
     assert supervisor.start_paper(missing_approval)["reason_code"] == "AUTONOMOUS_PAPER_APPROVAL_REQUIRED"
-    assert supervisor.start_paper(duration)["reason_code"] == "UNSUPPORTED_DURATION_SECONDS"
+    assert supervisor.start_paper(duration)["reason_code"] == "DURATION_ABOVE_MAXIMUM_SECONDS"
     assert runner.started_specs == []
+
+
+def test_supervisor_accepts_custom_duration_up_to_seven_days():
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+
+    result = supervisor.start_paper(dict(_valid_request(), duration_seconds=604800))
+
+    assert result["allowed"] is True
+    assert result["session"]["duration_seconds"] == 604800
+    assert "604800" in runner.started_specs[0].command
 
 
 def test_supervisor_tracks_exit_code_and_status():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
     supervisor.start_paper(_valid_request())
     runner.process.exit_code = 0
 
@@ -136,8 +159,8 @@ def test_supervisor_persists_session_and_parses_child_log_paths(tmp_path):
     runner = FakeRunner()
     store = OperatorSessionStore(path=tmp_path / "state" / "operator" / "sessions.jsonl")
     supervisor = OperatorPaperSupervisor(
-        config=PaperSupervisorConfig(
-            repo_root=runner.repo_root,
+        config=_supervisor_config(
+            runner,
             session_store_path=str(tmp_path / "state" / "operator" / "sessions.jsonl"),
         ),
         runner=runner,
@@ -176,7 +199,7 @@ def test_supervisor_persists_session_and_parses_child_log_paths(tmp_path):
 
 def test_supervisor_stop_requests_graceful_process_stop_without_broker_call():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
     supervisor.start_paper(_valid_request())
 
     stopped = supervisor.stop_paper({})
@@ -202,11 +225,25 @@ def test_supervisor_refuses_stop_without_active_run():
 
 def test_supervisor_refuses_when_runner_unavailable():
     runner = FakeRunner(available=False, unavailable_reason="WINDOWS_POWERSHELL_REQUIRED")
-    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
 
     result = supervisor.start_paper(_valid_request())
 
     assert result["allowed"] is False
     assert result["reason_code"] == "WINDOWS_POWERSHELL_REQUIRED"
     assert result["runtime_mutation_occurred"] is False
+    assert runner.started_specs == []
+
+
+def test_supervisor_refuses_paper_start_before_runner_when_credentials_missing():
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+
+    result = supervisor.start_paper(_valid_request())
+    snapshot = supervisor.status_snapshot()
+
+    assert result["allowed"] is False
+    assert result["reason_code"] == "ALPACA_PAPER_CREDENTIALS_NOT_CONFIGURED"
+    assert snapshot["paper_credentials_configured"] is False
+    assert snapshot["paper_start_allowed"] is False
     assert runner.started_specs == []

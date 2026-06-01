@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import time
+
 from app.api.operator_readonly_api import API_VERSION, OperatorSnapshotProvider, create_operator_app
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.operator_credentials.store import LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
+
+
+PAPER_ENV = {
+    "APCA_API_KEY_ID": "test-paper-key",
+    "APCA_API_SECRET_KEY": "test-paper-secret",
+    "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+}
 
 
 def _endpoint(app, path: str, method: str = "GET"):
@@ -103,8 +113,11 @@ def test_operator_intents_are_refused_without_mutation(tmp_path):
 
 def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
-    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=supervisor))
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
+        runner=runner,
+    )
+    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=supervisor, provider_env=dict(PAPER_ENV)))
     start = _endpoint(app, "/operator/intent/paper/start", "POST")
     runtime = _endpoint(app, "/operator/runtime")
 
@@ -172,6 +185,25 @@ def test_operator_provider_and_research_endpoints_are_safe(tmp_path):
     assert graph["raw_logs_included"] is False
     assert graph["secrets_values_exposed"] is False
     assert graph["can_execute"] is False
+
+
+def test_provider_launch_readiness_endpoints_return_from_local_truth_under_timeout(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+            provider_env={},
+            credential_store=store,
+        )
+    )
+
+    for path in ("/operator/providers", "/operator/providers/readiness", "/operator/launch-readiness"):
+        start = time.perf_counter()
+        payload = _endpoint(app, path)()
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, path
+        assert payload.get("secrets_values_exposed") is not True
 
 
 def test_operator_endpoint_smoke_matrix_is_safe(tmp_path):

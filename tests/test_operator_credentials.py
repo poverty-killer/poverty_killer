@@ -187,6 +187,31 @@ def test_provider_readiness_reads_local_secret_presence(tmp_path):
     assert "local-secret" not in str(readiness)
 
 
+def test_shared_alpaca_credentials_resolve_for_paper_and_news_without_raw_values(tmp_path):
+    store = _store(tmp_path)
+    store.save_provider(
+        "alpaca_news",
+        {
+            "APCA_API_KEY_ID": "shared-local-key",
+            "APCA_API_SECRET_KEY": "shared-local-secret",
+            "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+        },
+    )
+
+    credentials = store.providers_summary({})
+    readiness = provider_readiness_summary({}, credential_store=store)
+    paper_summary = next(row for row in credentials["providers"] if row["provider_id"] == "alpaca_paper")
+    paper_readiness = next(row for row in readiness["providers"] if row["provider_id"] == "alpaca_paper")
+    text = str(credentials) + str(readiness)
+
+    assert paper_summary["configured"] is True
+    assert paper_summary["source"] == "LOCAL_SECRET_PRESENT"
+    assert paper_readiness["configured"] is True
+    assert paper_readiness["status"] == "CONFIGURED"
+    assert "shared-local-secret" not in text
+    assert "shared-local-key" not in text
+
+
 def test_alpaca_save_refreshes_credentials_readiness_launch_and_diagnostics(tmp_path):
     store = _store(tmp_path)
     provider = OperatorSnapshotProvider(

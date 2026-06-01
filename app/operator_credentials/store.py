@@ -47,6 +47,36 @@ PROVIDER_CREDENTIAL_FIELDS: dict[str, dict[str, object]] = {
         "optional": (),
         "defaults": {},
     },
+    "gemini": {
+        "display_name": "Gemini / Google",
+        "required": ("GEMINI_API_KEY",),
+        "optional": ("GOOGLE_API_KEY",),
+        "defaults": {},
+    },
+    "xai_grok": {
+        "display_name": "Grok / xAI",
+        "required": ("XAI_API_KEY",),
+        "optional": ("XAI_BASE_URL",),
+        "defaults": {},
+    },
+    "deepseek": {
+        "display_name": "DeepSeek",
+        "required": ("DEEPSEEK_API_KEY",),
+        "optional": ("DEEPSEEK_BASE_URL",),
+        "defaults": {},
+    },
+    "kimi_moonshot": {
+        "display_name": "Kimi / Moonshot",
+        "required": ("KIMI_API_KEY",),
+        "optional": ("MOONSHOT_API_KEY", "KIMI_BASE_URL", "MOONSHOT_BASE_URL"),
+        "defaults": {},
+    },
+    "local_openai_compatible": {
+        "display_name": "Local OpenAI-compatible Model",
+        "required": ("LOCAL_AI_BASE_URL", "LOCAL_AI_MODEL"),
+        "optional": ("LOCAL_AI_API_KEY",),
+        "defaults": {},
+    },
 }
 
 PROVIDER_ID_ALIASES = {
@@ -58,6 +88,28 @@ PROVIDER_ID_ALIASES = {
     "alpaca broker": "alpaca_paper",
     "alpaca-news": "alpaca_news",
     "alpaca news": "alpaca_news",
+    "claude": "anthropic",
+    "google": "gemini",
+    "grok": "xai_grok",
+    "xai": "xai_grok",
+    "xai-grok": "xai_grok",
+    "deepseek-ai": "deepseek",
+    "kimi": "kimi_moonshot",
+    "moonshot": "kimi_moonshot",
+    "kimi-moonshot": "kimi_moonshot",
+    "local": "local_openai_compatible",
+    "local-ai": "local_openai_compatible",
+    "local openai compatible": "local_openai_compatible",
+}
+
+ALTERNATIVE_CREDENTIAL_KEYS = {
+    "GEMINI_API_KEY": ("GOOGLE_API_KEY",),
+    "KIMI_API_KEY": ("MOONSHOT_API_KEY",),
+}
+
+SHARED_CREDENTIAL_PROVIDER_GROUPS = {
+    "alpaca_paper": ("alpaca_paper", "alpaca_news"),
+    "alpaca_news": ("alpaca_paper", "alpaca_news"),
 }
 
 
@@ -101,6 +153,10 @@ def _clean_credentials(provider_id: str, credentials: Mapping[str, Any]) -> dict
         value = str(raw or "").strip()
         if value:
             clean[name] = value
+    if provider == "gemini" and not clean.get("GEMINI_API_KEY") and clean.get("GOOGLE_API_KEY"):
+        clean["GEMINI_API_KEY"] = clean["GOOGLE_API_KEY"]
+    if provider == "kimi_moonshot" and not clean.get("KIMI_API_KEY") and clean.get("MOONSHOT_API_KEY"):
+        clean["KIMI_API_KEY"] = clean["MOONSHOT_API_KEY"]
     if provider in {"alpaca_paper", "alpaca_news"} and "APCA_API_BASE_URL" not in clean:
         clean["APCA_API_BASE_URL"] = ALPACA_PAPER_ENDPOINT
     return clean
@@ -288,6 +344,74 @@ class LocalCredentialStore:
             return {}
         return {str(k): str(v) for k, v in values.items() if str(v).strip()}
 
+    def _provider_search_order(self, provider_id: str) -> tuple[str, ...]:
+        provider = normalize_provider_id(provider_id)
+        group = SHARED_CREDENTIAL_PROVIDER_GROUPS.get(provider)
+        if not group:
+            return (provider,)
+        return tuple(dict.fromkeys((provider, *group)))
+
+    def resolve_provider_field(
+        self,
+        provider_id: str,
+        field_name: str,
+        process_env: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        provider = normalize_provider_id(provider_id)
+        process_env = process_env or {}
+        candidate_names = (field_name, *ALTERNATIVE_CREDENTIAL_KEYS.get(field_name, ()))
+        for candidate in candidate_names:
+            env_value = str(process_env.get(candidate, "") or "").strip()
+            if env_value:
+                return {
+                    "name": field_name,
+                    "value": env_value,
+                    "source": "ENV_PRESENT",
+                    "source_provider_id": "process_env",
+                }
+        for source_provider_id in self._provider_search_order(provider):
+            local_values = self.provider_values(source_provider_id)
+            for candidate in candidate_names:
+                local_value = str(local_values.get(candidate, "") or "").strip()
+                if local_value:
+                    return {
+                        "name": field_name,
+                        "value": local_value,
+                        "source": "LOCAL_SECRET_PRESENT",
+                        "source_provider_id": source_provider_id,
+                    }
+        return {
+            "name": field_name,
+            "value": "",
+            "source": "NOT_CONFIGURED",
+            "source_provider_id": "",
+        }
+
+    def effective_provider_values(self, provider_id: str, process_env: Mapping[str, str] | None = None) -> dict[str, str]:
+        provider = normalize_provider_id(provider_id)
+        try:
+            fields = _provider_fields(provider)
+        except ValueError:
+            return {}
+        process_env = process_env or {}
+        defaults = dict(fields.get("defaults") or {})
+        effective: dict[str, str] = {}
+        for name in (*fields["required"], *fields["optional"]):  # type: ignore[index]
+            field_name = str(name)
+            resolved = self.resolve_provider_field(provider, field_name, process_env)
+            value = str(resolved.get("value") or "").strip()
+            if not value and field_name in defaults:
+                value = str(defaults[field_name] or "").strip()
+            if value:
+                effective[field_name] = value
+        if provider == "gemini" and not effective.get("GEMINI_API_KEY") and effective.get("GOOGLE_API_KEY"):
+            effective["GEMINI_API_KEY"] = effective["GOOGLE_API_KEY"]
+        if provider == "kimi_moonshot" and not effective.get("KIMI_API_KEY") and effective.get("MOONSHOT_API_KEY"):
+            effective["KIMI_API_KEY"] = effective["MOONSHOT_API_KEY"]
+        if provider in {"alpaca_paper", "alpaca_news"} and "APCA_API_BASE_URL" not in effective:
+            effective["APCA_API_BASE_URL"] = ALPACA_PAPER_ENDPOINT
+        return effective
+
     def local_env(self) -> dict[str, str]:
         env: dict[str, str] = {}
         for provider_id in PROVIDER_CREDENTIAL_FIELDS:
@@ -322,22 +446,16 @@ class LocalCredentialStore:
                 "raw_secret_values_included": False,
             }
         process_env = process_env or {}
-        local_values = self.provider_values(provider)
         required = tuple(str(name) for name in fields["required"])  # type: ignore[index]
         optional = tuple(str(name) for name in fields["optional"])  # type: ignore[index]
         rows: list[CredentialFieldSummary] = []
         for name in (*required, *optional):
-            env_value = str(process_env.get(name, "") or "").strip()
-            local_value = str(local_values.get(name, "") or "").strip()
-            if env_value:
-                source = "ENV_PRESENT"
-                value = env_value
-            elif local_value:
-                source = "LOCAL_SECRET_PRESENT"
-                value = local_value
-            else:
-                source = "NOT_CONFIGURED"
-                value = ""
+            resolved = self.resolve_provider_field(provider, name, process_env)
+            value = str(resolved.get("value") or "").strip()
+            source = str(resolved.get("source") or "NOT_CONFIGURED")
+            if not value and name in dict(fields.get("defaults") or {}):
+                value = str(dict(fields.get("defaults") or {}).get(name) or "").strip()
+                source = "SAFE_DEFAULT" if value else "NOT_CONFIGURED"
             rows.append(
                 CredentialFieldSummary(
                     name=name,

@@ -22,6 +22,13 @@ from app.ai_chief_operator.context_builder import build_ai_context, redact_secre
 from app.ai_chief_operator.governance_queue import GovernanceQueue
 from app.ai_chief_operator.models import normalize_recommendation
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
+from app.ai_chief_operator.model_router import HIGH_REASONING_API, LIGHT_API, LOCAL_GUIDE, LOCAL_MODEL_MODE, SUPREME_BOARD_PACKET_MODE
+from app.ai_chief_operator.router_settings import (
+    AIRouterSettingsStore,
+    default_ai_router_settings,
+    default_ai_router_settings_path,
+    router_mode_for_gateway,
+)
 from app.ai_chief_operator.quant_persona import (
     draft_codex_packet,
     build_quant_review_recommendation,
@@ -107,6 +114,10 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/ai/status": "read_only_ai_chief_status",
         "/operator/ai/recommendations": "read_only_ai_governance_queue",
         "/operator/ai/ask": "advisory_ai_question_answer_no_execution",
+        "/operator/ai/router/settings": "persistent_local_ai_router_settings_no_secret_storage",
+        "/operator/ai/routing/settings": "local_ai_routing_settings_no_secret_storage",
+        "/operator/ai/providers/validate": "safe_ai_provider_validation_no_paid_call_without_approval",
+        "/operator/ai/supreme-board-packet": "safe_manual_supreme_board_packet_bridge",
         "/operator/ai/analyze": "advisory_ai_analysis_governance_queue_only",
         "/operator/providers": "read_only_provider_setup_and_credential_readiness",
         "/operator/providers/readiness": "read_only_provider_readiness_summary",
@@ -184,6 +195,7 @@ class OperatorSnapshotProvider:
             default_credential_store_path(self.runtime_config.repo_root)
         )
         self.provider_env = self.credential_store.effective_env(self.process_env)
+        self.provider_env.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         self.portfolio_client = portfolio_client
         supervisor_config = PaperSupervisorConfig.from_runtime_config(self.runtime_config)
         supervisor_config.process_env = self._paper_process_env(self.provider_env)
@@ -219,6 +231,16 @@ class OperatorSnapshotProvider:
             ai_config or AIChiefConfig.from_env(self.provider_env),
             credential_env=self.provider_env,
         )
+        gateway_summary = self.ai_gateway.status().get("router") or {}
+        self.ai_router_settings_store = AIRouterSettingsStore(
+            default_ai_router_settings_path(self.runtime_config.repo_root)
+        )
+        ai_settings_loaded = self.ai_router_settings_store.load(
+            defaults=self._default_ai_router_settings(gateway_summary)
+        )
+        self.ai_routing_settings = dict(ai_settings_loaded["settings"])
+        self.ai_routing_settings_source = str(ai_settings_loaded.get("settings_source") or "DEFAULT_SETTINGS")
+        self.ai_routing_settings_last_result = ai_settings_loaded
         self.ai_queue = ai_queue or GovernanceQueue(
             path=self.runtime_config.operator_state_dir / "ai_governance_queue.jsonl"
         )
@@ -226,8 +248,28 @@ class OperatorSnapshotProvider:
         self.historical_tests_service = historical_tests or HistoricalTestService()
         self.last_credential_save_diagnostic: dict[str, Any] | None = None
 
+    def _default_ai_router_settings(self, gateway_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+        summary = gateway_summary or self.ai_gateway.status().get("router") or {}
+        settings = default_ai_router_settings()
+        settings.update(
+            {
+                "default_mode": summary.get("default_route_mode") or settings["default_mode"],
+                "light_provider": summary.get("light_provider") or settings["light_provider"],
+                "light_model": summary.get("light_model") or settings["light_model"],
+                "high_reasoning_provider": summary.get("high_reasoning_provider") or settings["high_reasoning_provider"],
+                "high_reasoning_model": summary.get("high_reasoning_model") or settings["high_reasoning_model"],
+                "local_provider": "local_openai_compatible",
+                "local_base_url": self.provider_env.get("LOCAL_AI_BASE_URL") or settings["local_base_url"],
+                "local_model": self.provider_env.get("LOCAL_AI_MODEL") or settings["local_model"],
+                "supreme_board_packet_default": bool(summary.get("supreme_board_packet_default")),
+            }
+        )
+        return settings
+
     def _paper_process_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
-        effective_env = env if env is not None else self.provider_env
+        effective_env = dict(env if env is not None else self.provider_env)
+        if env is None:
+            effective_env.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         return {
             key: str(value)
             for key, value in effective_env.items()
@@ -236,6 +278,7 @@ class OperatorSnapshotProvider:
 
     def _refresh_provider_env(self) -> dict[str, str]:
         refreshed = self.credential_store.effective_env(self.process_env)
+        refreshed.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         if refreshed != self.provider_env:
             self.provider_env = refreshed
             self.supervisor.config.process_env = self._paper_process_env(refreshed)
@@ -412,6 +455,9 @@ class OperatorSnapshotProvider:
             "paper_stop_allowed": supervisor["paper_stop_allowed"],
             "paper_start_refusal_reason": supervisor["paper_start_refusal_reason"],
             "paper_stop_refusal_reason": supervisor["paper_stop_refusal_reason"],
+            "paper_credentials_configured": supervisor.get("paper_credentials_configured"),
+            "paper_credential_refusal_reason": supervisor.get("paper_credential_refusal_reason"),
+            "paper_credential_source": supervisor.get("paper_credential_source"),
             "min_paper_duration_seconds": supervisor.get("min_paper_duration_seconds"),
             "max_paper_duration_seconds": supervisor.get("max_paper_duration_seconds"),
         }
@@ -443,6 +489,9 @@ class OperatorSnapshotProvider:
         }
 
     def diagnostics(self) -> dict[str, Any]:
+        operator_config_summary = self.runtime_config.safe_summary()
+        operator_config_summary["alpaca_credentials_present"] = self._alpaca_paper_configured()
+        operator_config_summary["world_awareness_credentials_present"] = self._alpaca_paper_configured()
         return {
             "api_version": API_VERSION,
             "data_source": "OPERATOR_BACKEND",
@@ -456,7 +505,7 @@ class OperatorSnapshotProvider:
             "db": "NO_DB_RUNTIME_FILE_STAGED_JSONL_METADATA_ONLY",
             "runtime_profile": self.runtime_config.runtime_profile,
             "hosted_mode": self.runtime_config.hosted_mode,
-            "operator_config": self.runtime_config.safe_summary(),
+            "operator_config": operator_config_summary,
             "storage": self.storage(),
             "legacy_dashboard_command_routes_present": False,
             "legacy_dashboard_status": "QUARANTINED_FROM_OPERATOR_PATH",
@@ -1019,6 +1068,10 @@ class OperatorSnapshotProvider:
             "source": "AI_CHIEF_OPERATOR",
             "persona": quant_persona_summary(),
             "gateway": self.ai_gateway.status(),
+            "routing_settings": dict(self.ai_routing_settings),
+            "routing_settings_source": self.ai_routing_settings_source,
+            "routing_settings_status": self.ai_routing_settings_last_result.get("status"),
+            "routing_settings_path_relative": self.ai_routing_settings_last_result.get("settings_path_relative"),
             "recommendation_count": len(recs),
             "pending_review_count": sum(1 for rec in recs if rec.get("status") == "PENDING_REVIEW"),
             "advisory_only": True,
@@ -1064,7 +1117,32 @@ class OperatorSnapshotProvider:
             refusal_reason = classification["reason_code"]
             gateway_answer: dict[str, Any] = {}
         else:
-            gateway_answer = self.ai_gateway.ask(question, context, page_context)
+            route_mode = router_mode_for_gateway(body.get("route_mode") or body.get("mode") or self.ai_routing_settings.get("default_mode") or LOCAL_GUIDE)
+            route_provider = str(body.get("provider_id") or "").strip()
+            route_model = str(body.get("model_name") or "").strip()
+            if not route_provider:
+                if route_mode == HIGH_REASONING_API:
+                    route_provider = str(self.ai_routing_settings.get("high_reasoning_provider") or "openai")
+                    route_model = route_model or str(self.ai_routing_settings.get("high_reasoning_model") or "")
+                elif route_mode == LIGHT_API:
+                    route_provider = str(self.ai_routing_settings.get("light_provider") or "openai")
+                    route_model = route_model or str(self.ai_routing_settings.get("light_model") or "")
+                elif route_mode == LOCAL_MODEL_MODE:
+                    route_provider = "local_openai_compatible"
+                    route_model = route_model or str(self.ai_routing_settings.get("local_model") or "")
+            gateway_answer = self.ai_gateway.ask(
+                question,
+                context,
+                page_context,
+                routing={
+                    "route_mode": route_mode,
+                    "provider_id": route_provider,
+                    "model_name": route_model,
+                    "approved_paid_call": body.get("approved_paid_call") is True,
+                    "max_output_tokens": body.get("max_output_tokens"),
+                    "reasoning_effort": body.get("reasoning_effort"),
+                },
+            )
             response = str(gateway_answer.get("response") or "")
             status = str(gateway_answer.get("status") or "ANSWERED_FALLBACK")
             provider_state = str(gateway_answer.get("provider_state") or provider_state)
@@ -1078,6 +1156,13 @@ class OperatorSnapshotProvider:
             provider["reasoning_policy"] = gateway_answer.get("reasoning_policy") or provider.get("reasoning_policy")
             provider["model_suitable_for_governance"] = gateway_answer.get("model_suitable_for_governance")
             provider["model_quality_warning"] = gateway_answer.get("model_quality_warning") or provider.get("model_quality_warning")
+            provider["provider_id"] = gateway_answer.get("provider_id") or provider.get("provider_id")
+            provider["cost_mode"] = gateway_answer.get("cost_mode")
+            provider["answer_source"] = gateway_answer.get("answer_source")
+            provider["persona_enforced"] = gateway_answer.get("persona_enforced")
+            provider["expert_roles_applied"] = gateway_answer.get("expert_roles_applied")
+            provider["provider_error_category"] = gateway_answer.get("provider_error_category")
+            provider["provider_error_message_safe"] = gateway_answer.get("provider_error_message_safe")
             if not response.strip():
                 evidence_graph = context.get("evidence_graph") or {}
                 providers = context.get("provider_readiness") or {}
@@ -1131,15 +1216,24 @@ class OperatorSnapshotProvider:
             "status": status,
             "provider_state": provider_state,
             "provider": provider.get("provider") or "disabled",
+            "provider_id": provider.get("provider_id") or provider.get("provider") or "disabled",
             "provider_mode": provider_mode,
             "response_source": provider.get("response_source") or (
                 "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" if provider_state != "MOCK_MODE" else "MOCK_MODE_DETERMINISTIC"
             ),
+            "answer_source": provider.get("answer_source") or provider.get("response_source") or "LOCAL_DETERMINISTIC",
+            "cost_mode": provider.get("cost_mode") or "FREE_LOCAL",
             "model": provider.get("model") or model_name,
             "model_name": model_name,
             "model_quality": model_quality,
             "reasoning_policy": reasoning_policy,
             "model_suitable_for_governance": bool(model_suitable),
+            "governance_suitable": bool(model_suitable),
+            "persona_enforced": provider.get("persona_enforced") is not False,
+            "expert_roles_applied": provider.get("expert_roles_applied") or [],
+            "provider_error_category": provider.get("provider_error_category"),
+            "provider_error_message_safe": provider.get("provider_error_message_safe"),
+            "route_decision": gateway_answer.get("route_decision") if isinstance(gateway_answer, dict) else {},
             "question": question,
             "answer": response,
             "response": response,
@@ -1177,6 +1271,179 @@ class OperatorSnapshotProvider:
             "raw_logs_included": False,
             "secrets_values_exposed": False,
             "secrets_exposed": False,
+        }
+
+    def ai_routing_settings_save(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = self.ai_router_settings_store.save(
+            payload or {},
+            defaults=self._default_ai_router_settings(),
+        )
+        if result.get("status") == "SAVED":
+            self.ai_routing_settings = dict(result["settings"])
+            self.ai_routing_settings_source = str(result.get("settings_source") or "PERSISTED_LOCAL_SETTINGS")
+        else:
+            self.ai_routing_settings_source = "IN_MEMORY_UNSAVED"
+        self.ai_routing_settings_last_result = result
+        return {
+            "source": "AI_ROUTER_SETTINGS",
+            "status": result.get("status"),
+            "settings": dict(self.ai_routing_settings),
+            "settings_source": self.ai_routing_settings_source,
+            "settings_path_relative": result.get("settings_path_relative"),
+            "validation_errors": result.get("validation_errors") or [],
+            "error_category": result.get("error_category"),
+            "safe_error_message": result.get("safe_error_message"),
+            "high_reasoning_api_requires_approval": True,
+            "no_paid_call_occurred": True,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+
+    def ai_router_settings(self) -> dict[str, Any]:
+        provider_registry = self.ai_gateway.status().get("provider_registry") or {}
+        providers = {
+            str(row.get("provider_id")): {
+                "provider_id": row.get("provider_id"),
+                "status": row.get("status"),
+                "configured": row.get("configured") is True,
+                "credential_source": row.get("credential_source") or "NOT_CONFIGURED",
+                "implemented": row.get("implemented") is True,
+                "model_name": row.get("model_name"),
+                "last_error_category": row.get("last_error_category"),
+            }
+            for row in provider_registry.get("providers") or []
+            if isinstance(row, dict)
+        }
+        selected_ids = {
+            str(self.ai_routing_settings.get("active_provider") or ""),
+            str(self.ai_routing_settings.get("light_provider") or ""),
+            str(self.ai_routing_settings.get("high_reasoning_provider") or ""),
+            "local_openai_compatible",
+            "deterministic_local",
+            "supreme_board_packet",
+        }
+        return {
+            **self.ai_routing_settings_last_result,
+            "settings": dict(self.ai_routing_settings),
+            "settings_source": self.ai_routing_settings_source,
+            "provider_availability": {
+                provider_id: providers.get(provider_id, {"provider_id": provider_id, "status": "UNKNOWN", "configured": False})
+                for provider_id in sorted(provider_id for provider_id in selected_ids if provider_id)
+            },
+            "no_paid_call_occurred": True,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+
+    def ai_providers_validate(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        provider_id = str(body.get("provider_id") or "").strip().lower().replace("-", "_")
+        model_name = str(body.get("model_name") or "").strip() or None
+        validation_mode = str(body.get("validation_mode") or "credential_presence").strip()
+        approved_paid_call = body.get("approved_paid_call") is True
+        registry = self.ai_gateway.status().get("provider_registry") or {}
+        providers = {row.get("provider_id"): row for row in registry.get("providers") or []}
+        profile = providers.get(provider_id)
+        if not profile:
+            return {
+                "source": "AI_PROVIDER_VALIDATION",
+                "provider_id": provider_id,
+                "configured": False,
+                "credential_source": "UNKNOWN_PROVIDER",
+                "model_name": model_name,
+                "validation_status": "VALIDATION_FAILED",
+                "error_category": "UNKNOWN_PROVIDER",
+                "safe_error_message": "Unknown AI provider id.",
+                "secrets_exposed": False,
+                "secrets_values_exposed": False,
+                "persona_enforced_possible": False,
+                "broker_call_occurred": False,
+                "trading_mutation_occurred": False,
+                "live_enabled": False,
+                "real_money_enabled": False,
+            }
+        configured = profile.get("configured") is True
+        credential_source = str(profile.get("credential_source") or "NOT_CONFIGURED")
+        if validation_mode == "minimal_test_call_with_approval" and not approved_paid_call:
+            validation_status = "REFUSED_APPROVAL_REQUIRED"
+            error_category = "APPROVAL_REQUIRED"
+            safe_error = "Minimal provider test call may cost money and requires explicit one-call approval."
+        elif not configured:
+            validation_status = "MISSING_CREDENTIALS"
+            error_category = "MISSING_CREDENTIALS"
+            safe_error = "Required provider credential is missing from env/local credential vault."
+        elif validation_mode == "minimal_test_call_with_approval":
+            validation_status = "NOT_IMPLEMENTED"
+            error_category = "SAFE_TEST_CALL_NOT_IMPLEMENTED"
+            safe_error = "Credential is present, but this endpoint does not fake a paid provider test call."
+        elif profile.get("implemented") is not True:
+            validation_status = "NOT_IMPLEMENTED"
+            error_category = "ADAPTER_NOT_IMPLEMENTED"
+            safe_error = "Provider registry is scaffolded; live call adapter is not implemented."
+        else:
+            validation_status = "CONFIGURED"
+            error_category = None
+            safe_error = "Credential presence and metadata check passed without provider call."
+        return {
+            "source": "AI_PROVIDER_VALIDATION",
+            "provider_id": provider_id,
+            "configured": configured,
+            "credential_source": credential_source,
+            "model_name": model_name or profile.get("model_name") or profile.get("default_model"),
+            "validation_mode": validation_mode,
+            "validation_status": validation_status,
+            "error_category": error_category,
+            "safe_error_message": safe_error,
+            "paid_call_occurred": False,
+            "secrets_exposed": False,
+            "secrets_values_exposed": False,
+            "persona_enforced_possible": True,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+        }
+
+    def ai_supreme_board_packet(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        question = str(body.get("question") or body.get("prompt") or "Review POVERTY_KILLER operator state.").strip()
+        page_context = redact_secrets(body.get("page_context") if isinstance(body.get("page_context"), dict) else {})
+        context = self._ai_context()
+        result = self.ai_gateway.ask(
+            question,
+            context,
+            page_context,
+            routing={
+                "route_mode": SUPREME_BOARD_PACKET_MODE,
+                "provider_id": "supreme_board_packet",
+                "model_name": "chatgpt-pro-manual",
+                "approved_paid_call": False,
+            },
+        )
+        return {
+            "source": "SUPREME_BOARD_PACKET_BRIDGE",
+            "status": "PACKET_READY",
+            "packet": result.get("response") or result.get("answer") or "",
+            "answer": result.get("response") or result.get("answer") or "",
+            "provider_id": "supreme_board_packet",
+            "answer_source": "SUPREME_BOARD_PACKET",
+            "cost_mode": "CHATGPT_PRO_MANUAL",
+            "persona_enforced": result.get("persona_enforced") is not False,
+            "expert_roles_applied": result.get("expert_roles_applied") or [],
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_exposed": False,
+            "secrets_values_exposed": False,
+            "raw_logs_included": False,
         }
 
     def _ai_answer_facts(self, mode: str, context: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -1595,6 +1862,30 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.post("/ai/ask")
     def ai_ask(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return provider.ai_ask(payload)
+
+    @router.get("/ai/router/settings")
+    def ai_router_settings() -> dict[str, Any]:
+        return provider.ai_router_settings()
+
+    @router.post("/ai/router/settings")
+    def ai_router_settings_save(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_routing_settings_save(payload)
+
+    @router.get("/ai/routing/settings")
+    def ai_routing_settings() -> dict[str, Any]:
+        return provider.ai_router_settings()
+
+    @router.post("/ai/routing/settings")
+    def ai_routing_settings_save(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_routing_settings_save(payload)
+
+    @router.post("/ai/providers/validate")
+    def ai_providers_validate(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_providers_validate(payload)
+
+    @router.post("/ai/supreme-board-packet")
+    def ai_supreme_board_packet(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.ai_supreme_board_packet(payload)
 
     @router.post("/ai/analyze")
     def ai_analyze(payload: dict[str, Any] | None = None) -> dict[str, Any]:

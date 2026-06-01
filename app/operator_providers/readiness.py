@@ -9,6 +9,11 @@ from app.operator_credentials.store import LocalCredentialStore, fingerprint_sec
 from app.operator_providers.models import EnvVarStatus, ProviderProfile, ProviderReadiness
 from app.operator_providers.registry import list_provider_profiles
 
+ALTERNATIVE_ENV_KEYS = {
+    "GEMINI_API_KEY": ("GOOGLE_API_KEY",),
+    "KIMI_API_KEY": ("MOONSHOT_API_KEY",),
+}
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -16,28 +21,59 @@ def _utc_now() -> str:
 
 def _credential_value(
     *,
+    provider_id: str,
     name: str,
     env: Mapping[str, str],
     local_env: Mapping[str, str],
+    credential_store: LocalCredentialStore | None = None,
 ) -> tuple[str, str]:
+    if credential_store is not None:
+        resolved = credential_store.resolve_provider_field(provider_id, name, env)
+        value = str(resolved.get("value") or "").strip()
+        if value:
+            return value, str(resolved.get("source") or "LOCAL_SECRET_PRESENT")
     env_value = str(env.get(name, "") or "").strip()
     if env_value:
         return env_value, "ENV_PRESENT"
     local_value = str(local_env.get(name, "") or "").strip()
     if local_value:
         return local_value, "LOCAL_SECRET_PRESENT"
+    for alias in ALTERNATIVE_ENV_KEYS.get(name, ()):
+        alias_env_value = str(env.get(alias, "") or "").strip()
+        if alias_env_value:
+            return alias_env_value, "ENV_PRESENT"
+        alias_local_value = str(local_env.get(alias, "") or "").strip()
+        if alias_local_value:
+            return alias_local_value, "LOCAL_SECRET_PRESENT"
     return "", "NOT_CONFIGURED"
 
 
-def _configured(env: Mapping[str, str], local_env: Mapping[str, str], name: str) -> bool:
-    value, _source = _credential_value(name=name, env=env, local_env=local_env)
+def _configured(profile: ProviderProfile, env: Mapping[str, str], local_env: Mapping[str, str], name: str, credential_store: LocalCredentialStore | None) -> bool:
+    value, _source = _credential_value(
+        provider_id=profile.provider_id,
+        name=name,
+        env=env,
+        local_env=local_env,
+        credential_store=credential_store,
+    )
     return bool(value)
 
 
-def _env_status(profile: ProviderProfile, env: Mapping[str, str], local_env: Mapping[str, str]) -> tuple[EnvVarStatus, ...]:
+def _env_status(
+    profile: ProviderProfile,
+    env: Mapping[str, str],
+    local_env: Mapping[str, str],
+    credential_store: LocalCredentialStore | None,
+) -> tuple[EnvVarStatus, ...]:
     rows: list[EnvVarStatus] = []
     for name in (*profile.required_env_vars, *profile.optional_env_vars):
-        value, source = _credential_value(name=name, env=env, local_env=local_env)
+        value, source = _credential_value(
+            provider_id=profile.provider_id,
+            name=name,
+            env=env,
+            local_env=local_env,
+            credential_store=credential_store,
+        )
         rows.append(
             EnvVarStatus(
                 name=name,
@@ -56,8 +92,12 @@ def build_provider_readiness(
     credential_store: LocalCredentialStore | None = None,
 ) -> ProviderReadiness:
     local_env = credential_store.local_env() if credential_store else {}
-    env_rows = _env_status(profile, env, local_env)
-    missing_required = [name for name in profile.required_env_vars if not _configured(env, local_env, name)]
+    env_rows = _env_status(profile, env, local_env, credential_store)
+    missing_required = [
+        name
+        for name in profile.required_env_vars
+        if not _configured(profile, env, local_env, name, credential_store)
+    ]
     configured = not missing_required
     reason_codes: list[str] = []
     configured_sources = {row.source for row in env_rows if row.configured}

@@ -20,12 +20,15 @@ from typing import Any, Protocol
 
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
+from app.operator_credentials.store import ALPACA_LIVE_ENDPOINT, ALPACA_PAPER_ENDPOINT
 
 
 SUPERVISOR_VERSION = "operator-paper-supervisor-v1"
 PAPER_PROFILE = "PAPER_EXPLORATION_ALPHA"
 DEFAULT_WATCHLIST = ("BTC/USD", "ETH/USD", "SOL/USD")
 DEFAULT_ALLOWED_DURATIONS = frozenset({180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400})
+DEFAULT_MIN_PAPER_DURATION_SECONDS = 60
+DEFAULT_MAX_PAPER_DURATION_SECONDS = 604800
 
 
 def utc_now_iso() -> str:
@@ -187,6 +190,8 @@ class PaperSupervisorConfig:
     allowed_profile: str = PAPER_PROFILE
     allowed_watchlist: tuple[str, ...] = DEFAULT_WATCHLIST
     allowed_durations: frozenset[int] = DEFAULT_ALLOWED_DURATIONS
+    min_paper_duration_seconds: int = DEFAULT_MIN_PAPER_DURATION_SECONDS
+    max_paper_duration_seconds: int = DEFAULT_MAX_PAPER_DURATION_SECONDS
     log_directory: str = "logs/operator_runs"
     runtime_profile: str = "LOCAL_PAPER"
     session_store_path: str | None = None
@@ -202,6 +207,8 @@ class PaperSupervisorConfig:
             allowed_profile=runtime_config.allowed_profile,
             allowed_watchlist=runtime_config.allowed_watchlist,
             allowed_durations=frozenset(runtime_config.allowed_durations),
+            min_paper_duration_seconds=runtime_config.min_paper_duration_seconds,
+            max_paper_duration_seconds=runtime_config.max_paper_duration_seconds,
             log_directory=str(runtime_config.log_dir.relative_to(runtime_config.repo_root) / "operator_runs")
             if runtime_config.log_dir.is_relative_to(runtime_config.repo_root)
             else str(runtime_config.log_dir / "operator_runs"),
@@ -247,23 +254,29 @@ class OperatorPaperSupervisor:
         stale_after_restart = bool(self._session and self._session.status == "PROCESS_STATE_UNKNOWN_AFTER_RESTART")
         latest_session = self._session.as_dict() if self._session else None
         active_session = latest_session if is_active else None
+        paper_credential_refusal = self._paper_credential_refusal()
         return {
             "supervisor_version": SUPERVISOR_VERSION,
             "state": "RUNNING" if is_active else ("STALE_ACTIVE_SESSION" if stale_after_restart else "IDLE"),
             "active_session": active_session,
             "latest_session": latest_session,
             "active_session_id": self._session.session_id if is_active and self._session else None,
-            "paper_start_allowed": not is_active and not stale_after_restart,
+            "paper_start_allowed": not is_active and not stale_after_restart and paper_credential_refusal is None,
             "paper_stop_allowed": is_active,
             "paper_start_refusal_reason": (
                 "DUPLICATE_ACTIVE_RUN" if is_active else (
-                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART" if stale_after_restart else None
+                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART" if stale_after_restart else paper_credential_refusal
                 )
             ),
             "paper_stop_refusal_reason": None if is_active else "NO_ACTIVE_RUN",
+            "paper_credentials_configured": paper_credential_refusal is None,
+            "paper_credential_refusal_reason": paper_credential_refusal,
+            "paper_credential_source": "PROCESS_ENV_PRESENT" if paper_credential_refusal is None else "MISSING_OR_INVALID",
             "allowed_profile": self.config.allowed_profile,
             "allowed_watchlist": list(self.config.allowed_watchlist),
             "allowed_durations": sorted(self.config.allowed_durations),
+            "min_paper_duration_seconds": self.config.min_paper_duration_seconds,
+            "max_paper_duration_seconds": self.config.max_paper_duration_seconds,
             "session_store": self.session_store.status(),
             "audit_event_count": len(self._audit_events),
             "last_audit_event": self._audit_events[-1].as_dict() if self._audit_events else None,
@@ -449,8 +462,10 @@ class OperatorPaperSupervisor:
             duration_int = int(duration)
         except (TypeError, ValueError):
             return "INVALID_DURATION_SECONDS"
-        if duration_int not in self.config.allowed_durations:
-            return "UNSUPPORTED_DURATION_SECONDS"
+        if duration_int < self.config.min_paper_duration_seconds:
+            return "DURATION_BELOW_MINIMUM_SECONDS"
+        if duration_int > self.config.max_paper_duration_seconds:
+            return "DURATION_ABOVE_MAXIMUM_SECONDS"
 
         watchlist = self._normalize_watchlist(request.get("watchlist")) or self.config.allowed_watchlist
         if not watchlist:
@@ -458,6 +473,21 @@ class OperatorPaperSupervisor:
         allowed = set(self.config.allowed_watchlist)
         if any(symbol not in allowed for symbol in watchlist):
             return "UNSUPPORTED_WATCHLIST_SYMBOL"
+        credential_refusal = self._paper_credential_refusal()
+        if credential_refusal:
+            return credential_refusal
+        return None
+
+    def _paper_credential_refusal(self) -> str | None:
+        key_id = str(self.config.process_env.get("APCA_API_KEY_ID") or "").strip()
+        secret_key = str(self.config.process_env.get("APCA_API_SECRET_KEY") or "").strip()
+        if not key_id or not secret_key:
+            return "ALPACA_PAPER_CREDENTIALS_NOT_CONFIGURED"
+        endpoint = str(self.config.process_env.get("APCA_API_BASE_URL") or ALPACA_PAPER_ENDPOINT).strip().rstrip("/")
+        if endpoint == ALPACA_LIVE_ENDPOINT:
+            return "LIVE_ENDPOINT_BLOCKED"
+        if endpoint != ALPACA_PAPER_ENDPOINT:
+            return "ALPACA_PAPER_ENDPOINT_REQUIRED"
         return None
 
     def _normalize_watchlist(self, raw: Any) -> tuple[str, ...]:

@@ -70,6 +70,24 @@ def test_launch_readiness_refreshes_local_vault_saved_after_backend_start(tmp_pa
     assert "alpaca_paper_credentials" not in after["reason_codes"]
 
 
+def test_launch_readiness_uses_same_shared_alpaca_truth_as_portfolio(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider("alpaca_news", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+            provider_env={},
+            credential_store=store,
+        )
+    )
+
+    payload = _endpoint(app, "/operator/launch-readiness")()
+
+    assert payload["alpaca_paper_credentials_configured"] is True
+    assert "alpaca_paper_credentials" not in payload["reason_codes"]
+    assert payload["portfolio_read_availability"] == "BROKER_READ_READY"
+
+
 def test_launch_readiness_blocks_live_endpoint_even_with_local_credentials(tmp_path):
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
