@@ -90,6 +90,43 @@
       title: "Anthropic / Claude",
       fields: [["ANTHROPIC_API_KEY", "Anthropic API key", "password", ""]]
     },
+    gemini: {
+      title: "Gemini / Google",
+      fields: [
+        ["GEMINI_API_KEY", "Gemini API key", "password", ""],
+        ["GOOGLE_API_KEY", "Google API key alternative", "password", ""]
+      ]
+    },
+    xai_grok: {
+      title: "Grok / xAI",
+      fields: [
+        ["XAI_API_KEY", "xAI API key", "password", ""],
+        ["XAI_BASE_URL", "xAI base URL", "text", "https://api.x.ai/v1"]
+      ]
+    },
+    deepseek: {
+      title: "DeepSeek",
+      fields: [
+        ["DEEPSEEK_API_KEY", "DeepSeek API key", "password", ""],
+        ["DEEPSEEK_BASE_URL", "DeepSeek base URL", "text", "https://api.deepseek.com/v1"]
+      ]
+    },
+    kimi_moonshot: {
+      title: "Kimi / Moonshot",
+      fields: [
+        ["KIMI_API_KEY", "Kimi API key", "password", ""],
+        ["MOONSHOT_API_KEY", "Moonshot API key alternative", "password", ""],
+        ["KIMI_BASE_URL", "Kimi base URL", "text", "https://api.moonshot.ai/v1"]
+      ]
+    },
+    local_openai_compatible: {
+      title: "Local OpenAI-compatible",
+      fields: [
+        ["LOCAL_AI_BASE_URL", "Local server base URL", "text", "http://127.0.0.1:11434/v1"],
+        ["LOCAL_AI_MODEL", "Local model name", "text", "local-model"],
+        ["LOCAL_AI_API_KEY", "Optional local API key", "password", ""]
+      ]
+    },
     alpaca_news: {
       title: "Alpaca News",
       fields: [
@@ -109,10 +146,12 @@
   let aiSelectedQuestion = AI_QUICK_PROMPTS[0];
   let aiQuestionText = AI_QUICK_PROMPTS[0];
   let aiOverlayResponse = "";
+  let aiOverlayLastResult = null;
   let aiOverlayError = "";
   let aiOverlayBusy = false;
   let homeAiQuestionText = "Review launch readiness, portfolio state, and the safest next PAPER step.";
   let homeAiResponse = "";
+  let homeAiLastResult = null;
   let homeAiError = "";
   let homeAiBusy = false;
   let credentialActionStatus = {};
@@ -179,6 +218,56 @@
     return "High-reasoning model not configured. Quant/governance answers are limited.";
   }
 
+  function aiProviderCards() {
+    const providers = data.ai.providerRegistry || [];
+    const fallbackIds = [
+      ["openai", "OpenAI / GPT"],
+      ["anthropic", "Claude / Anthropic"],
+      ["gemini", "Gemini / Google"],
+      ["xai_grok", "Grok / xAI"],
+      ["deepseek", "DeepSeek"],
+      ["kimi_moonshot", "Kimi / Moonshot"],
+      ["local_openai_compatible", "Local OpenAI-compatible"],
+      ["deterministic_local", "Deterministic Local"],
+      ["supreme_board_packet", "Supreme Board Packet"]
+    ];
+    if (providers.length) return providers;
+    return fallbackIds.map(([providerId, displayName]) => ({
+      providerId,
+      provider_id: providerId,
+      displayName,
+      display_name: displayName,
+      status: providerId === "deterministic_local" || providerId === "supreme_board_packet" ? "READY" : "MISSING_CREDENTIALS",
+      modelName: providerId === "supreme_board_packet" ? "chatgpt-pro-manual" : providerId === "deterministic_local" ? "deterministic-local-guide" : "not selected",
+      modelQuality: providerId === "supreme_board_packet" ? "HIGH_REASONING" : providerId === "deterministic_local" ? "FALLBACK_ONLY" : "UNKNOWN",
+      costMode: providerId === "supreme_board_packet" ? "CHATGPT_PRO_MANUAL" : providerId === "deterministic_local" ? "FREE_LOCAL" : "PROVIDER_ERROR",
+      credentialSource: providerId === "deterministic_local" || providerId === "supreme_board_packet" ? "NOT_REQUIRED" : "NOT_CONFIGURED",
+      personaEnforced: true,
+      implemented: providerId !== "gemini"
+    }));
+  }
+
+  function aiRoutingSettings() {
+    return data.ai.routingSettings || {
+      defaultMode: "LOCAL_GUIDE",
+      lightProvider: "openai",
+      lightModel: "gpt-5-mini",
+      highReasoningProvider: "openai",
+      highReasoningModel: "gpt-5.5-pro",
+      localProvider: "local_openai_compatible",
+      localBaseUrl: "http://127.0.0.1:11434/v1",
+      localModel: "local-model",
+      supremeBoardPacketDefault: false,
+      settingsSource: "DEFAULT_SETTINGS",
+      status: "DEFAULT_SETTINGS",
+      settingsPathRelative: ".operator_config/ai_router_settings.json"
+    };
+  }
+
+  function isHighReasoningMode(mode) {
+    return mode === "HIGH_REASONING_API" || mode === "HIGH_REASONING_API_WITH_APPROVAL";
+  }
+
   function pageAwareAiPrompts(pageId) {
     const common = ["Explain this page.", "What do I do next?"];
     const byPage = {
@@ -201,15 +290,15 @@
   }
 
   function sourceLabel() {
-    if (data.meta.dataSource === "OPERATOR_BACKEND") return "OPERATOR_BACKEND / read-only";
-    if (data.meta.dataSource === "PARTIAL_BACKEND") return `PARTIAL_BACKEND / ${backendDegradedSummary()}`;
-    return "MOCK DATA / sample";
+    if (data.meta.dataSource === "OPERATOR_BACKEND") return "Backend: OK";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return `Backend: Degraded - ${backendDegradedCount()} check${backendDegradedCount() === 1 ? "" : "s"}`;
+    return "Backend: Sample data";
   }
 
   function sourceSubtext() {
-    if (data.meta.dataSource === "OPERATOR_BACKEND") return "OPERATOR_BACKEND / runtime truth";
-    if (data.meta.dataSource === "PARTIAL_BACKEND") return `PARTIAL_BACKEND / ${backendDegradedSummary()}`;
-    return "MOCK DATA / sample fallback";
+    if (data.meta.dataSource === "OPERATOR_BACKEND") return "operator panel / backend OK";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return `operator panel / ${backendDegradedCount()} degraded check${backendDegradedCount() === 1 ? "" : "s"}`;
+    return "operator panel / sample data fallback";
   }
 
   function formatDuration(seconds) {
@@ -222,8 +311,23 @@
 
   function backendDegradedSummary() {
     const failures = data.meta.fetchFailures || [];
-    if (!failures.length) return "status connected; secondary status pending";
-    return `${failures.length} degraded: ${failures.slice(0, 2).join(" | ")}${failures.length > 2 ? " | more in Diagnostics" : ""}`;
+    if (!failures.length) return "Backend: OK";
+    return `Backend: Degraded - ${failures.length} check${failures.length === 1 ? "" : "s"}. View details in Diagnostics.`;
+  }
+
+  function backendDegradedCount() {
+    return (data.meta.fetchFailures || []).length;
+  }
+
+  function backendFailureRows() {
+    return (data.meta.fetchFailures || []).map((failure) => {
+      const text = String(failure || "unknown endpoint failure");
+      const separator = text.indexOf(": ");
+      return {
+        endpoint: separator >= 0 ? text.slice(0, separator) : "unknown",
+        reason: separator >= 0 ? text.slice(separator + 2) : text
+      };
+    });
   }
 
   function backendConnected() {
@@ -290,14 +394,14 @@
       badge(sourceLabel(), dataSourceColor()),
       badge(s.runtimeMode, "green"),
       badge(s.activeProfile, "cyan"),
-      badge(s.broker, "blue"),
+      badge(`Broker: ${s.broker}`, "blue"),
       badge(endpointLabel, endpointLabel === "PAPER endpoint" ? "green" : "yellow"),
-      badge(s.universe.join(", "), "gray"),
-      badge(`POST ${s.brokerPostCount}`, "yellow"),
-      badge(`DELETE ${s.brokerDeleteCount}`, "yellow"),
       badge("Live blocked", "red"),
-      badge("Real-money blocked", "red")
-    ].join("");
+      badge("Real-money blocked", "red"),
+      backendDegradedCount()
+        ? `<button class="status-detail-link" type="button" data-screen-shortcut="diagnostics">View details</button>`
+        : ""
+    ].filter(Boolean).join("");
   }
 
   function paperLaunchDisabledReason() {
@@ -381,6 +485,10 @@
     const launch = data.launchReadiness || {};
     const readiness = data.providerReadiness || {};
     const providerCounts = readiness.counts || {};
+    const blockerChecks = (launch.checks || []).filter((check) => {
+      const status = String(check.status || "").toUpperCase();
+      return check.blocker === true || status.includes("BLOCK") || status.includes("MISSING") || status.includes("DEGRADED") || status.includes("FAIL");
+    });
     return `
       <div class="card span-12" data-home-section="launch-readiness"><h3>Launch Readiness</h3>${kv([
         ["Can I run PAPER right now?", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
@@ -394,15 +502,20 @@
         ["Storage/audit", badge(data.diagnostics.sessionStoreStatus || "UNKNOWN", statusColor(data.diagnostics.sessionStoreStatus || "UNKNOWN"))],
         ["Portfolio read", badge(launch.portfolioReadAvailability || "UNKNOWN", statusColor(launch.portfolioReadAvailability || "UNKNOWN"))]
       ])}
-        ${table(
-          ["Check", "Status", "Detail", "Blocker"],
-          (launch.checks || []).map((check) => [
-            escapeHtml(check.title || check.checkId || "unknown"),
-            badge(check.status || "UNKNOWN", statusColor(check.status || "UNKNOWN")),
-            escapeHtml(check.detail || ""),
-            badge(check.blocker ? "yes" : "no", check.blocker ? "red" : "gray")
-          ])
-        )}
+        <div class="notice">What this means: if this card says READY_FOR_BOUNDED_PAPER, the backend sees the required PAPER-safe prerequisites. If it is blocked, fix the listed blocker before pressing Start.</div>
+        ${blockerChecks.length ? `<div class="notice error">Current blocker detail: ${escapeHtml(blockerChecks.map((check) => check.detail || check.title || check.checkId || "unknown").join(" | "))}</div>` : ""}
+        <details class="ai-context-details">
+          <summary>Advanced readiness checks</summary>
+          ${table(
+            ["Check", "Status", "Detail", "Blocker"],
+            (launch.checks || []).map((check) => [
+              escapeHtml(check.title || check.checkId || "unknown"),
+              badge(check.status || "UNKNOWN", statusColor(check.status || "UNKNOWN")),
+              escapeHtml(check.detail || ""),
+              badge(check.blocker ? "yes" : "no", check.blocker ? "red" : "gray")
+            ])
+          )}
+        </details>
       </div>
     `;
   }
@@ -744,6 +857,9 @@
     return `
       ${header("P&L Truth", "Broker-confirmed economics only. Unknown stays unknown.", "BROKER TRUTH REQUIRED")}
       <div class="grid">
+        <div class="card span-12"><h3>What This Means</h3>
+          <div class="notice">This page is intentionally conservative. If realized P&L, fees, slippage, or TCA are not broker-confirmed, the UI keeps them unknown instead of inventing clean numbers.</div>
+        </div>
         ${metric("Realized P&L", p.realizedPnl.source, "yellow")}
         ${metric("Unrealized P&L", p.unrealizedPnl.source, "yellow")}
         ${metric("Net P&L", p.netPnl.source, "yellow")}
@@ -786,7 +902,7 @@
       ? "Alpaca PAPER key is missing from this backend. Add it in Keys & Providers, then validate read-only."
       : (data.status.dominantBlocker || "No major blocker loaded.");
     return `
-      ${header("Portfolio Home", "Current PAPER holdings, cash, exposure, orders, and what needs attention first.", portfolio.status || "UNKNOWN")}
+      ${header("Portfolio Home", "Current PAPER holdings, cash, exposure, and orders.", portfolio.status || "UNKNOWN")}
       <div class="grid">
         ${metric("Total Equity", summary.totalEquity || "unknown", summary.totalEquity ? "green" : "yellow")}
         ${metric("Cash", summary.cash || "unknown", summary.cash ? "green" : "yellow")}
@@ -936,9 +1052,13 @@
           ["PAPER endpoint", badge(launch.paperEndpointOnly ? "confirmed" : "blocked/unknown", launch.paperEndpointOnly ? "green" : "red")],
           ["Paper start", badge(launch.paperStartAllowed ? "allowed" : "blocked", launch.paperStartAllowed ? "green" : "red")],
           ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
-          ["Backend degraded reasons", escapeHtml((launch.backendDegradedReasons || []).join(", ") || "none")]
+          ["Backend checks", badge((launch.backendDegradedReasons || []).length ? `${launch.backendDegradedReasons.length} degraded` : "no degraded checks", (launch.backendDegradedReasons || []).length ? "yellow" : "green")]
         ])}
-          <div class="status-strip">${(launch.checks || []).map((check) => badge(`${check.checkId}:${check.status}`, statusColor(check.status))).join("")}</div>
+          <details class="ai-context-details">
+            <summary>Advanced launch readiness details</summary>
+            <div class="notice mono">Backend degraded reasons: ${escapeHtml((launch.backendDegradedReasons || []).join(", ") || "none")}</div>
+            <div class="status-strip detail-strip">${(launch.checks || []).map((check) => badge(`${check.checkId}:${check.status}`, statusColor(check.status))).join("")}</div>
+          </details>
         </div>
         <div class="card span-6"><h3>Runtime Snapshot</h3>${kv([
           ["Process", badge(data.status.botStatus, statusColor(data.status.botStatus))],
@@ -1058,6 +1178,13 @@
     const ai = data.ai;
     const research = data.research.counts || {};
     const warning = aiModelWarning();
+    const routing = aiRoutingSettings();
+    const providerCards = aiProviderCards();
+    const providerOptionsFor = (selected) => providerCards.map((provider) => {
+      const id = provider.providerId || provider.provider_id;
+      const label = provider.displayName || provider.display_name || id;
+      return `<option value="${escapeHtml(id)}" ${selected === id ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    }).join("");
     return `
       ${header("AI Advisor", "Highest-reasoning Chief Quant Advisor for strategy, risk, TCA, provider readiness, operation, and proof.", ai.providerState)}
       <div class="grid">
@@ -1068,9 +1195,74 @@
         ${metric("Pending Review", ai.pendingReviewCount || 0, ai.pendingReviewCount ? "yellow" : "gray")}
         ${metric("Can Execute", "false", "gray")}
         <div class="card span-12"><h3>Mission</h3>
-          <div class="notice">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. I analyze trading edge, market structure, execution quality, portfolio exposure, risk, validation evidence, provider readiness, PAPER plans, and live-readiness proof. I cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass safety gates.</div>
+          <div class="notice">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Trading Strategist + Market Research Chief + Risk Officer + Execution/TCA Auditor + Operator Guide. I analyze trading edge, market structure, execution quality, portfolio exposure, risk, validation evidence, provider readiness, PAPER plans, and live-readiness proof. I cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass safety gates.</div>
           ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
         </div>
+        <div class="card span-12"><h3>AI Routing Settings</h3>
+          <div class="notice">High-reasoning API uses separate paid provider billing. ChatGPT Pro web subscription does not automatically provide API quota. Supreme Board Packet uses manual ChatGPT Pro workflow. Local Guide is free and deterministic. Local Model requires your own GPU/server.</div>
+          <div class="notice mono">Settings source: ${badge(routing.settingsSource || "DEFAULT_SETTINGS", statusColor(routing.settingsSource || "DEFAULT_SETTINGS"))} / status=${escapeHtml(routing.status || "DEFAULT_SETTINGS")} / path=${escapeHtml(routing.settingsPathRelative || ".operator_config/ai_router_settings.json")} / sources=PERSISTED_LOCAL_SETTINGS, DEFAULT_SETTINGS, IN_MEMORY_UNSAVED</div>
+          <div class="routing-grid">
+            <label>Default mode
+              <select data-ai-route-default-mode>
+                ${["LOCAL_GUIDE", "LIGHT_API", "HIGH_REASONING_API_WITH_APPROVAL", "SUPREME_BOARD_PACKET", "LOCAL_MODEL"].map((mode) => `<option value="${mode}" ${(routing.defaultMode === mode || (mode === "HIGH_REASONING_API_WITH_APPROVAL" && routing.defaultMode === "HIGH_REASONING_API")) ? "selected" : ""}>${mode.replaceAll("_", " ")}</option>`).join("")}
+              </select>
+            </label>
+            <label>Active provider
+              <select data-ai-active-provider>${providerOptionsFor(routing.activeProvider || "deterministic_local")}</select>
+            </label>
+            <label>Active model
+              <input data-ai-active-model value="${escapeHtml(routing.activeModel || "deterministic-local-guide")}" placeholder="selected model">
+            </label>
+            <label>Local base URL
+              <input data-ai-local-base-url value="${escapeHtml(routing.localBaseUrl || "http://127.0.0.1:11434/v1")}" placeholder="http://127.0.0.1:11434/v1">
+            </label>
+            <label>Supreme Board Packet default
+              <select data-ai-supreme-board-default>
+                <option value="false" ${routing.supremeBoardPacketDefault ? "" : "selected"}>off</option>
+                <option value="true" ${routing.supremeBoardPacketDefault ? "selected" : ""}>on</option>
+              </select>
+            </label>
+            <label>Light provider
+              <select data-ai-light-provider>${providerOptionsFor(routing.lightProvider)}</select>
+            </label>
+            <label>Light model
+              <input data-ai-light-model value="${escapeHtml(routing.lightModel || "")}" placeholder="gpt-5-mini">
+            </label>
+            <label>High-reasoning provider
+              <select data-ai-high-provider>${providerOptionsFor(routing.highReasoningProvider)}</select>
+            </label>
+            <label>High-reasoning model
+              <input data-ai-high-model value="${escapeHtml(routing.highReasoningModel || "")}" placeholder="gpt-5.5-pro">
+            </label>
+            <label>Local model
+              <input data-ai-local-model value="${escapeHtml(routing.localModel || "")}" placeholder="local-model">
+            </label>
+          </div>
+          <div class="button-row">
+            <button class="intent-button paper" type="button" data-ai-save-routing ${backendConnected() ? "" : "disabled"}>Save AI routing settings</button>
+            <button class="intent-button paper" type="button" data-ai-provider-test ${backendConnected() ? "" : "disabled"}>Test provider connection</button>
+            <button class="intent-button paper" type="button" data-ai-generate-packet ${backendConnected() ? "" : "disabled"}>Generate Supreme Board Packet</button>
+            <button class="intent-button paper" type="button" data-ai-approve-high-call ${backendConnected() ? "" : "disabled"}>Approve one high-reasoning call</button>
+            <button class="intent-button paper" type="button" data-ai-use-local-guide>Use local guide only</button>
+            <button class="intent-button paper" type="button" data-ai-use-light-model ${backendConnected() ? "" : "disabled"}>Use selected light model</button>
+            <button class="intent-button paper" type="button" data-ai-use-local-model ${backendConnected() ? "" : "disabled"}>Use selected local model</button>
+          </div>
+          <div class="notice mono">Last AI result: ${escapeHtml(ai.lastAnalyzeResult || "none")}</div>
+        </div>
+        <div class="card span-12"><h3>Provider / Model Registry</h3>${table(
+          ["Provider", "Status", "Configured", "Model", "Quality", "Cost", "Reasoning", "Persona", "Validation / Error"],
+          providerCards.map((provider) => [
+            escapeHtml(provider.displayName || provider.display_name || provider.providerId || provider.provider_id),
+            badge(provider.status || "UNKNOWN", statusColor(provider.status || "UNKNOWN")),
+            badge(String(provider.configured === true || provider.credentialSource === "NOT_REQUIRED" || provider.credential_source === "NOT_REQUIRED"), provider.configured || provider.credentialSource === "NOT_REQUIRED" || provider.credential_source === "NOT_REQUIRED" ? "green" : "yellow"),
+            escapeHtml(provider.modelName || provider.model_name || provider.default_model || "not selected"),
+            badge(provider.modelQuality || provider.model_quality || "UNKNOWN", modelQualityColor(provider.modelQuality || provider.model_quality || "UNKNOWN")),
+            badge(provider.costMode || provider.cost_mode || provider.cost_tier || "UNKNOWN", statusColor(provider.costMode || provider.cost_mode || "UNKNOWN")),
+            escapeHtml(provider.reasoningCapability || provider.reasoning_capability || provider.provider_family || "unknown"),
+            badge(String(provider.personaEnforced !== false), provider.personaEnforced === false ? "red" : "green"),
+            escapeHtml(provider.lastErrorCategory || provider.last_error_category || provider.lastValidationStatus || provider.last_validation_status || "NOT_RUN")
+          ])
+        )}</div>
         <div class="card span-6"><h3>Model Policy</h3>${kv([
           ["Provider mode", badge(ai.providerMode || "NOT_CONFIGURED", statusColor(ai.providerMode || "NOT_CONFIGURED"))],
           ["Selected model", escapeHtml(ai.modelName || "none")],
@@ -1436,12 +1628,13 @@
   function renderDiagnostics() {
     const d = data.diagnostics;
     const wiring = uiWiringSummary();
+    const failures = backendFailureRows();
     return `
       ${header("Diagnostics", "Environment, repo, and local runtime sanity without secrets.", sourceLabel())}
       <div class="card">${kv([
         ["Backend source", badge(sourceLabel(), dataSourceColor())],
         ["Backend fetch", escapeHtml(data.meta.backendStatus || "not inspected")],
-        ["Failed endpoints", data.meta.fetchFailures && data.meta.fetchFailures.length ? tokenText(data.meta.fetchFailures.join(", ")) : "none"],
+        ["Failed endpoints", failures.length ? badge(`${failures.length} degraded`, "yellow") : badge("none", "green")],
         ["Health", badge(d.healthStatus, statusColor(d.healthStatus))],
         ["Runtime profile", badge(d.runtimeProfile, "cyan")],
         ["Hosted mode", badge(String(d.hostedMode), d.hostedMode ? "yellow" : "gray")],
@@ -1457,7 +1650,18 @@
         ["World cache path", escapeHtml(d.worldAwarenessCachePath)],
         ["Latest child stdout", escapeHtml(d.latestChildStdout)],
         ["Latest child stderr", escapeHtml(d.latestChildStderr)]
-      ])}</div>
+      ])}
+        <details class="ai-context-details">
+          <summary>Backend endpoint details</summary>
+          ${failures.length ? table(
+            ["Endpoint", "Reason"],
+            failures.map((failure) => [
+              tokenText(failure.endpoint),
+              tokenText(failure.reason)
+            ])
+          ) : `<p class="muted">No backend endpoint failures are currently reported.</p>`}
+        </details>
+      </div>
       <div class="card" style="margin-top:12px"><h3>UI Wiring Audit</h3>${kv([
         ["Total controls", escapeHtml(wiring.total)],
         ["Wired", badge(wiring.wired, wiring.wired ? "green" : "gray")],
@@ -1777,7 +1981,9 @@
         model_quality: data.ai.modelQuality || "FALLBACK_ONLY",
         reasoning_policy: data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED",
         model_suitable_for_governance: data.ai.modelSuitableForGovernance === true,
-        warning: aiModelWarning()
+        warning: aiModelWarning(),
+        routing_settings: aiRoutingSettings(),
+        provider_registry_count: aiProviderCards().length
       },
       provider_readiness: {
         provider_count: data.providerReadiness.providerCount || 0,
@@ -1940,6 +2146,191 @@
     ].join("\n");
   }
 
+  function normalizeAiAskResult(result, fallbackAnswer) {
+    const payload = result || {};
+    const providerMode = payload.provider_mode || payload.providerMode || "DETERMINISTIC_FALLBACK";
+    const modelQuality = payload.model_quality || payload.modelQuality || "FALLBACK_ONLY";
+    const answerSource = payload.answer_source || payload.response_source || payload.answerSource || "LOCAL_DETERMINISTIC";
+    return {
+      status: payload.status || "ANSWERED_FALLBACK",
+      providerId: payload.provider_id || payload.provider || payload.providerId || "deterministic_local",
+      providerMode,
+      providerState: payload.provider_state || payload.providerState || data.ai.providerState || "AI_DISABLED",
+      modelName: payload.model_name || payload.model || payload.modelName || "deterministic-local-guide",
+      modelQuality,
+      costMode: payload.cost_mode || payload.costMode || "FREE_LOCAL",
+      answerSource,
+      reasoningPolicy: payload.reasoning_policy || payload.reasoningPolicy || "FALLBACK_ONLY_LIMITED",
+      modelSuitableForGovernance: payload.model_suitable_for_governance === true || payload.governance_suitable === true,
+      personaEnforced: payload.persona_enforced !== false,
+      expertRolesApplied: Array.isArray(payload.expert_roles_applied) ? payload.expert_roles_applied : [],
+      mode: payload.mode || "OPERATOR_GUIDE",
+      evidenceLevel: payload.evidence_level || payload.evidenceLevel || "UNKNOWN",
+      answer: payload.answer || payload.response || fallbackAnswer || "No advisory response returned.",
+      knownFacts: Array.isArray(payload.known_facts) ? payload.known_facts : [],
+      unknowns: Array.isArray(payload.unknowns) ? payload.unknowns : [],
+      nextStepLabel: payload.next_step_label || "Review current page",
+      nextStepPage: payload.next_step_page || "",
+      nextStepControlId: payload.next_step_control_id || "",
+      needsCodexPacket: payload.needs_codex_packet === true,
+      suggestedCodexPacketSummary: payload.suggested_codex_packet_summary || "",
+      providerErrorCategory: payload.provider_error_category || payload.error_category || "",
+      providerErrorMessageSafe: payload.provider_error_message_safe || payload.safe_error_message || "",
+      canExecute: payload.can_execute === true,
+      brokerCallOccurred: payload.broker_call_occurred === true,
+      tradingMutationOccurred: payload.trading_mutation_occurred === true,
+      liveEnabled: payload.live_enabled === true,
+      realMoneyEnabled: payload.real_money_enabled === true,
+      secretsExposed: payload.secrets_exposed === true || payload.secrets_values_exposed === true,
+      rawLogsIncluded: payload.raw_logs_included === true
+    };
+  }
+
+  function localAiResult(question, answer, overrides) {
+    const payload = {
+      status: "ANSWERED_LOCAL_GUIDE",
+      provider_id: "deterministic_local",
+      provider_mode: "DETERMINISTIC_FALLBACK",
+      provider_state: backendConnected() ? "LOCAL_GUIDE" : "BACKEND_UNREACHABLE",
+      model_name: "deterministic-local-guide",
+      model_quality: "FALLBACK_ONLY",
+      cost_mode: "FREE_LOCAL",
+      answer_source: "LOCAL_DETERMINISTIC",
+      reasoning_policy: "FALLBACK_ONLY_LIMITED",
+      model_suitable_for_governance: false,
+      persona_enforced: true,
+      expert_roles_applied: ["Chief Quant Advisor", "Quant Engineer", "Trading Systems Auditor", "Operator Guide"],
+      mode: "OPERATOR_GUIDE",
+      evidence_level: backendConnected() ? "SYSTEM_STATE" : "UNKNOWN",
+      answer,
+      known_facts: pageSummaryForAi(activeScreenId || "positions").slice(0, 4),
+      unknowns: aiMissingEvidence(activeScreenId || "positions").slice(0, 4),
+      next_step_label: "Review the highlighted blocker and use the visible safe control.",
+      next_step_page: activeScreenId || "positions",
+      next_step_control_id: "",
+      can_execute: false,
+      broker_call_occurred: false,
+      trading_mutation_occurred: false,
+      live_enabled: false,
+      real_money_enabled: false,
+      secrets_exposed: false,
+      raw_logs_included: false,
+      requested_question: question || ""
+    };
+    return normalizeAiAskResult({ ...payload, ...(overrides || {}) }, answer);
+  }
+
+  function aiFriendlyStatus(result) {
+    if (aiOverlayBusy && !result) return "Asking Chief Quant Advisor...";
+    if (!result) return "Local deterministic guide preview. Ask a question for a fresh advisory response.";
+    if (result.providerMode === "PROVIDER_ERROR" || result.answerSource === "PROVIDER_ERROR") {
+      return "AI provider error. Local fallback can still explain operator status.";
+    }
+    if (result.providerMode === "DETERMINISTIC_FALLBACK" || result.modelQuality === "FALLBACK_ONLY") {
+      return "DETERMINISTIC FALLBACK - not a full AI quant reasoning response.";
+    }
+    return "Live advisory response returned. Advisory only.";
+  }
+
+  function renderAiBullets(items, emptyLabel) {
+    const safeItems = (items || []).slice(0, 5);
+    if (!safeItems.length) return `<p class="muted">${escapeHtml(emptyLabel || "none returned")}</p>`;
+    return `<ul class="compact-list">${safeItems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+  }
+
+  function renderAiNextStep(result) {
+    return `
+      <div class="ai-next-step">
+        <h3>Next Step</h3>
+        ${kv([
+          ["Action", escapeHtml(result.nextStepLabel || "Review current page")],
+          ["Page", escapeHtml(result.nextStepPage || "not specified")],
+          ["Control", escapeHtml(result.nextStepControlId || "not specified")],
+          ["Codex packet needed", badge(String(result.needsCodexPacket === true), result.needsCodexPacket ? "yellow" : "gray")]
+        ])}
+        ${result.suggestedCodexPacketSummary ? `<div class="notice">${escapeHtml(result.suggestedCodexPacketSummary)}</div>` : ""}
+      </div>
+    `;
+  }
+
+  function renderAiEvidenceSummary(result, context) {
+    return `
+      <div class="ai-evidence-summary">
+        <h3>Compact Evidence Summary</h3>
+        ${kv([
+          ["Evidence level", badge(result.evidenceLevel || "UNKNOWN", statusColor(result.evidenceLevel || "UNKNOWN"))],
+          ["Major blocker", tokenText((context.blockers || [])[0] || "none reported")],
+          ["Known facts", escapeHtml(result.knownFacts.length ? `${result.knownFacts.length} returned` : "none returned")],
+          ["Unknowns", escapeHtml(result.unknowns.length ? `${result.unknowns.length} returned` : "none returned")]
+        ])}
+        <div class="two-column-summary">
+          <div>
+            <h4>Known facts</h4>
+            ${renderAiBullets(result.knownFacts, "No known facts returned.")}
+          </div>
+          <div>
+            <h4>Unknowns</h4>
+            ${renderAiBullets(result.unknowns, "No unknowns returned.")}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderAiCollapsedDetails(result, context) {
+    return `
+      <details class="ai-context-details ai-diagnostics-details">
+        <summary>Advanced details: context, provider diagnostics, safety flags</summary>
+        ${renderAiContextPreview(context)}
+        <div class="ai-context-preview">
+          <h3>Provider / Model Diagnostics</h3>
+          ${kv([
+            ["Status", escapeHtml(result.status)],
+            ["Provider ID", escapeHtml(result.providerId)],
+            ["Provider mode", badge(result.providerMode, statusColor(result.providerMode))],
+            ["Provider state", badge(result.providerState, statusColor(result.providerState))],
+            ["Model", escapeHtml(result.modelName)],
+            ["Model quality", badge(result.modelQuality, modelQualityColor(result.modelQuality))],
+            ["Answer source", badge(result.answerSource, statusColor(result.answerSource))],
+            ["Cost mode", badge(result.costMode, statusColor(result.costMode))],
+            ["Reasoning policy", badge(result.reasoningPolicy, statusColor(result.reasoningPolicy))],
+            ["Governance suitable", badge(String(result.modelSuitableForGovernance), result.modelSuitableForGovernance ? "green" : "red")],
+            ["Persona enforced", badge(String(result.personaEnforced), result.personaEnforced ? "green" : "red")],
+            ["Expert roles", escapeHtml(result.expertRolesApplied.join(", ") || "not returned")],
+            ["Provider error category", escapeHtml(result.providerErrorCategory || "none")],
+            ["Provider error message", escapeHtml(result.providerErrorMessageSafe || "none")]
+          ])}
+        </div>
+        <div class="ai-context-preview">
+          <h3>Safety Flags</h3>
+          ${kv([
+            ["can_execute", badge(String(result.canExecute), result.canExecute ? "red" : "green")],
+            ["broker_call_occurred", badge(String(result.brokerCallOccurred), result.brokerCallOccurred ? "red" : "green")],
+            ["trading_mutation_occurred", badge(String(result.tradingMutationOccurred), result.tradingMutationOccurred ? "red" : "green")],
+            ["live_enabled", badge(String(result.liveEnabled), result.liveEnabled ? "red" : "green")],
+            ["real_money_enabled", badge(String(result.realMoneyEnabled), result.realMoneyEnabled ? "red" : "green")],
+            ["secrets_exposed", badge(String(result.secretsExposed), result.secretsExposed ? "red" : "green")],
+            ["raw_logs_included", badge(String(result.rawLogsIncluded), result.rawLogsIncluded ? "red" : "green")]
+          ])}
+        </div>
+      </details>
+    `;
+  }
+
+  function scheduleAiOverlayScroll() {
+    if (!aiOverlayOpen) return;
+    const doScroll = () => {
+      const container = document.querySelector("[data-ai-chat-scroll-container]");
+      const endTarget = document.getElementById("ai-chief-response-end");
+      if (container) container.scrollTop = container.scrollHeight;
+      if (endTarget && typeof endTarget.scrollIntoView === "function") {
+        endTarget.scrollIntoView({ block: "end" });
+      }
+    };
+    window.requestAnimationFrame(doScroll);
+    window.setTimeout(doScroll, 80);
+  }
+
   function renderAiChiefOverlay() {
     const host = document.querySelector(".ai-chief-global");
     if (!host) return;
@@ -1947,6 +2338,8 @@
     const providerState = data.ai.providerState || "AI_DISABLED";
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
     const response = aiOverlayResponse || buildAiOverlayAdvisory(aiQuestionText || aiSelectedQuestion);
+    const result = aiOverlayLastResult || localAiResult(aiQuestionText || aiSelectedQuestion, response);
+    const friendlyStatus = aiOverlayBusy ? "Asking Chief Quant Advisor..." : aiFriendlyStatus(result);
     const prompts = pageAwareAiPrompts(activeScreenId || "positions");
     const warning = aiModelWarning();
     host.innerHTML = `
@@ -1958,9 +2351,17 @@
       <section class="ai-chief-drawer ${aiOverlayOpen ? "open" : ""}" aria-hidden="${aiOverlayOpen ? "false" : "true"}" aria-label="Global AI Chief advisory drawer">
         <div class="ai-chief-panel">
           <div class="ai-chief-header">
-            <div>
+            <div class="ai-chief-heading">
               <div class="ai-chief-title">Chief Quant Advisor</div>
-              <div class="muted mono">${escapeHtml(providerLabel)} / ${escapeHtml(data.ai.providerMode || "NOT_CONFIGURED")} / ${escapeHtml(data.ai.modelQuality || "FALLBACK_ONLY")} / ADVISORY_ONLY</div>
+              <div class="cardless-model-strip">
+                ${badge(providerLabel, statusColor(providerState))}
+                ${badge(result.providerMode, statusColor(result.providerMode))}
+                ${badge(result.modelName || "model unavailable", "gray")}
+                ${badge(result.modelQuality, modelQualityColor(result.modelQuality))}
+                ${badge(result.answerSource, statusColor(result.answerSource))}
+                ${badge(result.costMode, statusColor(result.costMode))}
+                ${badge("advisory only", "gray")}
+              </div>
             </div>
             <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Close</button>
           </div>
@@ -1973,22 +2374,7 @@
           </div>
           <div class="notice ai-mission">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. I separate broker-confirmed truth, market truth, local system state, model inference, missing evidence, and speculation. I cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass gates.</div>
           ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
-          <div class="ai-chief-body">
-            <div class="cardless-model-strip">
-              ${badge(`provider_mode=${data.ai.providerMode || "NOT_CONFIGURED"}`, statusColor(data.ai.providerMode || "NOT_CONFIGURED"))}
-              ${badge(`model=${data.ai.modelName || "none"}`, "gray")}
-              ${badge(`quality=${data.ai.modelQuality || "FALLBACK_ONLY"}`, modelQualityColor(data.ai.modelQuality || "FALLBACK_ONLY"))}
-              ${badge(`policy=${data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED"}`, statusColor(data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED"))}
-              ${badge(`governance=${String(data.ai.modelSuitableForGovernance === true)}`, data.ai.modelSuitableForGovernance ? "green" : "red")}
-            </div>
-            ${renderAiContextPreview(context)}
-            <div class="ai-question-bank" aria-label="AI Chief quick questions">
-              ${prompts.concat(AI_QUICK_PROMPTS).filter((prompt, index, arr) => arr.indexOf(prompt) === index).map((prompt) => `
-                <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
-                  ${escapeHtml(prompt)}
-                </button>
-              `).join("")}
-            </div>
+          <div class="ai-chief-body" data-ai-chat-scroll-container>
             <div class="ai-ask-box">
               <label for="ai-chief-question">Ask a page-aware question</label>
               <textarea id="ai-chief-question" data-ai-chief-question rows="4" placeholder="Ask about edge, risk, TCA, provider readiness, launch blockers, or latest run evidence.">${escapeHtml(aiQuestionText || "")}</textarea>
@@ -2001,13 +2387,24 @@
               </div>
               ${aiOverlayError ? `<div class="notice error">Error: ${escapeHtml(aiOverlayError)}</div>` : ""}
             </div>
-            <div class="ai-response">
-              <div class="split">
-                <h3>Advisory Response</h3>
-                ${badge(providerState, statusColor(providerState))}
-              </div>
-              <pre>${escapeHtml(response)}</pre>
+            <div class="ai-question-bank" aria-label="AI Chief quick questions">
+              ${prompts.concat(AI_QUICK_PROMPTS).filter((prompt, index, arr) => arr.indexOf(prompt) === index).map((prompt) => `
+                <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
+                  ${escapeHtml(prompt)}
+                </button>
+              `).join("")}
             </div>
+            <div class="ai-response advisor-answer">
+              <div class="split">
+                <h3>Advisor Answer</h3>
+                ${badge(result.mode, "cyan")}
+              </div>
+              <div class="notice ${result.providerMode === "PROVIDER_ERROR" || result.answerSource === "PROVIDER_ERROR" ? "error" : ""}">${escapeHtml(friendlyStatus)}</div>
+              <pre>${escapeHtml(result.answer || response)}</pre>
+            </div>
+            ${renderAiNextStep(result)}
+            ${renderAiEvidenceSummary(result, context)}
+            ${renderAiCollapsedDetails(result, context)}
             <div class="ai-chief-actions">
               <button class="intent-button paper" type="button" data-ai-chief-analyze ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>
                 ${aiOverlayBusy ? "Queueing advisory analysis..." : "Queue advisory analysis"}
@@ -2019,10 +2416,12 @@
                 ? "Ask uses /operator/ai/ask. With a saved OpenAI or Anthropic key, the backend attempts a real advisory model call. If the provider is missing or errors, it returns an honest fallback instead of pretending a model answered. Analyze uses the governed AI endpoint and governance queue."
                 : "Backend unreachable: overlay can show sample context only and will not queue runtime recommendations."}
             </div>
+            <div id="ai-chief-response-end" class="ai-chief-response-end" aria-hidden="true"></div>
           </div>
         </div>
       </section>
     `;
+    scheduleAiOverlayScroll();
   }
 
   function setAiOverlayOpen(open) {
@@ -2034,6 +2433,7 @@
     aiSelectedQuestion = question;
     aiQuestionText = question;
     aiOverlayResponse = buildAiOverlayAdvisory(question);
+    aiOverlayLastResult = localAiResult(question, aiOverlayResponse);
     aiOverlayError = "";
     aiOverlayOpen = true;
     renderAiChiefOverlay();
@@ -2042,6 +2442,7 @@
   function clearAiQuestion() {
     aiQuestionText = "";
     aiOverlayResponse = "";
+    aiOverlayLastResult = null;
     aiOverlayError = "";
     aiOverlayOpen = true;
     renderAiChiefOverlay();
@@ -2050,11 +2451,16 @@
   function formatAiAskResult(result) {
     const knownFacts = Array.isArray(result.known_facts) ? result.known_facts : [];
     const unknowns = Array.isArray(result.unknowns) ? result.unknowns : [];
+    const normalized = normalizeAiAskResult(result);
+    const friendly = aiFriendlyStatus(normalized);
     return [
-      `provider_mode=${result.provider_mode || "DETERMINISTIC_FALLBACK"} / provider_state=${result.provider_state || "AI_DISABLED"}`,
-      `model=${result.model_name || result.model || "none"} / model_quality=${result.model_quality || "FALLBACK_ONLY"} / reasoning_policy=${result.reasoning_policy || "FALLBACK_ONLY_LIMITED"} / governance_suitable=${String(result.model_suitable_for_governance === true)}`,
-      `mode=${result.mode || "OPERATOR_GUIDE"} / evidence_level=${result.evidence_level || "UNKNOWN"} / source=${result.response_source || "DETERMINISTIC_FALLBACK_NO_MODEL_CALL"}`,
+      friendly,
       result.answer || result.response || "No advisory response returned.",
+      "",
+      `provider_id=${result.provider_id || result.provider || "deterministic_local"} / provider_mode=${result.provider_mode || "DETERMINISTIC_FALLBACK"} / provider_state=${result.provider_state || "AI_DISABLED"}`,
+      `model=${result.model_name || result.model || "none"} / model_quality=${result.model_quality || "FALLBACK_ONLY"} / reasoning_policy=${result.reasoning_policy || "FALLBACK_ONLY_LIMITED"} / governance_suitable=${String(result.governance_suitable === true || result.model_suitable_for_governance === true)}`,
+      `answer_source=${result.answer_source || result.response_source || "LOCAL_DETERMINISTIC"} / cost_mode=${result.cost_mode || "FREE_LOCAL"} / persona_enforced=${String(result.persona_enforced === true)} / roles=${Array.isArray(result.expert_roles_applied) ? result.expert_roles_applied.join(",") : "not returned"}`,
+      `mode=${result.mode || "OPERATOR_GUIDE"} / evidence_level=${result.evidence_level || "UNKNOWN"} / source=${result.response_source || "DETERMINISTIC_FALLBACK_NO_MODEL_CALL"}`,
       knownFacts.length ? `known_facts:\n- ${knownFacts.join("\n- ")}` : "known_facts: none returned",
       unknowns.length ? `unknowns:\n- ${unknowns.join("\n- ")}` : "unknowns: none returned",
       `next_step=${result.next_step_label || "review current page"} / page=${result.next_step_page || "unknown"} / control=${result.next_step_control_id || "unknown"}`,
@@ -2075,6 +2481,7 @@
     aiOverlayError = "";
     if (!backendConnected()) {
       aiOverlayResponse = buildAiOverlayAdvisory(question);
+      aiOverlayLastResult = localAiResult(question, aiOverlayResponse);
       aiOverlayOpen = true;
       renderAiChiefOverlay();
       return;
@@ -2083,16 +2490,30 @@
     renderAiChiefOverlay();
     try {
       const context = buildAiChiefContext(question);
+      const routing = aiRoutingSettings();
       const result = await postIntent("/operator/ai/ask", {
         question,
         page_id: context.page_id,
         page_context: context,
-        advisory_only: true
+        advisory_only: true,
+        route_mode: routing.defaultMode || "LOCAL_GUIDE",
+        provider_id: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningProvider : routing.defaultMode === "LIGHT_API" ? routing.lightProvider : routing.defaultMode === "LOCAL_MODEL" ? "local_openai_compatible" : "",
+        model_name: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningModel : routing.defaultMode === "LIGHT_API" ? routing.lightModel : routing.defaultMode === "LOCAL_MODEL" ? routing.localModel : "",
+        approved_paid_call: false
       });
       aiOverlayResponse = formatAiAskResult(result);
+      aiOverlayLastResult = normalizeAiAskResult(result);
     } catch (error) {
       aiOverlayError = error.message || error.name || "ai_ask_failed";
       aiOverlayResponse = buildAiOverlayAdvisory(question);
+      aiOverlayLastResult = localAiResult(question, aiOverlayResponse, {
+        status: "PROVIDER_ERROR",
+        provider_mode: "PROVIDER_ERROR",
+        provider_state: "PROVIDER_ERROR",
+        answer_source: "LOCAL_DETERMINISTIC",
+        provider_error_category: "UI_AI_ASK_REQUEST_FAILED",
+        provider_error_message_safe: aiOverlayError
+      });
     } finally {
       aiOverlayBusy = false;
       aiOverlayOpen = true;
@@ -2104,6 +2525,7 @@
     homeAiQuestionText = question;
     homeAiError = "";
     homeAiResponse = buildAiOverlayAdvisory(question);
+    homeAiLastResult = localAiResult(question, homeAiResponse);
     renderScreens(activeScreenId);
     renderRail();
     renderAiChiefOverlay();
@@ -2112,6 +2534,7 @@
   function clearHomeAiQuestion() {
     homeAiQuestionText = "";
     homeAiResponse = "";
+    homeAiLastResult = null;
     homeAiError = "";
     renderScreens(activeScreenId);
     renderRail();
@@ -2125,6 +2548,7 @@
     homeAiError = "";
     if (!backendConnected()) {
       homeAiResponse = buildAiOverlayAdvisory(question);
+      homeAiLastResult = localAiResult(question, homeAiResponse);
       renderScreens(activeScreenId);
       renderRail();
       renderAiChiefOverlay();
@@ -2138,16 +2562,29 @@
       const context = buildAiChiefContext(question);
       context.page_id = activeScreenId || "positions";
       context.page_title = screenTitle(activeScreenId || "positions");
+      const routing = aiRoutingSettings();
       const result = await postIntent("/operator/ai/ask", {
         question,
         page_id: context.page_id,
         page_context: context,
-        advisory_only: true
+        advisory_only: true,
+        route_mode: routing.defaultMode || "LOCAL_GUIDE",
+        provider_id: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningProvider : routing.defaultMode === "LIGHT_API" ? routing.lightProvider : routing.defaultMode === "LOCAL_MODEL" ? "local_openai_compatible" : "",
+        model_name: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningModel : routing.defaultMode === "LIGHT_API" ? routing.lightModel : routing.defaultMode === "LOCAL_MODEL" ? routing.localModel : "",
+        approved_paid_call: false
       });
       homeAiResponse = formatAiAskResult(result);
+      homeAiLastResult = normalizeAiAskResult(result);
     } catch (error) {
       homeAiError = error.message || error.name || "home_ai_ask_failed";
       homeAiResponse = buildAiOverlayAdvisory(question);
+      homeAiLastResult = localAiResult(question, homeAiResponse, {
+        status: "PROVIDER_ERROR",
+        provider_mode: "PROVIDER_ERROR",
+        provider_state: "PROVIDER_ERROR",
+        provider_error_category: "UI_HOME_AI_ASK_REQUEST_FAILED",
+        provider_error_message_safe: homeAiError
+      });
     } finally {
       homeAiBusy = false;
       renderScreens(activeScreenId);
@@ -2159,6 +2596,7 @@
   async function runAiOverlayAnalyze() {
     if (!backendConnected() || aiOverlayBusy) {
       aiOverlayResponse = buildAiOverlayAdvisory(aiSelectedQuestion);
+      aiOverlayLastResult = localAiResult(aiSelectedQuestion, aiOverlayResponse);
       renderAiChiefOverlay();
       return;
     }
@@ -2189,6 +2627,29 @@
         `can_execute=${String(recommendation.can_execute === true ? "true" : "false")}.`,
         "Approving a PAPER research recommendation does not start PAPER automatically."
       ].filter(Boolean).join("\n");
+      aiOverlayLastResult = normalizeAiAskResult({
+        status: result.status || "QUEUED",
+        provider_id: "operator_ai_queue",
+        provider_mode: "DETERMINISTIC_FALLBACK",
+        provider_state: "GOVERNANCE_QUEUE",
+        model_name: "operator-ai-queue",
+        model_quality: "FALLBACK_ONLY",
+        answer_source: "LOCAL_DETERMINISTIC",
+        cost_mode: "FREE_LOCAL",
+        reasoning_policy: "FALLBACK_ONLY_LIMITED",
+        persona_enforced: true,
+        expert_roles_applied: ["Chief Quant Advisor", "Trading Systems Auditor", "Operator Guide"],
+        mode: "TRADING_SYSTEMS_AUDITOR",
+        evidence_level: "SYSTEM_STATE",
+        answer: aiOverlayResponse,
+        next_step_label: "Review the queued advisory item before acting.",
+        next_step_page: "ai",
+        can_execute: false,
+        broker_call_occurred: false,
+        trading_mutation_occurred: false,
+        live_enabled: false,
+        real_money_enabled: false
+      }, aiOverlayResponse);
       data = await loadData();
       data.ai.lastAnalyzeResult = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "OBSERVATION"}`;
       renderTopBar();
@@ -2196,8 +2657,201 @@
       renderRail();
     } catch (error) {
       aiOverlayResponse = `FAILED: ${error.message || error.name || "ai_analyze_error"}\nNo broker or trading mutation was requested by the UI.`;
+      aiOverlayLastResult = localAiResult(aiSelectedQuestion, aiOverlayResponse, {
+        status: "PROVIDER_ERROR",
+        provider_mode: "PROVIDER_ERROR",
+        provider_state: "PROVIDER_ERROR",
+        provider_error_category: "UI_AI_ANALYZE_REQUEST_FAILED",
+        provider_error_message_safe: error.message || error.name || "ai_analyze_error"
+      });
     } finally {
       aiOverlayBusy = false;
+      aiOverlayOpen = true;
+      renderAiChiefOverlay();
+    }
+  }
+
+  function currentAiRoutingFormValues() {
+    const value = (selector, fallback) => {
+      const el = document.querySelector(selector);
+      return String((el && el.value) || fallback || "").trim();
+    };
+    return {
+      default_mode: value("[data-ai-route-default-mode]", aiRoutingSettings().defaultMode || "LOCAL_GUIDE"),
+      active_provider: value("[data-ai-active-provider]", aiRoutingSettings().activeProvider || "deterministic_local"),
+      active_model: value("[data-ai-active-model]", aiRoutingSettings().activeModel || "deterministic-local-guide"),
+      light_provider: value("[data-ai-light-provider]", aiRoutingSettings().lightProvider || "openai"),
+      light_model: value("[data-ai-light-model]", aiRoutingSettings().lightModel || "gpt-5-mini"),
+      high_reasoning_provider: value("[data-ai-high-provider]", aiRoutingSettings().highReasoningProvider || "openai"),
+      high_reasoning_model: value("[data-ai-high-model]", aiRoutingSettings().highReasoningModel || "gpt-5.5-pro"),
+      local_base_url: value("[data-ai-local-base-url]", aiRoutingSettings().localBaseUrl || "http://127.0.0.1:11434/v1"),
+      local_model: value("[data-ai-local-model]", aiRoutingSettings().localModel || "local-model"),
+      supreme_board_packet_default: value("[data-ai-supreme-board-default]", aiRoutingSettings().supremeBoardPacketDefault ? "true" : "false") === "true"
+    };
+  }
+
+  function applyRoutingToLocalState(settings) {
+    data.ai.routingSettings = {
+      defaultMode: settings.default_mode || settings.defaultMode || "LOCAL_GUIDE",
+      activeProvider: settings.active_provider || settings.activeProvider || "deterministic_local",
+      activeModel: settings.active_model || settings.activeModel || "deterministic-local-guide",
+      lightProvider: settings.light_provider || settings.lightProvider || "openai",
+      lightModel: settings.light_model || settings.lightModel || "gpt-5-mini",
+      highReasoningProvider: settings.high_reasoning_provider || settings.highReasoningProvider || "openai",
+      highReasoningModel: settings.high_reasoning_model || settings.highReasoningModel || "gpt-5.5-pro",
+      localProvider: "local_openai_compatible",
+      localBaseUrl: settings.local_base_url || settings.localBaseUrl || "http://127.0.0.1:11434/v1",
+      localModel: settings.local_model || settings.localModel || "local-model",
+      supremeBoardPacketDefault: settings.supreme_board_packet_default === true || settings.supremeBoardPacketDefault === true,
+      settingsSource: settings.settings_source || settings.settingsSource || data.ai.routingSettings && data.ai.routingSettings.settingsSource || "IN_MEMORY_UNSAVED",
+      status: settings.status || data.ai.routingSettings && data.ai.routingSettings.status || "IN_MEMORY_UNSAVED",
+      settingsPathRelative: settings.settings_path_relative || settings.settingsPathRelative || data.ai.routingSettings && data.ai.routingSettings.settingsPathRelative || ".operator_config/ai_router_settings.json"
+    };
+  }
+
+  async function saveAiRoutingSettings() {
+    const settings = currentAiRoutingFormValues();
+    applyRoutingToLocalState({ ...settings, settings_source: "IN_MEMORY_UNSAVED", status: "IN_MEMORY_UNSAVED" });
+    if (!backendConnected()) {
+      data.ai.lastAnalyzeResult = "AI routing settings updated locally only; backend unavailable.";
+      renderScreens(activeScreenId);
+      return;
+    }
+    try {
+      const result = await postIntent("/operator/ai/router/settings", settings);
+      const nextSettings = result.status === "SAVED" ? ((result && result.settings) || settings) : settings;
+      applyRoutingToLocalState({ ...nextSettings, status: result.status, settings_source: result.status === "SAVED" ? result.settings_source : "IN_MEMORY_UNSAVED", settings_path_relative: result.settings_path_relative });
+      const errorText = Array.isArray(result.validation_errors) && result.validation_errors.length
+        ? ` reason=${result.validation_errors.map((item) => item.reason_code || item.detail || "validation_failed").join(",")}`
+        : "";
+      data.ai.lastAnalyzeResult = `${result.status || "SAVED"}: AI routing settings ${result.status === "SAVED" ? "persisted" : "not saved"}; source=${result.settings_source || "UNKNOWN"}; no paid call occurred.${errorText}`;
+      renderScreens(activeScreenId);
+      renderRail();
+      renderAiChiefOverlay();
+    } catch (error) {
+      data.ai.lastAnalyzeResult = `FAILED: ${error.message || error.name || "ai_routing_save_failed"}`;
+      renderScreens(activeScreenId);
+    }
+  }
+
+  async function validateSelectedAiProvider() {
+    const settings = currentAiRoutingFormValues();
+    const providerId = isHighReasoningMode(settings.default_mode)
+      ? settings.high_reasoning_provider
+      : settings.default_mode === "LIGHT_API"
+        ? settings.light_provider
+        : settings.default_mode === "LOCAL_MODEL"
+          ? "local_openai_compatible"
+          : "deterministic_local";
+    const modelName = isHighReasoningMode(settings.default_mode)
+      ? settings.high_reasoning_model
+      : settings.default_mode === "LIGHT_API"
+        ? settings.light_model
+        : settings.local_model;
+    try {
+      const result = await postIntent("/operator/ai/providers/validate", {
+        provider_id: providerId,
+        model_name: modelName,
+        validation_mode: "credential_presence",
+        approved_paid_call: false
+      });
+      data.ai.lastAnalyzeResult = `${providerId}: ${result.validation_status || result.status}; ${result.safe_error_message || "no provider call made"}`;
+      renderScreens(activeScreenId);
+    } catch (error) {
+      data.ai.lastAnalyzeResult = `FAILED: ${error.message || error.name || "ai_provider_validate_failed"}`;
+      renderScreens(activeScreenId);
+    }
+  }
+
+  async function generateSupremeBoardPacket() {
+    const question = aiQuestionText || aiSelectedQuestion || "Review the current operator state.";
+    if (!backendConnected()) {
+      aiOverlayResponse = buildAiOverlayAdvisory("Draft a Codex packet.");
+      aiOverlayLastResult = localAiResult("Draft a Codex packet.", aiOverlayResponse);
+      aiOverlayOpen = true;
+      renderAiChiefOverlay();
+      return;
+    }
+    try {
+      const context = buildAiChiefContext(question);
+      const result = await postIntent("/operator/ai/supreme-board-packet", {
+        question,
+        page_context: context,
+        advisory_only: true
+      });
+      aiOverlayResponse = result.packet || result.answer || "No packet returned.";
+      aiOverlayLastResult = normalizeAiAskResult({
+        status: result.status || "PACKET_READY",
+        provider_id: "supreme_board_packet",
+        provider_mode: "DETERMINISTIC_FALLBACK",
+        provider_state: "PACKET_READY",
+        model_name: "chatgpt-pro-manual",
+        model_quality: "HIGH_REASONING",
+        answer_source: "SUPREME_BOARD_PACKET",
+        cost_mode: "CHATGPT_PRO_MANUAL",
+        reasoning_policy: "HIGHEST_AVAILABLE_REQUIRED",
+        model_suitable_for_governance: true,
+        persona_enforced: true,
+        expert_roles_applied: ["Chief Quant Advisor", "Quant Engineer", "Trading Systems Auditor", "Risk Officer", "Operator Guide"],
+        mode: "CODEX_PACKET_ADVISOR",
+        evidence_level: "SYSTEM_STATE",
+        answer: aiOverlayResponse,
+        next_step_label: "Copy the packet into the Supreme Board workflow.",
+        next_step_page: "ai",
+        needs_codex_packet: true,
+        can_execute: false,
+        broker_call_occurred: false,
+        trading_mutation_occurred: false,
+        live_enabled: false,
+        real_money_enabled: false
+      }, aiOverlayResponse);
+      aiOverlayOpen = true;
+      data.ai.lastAnalyzeResult = "PACKET_READY: Supreme Board Packet generated; no API call occurred.";
+      renderScreens(activeScreenId);
+      renderAiChiefOverlay();
+    } catch (error) {
+      aiOverlayResponse = `FAILED: ${error.message || error.name || "supreme_board_packet_failed"}`;
+      aiOverlayLastResult = localAiResult(question, aiOverlayResponse, {
+        status: "PROVIDER_ERROR",
+        provider_mode: "PROVIDER_ERROR",
+        provider_state: "PROVIDER_ERROR",
+        provider_error_category: "UI_SUPREME_BOARD_PACKET_FAILED",
+        provider_error_message_safe: error.message || error.name || "supreme_board_packet_failed"
+      });
+      aiOverlayOpen = true;
+      renderAiChiefOverlay();
+    }
+  }
+
+  async function approveOneHighReasoningCall() {
+    const settings = currentAiRoutingFormValues();
+    const confirmed = window.confirm("Approve one paid high-reasoning API call? This uses provider API billing, cannot trade, cannot call broker, cannot enable live, and cannot expose secrets.");
+    if (!confirmed) return;
+    const question = aiQuestionText || aiSelectedQuestion || "Audit readiness.";
+    const context = buildAiChiefContext(question);
+    try {
+      const result = await postIntent("/operator/ai/ask", {
+        question,
+        page_context: context,
+        route_mode: "HIGH_REASONING_API",
+        provider_id: settings.high_reasoning_provider,
+        model_name: settings.high_reasoning_model,
+        approved_paid_call: true,
+        advisory_only: true
+      });
+      aiOverlayResponse = formatAiAskResult(result);
+      aiOverlayLastResult = normalizeAiAskResult(result);
+      aiOverlayOpen = true;
+      renderAiChiefOverlay();
+    } catch (error) {
+      aiOverlayResponse = `FAILED: ${error.message || error.name || "high_reasoning_call_failed"}\nNo broker or trading mutation was requested.`;
+      aiOverlayLastResult = localAiResult(question, aiOverlayResponse, {
+        status: "PROVIDER_ERROR",
+        provider_mode: "PROVIDER_ERROR",
+        provider_state: "PROVIDER_ERROR",
+        provider_error_category: "UI_HIGH_REASONING_CALL_FAILED",
+        provider_error_message_safe: error.message || error.name || "high_reasoning_call_failed"
+      });
       aiOverlayOpen = true;
       renderAiChiefOverlay();
     }
@@ -2470,6 +3124,7 @@
     const alerts = payload.alerts || {};
     const systemMap = payload.systemMap || {};
     const aiStatus = payload.aiStatus || {};
+    const aiRouterSettings = payload.aiRouterSettings || {};
     const aiRecommendations = payload.aiRecommendations || {};
     const providers = payload.providers || {};
     const providerReadiness = payload.providerReadiness || {};
@@ -2694,6 +3349,41 @@
     next.ai.reasoningPolicy = pick(aiProvider.reasoning_policy || aiPolicy.reasoning_policy, next.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED");
     next.ai.modelSuitableForGovernance = aiProvider.model_suitable_for_governance === true || aiPolicy.model_suitable_for_governance === true;
     next.ai.modelQualityWarning = pick(aiProvider.model_quality_warning || aiPolicy.warning, next.ai.modelQualityWarning || "");
+    const aiRegistry = aiGateway.provider_registry || {};
+    if (Array.isArray(aiRegistry.providers)) {
+      next.ai.providerRegistry = aiRegistry.providers.map((provider) => ({
+        providerId: pick(provider.provider_id, "unknown"),
+        displayName: pick(provider.display_name, provider.provider_id || "unknown"),
+        status: pick(provider.status, "UNKNOWN"),
+        configured: provider.configured === true,
+        credentialSource: pick(provider.credential_source, "NOT_CONFIGURED"),
+        modelName: pick(provider.model_name || provider.default_model, "not selected"),
+        modelQuality: pick((provider.model_quality_map && provider.model_quality_map[provider.model_name]) || provider.model_quality, "UNKNOWN"),
+        costMode: pick((provider.cost_tier_map && provider.cost_tier_map[provider.model_name]) || provider.cost_mode, "UNKNOWN"),
+        reasoningCapability: pick((provider.reasoning_capability_map && provider.reasoning_capability_map[provider.model_name]) || provider.provider_family, "unknown"),
+        implemented: provider.implemented === true,
+        personaEnforced: true,
+        lastValidationStatus: pick(provider.last_validation_status, "NOT_RUN"),
+        lastErrorCategory: pick(provider.last_error_category, null)
+      }));
+    }
+    const routing = aiRouterSettings.settings || aiStatus.routing_settings || aiGateway.router || {};
+    next.ai.routingSettings = {
+      defaultMode: pick(routing.default_mode || routing.default_route_mode, next.ai.routingSettings && next.ai.routingSettings.defaultMode || "LOCAL_GUIDE"),
+      activeProvider: pick(routing.active_provider, next.ai.routingSettings && next.ai.routingSettings.activeProvider || "deterministic_local"),
+      activeModel: pick(routing.active_model, next.ai.routingSettings && next.ai.routingSettings.activeModel || "deterministic-local-guide"),
+      lightProvider: pick(routing.light_provider, next.ai.routingSettings && next.ai.routingSettings.lightProvider || "openai"),
+      lightModel: pick(routing.light_model, next.ai.routingSettings && next.ai.routingSettings.lightModel || "gpt-5-mini"),
+      highReasoningProvider: pick(routing.high_reasoning_provider, next.ai.routingSettings && next.ai.routingSettings.highReasoningProvider || "openai"),
+      highReasoningModel: pick(routing.high_reasoning_model, next.ai.routingSettings && next.ai.routingSettings.highReasoningModel || "gpt-5.5-pro"),
+      localProvider: pick(routing.local_provider || routing.local_model_provider, "local_openai_compatible"),
+      localBaseUrl: pick(routing.local_base_url, next.ai.routingSettings && next.ai.routingSettings.localBaseUrl || "http://127.0.0.1:11434/v1"),
+      localModel: pick(routing.local_model, next.ai.routingSettings && next.ai.routingSettings.localModel || "local-model"),
+      supremeBoardPacketDefault: routing.supreme_board_packet_default === true,
+      settingsSource: pick(aiRouterSettings.settings_source || aiStatus.routing_settings_source, next.ai.routingSettings && next.ai.routingSettings.settingsSource || "DEFAULT_SETTINGS"),
+      status: pick(aiRouterSettings.status || aiStatus.routing_settings_status, next.ai.routingSettings && next.ai.routingSettings.status || "DEFAULT_SETTINGS"),
+      settingsPathRelative: pick(aiRouterSettings.settings_path_relative || aiStatus.routing_settings_path_relative, ".operator_config/ai_router_settings.json")
+    };
     next.ai.pendingReviewCount = pick(aiStatus.pending_review_count, next.ai.pendingReviewCount);
     next.ai.secretsValuesExposed = aiStatus.secrets_values_exposed === true;
     if (Array.isArray(aiRecommendations.recommendations)) {
@@ -2994,6 +3684,7 @@
       ["alerts", "/operator/alerts"],
       ["systemMap", "/operator/system-map"],
       ["aiStatus", "/operator/ai/status"],
+      ["aiRouterSettings", "/operator/ai/router/settings"],
       ["aiRecommendations", "/operator/ai/recommendations"],
       ["providers", "/operator/providers"],
       ["providerReadiness", "/operator/providers/readiness"],
@@ -3323,6 +4014,50 @@
     const homeAiClear = event.target.closest("[data-home-ai-clear]");
     if (homeAiClear && !homeAiClear.disabled) {
       clearHomeAiQuestion();
+      return;
+    }
+    const aiSaveRouting = event.target.closest("[data-ai-save-routing]");
+    if (aiSaveRouting && !aiSaveRouting.disabled) {
+      saveAiRoutingSettings();
+      return;
+    }
+    const aiProviderTest = event.target.closest("[data-ai-provider-test]");
+    if (aiProviderTest && !aiProviderTest.disabled) {
+      validateSelectedAiProvider();
+      return;
+    }
+    const aiGeneratePacket = event.target.closest("[data-ai-generate-packet]");
+    if (aiGeneratePacket && !aiGeneratePacket.disabled) {
+      generateSupremeBoardPacket();
+      return;
+    }
+    const aiApproveHigh = event.target.closest("[data-ai-approve-high-call]");
+    if (aiApproveHigh && !aiApproveHigh.disabled) {
+      approveOneHighReasoningCall();
+      return;
+    }
+    const aiUseLocal = event.target.closest("[data-ai-use-local-guide]");
+    if (aiUseLocal) {
+      applyRoutingToLocalState({ default_mode: "LOCAL_GUIDE" });
+      data.ai.lastAnalyzeResult = "LOCAL_GUIDE selected; no API call occurred.";
+      renderScreens(activeScreenId);
+      renderAiChiefOverlay();
+      return;
+    }
+    const aiUseLight = event.target.closest("[data-ai-use-light-model]");
+    if (aiUseLight && !aiUseLight.disabled) {
+      const settings = currentAiRoutingFormValues();
+      settings.default_mode = "LIGHT_API";
+      applyRoutingToLocalState(settings);
+      saveAiRoutingSettings();
+      return;
+    }
+    const aiUseLocalModel = event.target.closest("[data-ai-use-local-model]");
+    if (aiUseLocalModel && !aiUseLocalModel.disabled) {
+      const settings = currentAiRoutingFormValues();
+      settings.default_mode = "LOCAL_MODEL";
+      applyRoutingToLocalState(settings);
+      saveAiRoutingSettings();
       return;
     }
     const credentialSave = event.target.closest("[data-credential-save]");

@@ -5,6 +5,7 @@ from pathlib import Path
 
 APP_JS = Path("ui/operator-control-panel/app.js")
 MOCK_JS = Path("ui/operator-control-panel/mock-data.js")
+STYLES_CSS = Path("ui/operator-control-panel/styles.css")
 
 
 def _app_text() -> str:
@@ -25,7 +26,48 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     assert "model_quality=" in text
     assert "reasoning_policy=" in text
     assert "governance_suitable=" in text
-    assert "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide" in text
+    assert "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Trading Strategist + Market Research Chief + Risk Officer + Execution/TCA Auditor + Operator Guide" in text
+    assert "Advisor Answer" in text
+    assert "Next Step" in text
+    assert "Compact Evidence Summary" in text
+    assert "Advanced details: context, provider diagnostics, safety flags" in text
+    assert "data-ai-chat-scroll-container" in text
+    assert "ai-chief-response-end" in text
+    assert "scheduleAiOverlayScroll" in text
+    assert "requestAnimationFrame" in text
+    assert "AI provider error. Local fallback can still explain operator status." in text
+    assert "DETERMINISTIC FALLBACK - not a full AI quant reasoning response." in text
+    overlay = text[text.index("function renderAiChiefOverlay"):text.index("function setAiOverlayOpen")]
+    assert overlay.index("Advisor Answer") < overlay.index("renderAiCollapsedDetails")
+
+
+def test_header_compacts_backend_degraded_status_and_keeps_details_in_diagnostics():
+    text = _app_text()
+
+    render_topbar = text[text.index("function renderTopBar"):text.index("function paperLaunchDisabledReason")]
+    diagnostics = text[text.index("function renderDiagnostics"):text.index("function renderLive")]
+
+    assert "Backend: OK" in text
+    assert "Backend: Degraded -" in text
+    assert "View details" in render_topbar
+    assert "data-screen-shortcut=\"diagnostics\"" in render_topbar
+    assert "backendDegradedSummary()" not in render_topbar
+    assert "Backend endpoint details" in diagnostics
+    assert "backendFailureRows" in text
+    assert "Failed endpoints" in diagnostics
+
+
+def test_responsive_css_wraps_header_tables_cards_and_ai_drawer():
+    text = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert ".status-detail-link" in text
+    assert "overflow-x: hidden" in text
+    assert ".table-wrap" in text
+    assert "overflow-x: auto" in text
+    assert ".ai-chief-body" in text
+    assert "scroll-behavior: smooth" in text
+    assert ".two-column-summary" in text
+    assert "@media (max-width: 640px)" in text
 
 
 def test_command_center_has_paper_launch_control_and_safe_duration_options():
@@ -101,6 +143,51 @@ def test_ai_panel_shows_model_quality_and_lower_reasoning_warning():
     assert "Lower-reasoning model active. Do not use this for final quant/risk/live-readiness decisions." in text
     assert "HIGH_REASONING" in text
     assert "FALLBACK_ONLY_LIMITED" in text
+
+
+def test_ai_provider_model_router_controls_are_visible_and_cost_labeled():
+    text = _app_text()
+
+    assert "AI Routing Settings" in text
+    assert "Settings source:" in text
+    assert "PERSISTED_LOCAL_SETTINGS" in text
+    assert "DEFAULT_SETTINGS" in text
+    assert "IN_MEMORY_UNSAVED" in text
+    assert ".operator_config/ai_router_settings.json" in text
+    assert "data-ai-route-default-mode" in text
+    assert "data-ai-active-provider" in text
+    assert "data-ai-active-model" in text
+    assert "data-ai-light-provider" in text
+    assert "data-ai-high-provider" in text
+    assert "data-ai-local-base-url" in text
+    assert "data-ai-local-model" in text
+    assert "Save AI routing settings" in text
+    assert "Test provider connection" in text
+    assert "Generate Supreme Board Packet" in text
+    assert "Approve one high-reasoning call" in text
+    assert "Use local guide only" in text
+    assert "Use selected light model" in text
+    assert "Use selected local model" in text
+    assert "High-reasoning API uses separate paid provider billing." in text
+    assert "ChatGPT Pro web subscription does not automatically provide API quota." in text
+    assert "Supreme Board Packet uses manual ChatGPT Pro workflow." in text
+    assert "Local Guide is free and deterministic." in text
+    assert "/operator/ai/router/settings" in text
+    assert "/operator/ai/providers/validate" in text
+    assert "/operator/ai/supreme-board-packet" in text
+
+    for provider_id in [
+        "openai",
+        "anthropic",
+        "gemini",
+        "xai_grok",
+        "deepseek",
+        "kimi_moonshot",
+        "local_openai_compatible",
+        "deterministic_local",
+        "supreme_board_packet",
+    ]:
+        assert provider_id in text
 
 
 def test_ai_prompt_chips_exist_for_required_operator_workflows():

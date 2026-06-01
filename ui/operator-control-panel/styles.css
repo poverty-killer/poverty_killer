@@ -31,6 +31,7 @@ body {
   font-size: 13px;
   letter-spacing: 0;
   overflow: hidden;
+  overflow-x: hidden;
 }
 
 button,
@@ -49,12 +50,13 @@ textarea {
     "nav main rail";
   height: 100vh;
   min-height: 100vh;
+  min-width: 0;
 }
 
 .topbar {
   grid-area: topbar;
   display: grid;
-  grid-template-columns: clamp(190px, 15vw, 220px) minmax(280px, 1fr) minmax(220px, max-content);
+  grid-template-columns: clamp(190px, 15vw, 220px) minmax(0, 1fr) minmax(180px, auto);
   grid-template-areas: "brand status actions";
   min-height: 54px;
   border-bottom: 1px solid var(--line);
@@ -70,6 +72,7 @@ textarea {
   border-right: 1px solid var(--line);
   font-weight: 700;
   min-width: 0;
+  overflow: hidden;
 }
 
 .brand-mark {
@@ -93,6 +96,7 @@ textarea {
   min-width: 0;
   padding: 8px 12px;
   overflow: visible;
+  min-height: 44px;
 }
 
 .top-actions {
@@ -106,6 +110,7 @@ textarea {
   min-width: 0;
   padding: 0 12px;
   border-left: 1px solid var(--line);
+  overflow: hidden;
 }
 
 .nav {
@@ -115,12 +120,40 @@ textarea {
   overflow-y: auto;
   padding: 10px;
   min-width: 0;
+  scrollbar-color: rgba(100, 116, 139, 0.7) transparent;
+  scrollbar-width: thin;
+}
+
+.nav::-webkit-scrollbar,
+.table-wrap::-webkit-scrollbar,
+.ai-chief-body::-webkit-scrollbar,
+.main::-webkit-scrollbar,
+.rail::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.nav::-webkit-scrollbar-track,
+.table-wrap::-webkit-scrollbar-track,
+.ai-chief-body::-webkit-scrollbar-track,
+.main::-webkit-scrollbar-track,
+.rail::-webkit-scrollbar-track {
+  background: #0b0e14;
+}
+
+.nav::-webkit-scrollbar-thumb,
+.table-wrap::-webkit-scrollbar-thumb,
+.ai-chief-body::-webkit-scrollbar-thumb,
+.main::-webkit-scrollbar-thumb,
+.rail::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.72);
 }
 
 .main {
   grid-area: main;
   overflow: auto;
-  padding: 14px;
+  padding: 14px 14px 92px;
   min-width: 0;
 }
 
@@ -165,6 +198,7 @@ textarea {
 
 .screen {
   display: none;
+  min-width: 0;
 }
 
 .screen.active {
@@ -180,6 +214,11 @@ textarea {
   margin-bottom: 14px;
 }
 
+.screen-header > div {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
 .screen-title {
   margin: 0;
   font-size: 22px;
@@ -189,12 +228,15 @@ textarea {
 .screen-subtitle {
   margin: 5px 0 0;
   color: var(--muted);
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 12px;
+  min-width: 0;
 }
 
 .card {
@@ -203,6 +245,7 @@ textarea {
   border-radius: 8px;
   padding: 12px;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .card h3 {
@@ -260,32 +303,24 @@ textarea {
   border: 1px solid var(--line);
   background: #0f131b;
   color: var(--muted);
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
-  overflow-wrap: normal;
+  overflow-wrap: anywhere;
   word-break: normal;
   font-size: 12px;
   line-height: 1.25;
+  text-align: center;
 }
 
 .status-strip .badge {
-  max-width: 30ch;
-}
-
-.status-strip .badge:nth-child(1),
-.status-strip .badge:nth-child(2),
-.status-strip .badge:nth-child(5),
-.status-strip .badge:nth-child(7),
-.status-strip .badge:nth-child(8),
-.status-strip .badge:nth-child(9),
-.status-strip .badge:nth-child(10) {
+  max-width: 22ch;
+  white-space: nowrap;
   flex-shrink: 0;
 }
 
-.status-strip .badge:nth-child(3),
-.status-strip .badge:nth-child(6) {
-  max-width: 34ch;
+.status-strip .badge:nth-child(4) {
+  max-width: 26ch;
 }
 
 .metric-value .badge {
@@ -307,8 +342,22 @@ textarea {
 }
 
 .token-text {
-  overflow-wrap: normal;
+  overflow-wrap: anywhere;
   word-break: normal;
+}
+
+.status-detail-link {
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid rgba(6, 182, 212, 0.45);
+  border-radius: 999px;
+  background: #0f131b;
+  color: var(--cyan);
+  cursor: pointer;
+}
+
+.status-detail-link:hover {
+  border-color: rgba(6, 182, 212, 0.85);
 }
 
 .badge.green { color: var(--green); border-color: rgba(34, 197, 94, 0.45); }
@@ -322,6 +371,7 @@ textarea {
   width: 100%;
   min-width: 760px;
   border-collapse: collapse;
+  table-layout: auto;
 }
 
 .table-wrap {
@@ -351,6 +401,11 @@ textarea {
 .table td {
   max-width: 280px;
   overflow-wrap: anywhere;
+}
+
+.table td:nth-child(n+2),
+.table th:nth-child(n+2) {
+  font-variant-numeric: tabular-nums;
 }
 
 .muted {
@@ -412,7 +467,8 @@ textarea {
 
 .button-row,
 .form-grid,
-.credential-grid {
+.credential-grid,
+.routing-grid {
   display: grid;
   gap: 10px;
 }
@@ -428,6 +484,11 @@ textarea {
 
 .credential-grid {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.routing-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin: 12px 0;
 }
 
 .credential-box {
@@ -446,6 +507,7 @@ textarea {
 }
 
 .form-grid label,
+.routing-grid label,
 .credential-box label {
   display: grid;
   gap: 5px;
@@ -463,6 +525,8 @@ textarea {
 .form-grid input,
 .form-grid select,
 .form-grid textarea,
+.routing-grid input,
+.routing-grid select,
 .credential-box input {
   width: 100%;
   min-width: 0;
@@ -530,12 +594,16 @@ textarea {
   grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1fr);
   gap: 7px 12px;
   min-width: 0;
-  overflow-wrap: normal;
+  overflow-wrap: anywhere;
   word-break: normal;
 }
 
 .kv div:nth-child(odd) {
   color: var(--muted);
+}
+
+.kv div {
+  min-width: 0;
 }
 
 .rail-card {
@@ -616,7 +684,7 @@ textarea {
   bottom: 18px;
   z-index: 60;
   display: none;
-  width: min(500px, calc(100vw - 36px));
+  width: min(560px, calc(100vw - 36px));
   min-width: 0;
 }
 
@@ -639,10 +707,18 @@ textarea {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 14px;
   border-bottom: 1px solid var(--line);
   background: #10141d;
+  min-width: 0;
+}
+
+.ai-chief-heading {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
 }
 
 .ai-chief-title {
@@ -694,10 +770,13 @@ textarea {
   padding: 14px;
   overflow-y: auto;
   min-width: 0;
+  scroll-behavior: smooth;
 }
 
 .ai-context-preview,
-.ai-response {
+.ai-response,
+.ai-next-step,
+.ai-evidence-summary {
   min-width: 0;
   padding: 12px;
   border: 1px solid var(--line);
@@ -706,12 +785,27 @@ textarea {
 }
 
 .ai-context-preview h3,
-.ai-response h3 {
+.ai-response h3,
+.ai-next-step h3,
+.ai-evidence-summary h3 {
   margin: 0;
   color: #cbd5e1;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.advisor-answer {
+  border-color: rgba(6, 182, 212, 0.36);
+  background: #101720;
+}
+
+.ai-next-step {
+  border-color: rgba(34, 197, 94, 0.26);
+}
+
+.ai-evidence-summary {
+  border-color: rgba(234, 179, 8, 0.25);
 }
 
 .ai-context-preview .kv {
@@ -725,6 +819,7 @@ textarea {
   border-radius: 8px;
   padding: 10px;
   background: #0d1118;
+  min-width: 0;
 }
 
 .ai-context-details summary {
@@ -743,6 +838,42 @@ textarea {
   margin: 8px 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.ai-diagnostics-details {
+  margin-top: 0;
+}
+
+.compact-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.compact-list li {
+  margin-bottom: 5px;
+  overflow-wrap: anywhere;
+}
+
+.two-column-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.two-column-summary h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.detail-strip {
+  margin-top: 10px;
+}
+
+.ai-chief-response-end {
+  min-height: 1px;
 }
 
 .ai-question-bank {
@@ -787,7 +918,8 @@ textarea {
 
 @media (max-width: 1440px) {
   body {
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .shell {
@@ -896,7 +1028,12 @@ textarea {
   .nav,
   .main,
   .rail {
-    overflow: visible;
+    overflow-y: visible;
+  }
+
+  .main,
+  .rail {
+    overflow-x: hidden;
   }
 
   .grid {
@@ -928,8 +1065,16 @@ textarea {
     padding: 10px;
   }
 
+  .main {
+    padding-bottom: 118px;
+  }
+
   .screen-title {
     font-size: 20px;
+  }
+
+  .screen-header > div {
+    flex-basis: 100%;
   }
 
   .grid {
@@ -985,6 +1130,10 @@ textarea {
   }
 
   .ai-context-preview .kv {
+    grid-template-columns: 1fr;
+  }
+
+  .two-column-summary {
     grid-template-columns: 1fr;
   }
 }
