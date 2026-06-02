@@ -16,8 +16,37 @@ from app.ai_chief_operator.model_policy import (
     HIGHEST_AVAILABLE_REQUIRED,
     HIGH_REASONING,
     LOWER_MODEL_WARNING,
+    classify_model_quality,
     model_quality_report,
+    provider_mode_for,
     prompt_allows_model_call,
+)
+from app.ai_chief_operator.model_registry import (
+    LOCAL_DETERMINISTIC,
+    PROVIDER_ERROR_COST,
+    PROVIDER_ERROR_SOURCE,
+    SUPREME_BOARD_PACKET,
+    base_url_for_provider,
+    first_configured_secret,
+    get_ai_provider_profile,
+    registry_summary,
+)
+from app.ai_chief_operator.model_router import (
+    HIGH_REASONING_API,
+    LOCAL_GUIDE,
+    LOCAL_MODEL_MODE,
+    SUPREME_BOARD_PACKET_MODE,
+    normalize_route_mode,
+    route_ai_request,
+)
+from app.ai_chief_operator.provider_adapters import (
+    AIProviderRequest,
+    AnthropicMessagesAdapter,
+    DeterministicLocalAdapter,
+    NotImplementedAdapter,
+    OpenAIChatCompatibleAdapter,
+    OpenAIResponsesAdapter,
+    SupremeBoardPacketAdapter,
 )
 from app.ai_chief_operator.quant_persona import AI_SYSTEM_POLICY, classify_quant_prompt
 
@@ -483,6 +512,129 @@ class AIProviderGateway:
         self.http_post = http_post or self._http_post
         self.provider = self._provider_for_config(self.config)
 
+    def _configured_for(self, provider_id: str) -> bool:
+        profile = get_ai_provider_profile(provider_id)
+        if profile is None:
+            return False
+        if provider_id in {"deterministic_local", "supreme_board_packet"}:
+            return True
+        if provider_id == "local_openai_compatible":
+            return bool(
+                str(self.credential_env.get("LOCAL_AI_BASE_URL") or "").strip()
+                and str(self.credential_env.get("LOCAL_AI_MODEL") or self.config.local_openai_compatible_model or "").strip()
+            )
+        if self.config.configured_for_provider(provider_id):
+            return True
+        return first_configured_secret(profile, self.credential_env) != ""
+
+    def _model_for(self, provider_id: str, requested_model: str | None = None) -> str | None:
+        return str(requested_model or self.config.model_for_provider(provider_id) or "").strip() or None
+
+    def _base_url_for(self, provider_id: str) -> str:
+        return str(
+            self.config.base_url_for_provider(provider_id)
+            or base_url_for_provider(provider_id, self.credential_env)
+            or ""
+        ).rstrip("/")
+
+    def _api_key_for(self, provider_id: str) -> str:
+        profile = get_ai_provider_profile(provider_id)
+        if profile is None:
+            return ""
+        return first_configured_secret(profile, self.credential_env)
+
+    def _provider_status_for(self, provider_id: str) -> dict[str, Any]:
+        if provider_id in {"disabled", "off", "none", ""}:
+            return {
+                "provider": "disabled",
+                "provider_id": "disabled",
+                "provider_state": "AI_DISABLED",
+                "can_call_model": False,
+                "secrets_values_exposed": False,
+                **_fallback_model_fields("disabled"),
+            }
+        if provider_id == "mock":
+            return MockProvider().status()
+        profile = get_ai_provider_profile(provider_id)
+        if profile is None:
+            report = model_quality_report(provider=provider_id, model_name=None, configured=False, error=True)
+            return {
+                "provider": provider_id,
+                "provider_id": provider_id,
+                "provider_state": "PROVIDER_ERROR",
+                "can_call_model": False,
+                "model": None,
+                **report.to_dict(),
+                "cost_mode": PROVIDER_ERROR_COST,
+                "answer_source": PROVIDER_ERROR_SOURCE,
+                "secrets_values_exposed": False,
+            }
+        configured = self._configured_for(profile.provider_id)
+        model = self._model_for(profile.provider_id)
+        if not profile.implemented:
+            provider_state = "NOT_IMPLEMENTED"
+            report = model_quality_report(provider=profile.provider_id, model_name=model, configured=configured, error=True)
+        elif configured:
+            provider_state = "PROVIDER_READY"
+            report = model_quality_report(provider=profile.provider_id, model_name=model, configured=True)
+        else:
+            provider_state = "CREDENTIAL_MISSING" if profile.credential_env_vars else "PROVIDER_READY"
+            report = model_quality_report(provider=profile.provider_id, model_name=model, configured=False)
+        return {
+            "provider": profile.provider_id,
+            "provider_id": profile.provider_id,
+            "display_name": profile.display_name,
+            "provider_state": provider_state,
+            "can_call_model": configured and profile.implemented and profile.api_format not in {"deterministic", "packet_bridge"},
+            "model": model,
+            "model_name": model,
+            **report.to_dict(),
+            "api_format": profile.api_format,
+            "cost_mode": "PROVIDER_ERROR" if provider_state in {"CREDENTIAL_MISSING", "NOT_IMPLEMENTED"} else None,
+            "secrets_values_exposed": False,
+        }
+
+    def _adapter_for(self, provider_id: str, model_quality: str) -> Any:
+        profile = get_ai_provider_profile(provider_id)
+        if provider_id == "deterministic_local":
+            return DeterministicLocalAdapter()
+        if provider_id == "supreme_board_packet":
+            return SupremeBoardPacketAdapter()
+        if profile is None or not profile.implemented:
+            return NotImplementedAdapter(provider_id, model_quality)
+        api_key = self._api_key_for(provider_id)
+        base_url = self._base_url_for(provider_id)
+        if provider_id == "openai":
+            return OpenAIResponsesAdapter(
+                api_key=api_key,
+                base_url=base_url,
+                http_post=self.http_post,
+                timeout_seconds=self.config.timeout_seconds,
+                model_quality=model_quality,
+                provider_id=provider_id,
+            )
+        if provider_id == "anthropic":
+            return AnthropicMessagesAdapter(
+                api_key=api_key,
+                base_url=base_url,
+                http_post=self.http_post,
+                timeout_seconds=self.config.timeout_seconds,
+                model_quality=model_quality,
+            )
+        if provider_id == "gemini":
+            return NotImplementedAdapter(provider_id, model_quality)
+        if provider_id in {"xai_grok", "deepseek", "kimi_moonshot", "local_openai_compatible"}:
+            return OpenAIChatCompatibleAdapter(
+                provider_id=provider_id,
+                api_key=api_key,
+                base_url=base_url,
+                http_post=self.http_post,
+                timeout_seconds=self.config.timeout_seconds,
+                model_quality=model_quality,
+                provider_mode=provider_mode_for(provider_id, configured=True),
+            )
+        return NotImplementedAdapter(provider_id, model_quality)
+
     def _provider_for_config(self, config: AIChiefConfig) -> AdvisoryProvider:
         state = config.provider_state()
         if state == "AI_DISABLED":
@@ -519,12 +671,26 @@ class AIProviderGateway:
         return json.loads(payload or "{}")
 
     def status(self) -> dict[str, Any]:
-        provider_status = self.provider.status()
+        provider_status = self._provider_status_for(self.config.provider)
         config_summary = self.config.safe_summary()
+        registry = registry_summary(self.credential_env)
         return {
-            "gateway_version": "ai-chief-provider-gateway-v1",
+            "gateway_version": "ai-chief-provider-gateway-v2-provider-agnostic-router",
             "config": config_summary,
             "provider": provider_status,
+            "provider_registry": registry,
+            "router": {
+                "default_route_mode": self.config.default_route_mode,
+                "light_provider": self.config.light_provider,
+                "light_model": self.config.light_model,
+                "high_reasoning_provider": self.config.high_reasoning_provider,
+                "high_reasoning_model": self.config.high_reasoning_model,
+                "local_model_provider": self.config.local_model_provider,
+                "supreme_board_packet_default": self.config.supreme_board_packet_default,
+                "high_reasoning_api_requires_approval": True,
+                "no_paid_call_on_status_load": True,
+                "no_silent_downgrade": True,
+            },
             "model_policy": {
                 "provider_mode": provider_status.get("provider_mode") or config_summary.get("provider_mode"),
                 "model_name": provider_status.get("model_name") or config_summary.get("model_name"),
@@ -536,6 +702,8 @@ class AIProviderGateway:
                 "allow_low_reasoning_for_ui_help": self.config.allow_low_reasoning_for_ui_help,
                 "refuse_governance_on_low_reasoning": self.config.refuse_governance_on_low_reasoning,
             },
+            "forced_persona_policy": AI_SYSTEM_POLICY,
+            "persona_enforced": True,
             "advisory_only": True,
             "can_execute": False,
             "broker_call_occurred": False,
@@ -553,32 +721,142 @@ class AIProviderGateway:
         question: str,
         context: dict[str, Any],
         page_context: dict[str, Any] | None = None,
+        routing: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        routing = routing or {}
+        page_id = str((page_context or {}).get("page_id") or "")
+        classification = classify_quant_prompt(question, page_id=page_id)
+        requested_mode = normalize_route_mode(str(routing.get("route_mode") or routing.get("mode") or self.config.default_route_mode))
+        if requested_mode == HIGH_REASONING_API:
+            default_provider = self.config.high_reasoning_provider
+            default_model = self.config.high_reasoning_model
+        elif requested_mode == LOCAL_MODEL_MODE:
+            default_provider = "local_openai_compatible"
+            default_model = self.config.local_openai_compatible_model
+        elif requested_mode == SUPREME_BOARD_PACKET_MODE:
+            default_provider = "supreme_board_packet"
+            default_model = "chatgpt-pro-manual"
+        elif requested_mode == LOCAL_GUIDE:
+            default_provider = "deterministic_local"
+            default_model = "deterministic-local-guide"
+        else:
+            default_provider = self.config.light_provider
+            default_model = self.config.light_model
+        provider_id = str(routing.get("provider_id") or default_provider or self.config.provider or "deterministic_local").strip().lower()
+        model_name = str(routing.get("model_name") or default_model or self._model_for(provider_id) or "").strip() or None
+        if provider_id == "local_openai_compatible":
+            model_name = str(routing.get("model_name") or self.credential_env.get("LOCAL_AI_MODEL") or model_name or "local-model").strip()
+        approved_paid_call = routing.get("approved_paid_call") is True
+        profile = get_ai_provider_profile(provider_id)
+        provider_configured = self._configured_for(provider_id)
+        provider_implemented = bool(profile and profile.implemented)
+        route = route_ai_request(
+            requested_mode=requested_mode,
+            provider_id=provider_id,
+            model_name=model_name,
+            classification=classification,
+            approved_paid_call=approved_paid_call,
+            provider_configured=provider_configured,
+            provider_implemented=provider_implemented,
+        )
+        safe_context = redact_secrets(context)
+        request = AIProviderRequest(
+            provider_id=route.provider_id,
+            model_name=route.model_name,
+            mode=route.route_mode,
+            question=question,
+            forced_persona_policy=AI_SYSTEM_POLICY,
+            safe_context={
+                **safe_context,
+                "page_context": redact_secrets(page_context or {}),
+                "route_decision": route.to_dict(),
+            },
+            max_output_tokens=int(routing.get("max_output_tokens") or 1800),
+            temperature=routing.get("temperature") if isinstance(routing.get("temperature"), float) else None,
+            reasoning_effort=str(routing.get("reasoning_effort") or "high") if route.route_mode == HIGH_REASONING_API else None,
+            approved_paid_call=approved_paid_call,
+            request_classification=classification,
+            allow_tools=False,
+            allow_broker_tools=False,
+        )
         try:
-            result = self.provider.ask(question, context, page_context)
+            if route.answer_source in {LOCAL_DETERMINISTIC, SUPREME_BOARD_PACKET} or not route.allowed_provider_call:
+                if route.answer_source == SUPREME_BOARD_PACKET:
+                    adapter = SupremeBoardPacketAdapter()
+                    result = adapter.ask_ai(request).to_dict()
+                    status = "ANSWERED_PACKET"
+                elif route.answer_source == LOCAL_DETERMINISTIC or route.reason_code in {
+                    "HIGH_REASONING_API_APPROVAL_REQUIRED",
+                    "SERIOUS_PROMPT_REQUIRES_HIGH_REASONING_OR_PACKET",
+                }:
+                    adapter = DeterministicLocalAdapter()
+                    result = adapter.ask_ai(request).to_dict()
+                    if route.warning and route.warning not in result["response"]:
+                        result["response"] = f"{route.warning}\n{result['response']}"
+                        result["answer"] = result["response"]
+                    status = "ANSWERED_FALLBACK"
+                else:
+                    adapter = NotImplementedAdapter(route.provider_id, route.model_quality)
+                    result = adapter.ask_ai(request).to_dict()
+                    if route.warning:
+                        result["response"] = f"{route.warning}\n{result.get('response') or ''}".strip()
+                        result["answer"] = result["response"]
+                    status = "PROVIDER_ERROR"
+            else:
+                adapter = self._adapter_for(route.provider_id, route.model_quality)
+                result = adapter.ask_ai(request).to_dict()
+                status = "ANSWERED_MODEL" if result.get("answer_source") in {"API_LIGHT_MODEL", "API_HIGH_REASONING_APPROVED", "LOCAL_MODEL"} else "PROVIDER_ERROR"
         except Exception as exc:
             raw_detail = str(exc) or type(exc).__name__
             safe_detail = str(redact_secrets({"error": raw_detail}).get("error") or raw_detail)
             safe_detail = LOCAL_PATH_RE.sub("REDACTED_LOCAL_PATH", safe_detail)[:320]
             report = model_quality_report(
-                provider=self.provider.name,
-                model_name=getattr(self.provider, "model", None),
+                provider=route.provider_id,
+                model_name=route.model_name,
                 configured=True,
                 error=True,
             )
             result = {
                 "status": "PROVIDER_ERROR",
-                "provider": self.provider.name,
+                "provider": route.provider_id,
+                "provider_id": route.provider_id,
                 "provider_state": "PROVIDER_ERROR",
                 "response_source": "PROVIDER_ERROR_NO_MODEL_ANSWER",
+                "answer_source": "PROVIDER_ERROR",
                 "response": (
                     "Configured high-reasoning AI provider could not return a response, so no model answer is being faked.\n"
                     f"Provider error: {type(exc).__name__}: {safe_detail}.\n"
                     "Use Provider Setup to verify the key/model and try again. If the configured high-reasoning model is unavailable in the account, set OPENAI_HIGH_REASONING_MODEL or ANTHROPIC_HIGH_REASONING_MODEL to an available high-reasoning model."
                 ),
                 "model_call_occurred": False,
+                "cost_mode": "PROVIDER_ERROR",
+                "persona_enforced": True,
+                "expert_roles_applied": [],
+                "provider_error_category": type(exc).__name__,
+                "provider_error_message_safe": safe_detail,
                 **report.to_dict(),
             }
+            status = "PROVIDER_ERROR"
+        result.setdefault("status", status)
+        result.setdefault("provider_state", "PROVIDER_READY" if route.allowed_provider_call else route.reason_code)
+        if status == "PROVIDER_ERROR":
+            result["provider_state"] = "PROVIDER_ERROR"
+        result.setdefault("provider", route.provider_id)
+        result.setdefault("provider_id", route.provider_id)
+        result.setdefault("model_name", route.model_name)
+        result.setdefault("model", route.model_name)
+        result.setdefault("model_quality", route.model_quality)
+        result.setdefault("cost_mode", route.cost_mode)
+        result.setdefault("answer_source", route.answer_source)
+        result.setdefault("response_source", result.get("answer_source"))
+        result.setdefault("reasoning_policy", "HIGHEST_AVAILABLE_REQUIRED" if route.model_quality == HIGH_REASONING else "FALLBACK_ONLY_LIMITED")
+        result.setdefault("model_suitable_for_governance", route.model_suitable_for_governance)
+        result.setdefault("persona_enforced", True)
+        result.setdefault("expert_roles_applied", [])
+        result.setdefault("provider_error_category", None)
+        result.setdefault("provider_error_message_safe", None)
+        result["route_decision"] = route.to_dict()
+        result["request_classification"] = classification
         result.update(
             {
                 "advisory_only": True,

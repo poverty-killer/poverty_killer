@@ -1,5 +1,6 @@
 {
   "version": "phase-7-operator-reality-audit-backtest-control",
+  "operator_activation_version": "operator-activation-e2e-ai5-20260602",
   "mode": "read_only_operator_contracts",
   "ui_policy": {
     "paper_enabled_first": true,
@@ -76,6 +77,14 @@
       "next_step_control_id",
       "needs_codex_packet",
       "can_execute"
+      ,
+      "provider_id",
+      "answer_source",
+      "cost_mode",
+      "persona_enforced",
+      "expert_roles_applied",
+      "provider_error_category",
+      "provider_error_message_safe"
     ],
     "forbidden_ai_authority": [
       "trade",
@@ -90,11 +99,15 @@
     ]
   },
   "ai_quant_research_chief": {
-    "identity": "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide",
+    "identity": "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Trading Strategist + Market Research Chief + Risk Officer + Execution/TCA Auditor + Operator Guide",
     "roles": [
       "Chief Quant Advisor",
       "Quant Engineer",
       "Trading Systems Auditor",
+      "Trading Strategist",
+      "Market Research Chief",
+      "Risk Officer",
+      "Execution/TCA Auditor",
       "Operator Guide",
       "Run Planner",
       "Portfolio Reviewer",
@@ -106,8 +119,57 @@
       "required_quality_for_quant_governance": "HIGH_REASONING",
       "fallback_label": "DETERMINISTIC FALLBACK - not a full AI quant reasoning response",
       "no_silent_downgrade": true,
-      "model_quality_labels": ["HIGH_REASONING", "STANDARD", "LOW_REASONING", "FALLBACK_ONLY", "UNKNOWN"],
+      "model_quality_labels": ["HIGH_REASONING", "STANDARD", "LOW_REASONING", "LOCAL_UNEVALUATED", "FALLBACK_ONLY", "UNKNOWN"],
       "reasoning_policy_labels": ["HIGHEST_AVAILABLE_REQUIRED", "LOWER_MODEL_WARNING", "FALLBACK_ONLY_LIMITED"]
+    },
+    "provider_agnostic_router": {
+      "settings_endpoint": "/operator/ai/router/settings",
+      "legacy_settings_endpoint": "/operator/ai/routing/settings",
+      "provider_validation_endpoint": "/operator/ai/providers/validate",
+      "supreme_board_packet_endpoint": "/operator/ai/supreme-board-packet",
+      "settings_store": ".operator_config/ai_router_settings.json",
+      "settings_sources": ["PERSISTED_LOCAL_SETTINGS", "DEFAULT_SETTINGS", "IN_MEMORY_UNSAVED"],
+      "default_mode": "LOCAL_GUIDE",
+      "high_reasoning_api_requires_approval": true,
+      "background_model_calls_disabled": true,
+      "paid_call_on_settings_page_load": false,
+      "settings_save_stores_secrets": false,
+      "providers": [
+        "openai",
+        "anthropic",
+        "gemini",
+        "xai_grok",
+        "deepseek",
+        "kimi_moonshot",
+        "local_openai_compatible",
+        "deterministic_local",
+        "supreme_board_packet"
+      ],
+      "modes": [
+        "LOCAL_GUIDE",
+        "LIGHT_API",
+        "HIGH_REASONING_API_WITH_APPROVAL",
+        "SUPREME_BOARD_PACKET",
+        "LOCAL_MODEL",
+        "PROVIDER_DISABLED"
+      ],
+      "cost_modes": [
+        "FREE_LOCAL",
+        "CHATGPT_PRO_MANUAL",
+        "LOW_COST_API",
+        "PAID_API_APPROVED",
+        "LOCAL_INFRA_COST",
+        "PROVIDER_ERROR"
+      ],
+      "answer_sources": [
+        "LOCAL_DETERMINISTIC",
+        "API_LIGHT_MODEL",
+        "API_HIGH_REASONING_APPROVED",
+        "LOCAL_MODEL",
+        "SUPREME_BOARD_PACKET",
+        "PROVIDER_ERROR",
+        "NOT_CONFIGURED"
+      ]
     },
     "expert_modes": [
       "QUANT_ADVISOR",
@@ -161,7 +223,7 @@
     "browser_local_storage_for_secrets": false,
     "ai_context_receives_raw_secrets": false,
     "gitignored_secret_store_required": true,
-    "supported_providers": ["alpaca_paper", "openai", "anthropic", "alpaca_news"],
+    "supported_providers": ["alpaca_paper", "openai", "anthropic", "gemini", "xai_grok", "deepseek", "kimi_moonshot", "local_openai_compatible", "alpaca_news"],
     "post_save_mutates_only_local_secret_store": true,
     "delete_mutates_only_local_secret_store": true,
     "broker_call_occurred": false,
@@ -303,6 +365,8 @@
       }
     },
     "/operator/health": {
+      "api_version": "operator-backend-v1",
+      "operator_activation_version": "operator-activation-e2e-ai5-20260602",
       "api_status": "OK | DEGRADED",
       "supervisor_status": "IDLE | RUNNING | STALE_ACTIVE_SESSION",
       "session_store_status": "READY | DEGRADED",
@@ -757,9 +821,11 @@
             "raw_secret_values_included": false,
             "secrets_values_exposed": false
         },
-        "/operator/credentials/diagnostics": {
-            "source": "OPERATOR_CREDENTIAL_DIAGNOSTICS",
-            "backend_cwd": "current backend working directory",
+    "/operator/credentials/diagnostics": {
+      "source": "OPERATOR_CREDENTIAL_DIAGNOSTICS",
+      "api_version": "operator-backend-v1",
+      "operator_activation_version": "operator-activation-e2e-ai5-20260602",
+      "backend_cwd": "current backend working directory",
             "credential_vault_relative_path": ".operator_secrets/provider_credentials.json",
             "vault_file_exists": false,
             "provider_ids_present": [],
@@ -924,19 +990,32 @@
       "trading_mutation_occurred": false,
       "can_execute": false
     },
-    "/operator/ai/ask": {
-      "method": "POST",
-      "freeform_question_supported": true,
-      "deterministic_fallback_when_provider_disabled": true,
-      "broker_call_occurred": false,
+        "/operator/ai/ask": {
+          "method": "POST",
+          "freeform_question_supported": true,
+          "deterministic_fallback_when_provider_disabled": true,
+          "broker_call_occurred": false,
       "trading_mutation_occurred": false,
       "live_enabled": false,
       "real_money_enabled": false,
       "raw_logs_included": false,
-      "secrets_values_exposed": false,
-      "can_execute": false
-    },
-    "/operator/ai/quant-review": {
+          "secrets_values_exposed": false,
+          "can_execute": false
+        },
+        "/operator/ai/router/settings": {
+          "method": "GET_OR_POST",
+          "settings_store": ".operator_config/ai_router_settings.json",
+          "settings_sources": ["PERSISTED_LOCAL_SETTINGS", "DEFAULT_SETTINGS", "IN_MEMORY_UNSAVED"],
+          "stores_raw_secrets": false,
+          "paid_call_on_load": false,
+          "paid_call_on_save": false,
+          "broker_call_occurred": false,
+          "trading_mutation_occurred": false,
+          "live_enabled": false,
+          "real_money_enabled": false,
+          "can_execute": false
+        },
+        "/operator/ai/quant-review": {
       "method": "POST",
       "persona": "AI Quant Research Chief / Trading Edge Advisor",
       "domain_scoped": true,
@@ -999,6 +1078,7 @@
     },
     "/operator/contracts": {
       "version": "operator-backend-v1",
+      "operator_activation_version": "operator-activation-e2e-ai5-20260602",
       "read_only": true,
       "truth_labels": {
         "broker_confirmed": "canonical after broker acknowledgement/reconciliation",

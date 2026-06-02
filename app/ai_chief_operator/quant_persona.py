@@ -5,12 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 
-AI_QUANT_IDENTITY = "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide"
+AI_QUANT_IDENTITY = (
+    "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Trading Strategist + "
+    "Market Research Chief + Risk Officer + Execution/TCA Auditor + Operator Guide"
+)
 
 AI_QUANT_ROLES = (
     "Chief Quant Advisor",
     "Quant Engineer",
     "Trading Systems Auditor",
+    "Trading Strategist",
+    "Market Research Chief",
+    "Risk Officer",
+    "Execution/TCA Auditor",
     "Operator Guide",
     "Run Planner",
     "Portfolio Reviewer",
@@ -18,13 +25,15 @@ AI_QUANT_ROLES = (
 )
 
 AI_SYSTEM_POLICY = (
-    "You are the Chief Quant Advisor, Quant Engineer, Trading Systems Auditor, and Operator Guide for POVERTY_KILLER. "
+    "You are the Chief Quant Advisor, Quant Engineer, Trading Systems Auditor, Trading Strategist, Market Research Chief, "
+    "Risk Officer, Execution/TCA Auditor, and Operator Guide for POVERTY_KILLER. "
     "You are not a general chatbot. Your job is to help Shan operate and improve this trading engine, interpret "
     "portfolio/risk/P&L/execution evidence, critique strategy validity, identify missing proof, design safe PAPER "
-    "validation plans, and guide safe operation. You must use expert-level quant, trading, systems, and risk reasoning "
-    "while explaining clearly to a non-coder operator. You cannot trade, call broker, enable live, expose secrets, "
-    "mutate strategy, or bypass safety gates. You must separate broker-confirmed truth, market truth, local engine "
-    "state, model inference, missing evidence, and speculation."
+    "validation plans, and guide safe operation. Use expert-level quantitative trading, financial, market-structure, "
+    "execution, risk, analytical, logical, and systems reasoning. Explain clearly to a non-coder operator without "
+    "dumbing down the analysis. You cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass "
+    "safety gates. You must separate broker-confirmed truth, market truth, local engine state, model inference, missing "
+    "evidence, and speculation."
 )
 
 QUANT_PROMPTS = (
@@ -183,6 +192,11 @@ MODE_KEYWORDS = {
         "warning mean",
         "not a coder",
         "how do i",
+        "are you alive",
+        "operator status",
+        "operator launch status",
+        "launch status",
+        "current operator",
     ),
 }
 
@@ -198,6 +212,7 @@ def quant_persona_summary() -> dict[str, Any]:
             "attack weak assumptions",
             "identify overfit and fake-alpha risk",
             "review NetEdge, TCA, fees, fills, slippage, risk, market truth, and execution quality",
+            "stress-test market structure, strategy design, signal decay, concentration, drawdown, and execution gap assumptions",
             "recommend safest next PAPER experiment",
             "draft Codex packets",
             "advise Shan only",
@@ -254,7 +269,19 @@ def classify_quant_prompt(prompt: str, *, page_id: str | None = None) -> dict[st
     text = str(prompt or "").strip()
     lowered = text.lower()
     forbidden = [term for term in FORBIDDEN_TERMS if term in lowered]
-    operator_phrases = ("explain this page", "what do i do next", "what page", "button", "warning", "where do i enter")
+    operator_phrases = (
+        "explain this page",
+        "what do i do next",
+        "what page",
+        "button",
+        "warning",
+        "where do i enter",
+        "are you alive",
+        "operator status",
+        "operator launch status",
+        "launch status",
+        "current operator",
+    )
     mode_terms = tuple(term for keywords in MODE_KEYWORDS.values() for term in keywords)
     in_domain = (
         any(term in lowered for term in DOMAIN_TERMS)

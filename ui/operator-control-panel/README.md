@@ -98,6 +98,9 @@ Global AI Chief overlay:
   and does not present it as runtime truth.
 - Queueing analysis uses the governed AI advisory endpoint and governance queue;
   recommendations remain `can_execute=false`.
+- `/operator/ai/ask` attempts a real advisory OpenAI or Anthropic model call
+  when a saved key is present. Provider errors or missing keys return an honest
+  deterministic fallback instead of a fake model answer.
 
 AI Quant Research Chief / Research OS:
 
@@ -121,21 +124,22 @@ Operator activation:
 - Launch Readiness answers whether bounded PAPER can run now, with explicit
   blockers for missing credentials, non-paper endpoints, active runtime,
   storage, safe stop, and portfolio read availability.
-- Positions & Orders uses broker-confirmed PAPER data when credentials are
+- Portfolio Home is the first screen and uses broker-confirmed PAPER data when credentials are
   available; otherwise it displays unavailable/degraded truth and does not
   invent positions.
 - The bounded PAPER setup flow calls only `/operator/intent/paper/start` with
-  PAPER-only/live-locked/real-money-blocked confirmations.
+  PAPER-only/live-locked/real-money-blocked confirmations. Run PAPER accepts
+  bounded minutes/hours/days from 60 seconds through 7 days.
 
 Reality audit / historical test control:
 
 - Diagnostics includes a UI wiring audit so visible controls are classified as
   wired, disabled with reason, not implemented, or broken.
 - The global AI drawer includes a freeform question box and calls
-  `/operator/ai/ask`. If providers are disabled or config-only, the response is
-  explicitly labeled as deterministic fallback, not a real model answer.
-- Command Center includes the visible bounded PAPER launch form and disabled
+  `/operator/ai/ask`. Provider/model failures are explicitly labeled as
+  deterministic fallback, not a real model answer.
+- Run PAPER includes the visible bounded PAPER launch form and disabled
   reason when launch readiness blocks it.
-- Historical Tests provides the 4-month Alpaca historical test control. Until a
+- 4-Month Test provides the Alpaca historical test control. Until a
   governed strategy replay/backtest harness exists, it returns honest unavailable
   status and never invents P&L, fees, TCA, fills, or performance metrics.

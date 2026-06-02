@@ -31,11 +31,23 @@ BOOLEAN_STATUS_KEYS = {
     "live_ready",
     "local_paper_ready",
 }
+SAFE_CREDENTIAL_STATUS_KEYS = {
+    "alpaca_paper_credentials_configured",
+    "credential_precedence",
+    "credential_source",
+    "credential_status",
+    "missing_credentials_count",
+}
 
 
 def redact_secrets(value: Any, *, key: str = "") -> Any:
     key_lower = key.lower()
     if key_lower in BOOLEAN_STATUS_KEYS and isinstance(value, bool):
+        return value
+    if key_lower in SAFE_CREDENTIAL_STATUS_KEYS:
+        if isinstance(value, str):
+            text = SECRET_VALUE_RE.sub("REDACTED", value)
+            return HIGH_ENTROPY_VALUE_RE.sub("REDACTED", text)
         return value
     if any(part in key_lower for part in SECRET_KEY_PARTS):
         return "REDACTED"

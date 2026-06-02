@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from app.api.operator_readonly_api import API_VERSION, OperatorSnapshotProvider, create_operator_app
+from app.api.operator_readonly_api import API_VERSION, OPERATOR_ACTIVATION_VERSION, OperatorSnapshotProvider, create_operator_app
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_credentials.store import LocalCredentialStore
@@ -150,6 +150,8 @@ def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     diagnostics = _endpoint(app, "/operator/diagnostics")()
 
     assert health["live_status"] == "LIVE_LOCKED"
+    assert health["api_version"] == API_VERSION
+    assert health["operator_activation_version"] == OPERATOR_ACTIVATION_VERSION
     assert health["real_money_status"] == "BLOCKED"
     assert health["broker_call_occurred"] is False
     assert readiness["live_ready"] is False
@@ -158,6 +160,7 @@ def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     assert storage["world_awareness_cache"]["cache_type"] == "jsonl_append_only"
     assert storage["stores_log_contents"] is False
     assert diagnostics["operator_config"]["live_enabled"] is False
+    assert diagnostics["operator_activation_version"] == OPERATOR_ACTIVATION_VERSION
     assert diagnostics["operator_config"]["real_money_enabled"] is False
     assert diagnostics["storage"]["secrets_values_exposed"] is False
 

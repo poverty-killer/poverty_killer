@@ -64,6 +64,7 @@ from app.world_awareness.scheduler import WorldAwarenessProviderRuntime
 
 
 API_VERSION = "operator-backend-v1"
+OPERATOR_ACTIVATION_VERSION = "operator-activation-e2e-ai5-20260602"
 
 
 def _utc_now() -> str:
@@ -72,6 +73,7 @@ def _utc_now() -> str:
 
 READ_ONLY_CONTRACTS: dict[str, Any] = {
     "version": API_VERSION,
+    "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
     "read_only": True,
     "control_policy": {
         "ui_is_trading_engine": False,
@@ -337,6 +339,8 @@ class OperatorSnapshotProvider:
             degraded_reasons.extend(str(item) for item in config_status["warnings"])
         return {
             "api_status": "DEGRADED" if degraded_reasons else "OK",
+            "api_version": API_VERSION,
+            "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
             "supervisor_status": supervisor["state"],
             "session_store_status": storage["session_store"]["status"],
             "world_awareness_cache_status": storage["world_awareness_cache"]["status"],
@@ -494,6 +498,7 @@ class OperatorSnapshotProvider:
         operator_config_summary["world_awareness_credentials_present"] = self._alpaca_paper_configured()
         return {
             "api_version": API_VERSION,
+            "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
             "data_source": "OPERATOR_BACKEND",
             "git_commit": "UNKNOWN_NOT_INSPECTED",
             "dirty_worktree": "UNKNOWN_NOT_INSPECTED",
@@ -643,6 +648,8 @@ class OperatorSnapshotProvider:
         last_save = self.last_credential_save_diagnostic or {}
         diagnostics: dict[str, Any] = {
             "source": "OPERATOR_CREDENTIAL_DIAGNOSTICS",
+            "api_version": API_VERSION,
+            "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
             "backend_cwd": os.getcwd(),
             "backend_repo_root": str(self.runtime_config.repo_root),
             "credential_vault_relative_path": DEFAULT_RELATIVE_STORE_PATH,
@@ -1099,7 +1106,6 @@ class OperatorSnapshotProvider:
         question = str(body.get("question") or body.get("prompt") or "").strip()
         page_context = redact_secrets(body.get("page_context") if isinstance(body.get("page_context"), dict) else {})
         page_id = str(body.get("page_id") or page_context.get("page_id") or "")
-        context = self._ai_context()
         gateway_status = self.ai_gateway.status()
         provider = gateway_status.get("provider") or {}
         model_policy = gateway_status.get("model_policy") or {}
@@ -1108,6 +1114,7 @@ class OperatorSnapshotProvider:
         mode = str(classification.get("mode") or "OPERATOR_GUIDE")
         evidence_level = str(classification.get("evidence_level") or "UNKNOWN")
         if not classification["allowed"]:
+            context = self._ai_light_context()
             response = (
                 "Refused or redirected. The Chief Quant Advisor cannot trade, call broker, enable live, "
                 "handle secrets, bypass safety gates, submit/cancel/liquidate orders, or mutate strategy. "
@@ -1118,6 +1125,7 @@ class OperatorSnapshotProvider:
             gateway_answer: dict[str, Any] = {}
         else:
             route_mode = router_mode_for_gateway(body.get("route_mode") or body.get("mode") or self.ai_routing_settings.get("default_mode") or LOCAL_GUIDE)
+            context = self._ai_light_context() if route_mode == LOCAL_GUIDE else self._ai_context()
             route_provider = str(body.get("provider_id") or "").strip()
             route_model = str(body.get("model_name") or "").strip()
             if not route_provider:
@@ -1496,7 +1504,7 @@ class OperatorSnapshotProvider:
 
     def _ai_next_step(self, mode: str, context: dict[str, Any], page_id: str) -> dict[str, str | None]:
         readiness = context.get("launch_readiness") or {}
-        credentials = context.get("credentials") or {}
+        provider_setup = context.get("provider_setup") if isinstance(context.get("provider_setup"), dict) else {}
         alpaca_missing = "alpaca_paper_credentials" in set(readiness.get("reason_codes") or [])
         if mode == "SETUP_HELP" or alpaca_missing:
             return {"label": "Open Keys & Providers and save/validate Alpaca PAPER credentials.", "page": "providers", "control_id": "credential_save_alpaca_paper"}
@@ -1508,9 +1516,39 @@ class OperatorSnapshotProvider:
             return {"label": "Draft a scoped Codex packet with exact blocker, file area, tests, and safety limits.", "page": "ai", "control_id": "ai_ask"}
         if mode == "TRADING_SYSTEMS_AUDITOR":
             return {"label": "Audit readiness, provider status, portfolio truth, P&L/TCA, and blocked controls before any run.", "page": page_id or "diagnostics", "control_id": "ai_ask"}
-        if credentials.get("configured_count") == 0:
+        if provider_setup.get("configured_count") == 0:
             return {"label": "Configure required providers before relying on model or broker answers.", "page": "providers", "control_id": "credential_save_alpaca_paper"}
         return {"label": "Review the current page summary and ask a narrower follow-up if evidence is missing.", "page": page_id or "positions", "control_id": "ai_ask"}
+
+    def _ai_light_context(self) -> dict[str, Any]:
+        launch = self.launch_readiness()
+        providers = self.providers_readiness()
+        return redact_secrets(
+            {
+                "context_version": "ai-chief-light-context-v1",
+                "scope": "operator_status_and_local_guide",
+                "readiness": self.readiness(),
+                "launch_readiness": launch,
+                "provider_readiness": providers,
+                "provider_setup": self.credentials_providers(),
+                "health": self.health(),
+                "runtime": self.runtime(),
+                "portfolio": {
+                    "status": "PAGE_CONTEXT_OR_PORTFOLIO_ENDPOINT_REQUIRED",
+                    "detail": "Light AI context does not call broker. Use Portfolio Home or /operator/portfolio for broker-confirmed holdings.",
+                    "broker_read_occurred": False,
+                    "broker_mutation_occurred": False,
+                },
+                "live_status": "LIVE_LOCKED",
+                "real_money_blocked": True,
+                "raw_logs_included": False,
+                "secrets_values_exposed": False,
+                "advisory_only": True,
+                "can_execute": False,
+                "broker_call_occurred": False,
+                "trading_mutation_occurred": False,
+            }
+        )
 
     def _ai_context(self) -> dict[str, Any]:
         archive = self.runs()
@@ -1537,7 +1575,7 @@ class OperatorSnapshotProvider:
             alerts=alerts,
         )
         context["provider_readiness"] = self.providers()
-        context["credentials"] = self.credentials_providers()
+        context["provider_setup"] = self.credentials_providers()
         context["launch_readiness"] = self.launch_readiness()
         context["portfolio"] = {
             "status": "PAGE_CONTEXT_OR_PORTFOLIO_ENDPOINT_REQUIRED",
@@ -1949,6 +1987,7 @@ def create_operator_app(provider: OperatorSnapshotProvider | None = None) -> Fas
 
 __all__ = [
     "API_VERSION",
+    "OPERATOR_ACTIVATION_VERSION",
     "OperatorSnapshotProvider",
     "READ_ONLY_CONTRACTS",
     "create_operator_app",

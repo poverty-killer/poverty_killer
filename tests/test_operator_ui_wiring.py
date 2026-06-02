@@ -16,6 +16,8 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     text = _app_text()
 
     assert "data-ai-chief-open" in text
+    assert "ai-chief-dock" in text
+    assert "data-ai-chief-wide" in text
     assert "data-ai-chief-question" in text
     assert "data-ai-chief-ask" in text
     assert "data-ai-chief-clear" in text
@@ -37,8 +39,88 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     assert "requestAnimationFrame" in text
     assert "AI provider error. Local fallback can still explain operator status." in text
     assert "DETERMINISTIC FALLBACK - not a full AI quant reasoning response." in text
+    assert "More prompts" in text
+    assert "AI_PRIMARY_PROMPT_LIMIT" in text
     overlay = text[text.index("function renderAiChiefOverlay"):text.index("function setAiOverlayOpen")]
     assert overlay.index("Advisor Answer") < overlay.index("renderAiCollapsedDetails")
+
+
+def test_commercial_navigation_groups_keep_all_pages_accessible():
+    text = _app_text()
+
+    assert "NAV_GROUPS" in text
+    for group in ["Operate", "Understand", "Setup", "Research / Proof", "System"]:
+        assert group in text
+    for page_id in [
+        "positions",
+        "command",
+        "action",
+        "activity",
+        "runs",
+        "pnl",
+        "decision",
+        "market",
+        "risk",
+        "alerts",
+        "providers",
+        "ai",
+        "historical",
+        "research",
+        "world",
+        "diagnostics",
+        "system",
+        "audit",
+        "live",
+    ]:
+        assert f'"{page_id}"' in text
+    assert "main.innerHTML = screens.map" in text
+    assert "group.items.map" in text
+    assert "showScreen(button.dataset.screen)" in text
+
+
+def test_ai_advisor_is_docked_and_resizes_layout_not_overlay_first():
+    app_text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert "syncAiDockedState" in app_text
+    assert "ai-docked-open" in app_text
+    assert "ai-docked-wide" in app_text
+    assert "shouldOpenAiDockFromUrl" in app_text
+    assert "aiDock" in app_text
+    assert "data-ai-chat-scroll-container" in app_text
+    assert "ai-chief-response-end" in app_text
+    assert "body.ai-docked-open .shell" in css
+    assert "calc(100vw - var(--ai-dock-width))" in css
+    assert ".ai-chief-drawer.open" in css
+    assert "pointer-events: auto" in css
+    assert ".ai-chief-body" in css
+    assert "overflow-y: auto" in css
+    assert ".ai-chief-backdrop.open" in css
+
+
+def test_ai_prompts_are_limited_with_more_prompts_expander():
+    text = _app_text()
+
+    assert "primaryAiPrompts" in text
+    assert "moreAiPrompts" in text
+    assert "AI_PRIMARY_PROMPT_LIMIT = 6" in text
+    assert "ai-more-prompts" in text
+    assert "More prompts" in text
+    assert "AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT)" in text
+
+
+def test_portfolio_home_has_commercial_cockpit_lane_and_primary_actions():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert 'data-home-section="portfolio-cockpit"' in text
+    assert "Account Cockpit" in text
+    assert "Broker-confirmed PAPER account view first" in text
+    assert "Ask Docked Advisor" in text
+    assert "primary-action" in text
+    assert ".cockpit-hero" in css
+    assert ".launch-control-layout" in css
+    assert ".confirmation-grid" in css
 
 
 def test_header_compacts_backend_degraded_status_and_keeps_details_in_diagnostics():

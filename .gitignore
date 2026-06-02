@@ -8,6 +8,7 @@ logs/
 .aider*
 .secrets/
 .operator_secrets/
+.operator_config/
 _repo_quarantine/
 .pytest_cache/
 data/*.db*

@@ -24,6 +24,13 @@
     ["audit", "Audit Log"],
     ["live", "Live Locked"]
   ];
+  const NAV_GROUPS = [
+    { title: "Operate", summary: "Portfolio and PAPER runtime", items: ["positions", "command", "action", "activity", "runs"] },
+    { title: "Understand", summary: "P&L, decisions, risk, alerts", items: ["pnl", "decision", "market", "risk", "alerts"] },
+    { title: "Setup", summary: "Keys, AI routing, historical test", items: ["providers", "ai", "historical"] },
+    { title: "Research / Proof", summary: "Evidence and outside events", items: ["research", "world"] },
+    { title: "System", summary: "Diagnostics, maps, audit, locks", items: ["diagnostics", "system", "audit", "live"] }
+  ];
   const DEFAULT_BACKEND_FETCH_TIMEOUT_MS = 10000;
   const HEAVY_BACKEND_FETCH_TIMEOUT_MS = 15000;
   const HEAVY_BACKEND_ENDPOINTS = new Set([
@@ -57,6 +64,7 @@
     "Draft Codex packet request.",
     "Review provider/data readiness."
   ];
+  const AI_PRIMARY_PROMPT_LIMIT = 6;
   const AI_PRESERVED_BOOLEAN_KEYS = new Set([
     "secrets_values_exposed",
     "secretsValuesExposed",
@@ -143,6 +151,7 @@
   ];
   let activeScreenId = "positions";
   let aiOverlayOpen = false;
+  let aiWideMode = false;
   let aiSelectedQuestion = AI_QUICK_PROMPTS[0];
   let aiQuestionText = AI_QUICK_PROMPTS[0];
   let aiOverlayResponse = "";
@@ -281,6 +290,57 @@
       research: ["Is this strategy statistically believable?", "What could be overfit?", "Does this look like real edge or noise?"]
     };
     return [...common, ...(byPage[pageId] || ["Why is this blocked?", "Audit readiness."])];
+  }
+
+  function uniquePrompts(prompts) {
+    return (prompts || []).filter((prompt, index, arr) => prompt && arr.indexOf(prompt) === index);
+  }
+
+  function primaryAiPrompts(pageId) {
+    return uniquePrompts(pageAwareAiPrompts(pageId || activeScreenId || "positions").concat(AI_QUICK_PROMPTS)).slice(0, AI_PRIMARY_PROMPT_LIMIT);
+  }
+
+  function moreAiPrompts(pageId) {
+    const primary = new Set(primaryAiPrompts(pageId));
+    return uniquePrompts(pageAwareAiPrompts(pageId || activeScreenId || "positions").concat(AI_QUICK_PROMPTS)).filter((prompt) => !primary.has(prompt));
+  }
+
+  function screenIndex(id) {
+    return screens.findIndex(([screenId]) => screenId === id);
+  }
+
+  function navPageNumber(id) {
+    const index = screenIndex(id);
+    return index >= 0 ? String(index + 1).padStart(2, "0") : "--";
+  }
+
+  function navBadge(id) {
+    const badges = {
+      command: "Primary",
+      positions: "Home",
+      providers: "Setup",
+      ai: "Advisor",
+      diagnostics: "Advanced",
+      live: "Locked"
+    };
+    return badges[id] || "";
+  }
+
+  function shouldOpenAiDockFromUrl() {
+    const params = new URLSearchParams(window.location.search || "");
+    const value = String(params.get("aiDock") || params.get("advisor") || "").toLowerCase();
+    return value === "open" || value === "1" || value === "true";
+  }
+
+  function shouldUseWideAiDockFromUrl() {
+    const params = new URLSearchParams(window.location.search || "");
+    const value = String(params.get("aiWide") || "").toLowerCase();
+    return value === "1" || value === "true" || value === "wide";
+  }
+
+  function syncAiDockedState() {
+    document.body.classList.toggle("ai-docked-open", aiOverlayOpen);
+    document.body.classList.toggle("ai-docked-wide", aiOverlayOpen && aiWideMode);
   }
 
   function dataSourceColor() {
@@ -434,48 +494,60 @@
           ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
         </div>
         <p class="muted">Starts the existing governed PAPER runner only. Pick minutes, hours, or a 7-day run; the server refuses anything outside ${escapeHtml(formatDuration(minDuration))} to ${escapeHtml(formatDuration(maxDuration))}.</p>
-        <div class="form-grid">
-          <label>Watchlist
-            <input data-paper-watchlist type="text" value="${escapeHtml(watchlist)}" autocomplete="off">
-          </label>
-          <label>Run length
-            <select data-paper-duration>
-              ${[
-                [300, "5 minutes"],
-                [900, "15 minutes"],
-                [1800, "30 minutes"],
-                [3600, "1 hour"],
-                [14400, "4 hours"],
-                [86400, "1 day"],
-                [604800, "7 days"],
-                ["custom", "Custom minutes / hours / days"]
-              ].map(([seconds, label]) => `<option value="${seconds}" ${seconds === 604800 ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
-            </select>
-          </label>
-          <label>Custom amount
-            <input data-paper-duration-amount type="number" min="1" max="7" value="7" inputmode="numeric">
-          </label>
-          <label>Custom unit
-            <select data-paper-duration-unit>
-              <option value="minutes">minutes</option>
-              <option value="hours">hours</option>
-              <option value="days" selected>days</option>
-            </select>
-          </label>
-          <label class="checkline"><input data-paper-profile-alpha type="checkbox" checked> PAPER_EXPLORATION_ALPHA</label>
-          <label class="checkline"><input data-paper-confirm-paper type="checkbox"> Confirm PAPER-only</label>
-          <label class="checkline"><input data-paper-confirm-live-locked type="checkbox"> Confirm live locked</label>
-          <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox"> Confirm real-money blocked</label>
-          <label class="checkline"><input data-paper-confirm-no-manual-trades type="checkbox"> Confirm no manual trades</label>
+        <div class="launch-control-layout">
+          <div class="launch-input-panel">
+            <div class="form-grid">
+              <label>Watchlist
+                <input data-paper-watchlist type="text" value="${escapeHtml(watchlist)}" autocomplete="off">
+              </label>
+              <label>Run length
+                <select data-paper-duration>
+                  ${[
+                    [300, "5 minutes"],
+                    [900, "15 minutes"],
+                    [1800, "30 minutes"],
+                    [3600, "1 hour"],
+                    [14400, "4 hours"],
+                    [86400, "1 day"],
+                    [604800, "7 days"],
+                    ["custom", "Custom minutes / hours / days"]
+                  ].map(([seconds, label]) => `<option value="${seconds}" ${seconds === 604800 ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+                </select>
+              </label>
+              <label>Custom amount
+                <input data-paper-duration-amount type="number" min="1" max="7" value="7" inputmode="numeric">
+              </label>
+              <label>Custom unit
+                <select data-paper-duration-unit>
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                  <option value="days" selected>days</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="launch-confirm-panel">
+            <div class="launch-confirm-title">Safety confirmations</div>
+            <div class="confirmation-grid">
+              <label class="checkline"><input data-paper-profile-alpha type="checkbox" checked> PAPER_EXPLORATION_ALPHA</label>
+              <label class="checkline"><input data-paper-confirm-paper type="checkbox"> PAPER-only</label>
+              <label class="checkline"><input data-paper-confirm-live-locked type="checkbox"> Live locked</label>
+              <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox"> Real-money blocked</label>
+              <label class="checkline"><input data-paper-confirm-no-manual-trades type="checkbox"> No manual trades</label>
+            </div>
+          </div>
         </div>
         <div class="button-row">
-          <button class="intent-button paper" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" ${startDisabled}>
+          <button class="intent-button paper primary-action" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" ${startDisabled}>
             Start Bounded PAPER Run
           </button>
           <button class="intent-button live" disabled>No manual trades / force trade unavailable</button>
         </div>
-        <div class="notice">${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
-        <div class="notice">Alpaca key missing means this backend sees neither an environment key nor a Local credential vault entry for Alpaca PAPER. Add it in Keys & Providers, then validate read-only.</div>
+        <div class="notice ${disabledReason ? "error" : ""}">${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
+        <details class="ai-context-details">
+          <summary>Why this can be disabled</summary>
+          <div class="notice">Alpaca key missing means this backend sees neither an environment key nor a Local credential vault entry for Alpaca PAPER. Add it in Keys & Providers, then validate read-only.</div>
+        </details>
         <div class="notice mono">Endpoint target: /operator/intent/paper/start only. Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
       </div>
     `;
@@ -606,27 +678,46 @@
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
     const response = homeAiResponse || "No home-page question asked yet. Ask about readiness, portfolio risk, blockers, PAPER planning, or evidence quality.";
     const warning = aiModelWarning();
+    const primaryPrompts = primaryAiPrompts(activeScreenId || "positions");
+    const extraPrompts = moreAiPrompts(activeScreenId || "positions");
     return `
       <div class="card span-12" data-home-section="ai-quant-advisor"><h3>AI Quant Advisor</h3>
-        <div class="notice ai-mission">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. Advisory only. can_execute=false. No broker calls, no live enablement, no real-money enablement, no threshold mutation, no secrets.</div>
-        <div class="notice mono">Provider mode: ${escapeHtml(data.ai.providerMode || "NOT_CONFIGURED")} / Provider: ${escapeHtml(providerLabel)} / Model: ${escapeHtml(data.ai.modelName || "none")} / Quality: ${escapeHtml(data.ai.modelQuality || "FALLBACK_ONLY")} / Policy: ${escapeHtml(data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED")}.</div>
+        <div class="cardless-model-strip compact-model-strip">
+          ${badge(data.ai.providerMode || "NOT_CONFIGURED", statusColor(data.ai.providerMode || "NOT_CONFIGURED"))}
+          ${badge(data.ai.modelName || "model unavailable", "gray")}
+          ${badge(data.ai.modelQuality || "FALLBACK_ONLY", modelQualityColor(data.ai.modelQuality || "FALLBACK_ONLY"))}
+          ${badge("advisory only", "gray")}
+        </div>
+        <div class="notice ai-mission compact">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. Advisory only: can_execute=false, No broker calls, no live enablement, no real-money enablement, no threshold mutation, no secrets.</div>
         ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
         <div class="ai-ask-box">
           <label for="home-ai-question">Ask a question from the home page</label>
           <textarea id="home-ai-question" data-home-ai-question rows="4" placeholder="Ask what blocks PAPER, what we own, what risk matters, or what proof is needed next.">${escapeHtml(homeAiQuestionText || "")}</textarea>
-          <div class="ai-question-bank" aria-label="Home AI Advisor suggestions">
-            ${pageAwareAiPrompts(activeScreenId || "positions").map((prompt) => `
+          <div class="ai-question-bank compact" aria-label="Home AI Advisor suggestions">
+            ${primaryPrompts.map((prompt) => `
               <button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>
             `).join("")}
           </div>
+          ${extraPrompts.length ? `
+            <details class="ai-context-details ai-more-prompts">
+              <summary>More prompts</summary>
+              <div class="ai-question-bank compact">
+                ${extraPrompts.map((prompt) => `<button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
+              </div>
+            </details>
+          ` : ""}
           <div class="button-row">
             <button class="intent-button paper" type="button" data-home-ai-ask ${homeAiBusy ? "disabled" : ""}>${homeAiBusy ? "Asking..." : "Ask AI Quant Advisor"}</button>
             <button class="intent-button paper" type="button" data-home-ai-clear ${homeAiBusy ? "disabled" : ""}>Clear</button>
-            <button class="intent-button paper" type="button" data-ai-chief-open>Open Global Drawer</button>
+            <button class="intent-button paper" type="button" data-ai-chief-open>Open Docked Advisor</button>
           </div>
           ${homeAiError ? `<div class="notice error">Error: ${escapeHtml(homeAiError)}</div>` : ""}
         </div>
         <div class="ai-response"><h3>Home Advisory Response</h3><pre>${escapeHtml(response)}</pre></div>
+        <details class="ai-context-details">
+          <summary>Provider and model details</summary>
+          <div class="notice mono">Provider mode: ${escapeHtml(data.ai.providerMode || "NOT_CONFIGURED")} / Provider: ${escapeHtml(providerLabel)} / Model: ${escapeHtml(data.ai.modelName || "none")} / Quality: ${escapeHtml(data.ai.modelQuality || "FALLBACK_ONLY")} / Policy: ${escapeHtml(data.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED")}.</div>
+        </details>
       </div>
     `;
   }
@@ -648,11 +739,26 @@
 
   function renderNav() {
     const nav = document.querySelector(".nav");
-    nav.innerHTML = screens.map(([id, label], index) => `
-      <button class="nav-button ${index === 0 ? "active" : ""}" data-screen="${id}">
-        <span>${escapeHtml(label)}</span>
-        <span class="muted">${String(index + 1).padStart(2, "0")}</span>
-      </button>
+    nav.innerHTML = NAV_GROUPS.map((group) => `
+      <div class="nav-group" data-nav-group="${escapeHtml(group.title)}">
+        <div class="nav-group-title">${escapeHtml(group.title)}</div>
+        <div class="nav-group-summary">${escapeHtml(group.summary)}</div>
+        <div class="nav-group-items">
+          ${group.items.map((id) => {
+            const label = screenTitle(id);
+            const badgeText = navBadge(id);
+            return `
+              <button class="nav-button ${id === "positions" ? "active" : ""}" data-screen="${id}">
+                <span class="nav-label">${escapeHtml(label)}</span>
+                <span class="nav-meta">
+                  ${badgeText ? `<span class="nav-badge">${escapeHtml(badgeText)}</span>` : ""}
+                  <span class="nav-page-number">${navPageNumber(id)}</span>
+                </span>
+              </button>
+            `;
+          }).join("")}
+        </div>
+      </div>
     `).join("");
     nav.addEventListener("click", (event) => {
       const button = event.target.closest("[data-screen]");
@@ -904,6 +1010,25 @@
     return `
       ${header("Portfolio Home", "Current PAPER holdings, cash, exposure, and orders.", portfolio.status || "UNKNOWN")}
       <div class="grid">
+        <div class="card span-12 cockpit-hero" data-home-section="portfolio-cockpit">
+          <div class="cockpit-hero-main">
+            <div>
+              <h3>Account Cockpit</h3>
+              <p>Broker-confirmed PAPER account view first. Use Run PAPER only after readiness is green and safety confirmations are checked.</p>
+            </div>
+            <div class="cockpit-badges">
+              ${badge(portfolio.status || "UNKNOWN", statusColor(portfolio.status || "UNKNOWN"))}
+              ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
+              ${badge("Live locked", "red")}
+              ${badge("Real-money blocked", "red")}
+            </div>
+          </div>
+          <div class="cockpit-hero-actions">
+            <button class="intent-button paper primary-action" type="button" data-screen-shortcut="command">Open Run PAPER</button>
+            <button class="intent-button paper" type="button" data-screen-shortcut="providers">Keys & Providers</button>
+            <button class="intent-button paper" type="button" data-ai-chief-open>Ask Docked Advisor</button>
+          </div>
+        </div>
         ${metric("Total Equity", summary.totalEquity || "unknown", summary.totalEquity ? "green" : "yellow")}
         ${metric("Cash", summary.cash || "unknown", summary.cash ? "green" : "yellow")}
         ${metric("Buying Power", summary.buyingPower || "unknown", summary.buyingPower ? "green" : "yellow")}
@@ -950,7 +1075,7 @@
           <div class="button-row operator-flow-actions">
             <button class="intent-button paper" type="button" data-screen-shortcut="command">Open Run PAPER</button>
             <button class="intent-button paper" type="button" data-screen-shortcut="providers">Add / Validate Keys</button>
-            <button class="intent-button paper" type="button" data-ai-chief-open>Ask AI Advisor</button>
+            <button class="intent-button paper" type="button" data-ai-chief-open>Ask Docked Advisor</button>
             <button class="intent-button live" disabled>Live trading locked</button>
           </div>
         </div>
@@ -1249,20 +1374,25 @@
           </div>
           <div class="notice mono">Last AI result: ${escapeHtml(ai.lastAnalyzeResult || "none")}</div>
         </div>
-        <div class="card span-12"><h3>Provider / Model Registry</h3>${table(
-          ["Provider", "Status", "Configured", "Model", "Quality", "Cost", "Reasoning", "Persona", "Validation / Error"],
-          providerCards.map((provider) => [
-            escapeHtml(provider.displayName || provider.display_name || provider.providerId || provider.provider_id),
-            badge(provider.status || "UNKNOWN", statusColor(provider.status || "UNKNOWN")),
-            badge(String(provider.configured === true || provider.credentialSource === "NOT_REQUIRED" || provider.credential_source === "NOT_REQUIRED"), provider.configured || provider.credentialSource === "NOT_REQUIRED" || provider.credential_source === "NOT_REQUIRED" ? "green" : "yellow"),
-            escapeHtml(provider.modelName || provider.model_name || provider.default_model || "not selected"),
-            badge(provider.modelQuality || provider.model_quality || "UNKNOWN", modelQualityColor(provider.modelQuality || provider.model_quality || "UNKNOWN")),
-            badge(provider.costMode || provider.cost_mode || provider.cost_tier || "UNKNOWN", statusColor(provider.costMode || provider.cost_mode || "UNKNOWN")),
-            escapeHtml(provider.reasoningCapability || provider.reasoning_capability || provider.provider_family || "unknown"),
-            badge(String(provider.personaEnforced !== false), provider.personaEnforced === false ? "red" : "green"),
-            escapeHtml(provider.lastErrorCategory || provider.last_error_category || provider.lastValidationStatus || provider.last_validation_status || "NOT_RUN")
-          ])
-        )}</div>
+        <div class="card span-12"><h3>Provider / Model Registry</h3>
+          <details class="ai-context-details">
+            <summary>Show provider registry, model quality, cost, and validation details</summary>
+            ${table(
+              ["Provider", "Status", "Configured", "Model", "Quality", "Cost", "Reasoning", "Persona", "Validation / Error"],
+              providerCards.map((provider) => [
+                escapeHtml(provider.displayName || provider.display_name || provider.providerId || provider.provider_id),
+                badge(provider.status || "UNKNOWN", statusColor(provider.status || "UNKNOWN")),
+                badge(String(provider.configured === true || provider.credentialSource === "NOT_REQUIRED" || provider.credential_source === "NOT_REQUIRED"), provider.configured || provider.credentialSource === "NOT_REQUIRED" || provider.credential_source === "NOT_REQUIRED" ? "green" : "yellow"),
+                escapeHtml(provider.modelName || provider.model_name || provider.default_model || "not selected"),
+                badge(provider.modelQuality || provider.model_quality || "UNKNOWN", modelQualityColor(provider.modelQuality || provider.model_quality || "UNKNOWN")),
+                badge(provider.costMode || provider.cost_mode || provider.cost_tier || "UNKNOWN", statusColor(provider.costMode || provider.cost_mode || "UNKNOWN")),
+                escapeHtml(provider.reasoningCapability || provider.reasoning_capability || provider.provider_family || "unknown"),
+                badge(String(provider.personaEnforced !== false), provider.personaEnforced === false ? "red" : "green"),
+                escapeHtml(provider.lastErrorCategory || provider.last_error_category || provider.lastValidationStatus || provider.last_validation_status || "NOT_RUN")
+              ])
+            )}
+          </details>
+        </div>
         <div class="card span-6"><h3>Model Policy</h3>${kv([
           ["Provider mode", badge(ai.providerMode || "NOT_CONFIGURED", statusColor(ai.providerMode || "NOT_CONFIGURED"))],
           ["Selected model", escapeHtml(ai.modelName || "none")],
@@ -1278,10 +1408,17 @@
           ["Promotion gates", escapeHtml(research.promotionGates || 0)]
         ])}</div>
         <div class="card span-12"><h3>Expert Prompt Modes</h3>
-          <div class="stack">${["QUANT_ADVISOR", "QUANT_ENGINEER", "TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE", "RUN_PLANNER", "PORTFOLIO_REVIEW", "SETUP_HELP", "CODEX_PACKET_ADVISOR", "UNSAFE_REQUEST_REFUSAL"].map((prompt) => badge(prompt, "gray")).join("")}</div>
+          <details class="ai-context-details">
+            <summary>Show advisor modes</summary>
+            <div class="stack">${["QUANT_ADVISOR", "QUANT_ENGINEER", "TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE", "RUN_PLANNER", "PORTFOLIO_REVIEW", "SETUP_HELP", "CODEX_PACKET_ADVISOR", "UNSAFE_REQUEST_REFUSAL"].map((prompt) => badge(prompt, "gray")).join("")}</div>
+          </details>
         </div>
         <div class="card span-12"><h3>Focused Quant Prompts</h3>
-          <div class="stack">${AI_QUICK_PROMPTS.slice(0, 14).map((prompt) => badge(prompt, "gray")).join("")}</div>
+          <div class="ai-question-bank compact">${AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT).map((prompt) => `<button class="ai-question" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}</div>
+          <details class="ai-context-details ai-more-prompts">
+            <summary>More prompts</summary>
+            <div class="ai-question-bank compact">${AI_QUICK_PROMPTS.slice(AI_PRIMARY_PROMPT_LIMIT).map((prompt) => `<button class="ai-question" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}</div>
+          </details>
         </div>
         <div class="card span-12"><h3>Advisory Boundary</h3>${kv([
           ["AI direct broker calls", badge("forbidden", "red")],
@@ -1390,9 +1527,19 @@
   function credentialSummaryLine(providers, providerId) {
     const provider = (providers || []).find((item) => item.providerId === providerId);
     if (!provider) return "not loaded";
-    const configured = provider.configured ? "configured" : "missing";
-    const sources = (provider.fields || []).map((field) => `${field.name}:${field.source}`).join(", ");
-    return `${configured}; ${sources || "no fields"}`;
+    const configured = provider.configured === true;
+    const fields = provider.fields || [];
+    const localCount = fields.filter((field) => field.source === "LOCAL_SECRET_PRESENT").length;
+    const envCount = fields.filter((field) => field.source === "ENV_PRESENT").length;
+    const missingCount = fields.filter((field) => !field.source || field.source === "NOT_CONFIGURED").length;
+    if (configured) {
+      const sourceText = [
+        localCount ? `${localCount} local vault field${localCount === 1 ? "" : "s"}` : "",
+        envCount ? `${envCount} environment field${envCount === 1 ? "" : "s"}` : ""
+      ].filter(Boolean).join(", ");
+      return `configured; ${sourceText || "safe source present"}; raw secrets hidden`;
+    }
+    return `missing; ${missingCount || "required"} field${missingCount === 1 ? "" : "s"} needed; raw secrets hidden`;
   }
 
   function credentialActionStatusText(action, providerId, result) {
@@ -1557,6 +1704,7 @@
       ["ai_overlay", "ai_ask", "Ask Quant Chief", "button", "WIRED", "local_advisory_write", "", "POST", "/operator/ai/ask"],
       ["ai_overlay", "ai_clear", "Clear", "button", "WIRED", "read_only", "", null, "local_clear"],
       ["ai_overlay", "ai_close", "Close", "button", "WIRED", "read_only", "", null, "local_close"],
+      ["ai_overlay", "ai_wide", "Wide advisor", "button", "WIRED", "read_only", "", null, "toggle_ai_dock_width"],
       ["command", "paper_watchlist", "Watchlist", "input", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_duration", "Run length", "select+number", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_start", "Start Bounded PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
@@ -2334,13 +2482,15 @@
   function renderAiChiefOverlay() {
     const host = document.querySelector(".ai-chief-global");
     if (!host) return;
+    syncAiDockedState();
     const context = buildAiChiefContext(aiSelectedQuestion);
     const providerState = data.ai.providerState || "AI_DISABLED";
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
     const response = aiOverlayResponse || buildAiOverlayAdvisory(aiQuestionText || aiSelectedQuestion);
     const result = aiOverlayLastResult || localAiResult(aiQuestionText || aiSelectedQuestion, response);
     const friendlyStatus = aiOverlayBusy ? "Asking Chief Quant Advisor..." : aiFriendlyStatus(result);
-    const prompts = pageAwareAiPrompts(activeScreenId || "positions");
+    const primaryPrompts = primaryAiPrompts(activeScreenId || "positions");
+    const extraPrompts = moreAiPrompts(activeScreenId || "positions");
     const warning = aiModelWarning();
     host.innerHTML = `
       <button class="ai-chief-fab ${aiOverlayOpen ? "open" : ""}" type="button" data-ai-chief-open aria-expanded="${aiOverlayOpen ? "true" : "false"}">
@@ -2348,22 +2498,23 @@
         <span class="ai-chief-fab-sub">${escapeHtml(screenTitle(activeScreenId))}</span>
       </button>
       <div class="ai-chief-backdrop ${aiOverlayOpen ? "open" : ""}" data-ai-chief-close></div>
-      <section class="ai-chief-drawer ${aiOverlayOpen ? "open" : ""}" aria-hidden="${aiOverlayOpen ? "false" : "true"}" aria-label="Global AI Chief advisory drawer">
+      <section class="ai-chief-drawer ai-chief-dock ${aiOverlayOpen ? "open" : ""} ${aiWideMode ? "wide" : ""}" aria-hidden="${aiOverlayOpen ? "false" : "true"}" aria-label="Global AI Chief advisory drawer">
         <div class="ai-chief-panel">
           <div class="ai-chief-header">
             <div class="ai-chief-heading">
               <div class="ai-chief-title">Chief Quant Advisor</div>
               <div class="cardless-model-strip">
-                ${badge(providerLabel, statusColor(providerState))}
                 ${badge(result.providerMode, statusColor(result.providerMode))}
-                ${badge(result.modelName || "model unavailable", "gray")}
+                ${badge(result.modelName || providerLabel || "model unavailable", "gray")}
                 ${badge(result.modelQuality, modelQualityColor(result.modelQuality))}
                 ${badge(result.answerSource, statusColor(result.answerSource))}
-                ${badge(result.costMode, statusColor(result.costMode))}
                 ${badge("advisory only", "gray")}
               </div>
             </div>
-            <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Close</button>
+            <div class="ai-chief-header-actions">
+              <button class="ai-chief-close" type="button" data-ai-chief-wide aria-label="${aiWideMode ? "Use normal advisor width" : "Use wide advisor width"}">${aiWideMode ? "Normal" : "Wide"}</button>
+              <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Collapse</button>
+            </div>
           </div>
           <div class="ai-boundary">
             ${badge("cannot trade", "red")}
@@ -2383,17 +2534,29 @@
                   ${aiOverlayBusy ? "Asking..." : "Ask Quant Chief"}
                 </button>
                 <button class="intent-button paper" type="button" data-ai-chief-clear ${aiOverlayBusy ? "disabled" : ""}>Clear</button>
-                <button class="intent-button live" type="button" data-ai-chief-close>Close</button>
+                <button class="intent-button paper" type="button" data-ai-chief-close>Collapse</button>
               </div>
               ${aiOverlayError ? `<div class="notice error">Error: ${escapeHtml(aiOverlayError)}</div>` : ""}
             </div>
-            <div class="ai-question-bank" aria-label="AI Chief quick questions">
-              ${prompts.concat(AI_QUICK_PROMPTS).filter((prompt, index, arr) => arr.indexOf(prompt) === index).map((prompt) => `
+            <div class="ai-question-bank compact" aria-label="AI Chief quick questions">
+              ${primaryPrompts.map((prompt) => `
                 <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
                   ${escapeHtml(prompt)}
                 </button>
               `).join("")}
             </div>
+            ${extraPrompts.length ? `
+              <details class="ai-context-details ai-more-prompts">
+                <summary>More prompts</summary>
+                <div class="ai-question-bank compact">
+                  ${extraPrompts.map((prompt) => `
+                    <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
+                      ${escapeHtml(prompt)}
+                    </button>
+                  `).join("")}
+                </div>
+              </details>
+            ` : ""}
             <div class="ai-response advisor-answer">
               <div class="split">
                 <h3>Advisor Answer</h3>
@@ -2426,6 +2589,14 @@
 
   function setAiOverlayOpen(open) {
     aiOverlayOpen = open;
+    syncAiDockedState();
+    renderAiChiefOverlay();
+  }
+
+  function toggleAiWideMode() {
+    aiWideMode = !aiWideMode;
+    aiOverlayOpen = true;
+    syncAiDockedState();
     renderAiChiefOverlay();
   }
 
@@ -2436,6 +2607,7 @@
     aiOverlayLastResult = localAiResult(question, aiOverlayResponse);
     aiOverlayError = "";
     aiOverlayOpen = true;
+    syncAiDockedState();
     renderAiChiefOverlay();
   }
 
@@ -2445,6 +2617,7 @@
     aiOverlayLastResult = null;
     aiOverlayError = "";
     aiOverlayOpen = true;
+    syncAiDockedState();
     renderAiChiefOverlay();
   }
 
@@ -3727,6 +3900,9 @@
 
   async function boot() {
     data = await loadData();
+    aiOverlayOpen = shouldOpenAiDockFromUrl();
+    aiWideMode = aiOverlayOpen && shouldUseWideAiDockFromUrl();
+    syncAiDockedState();
     renderTopBar();
     renderNav();
     renderScreens("positions");
@@ -3979,6 +4155,11 @@
     const aiClose = event.target.closest("[data-ai-chief-close]");
     if (aiClose) {
       setAiOverlayOpen(false);
+      return;
+    }
+    const aiWide = event.target.closest("[data-ai-chief-wide]");
+    if (aiWide) {
+      toggleAiWideMode();
       return;
     }
     const aiPrompt = event.target.closest("[data-ai-chief-prompt]");

@@ -14,6 +14,7 @@ from typing import Mapping
 HIGH_REASONING = "HIGH_REASONING"
 STANDARD = "STANDARD"
 LOW_REASONING = "LOW_REASONING"
+LOCAL_UNEVALUATED = "LOCAL_UNEVALUATED"
 FALLBACK_ONLY = "FALLBACK_ONLY"
 UNKNOWN = "UNKNOWN"
 
@@ -69,7 +70,7 @@ def explicit_quality_override(env: Mapping[str, str], provider: str) -> str | No
         "AI_MODEL_QUALITY_OVERRIDE",
         "PK_AI_CHIEF_MODEL_QUALITY_OVERRIDE",
     )
-    allowed = {HIGH_REASONING, STANDARD, LOW_REASONING, FALLBACK_ONLY, UNKNOWN}
+    allowed = {HIGH_REASONING, STANDARD, LOW_REASONING, LOCAL_UNEVALUATED, FALLBACK_ONLY, UNKNOWN}
     for name in names:
         value = str(env.get(name) or "").strip().upper()
         if value in allowed:
@@ -78,13 +79,19 @@ def explicit_quality_override(env: Mapping[str, str], provider: str) -> str | No
 
 
 def classify_model_quality(provider: str, model_name: str | None, *, override: str | None = None) -> str:
-    if override in {HIGH_REASONING, STANDARD, LOW_REASONING, FALLBACK_ONLY, UNKNOWN}:
+    if override in {HIGH_REASONING, STANDARD, LOW_REASONING, LOCAL_UNEVALUATED, FALLBACK_ONLY, UNKNOWN}:
         return str(override)
     provider_key = str(provider or "").strip().lower()
     model = str(model_name or "").strip().lower()
     if not model:
         return FALLBACK_ONLY
-    low_tokens = ("mini", "nano", "haiku", "instant", "fast", "cheap", "small", "lite")
+    if provider_key in {"deterministic_local", "mock", "disabled"}:
+        return FALLBACK_ONLY
+    if provider_key in {"local_openai_compatible", "local", "ollama", "lm_studio"}:
+        return LOCAL_UNEVALUATED
+    if provider_key == "supreme_board_packet":
+        return HIGH_REASONING
+    low_tokens = ("mini", "nano", "haiku", "instant", "fast", "cheap", "small", "lite", "flash")
     if any(token in model for token in low_tokens):
         return LOW_REASONING
     if provider_key == "openai":
@@ -110,6 +117,26 @@ def classify_model_quality(provider: str, model_name: str | None, *, override: s
             return HIGH_REASONING
         if "sonnet" in model:
             return STANDARD
+    if provider_key == "gemini":
+        if "pro" in model and ("2.5" in model or "reason" in model):
+            return HIGH_REASONING
+        if "flash" in model:
+            return STANDARD
+    if provider_key in {"xai_grok", "xai", "grok"}:
+        if "grok-4" in model or "reason" in model:
+            return HIGH_REASONING
+        if "grok" in model:
+            return STANDARD
+    if provider_key == "deepseek":
+        if "reasoner" in model or "r1" in model:
+            return HIGH_REASONING
+        if "chat" in model:
+            return STANDARD
+    if provider_key in {"kimi_moonshot", "kimi", "moonshot"}:
+        if "thinking" in model or "reason" in model or "k2" in model:
+            return HIGH_REASONING
+        if "moonshot" in model or "kimi" in model:
+            return STANDARD
     return UNKNOWN
 
 
@@ -125,6 +152,20 @@ def provider_mode_for(provider: str, *, configured: bool, error: bool = False, f
         return "LIVE_OPENAI"
     if provider_key == "anthropic":
         return "LIVE_ANTHROPIC"
+    if provider_key == "gemini":
+        return "LIVE_GEMINI"
+    if provider_key in {"xai_grok", "xai", "grok"}:
+        return "LIVE_XAI_GROK"
+    if provider_key == "deepseek":
+        return "LIVE_DEEPSEEK"
+    if provider_key in {"kimi_moonshot", "kimi", "moonshot"}:
+        return "LIVE_KIMI_MOONSHOT"
+    if provider_key == "local_openai_compatible":
+        return "LOCAL_MODEL"
+    if provider_key == "deterministic_local":
+        return "DETERMINISTIC_FALLBACK"
+    if provider_key == "supreme_board_packet":
+        return "SUPREME_BOARD_PACKET"
     return "PROVIDER_ERROR"
 
 
@@ -151,16 +192,28 @@ def model_quality_report(
         if quality == HIGH_REASONING:
             policy = HIGHEST_AVAILABLE_REQUIRED
             warning = None
+        elif quality == LOCAL_UNEVALUATED:
+            policy = LOWER_MODEL_WARNING
+            warning = "LOCAL MODEL UNEVALUATED - not suitable for final quant/risk/governance decisions."
         else:
             policy = LOWER_MODEL_WARNING
             warning = "LOWER-REASONING MODEL ACTIVE - not suitable for final quant/risk/governance decisions."
+    governance_modes = {
+        "LIVE_OPENAI",
+        "LIVE_ANTHROPIC",
+        "LIVE_GEMINI",
+        "LIVE_XAI_GROK",
+        "LIVE_DEEPSEEK",
+        "LIVE_KIMI_MOONSHOT",
+        "SUPREME_BOARD_PACKET",
+    }
     return ModelQualityReport(
         provider=provider,
         provider_mode=provider_mode,
         model_name=model_name,
         model_quality=quality,
         reasoning_policy=policy,
-        model_suitable_for_governance=quality == HIGH_REASONING and provider_mode in {"LIVE_OPENAI", "LIVE_ANTHROPIC"},
+        model_suitable_for_governance=quality == HIGH_REASONING and provider_mode in governance_modes,
         warning=warning,
     )
 
@@ -172,9 +225,17 @@ def prompt_allows_model_call(
     require_high_reasoning_for_quant: bool,
     allow_low_reasoning_for_ui_help: bool,
 ) -> bool:
-    if report.model_quality == HIGH_REASONING and report.provider_mode in {"LIVE_OPENAI", "LIVE_ANTHROPIC"}:
+    live_modes = {
+        "LIVE_OPENAI",
+        "LIVE_ANTHROPIC",
+        "LIVE_GEMINI",
+        "LIVE_XAI_GROK",
+        "LIVE_DEEPSEEK",
+        "LIVE_KIMI_MOONSHOT",
+    }
+    if report.model_quality == HIGH_REASONING and report.provider_mode in live_modes:
         return True
-    if report.provider_mode not in {"LIVE_OPENAI", "LIVE_ANTHROPIC"}:
+    if report.provider_mode not in live_modes | {"LOCAL_MODEL"}:
         return False
     if mode in SERIOUS_AI_MODES and require_high_reasoning_for_quant:
         return False

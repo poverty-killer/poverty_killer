@@ -5,6 +5,8 @@ import inspect
 from app.ai_chief_operator.config import AIChiefConfig
 from app.ai_chief_operator.context_builder import build_ai_context, redact_secrets
 from app.ai_chief_operator.governance_queue import GovernanceQueue
+from app.ai_chief_operator.model_registry import ai_provider_ids, registry_summary
+from app.ai_chief_operator.model_router import HIGH_REASONING_API, LOCAL_GUIDE, route_ai_request
 from app.ai_chief_operator.model_policy import classify_model_quality
 from app.ai_chief_operator.models import normalize_recommendation
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
@@ -47,6 +49,68 @@ def test_model_quality_registry_classifies_high_and_low_reasoning_models():
     assert classify_model_quality("anthropic", "claude-opus-4.7") == "HIGH_REASONING"
     assert classify_model_quality("anthropic", "claude-haiku-4") == "LOW_REASONING"
     assert classify_model_quality("anthropic", "claude-sonnet-4") == "STANDARD"
+    assert classify_model_quality("deepseek", "deepseek-reasoner") == "HIGH_REASONING"
+    assert classify_model_quality("kimi_moonshot", "kimi-k2-thinking") == "HIGH_REASONING"
+    assert classify_model_quality("local_openai_compatible", "local-model") == "LOCAL_UNEVALUATED"
+
+
+def test_provider_agnostic_registry_represents_supported_ai_paths():
+    provider_ids = set(ai_provider_ids())
+
+    assert {
+        "openai",
+        "anthropic",
+        "gemini",
+        "xai_grok",
+        "deepseek",
+        "kimi_moonshot",
+        "local_openai_compatible",
+        "deterministic_local",
+        "supreme_board_packet",
+    } <= provider_ids
+    summary = registry_summary({})
+    assert summary["paid_call_on_status_load"] is False
+    assert summary["forced_persona_policy_required"] is True
+    assert any(provider["provider_id"] == "gemini" and provider["status"] == "NOT_IMPLEMENTED" for provider in summary["providers"])
+
+
+def test_mode_router_defaults_local_and_requires_approval_for_high_reasoning():
+    classification = classify_quant_prompt("Is this strategy statistically believable?", page_id="research")
+    local = route_ai_request(
+        requested_mode=LOCAL_GUIDE,
+        provider_id="openai",
+        model_name="gpt-5.5-pro",
+        classification=classification,
+        approved_paid_call=False,
+        provider_configured=True,
+        provider_implemented=True,
+    )
+    high_without_approval = route_ai_request(
+        requested_mode=HIGH_REASONING_API,
+        provider_id="openai",
+        model_name="gpt-5.5-pro",
+        classification=classification,
+        approved_paid_call=False,
+        provider_configured=True,
+        provider_implemented=True,
+    )
+    high_approved = route_ai_request(
+        requested_mode=HIGH_REASONING_API,
+        provider_id="openai",
+        model_name="gpt-5.5-pro",
+        classification=classification,
+        approved_paid_call=True,
+        provider_configured=True,
+        provider_implemented=True,
+    )
+
+    assert local.answer_source == "LOCAL_DETERMINISTIC"
+    assert local.allowed_provider_call is False
+    assert high_without_approval.allowed_provider_call is False
+    assert high_without_approval.approval_required is True
+    assert high_without_approval.reason_code == "HIGH_REASONING_API_APPROVAL_REQUIRED"
+    assert high_approved.allowed_provider_call is True
+    assert high_approved.answer_source == "API_HIGH_REASONING_APPROVED"
 
 
 def test_serious_quant_prompt_does_not_call_low_reasoning_model():
@@ -59,15 +123,26 @@ def test_serious_quant_prompt_does_not_call_low_reasoning_model():
     env = {"OPENAI_API_KEY": "sk-hidden1234567890", "PK_AI_CHIEF_OPENAI_MODEL": "gpt-5-mini"}
     gateway = AIProviderGateway(AIChiefConfig.from_env(env), credential_env=env, http_post=fake_post)
 
-    answer = gateway.ask("Is this strategy statistically believable?", {}, {"page_id": "research"})
+    answer = gateway.ask(
+        "Is this strategy statistically believable?",
+        {},
+        {"page_id": "research"},
+        routing={
+            "route_mode": "HIGH_REASONING_API",
+            "provider_id": "openai",
+            "model_name": "gpt-5-mini",
+            "approved_paid_call": True,
+        },
+    )
 
     assert calls == []
-    assert answer["provider_mode"] == "DETERMINISTIC_FALLBACK"
+    assert answer["provider_mode"] == "PROVIDER_ERROR"
     assert answer["model_name"] == "gpt-5-mini"
     assert answer["model_quality"] == "LOW_REASONING"
-    assert answer["reasoning_policy"] == "LOWER_MODEL_WARNING"
+    assert answer["reasoning_policy"] == "FALLBACK_ONLY_LIMITED"
     assert answer["model_suitable_for_governance"] is False
-    assert "LOWER-REASONING MODEL ACTIVE" in answer["response"]
+    assert answer["route_decision"]["reason_code"] == "NO_SILENT_DOWNGRADE_TO_LOWER_REASONING_MODEL"
+    assert "No silent downgrade" in answer["response"]
 
 
 def test_openai_ai_ask_uses_real_provider_path_without_exposing_secrets():
@@ -87,10 +162,18 @@ def test_openai_ai_ask_uses_real_provider_path_without_exposing_secrets():
             "latest_run_archive_summary": [{"report_path": r"C:\Users\shahn\OneDrive\Desktop\poverty_killer\state\operator\reports\paper.md"}],
         },
         {"page_id": "positions"},
+        routing={
+            "route_mode": "HIGH_REASONING_API",
+            "provider_id": "openai",
+            "model_name": "gpt-5.5-pro",
+            "approved_paid_call": True,
+        },
     )
 
     assert answer["status"] == "ANSWERED_MODEL"
-    assert answer["response_source"] == "OPENAI_RESPONSES_API"
+    assert answer["response_source"] == "API_HIGH_REASONING_APPROVED"
+    assert answer["answer_source"] == "API_HIGH_REASONING_APPROVED"
+    assert answer["cost_mode"] == "PAID_API_APPROVED"
     assert answer["provider_mode"] == "LIVE_OPENAI"
     assert answer["model_name"] == "gpt-5.5-pro"
     assert answer["model_quality"] == "HIGH_REASONING"
@@ -115,7 +198,17 @@ def test_unavailable_high_reasoning_model_returns_clear_provider_error():
     env = {"OPENAI_API_KEY": "sk-hidden1234567890", "OPENAI_HIGH_REASONING_MODEL": "gpt-5.5-pro"}
     gateway = AIProviderGateway(AIChiefConfig.from_env(env), credential_env=env, http_post=failing_post)
 
-    answer = gateway.ask("What evidence blocks live readiness?", {}, {"page_id": "research"})
+    answer = gateway.ask(
+        "What evidence blocks live readiness?",
+        {},
+        {"page_id": "research"},
+        routing={
+            "route_mode": "HIGH_REASONING_API",
+            "provider_id": "openai",
+            "model_name": "gpt-5.5-pro",
+            "approved_paid_call": True,
+        },
+    )
 
     assert answer["status"] == "PROVIDER_ERROR"
     assert answer["provider_mode"] == "PROVIDER_ERROR"
@@ -135,17 +228,27 @@ def test_empty_high_reasoning_response_is_provider_error_not_fake_answer():
     env = {"OPENAI_API_KEY": "sk-hidden1234567890", "OPENAI_HIGH_REASONING_MODEL": "gpt-5.5-pro"}
     gateway = AIProviderGateway(AIChiefConfig.from_env(env), credential_env=env, http_post=empty_post)
 
-    answer = gateway.ask("Why is PAPER run blocked?", {}, {"page_id": "command"})
+    answer = gateway.ask(
+        "Why is PAPER run blocked?",
+        {},
+        {"page_id": "command"},
+        routing={
+            "route_mode": "HIGH_REASONING_API",
+            "provider_id": "openai",
+            "model_name": "gpt-5.5-pro",
+            "approved_paid_call": True,
+        },
+    )
 
     assert answer["status"] == "PROVIDER_ERROR"
     assert answer["provider_state"] == "PROVIDER_ERROR"
-    assert answer["response_source"] == "PROVIDER_ERROR_EMPTY_MODEL_RESPONSE"
+    assert answer["response_source"] == "PROVIDER_ERROR"
     assert answer["provider_mode"] == "PROVIDER_ERROR"
     assert answer["model_name"] == "gpt-5.5-pro"
     assert answer["model_quality"] == "UNKNOWN"
     assert answer["reasoning_policy"] == "FALLBACK_ONLY_LIMITED"
     assert answer["model_suitable_for_governance"] is False
-    assert "no expert model answer is being faked" in answer["response"]
+    assert "No provider success is being faked" in answer["response"]
 
 
 def test_mock_ai_provider_returns_structured_recommendation():
@@ -217,6 +320,8 @@ def test_ai_quant_persona_is_domain_scoped_and_refuses_general_or_unsafe_prompts
 
     assert persona["identity"].startswith("Chief Quant Advisor")
     assert "You are the Chief Quant Advisor" in persona["system_policy"]
+    assert "Trading Strategist" in persona["identity"]
+    assert "Risk Officer" in persona["identity"]
     assert persona["can_execute"] is False
     assert general["allowed"] is False
     assert general["reason_code"] == "NON_TRADING_GENERALIST_PROMPT"
