@@ -259,6 +259,8 @@
   function aiRoutingSettings() {
     return data.ai.routingSettings || {
       defaultMode: "LOCAL_GUIDE",
+      activeProvider: "deterministic_local",
+      activeModel: "deterministic-local-guide",
       lightProvider: "openai",
       lightModel: "gpt-5-mini",
       highReasoningProvider: "openai",
@@ -275,6 +277,55 @@
 
   function isHighReasoningMode(mode) {
     return mode === "HIGH_REASONING_API" || mode === "HIGH_REASONING_API_WITH_APPROVAL";
+  }
+
+  function routingValue(routing, camelKey, snakeKey, fallback) {
+    if (routing && routing[camelKey] !== undefined && routing[camelKey] !== null && routing[camelKey] !== "") return routing[camelKey];
+    if (routing && routing[snakeKey] !== undefined && routing[snakeKey] !== null && routing[snakeKey] !== "") return routing[snakeKey];
+    return fallback;
+  }
+
+  function isExternalAiApiProvider(providerId) {
+    const id = String(providerId || "").trim();
+    return Boolean(id && !["deterministic_local", "supreme_board_packet", "local_openai_compatible"].includes(id));
+  }
+
+  function isPortfolioUnavailableStatus(status) {
+    return ["BROKER_DATA_UNAVAILABLE", "BROKER_READ_FAILED", "AUTH_FAILED", "MISSING_CREDENTIALS", "BACKEND_DEGRADED", "STALE_BACKEND"].includes(String(status || ""));
+  }
+
+  function aiAskRoutingPayload(routing) {
+    const routeMode = String(routingValue(routing, "defaultMode", "default_mode", "LOCAL_GUIDE") || "LOCAL_GUIDE");
+    const activeProvider = String(routingValue(routing, "activeProvider", "active_provider", "") || "").trim();
+    const activeModel = String(routingValue(routing, "activeModel", "active_model", "") || "").trim();
+    if (routeMode === "LOCAL_GUIDE" || routeMode === "SUPREME_BOARD_PACKET") {
+      return { routeMode, providerId: "", modelName: "" };
+    }
+    if (routeMode === "LOCAL_MODEL") {
+      return {
+        routeMode,
+        providerId: "local_openai_compatible",
+        modelName: String(routingValue(routing, "localModel", "local_model", "local-model") || "").trim()
+      };
+    }
+    if (isExternalAiApiProvider(activeProvider)) {
+      return { routeMode, providerId: activeProvider, modelName: activeModel };
+    }
+    if (isHighReasoningMode(routeMode)) {
+      return {
+        routeMode,
+        providerId: String(routingValue(routing, "highReasoningProvider", "high_reasoning_provider", "openai") || "openai").trim(),
+        modelName: String(routingValue(routing, "highReasoningModel", "high_reasoning_model", "") || "").trim()
+      };
+    }
+    if (routeMode === "LIGHT_API") {
+      return {
+        routeMode,
+        providerId: String(routingValue(routing, "lightProvider", "light_provider", "openai") || "openai").trim(),
+        modelName: String(routingValue(routing, "lightModel", "light_model", "") || "").trim()
+      };
+    }
+    return { routeMode: "LOCAL_GUIDE", providerId: "", modelName: "" };
   }
 
   function pageAwareAiPrompts(pageId) {
@@ -617,7 +668,7 @@
   function renderHomePositionsPreview() {
     const portfolio = data.portfolio || {};
     const positions = (portfolio.positions || []).slice(0, 5);
-    const unavailable = portfolio.status === "BROKER_DATA_UNAVAILABLE";
+    const unavailable = isPortfolioUnavailableStatus(portfolio.status);
     return `
       <div class="card span-12" data-home-section="positions-preview"><h3>Current Assets / Positions Preview</h3>${positions.length ? table(
         ["Symbol", "Quantity", "Average Entry", "Current Price", "Market Value", "Unrealized P&L", "Daily Change", "Exposure", "Truth"],
@@ -632,7 +683,7 @@
           escapeHtml(p.exposurePercentOfPortfolio || "unknown"),
           p.brokerConfirmed ? badge("broker-confirmed", "green") : badge(p.source || portfolio.dataSource || "unavailable", statusColor(p.source || portfolio.dataSource || "unavailable"))
         ])
-      ) : `<p class="muted">${escapeHtml(unavailable ? `No current PAPER positions shown; broker data unavailable: ${portfolio.unavailableReason || "UNKNOWN"}.` : "No current PAPER positions.")}</p>`}</div>
+      ) : `<p class="muted">${escapeHtml(unavailable ? `No current PAPER positions shown; broker status is ${portfolio.status || "UNKNOWN"}: ${portfolio.unavailableReason || "UNKNOWN"}.` : "No current PAPER positions.")}</p>`}</div>
     `;
   }
 
@@ -1001,12 +1052,15 @@
     const positions = portfolio.positions || [];
     const orders = portfolio.openOrders || data.orders || [];
     const intelligence = portfolio.positionIntelligence || [];
-    const unavailable = portfolio.status === "BROKER_DATA_UNAVAILABLE";
+    const unavailable = isPortfolioUnavailableStatus(portfolio.status);
     const launch = data.launchReadiness || {};
-    const missingAlpaca = launch.alpacaPaperCredentialsConfigured === false || unavailable;
+    const missingAlpaca = launch.alpacaPaperCredentialsConfigured === false || portfolio.status === "MISSING_CREDENTIALS";
+    const exactBrokerIssue = unavailable && !missingAlpaca;
     const biggestBlocker = missingAlpaca
-      ? "Alpaca PAPER key is missing from this backend. Add it in Keys & Providers, then validate read-only."
-      : (data.status.dominantBlocker || "No major blocker loaded.");
+        ? "Alpaca PAPER key is missing from this backend. Add it in Keys & Providers, then validate read-only."
+        : exactBrokerIssue
+          ? `Broker portfolio status is ${portfolio.status || "UNKNOWN"}: ${portfolio.unavailableReason || "UNKNOWN"}.`
+          : (data.status.dominantBlocker || "No major blocker loaded.");
     return `
       ${header("Portfolio Home", "Current PAPER holdings, cash, exposure, and orders.", portfolio.status || "UNKNOWN")}
       <div class="grid">
@@ -1058,7 +1112,7 @@
               badge(p.source || "UNAVAILABLE", statusColor(p.source || "UNAVAILABLE")),
               badge(p.riskStatus || "UNKNOWN", statusColor(p.riskStatus || "UNKNOWN"))
             ])
-          ) : `<p class="muted">${escapeHtml(portfolio.empty ? "No current PAPER positions." : "No broker-confirmed positions available.")}</p>`}
+          ) : `<p class="muted">${escapeHtml(portfolio.empty ? "No current PAPER positions." : unavailable ? `No broker-confirmed positions available: ${portfolio.status || "UNKNOWN"} / ${portfolio.unavailableReason || "UNKNOWN"}.` : "No broker-confirmed positions available.")}</p>`}
         </div>
 
         <div class="card span-6">
@@ -1097,7 +1151,7 @@
           ])
         ) : `<p class="muted">No open broker-confirmed orders.</p>`}</div>
 
-        ${unavailable ? `<div class="card span-12"><h3>Broker Data Unavailable</h3><p class="muted">Reason: ${escapeHtml(portfolio.unavailableReason || "UNKNOWN")}. No positions are invented and local-only state is not shown as broker truth.</p></div>` : ""}
+        ${unavailable ? `<div class="card span-12"><h3>Portfolio Broker Truth</h3><p class="muted">Status: ${escapeHtml(portfolio.status || "UNKNOWN")}. Reason: ${escapeHtml(portfolio.unavailableReason || "UNKNOWN")}. No positions are invented and local-only state is not shown as broker truth.</p></div>` : ""}
 
         <div class="card span-12"><h3>Portfolio Summary</h3>
           <details class="ai-context-details" open>
@@ -1304,6 +1358,7 @@
     const research = data.research.counts || {};
     const warning = aiModelWarning();
     const routing = aiRoutingSettings();
+    const activeRoute = aiAskRoutingPayload(routing);
     const providerCards = aiProviderCards();
     const providerOptionsFor = (selected) => providerCards.map((provider) => {
       const id = provider.providerId || provider.provider_id;
@@ -1314,6 +1369,7 @@
       ${header("AI Advisor", "Highest-reasoning Chief Quant Advisor for strategy, risk, TCA, provider readiness, operation, and proof.", ai.providerState)}
       <div class="grid">
         ${metric("Provider", ai.provider, statusColor(ai.providerState))}
+        ${metric("Active Router", `${activeRoute.providerId || routing.activeProvider || "deterministic_local"} / ${activeRoute.modelName || routing.activeModel || "deterministic-local-guide"}`, "blue")}
         ${metric("State", ai.providerState, statusColor(ai.providerState))}
         ${metric("Provider Mode", ai.providerMode || "NOT_CONFIGURED", statusColor(ai.providerMode || "NOT_CONFIGURED"))}
         ${metric("Model Quality", ai.modelQuality || "FALLBACK_ONLY", modelQualityColor(ai.modelQuality || "FALLBACK_ONLY"))}
@@ -2484,6 +2540,10 @@
     if (!host) return;
     syncAiDockedState();
     const context = buildAiChiefContext(aiSelectedQuestion);
+    const routing = aiRoutingSettings();
+    const route = aiAskRoutingPayload(routing);
+    const activeProviderLabel = route.providerId || routing.activeProvider || data.ai.provider || "deterministic_local";
+    const activeModelLabel = route.modelName || routing.activeModel || data.ai.modelName || "deterministic-local-guide";
     const providerState = data.ai.providerState || "AI_DISABLED";
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
     const response = aiOverlayResponse || buildAiOverlayAdvisory(aiQuestionText || aiSelectedQuestion);
@@ -2504,8 +2564,9 @@
             <div class="ai-chief-heading">
               <div class="ai-chief-title">Chief Quant Advisor</div>
               <div class="cardless-model-strip">
+                ${badge(`active ${activeProviderLabel}`, statusColor(activeProviderLabel))}
+                ${badge(activeModelLabel, "gray")}
                 ${badge(result.providerMode, statusColor(result.providerMode))}
-                ${badge(result.modelName || providerLabel || "model unavailable", "gray")}
                 ${badge(result.modelQuality, modelQualityColor(result.modelQuality))}
                 ${badge(result.answerSource, statusColor(result.answerSource))}
                 ${badge("advisory only", "gray")}
@@ -2664,14 +2725,15 @@
     try {
       const context = buildAiChiefContext(question);
       const routing = aiRoutingSettings();
+      const route = aiAskRoutingPayload(routing);
       const result = await postIntent("/operator/ai/ask", {
         question,
         page_id: context.page_id,
         page_context: context,
         advisory_only: true,
-        route_mode: routing.defaultMode || "LOCAL_GUIDE",
-        provider_id: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningProvider : routing.defaultMode === "LIGHT_API" ? routing.lightProvider : routing.defaultMode === "LOCAL_MODEL" ? "local_openai_compatible" : "",
-        model_name: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningModel : routing.defaultMode === "LIGHT_API" ? routing.lightModel : routing.defaultMode === "LOCAL_MODEL" ? routing.localModel : "",
+        route_mode: route.routeMode,
+        provider_id: route.providerId,
+        model_name: route.modelName,
         approved_paid_call: false
       });
       aiOverlayResponse = formatAiAskResult(result);
@@ -2736,14 +2798,15 @@
       context.page_id = activeScreenId || "positions";
       context.page_title = screenTitle(activeScreenId || "positions");
       const routing = aiRoutingSettings();
+      const route = aiAskRoutingPayload(routing);
       const result = await postIntent("/operator/ai/ask", {
         question,
         page_id: context.page_id,
         page_context: context,
         advisory_only: true,
-        route_mode: routing.defaultMode || "LOCAL_GUIDE",
-        provider_id: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningProvider : routing.defaultMode === "LIGHT_API" ? routing.lightProvider : routing.defaultMode === "LOCAL_MODEL" ? "local_openai_compatible" : "",
-        model_name: isHighReasoningMode(routing.defaultMode) ? routing.highReasoningModel : routing.defaultMode === "LIGHT_API" ? routing.lightModel : routing.defaultMode === "LOCAL_MODEL" ? routing.localModel : "",
+        route_mode: route.routeMode,
+        provider_id: route.providerId,
+        model_name: route.modelName,
         approved_paid_call: false
       });
       homeAiResponse = formatAiAskResult(result);
@@ -2897,7 +2960,10 @@
       const errorText = Array.isArray(result.validation_errors) && result.validation_errors.length
         ? ` reason=${result.validation_errors.map((item) => item.reason_code || item.detail || "validation_failed").join(",")}`
         : "";
-      data.ai.lastAnalyzeResult = `${result.status || "SAVED"}: AI routing settings ${result.status === "SAVED" ? "persisted" : "not saved"}; source=${result.settings_source || "UNKNOWN"}; no paid call occurred.${errorText}`;
+      const saveMessage = `${result.status || "SAVED"}: AI routing settings ${result.status === "SAVED" ? "persisted" : "not saved"}; source=${result.settings_source || "UNKNOWN"}; no paid call occurred.${errorText}`;
+      data = await loadData();
+      data.ai.lastAnalyzeResult = saveMessage;
+      renderTopBar();
       renderScreens(activeScreenId);
       renderRail();
       renderAiChiefOverlay();
@@ -2909,18 +2975,9 @@
 
   async function validateSelectedAiProvider() {
     const settings = currentAiRoutingFormValues();
-    const providerId = isHighReasoningMode(settings.default_mode)
-      ? settings.high_reasoning_provider
-      : settings.default_mode === "LIGHT_API"
-        ? settings.light_provider
-        : settings.default_mode === "LOCAL_MODEL"
-          ? "local_openai_compatible"
-          : "deterministic_local";
-    const modelName = isHighReasoningMode(settings.default_mode)
-      ? settings.high_reasoning_model
-      : settings.default_mode === "LIGHT_API"
-        ? settings.light_model
-        : settings.local_model;
+    const route = aiAskRoutingPayload(settings);
+    const providerId = route.providerId || settings.active_provider || "deterministic_local";
+    const modelName = route.modelName || settings.active_model || settings.local_model;
     try {
       const result = await postIntent("/operator/ai/providers/validate", {
         provider_id: providerId,
@@ -3170,9 +3227,11 @@
       dataSource: pick(portfolio.data_source, "UNAVAILABLE"),
       status: pick(portfolio.status, "UNKNOWN"),
       unavailableReason: pick(portfolio.unavailable_reason, null),
+      detail: pick(portfolio.detail, null),
       message: pick(portfolio.message, ""),
       empty: portfolio.empty === true,
       dataFreshnessTs: pick(portfolio.data_freshness_ts, null),
+      brokerReadAttempted: portfolio.broker_read_attempted === true,
       brokerReadOccurred: portfolio.broker_read_occurred === true,
       brokerMutationOccurred: portfolio.broker_mutation_occurred === true,
       summary: {

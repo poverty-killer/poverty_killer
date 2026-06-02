@@ -10,8 +10,8 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $RepoRoot "venv\Scripts\python.exe"
 $UiPath = Join-Path $RepoRoot "ui\operator-control-panel\index.html"
 $BaseUrl = "http://$HostAddress`:$Port"
-$UiVersion = "operator-activation-e2e-ai5-20260602"
-$ExpectedActivationVersion = "operator-activation-e2e-ai5-20260602"
+$UiVersion = "operator-activation-e2e-truth6-20260602"
+$ExpectedActivationVersion = "operator-activation-e2e-truth6-20260602"
 $LogBase = $env:LOCALAPPDATA
 if ([string]::IsNullOrWhiteSpace($LogBase)) {
     $LogBase = $env:TEMP

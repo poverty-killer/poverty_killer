@@ -5,7 +5,7 @@ from pathlib import Path
 
 HIDDEN_LAUNCHER = Path("scripts/open_operator_console_hidden.ps1")
 VISIBLE_LAUNCHER = Path("scripts/open_operator_console.ps1")
-OPERATOR_UI_VERSION = "operator-activation-e2e-ai5-20260602"
+OPERATOR_UI_VERSION = "operator-activation-e2e-truth6-20260602"
 
 
 def _launcher_text() -> str:
@@ -36,7 +36,7 @@ def test_hidden_launcher_requires_operator_health_before_browser_open():
     assert "ConvertFrom-Json" in text
     assert 'live_status -ne "LIVE_LOCKED"' in text
     assert 'real_money_status -ne "BLOCKED"' in text
-    assert '$ExpectedActivationVersion = "operator-activation-e2e-ai5-20260602"' in text
+    assert '$ExpectedActivationVersion = "operator-activation-e2e-truth6-20260602"' in text
     assert "operator_activation_version -ne $ExpectedActivationVersion" in text
     assert "[int]$response.StatusCode -lt 500" not in text
     assert "accepted_provider_ids" in text

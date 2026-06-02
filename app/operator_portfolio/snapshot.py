@@ -75,11 +75,37 @@ def _difference(left: Any, right: Any) -> str | None:
     return format((left_d - right_d).normalize(), "f")
 
 
-def _empty_unavailable(reason: str, *, detail: str | None = None) -> dict[str, Any]:
+def _portfolio_unavailable_status(reason: str) -> str:
+    if reason == "MISSING_ALPACA_PAPER_CREDENTIALS":
+        return "MISSING_CREDENTIALS"
+    if reason == "AUTH_FAILED":
+        return "AUTH_FAILED"
+    if reason == "BROKER_READ_FAILED":
+        return "BROKER_READ_FAILED"
+    if reason in {"LIVE_ENDPOINT_BLOCKED", "ALPACA_PAPER_ENDPOINT_REQUIRED"}:
+        return "BACKEND_DEGRADED"
+    return "BACKEND_DEGRADED"
+
+
+def _broker_failure_reason(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if code in {401, 403} or any(marker in text for marker in ("401", "403", "unauthor", "forbidden")):
+        return "AUTH_FAILED"
+    return "BROKER_READ_FAILED"
+
+
+def _empty_unavailable(
+    reason: str,
+    *,
+    detail: str | None = None,
+    broker_read_attempted: bool = False,
+) -> dict[str, Any]:
+    status = _portfolio_unavailable_status(reason)
     return {
         "source": PORTFOLIO_SOURCE,
         "data_source": "UNAVAILABLE",
-        "status": "BROKER_DATA_UNAVAILABLE",
+        "status": status,
         "unavailable_reason": reason,
         "detail": detail,
         "summary": {
@@ -105,6 +131,7 @@ def _empty_unavailable(reason: str, *, detail: str | None = None) -> dict[str, A
         "empty": False,
         "message": "Broker PAPER portfolio data is unavailable; no positions are invented.",
         "data_freshness_ts": None,
+        "broker_read_attempted": broker_read_attempted,
         "broker_read_occurred": False,
         "broker_mutation_occurred": False,
         "order_submission_occurred": False,
@@ -289,7 +316,11 @@ def build_portfolio_snapshot(
         orders_path = "/v2/orders?" + urllib.parse.urlencode({"status": "open", "limit": "100", "nested": "false"})
         orders = broker_client.get_json(orders_path, headers)
     except Exception as exc:
-        return _empty_unavailable("BROKER_READ_FAILED", detail=exc.__class__.__name__)
+        return _empty_unavailable(
+            _broker_failure_reason(exc),
+            detail=exc.__class__.__name__,
+            broker_read_attempted=True,
+        )
 
     activities: Any = []
     activities_status = "UNAVAILABLE"
@@ -361,6 +392,7 @@ def build_portfolio_snapshot(
         "empty": not position_rows,
         "message": "No current PAPER positions." if not position_rows else "Broker-confirmed PAPER positions loaded.",
         "data_freshness_ts": freshness,
+        "broker_read_attempted": True,
         "broker_read_occurred": True,
         "broker_mutation_occurred": False,
         "order_submission_occurred": False,

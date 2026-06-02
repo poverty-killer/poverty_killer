@@ -1,6 +1,6 @@
 {
   "version": "phase-7-operator-reality-audit-backtest-control",
-  "operator_activation_version": "operator-activation-e2e-ai5-20260602",
+  "operator_activation_version": "operator-activation-e2e-truth6-20260602",
   "mode": "read_only_operator_contracts",
   "ui_policy": {
     "paper_enabled_first": true,
@@ -366,7 +366,7 @@
     },
     "/operator/health": {
       "api_version": "operator-backend-v1",
-      "operator_activation_version": "operator-activation-e2e-ai5-20260602",
+      "operator_activation_version": "operator-activation-e2e-truth6-20260602",
       "api_status": "OK | DEGRADED",
       "supervisor_status": "IDLE | RUNNING | STALE_ACTIVE_SESSION",
       "session_store_status": "READY | DEGRADED",
@@ -824,7 +824,7 @@
     "/operator/credentials/diagnostics": {
       "source": "OPERATOR_CREDENTIAL_DIAGNOSTICS",
       "api_version": "operator-backend-v1",
-      "operator_activation_version": "operator-activation-e2e-ai5-20260602",
+      "operator_activation_version": "operator-activation-e2e-truth6-20260602",
       "backend_cwd": "current backend working directory",
             "credential_vault_relative_path": ".operator_secrets/provider_credentials.json",
             "vault_file_exists": false,
@@ -860,7 +860,7 @@
     },
     "/operator/portfolio": {
       "source": "OPERATOR_PORTFOLIO_READ_ONLY",
-      "status": "BROKER_CONFIRMED | BROKER_CONFIRMED_EMPTY | BROKER_DATA_UNAVAILABLE",
+      "status": "BROKER_CONFIRMED | BROKER_CONFIRMED_EMPTY | MISSING_CREDENTIALS | AUTH_FAILED | BROKER_READ_FAILED | BACKEND_DEGRADED | STALE_BACKEND",
       "positions": [],
       "open_orders": [],
       "position_intelligence": [],
@@ -1078,7 +1078,7 @@
     },
     "/operator/contracts": {
       "version": "operator-backend-v1",
-      "operator_activation_version": "operator-activation-e2e-ai5-20260602",
+      "operator_activation_version": "operator-activation-e2e-truth6-20260602",
       "read_only": true,
       "truth_labels": {
         "broker_confirmed": "canonical after broker acknowledgement/reconciliation",

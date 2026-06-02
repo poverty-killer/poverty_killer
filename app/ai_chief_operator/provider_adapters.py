@@ -148,6 +148,8 @@ def extract_text_fields(value: Any) -> str:
         elif isinstance(node, list):
             for item in node:
                 visit(item)
+        elif isinstance(node, str) and node.strip():
+            parts.append(node)
 
     visit(value)
     return "\n".join(dict.fromkeys(part.strip() for part in parts if part.strip()))

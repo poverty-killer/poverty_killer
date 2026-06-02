@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.ai_chief_operator.config import AIChiefConfig
+from app.ai_chief_operator.provider_gateway import AIProviderGateway
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_credentials.store import LocalCredentialStore
@@ -209,3 +210,68 @@ def test_ai_ask_local_guide_uses_light_context_without_heavy_evidence_graph(tmp_
     assert payload["status"] != "REFUSED"
     assert payload["context"]["context_version"] == "ai-chief-light-context-v1"
     assert payload["broker_call_occurred"] is False
+
+
+def test_ai_ask_uses_saved_active_deepseek_provider_without_silent_openai_fallback(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider(
+        "deepseek",
+        {
+            "DEEPSEEK_API_KEY": "deepseek-test-token-value",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def fake_post(url, headers, body, timeout_seconds):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["body"] = body
+        captured["timeout_seconds"] = timeout_seconds
+        return {"choices": [{"message": {"content": "DeepSeek operator answer."}}]}
+
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    provider.ai_gateway = AIProviderGateway(
+        AIChiefConfig.from_env(provider.provider_env),
+        credential_env=provider.provider_env,
+        http_post=fake_post,
+    )
+    app = create_operator_app(provider=provider)
+
+    saved = _endpoint(app, "/operator/ai/router/settings", "POST")(
+        {
+            "default_mode": "LIGHT_API",
+            "active_provider": "deepseek",
+            "active_model": "deepseek-chat",
+            "light_provider": "openai",
+            "light_model": "gpt-5-mini",
+            "high_reasoning_provider": "openai",
+            "high_reasoning_model": "gpt-5.5-pro",
+            "local_model": "local-model",
+        }
+    )
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "Explain this page.",
+            "page_context": {"page_id": "ai", "page_title": "AI Advisor"},
+        }
+    )
+
+    assert saved["status"] == "SAVED"
+    assert saved["settings"]["active_provider"] == "deepseek"
+    assert payload["provider_id"] == "deepseek", payload
+    assert payload["route_decision"]["reason_code"] == "LIGHT_API_SELECTED", payload
+    assert payload["status"] == "ANSWERED_MODEL", payload
+    assert payload["model_name"] == "deepseek-chat"
+    assert payload["answer_source"] == "API_LIGHT_MODEL"
+    assert payload["route_decision"]["provider_id"] == "deepseek"
+    assert "api.deepseek.com" in str(captured["url"])
+    assert captured["body"]["model"] == "deepseek-chat"
+    assert "DeepSeek operator answer" in payload["answer"]
+    assert "openai" not in str(captured["url"]).lower()
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False

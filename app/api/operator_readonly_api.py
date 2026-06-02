@@ -64,7 +64,7 @@ from app.world_awareness.scheduler import WorldAwarenessProviderRuntime
 
 
 API_VERSION = "operator-backend-v1"
-OPERATOR_ACTIVATION_VERSION = "operator-activation-e2e-ai5-20260602"
+OPERATOR_ACTIVATION_VERSION = "operator-activation-e2e-truth6-20260602"
 
 
 def _utc_now() -> str:
@@ -284,12 +284,23 @@ class OperatorSnapshotProvider:
         if refreshed != self.provider_env:
             self.provider_env = refreshed
             self.supervisor.config.process_env = self._paper_process_env(refreshed)
-            self.ai_gateway = AIProviderGateway(AIChiefConfig.from_env(refreshed), credential_env=refreshed)
+            self.ai_gateway = AIProviderGateway(
+                AIChiefConfig.from_env(refreshed),
+                credential_env=refreshed,
+                http_post=self.ai_gateway.http_post,
+            )
         return self.provider_env
 
     def _alpaca_paper_configured(self) -> bool:
         summary = self.credential_store.provider_summary("alpaca_paper", self.process_env)
         return bool(summary["configured"])
+
+    def _active_router_api_selection(self) -> tuple[str, str]:
+        provider_id = str(self.ai_routing_settings.get("active_provider") or "").strip().lower()
+        model_name = str(self.ai_routing_settings.get("active_model") or "").strip()
+        if provider_id in {"", "deterministic_local", "supreme_board_packet", "local_openai_compatible"}:
+            return "", ""
+        return provider_id, model_name
 
     def status(self) -> dict[str, Any]:
         supervisor = self.supervisor.status_snapshot()
@@ -705,16 +716,31 @@ class OperatorSnapshotProvider:
                 "provider_readiness_status": readiness_row.get("status") or "UNKNOWN",
             }
         alpaca_sources = diagnostics["providers"]["alpaca_paper"]["source_used_by_provider_readiness"]
+        supervisor_env = self.supervisor.config.process_env
+        supervisor_present = {
+            "APCA_API_KEY_ID": bool(str(supervisor_env.get("APCA_API_KEY_ID") or "").strip()),
+            "APCA_API_SECRET_KEY": bool(str(supervisor_env.get("APCA_API_SECRET_KEY") or "").strip()),
+            "APCA_API_BASE_URL": bool(str(supervisor_env.get("APCA_API_BASE_URL") or "").strip()),
+        }
+        diagnostics["source_used_by_credential_cards"] = alpaca_sources
+        diagnostics["source_used_by_provider_table"] = alpaca_sources
+        diagnostics["source_used_by_provider_readiness"] = alpaca_sources
         diagnostics["source_used_by_launch_readiness"] = alpaca_sources
+        diagnostics["source_used_by_portfolio"] = alpaca_sources if (
+            str(effective_env.get("APCA_API_KEY_ID") or "").strip()
+            and str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()
+        ) else "NOT_CONFIGURED"
         diagnostics["source_used_by_portfolio_broker_read"] = alpaca_sources if (
             str(effective_env.get("APCA_API_KEY_ID") or "").strip()
             and str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()
         ) else "NOT_CONFIGURED"
+        diagnostics["source_used_by_paper_supervisor"] = alpaca_sources if all(supervisor_present.values()) else "NOT_CONFIGURED"
         diagnostics["portfolio_required_field_names_present"] = {
             "APCA_API_KEY_ID": bool(str(effective_env.get("APCA_API_KEY_ID") or "").strip()),
             "APCA_API_SECRET_KEY": bool(str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()),
             "APCA_API_BASE_URL": bool(str(effective_env.get("APCA_API_BASE_URL") or "").strip()),
         }
+        diagnostics["paper_supervisor_required_field_names_present"] = supervisor_present
         return diagnostics
 
     def credentials_save(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1129,12 +1155,13 @@ class OperatorSnapshotProvider:
             route_provider = str(body.get("provider_id") or "").strip()
             route_model = str(body.get("model_name") or "").strip()
             if not route_provider:
+                active_provider, active_model = self._active_router_api_selection()
                 if route_mode == HIGH_REASONING_API:
-                    route_provider = str(self.ai_routing_settings.get("high_reasoning_provider") or "openai")
-                    route_model = route_model or str(self.ai_routing_settings.get("high_reasoning_model") or "")
+                    route_provider = active_provider or str(self.ai_routing_settings.get("high_reasoning_provider") or "openai")
+                    route_model = route_model or active_model or str(self.ai_routing_settings.get("high_reasoning_model") or "")
                 elif route_mode == LIGHT_API:
-                    route_provider = str(self.ai_routing_settings.get("light_provider") or "openai")
-                    route_model = route_model or str(self.ai_routing_settings.get("light_model") or "")
+                    route_provider = active_provider or str(self.ai_routing_settings.get("light_provider") or "openai")
+                    route_model = route_model or active_model or str(self.ai_routing_settings.get("light_model") or "")
                 elif route_mode == LOCAL_MODEL_MODE:
                     route_provider = "local_openai_compatible"
                     route_model = route_model or str(self.ai_routing_settings.get("local_model") or "")
@@ -1470,7 +1497,7 @@ class OperatorSnapshotProvider:
         if mode == "PORTFOLIO_REVIEW":
             summary = portfolio.get("summary") if isinstance(portfolio.get("summary"), dict) else {}
             facts.append(f"Portfolio status: {portfolio.get('status') or 'UNKNOWN'}; positions={summary.get('position_count', 0)}; open_orders={summary.get('open_order_count', 0)}.")
-            if portfolio.get("status") == "BROKER_DATA_UNAVAILABLE":
+            if portfolio.get("status") not in {"BROKER_CONFIRMED", "BROKER_CONFIRMED_EMPTY"}:
                 unknowns.append(f"Broker portfolio truth unavailable: {portfolio.get('unavailable_reason') or 'UNKNOWN'}.")
         if mode == "RUN_PLANNER":
             facts.append(f"Launch readiness: {readiness.get('final_launch_readiness') or 'UNKNOWN'}.")

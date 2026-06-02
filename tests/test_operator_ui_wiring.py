@@ -258,6 +258,31 @@ def test_ai_provider_model_router_controls_are_visible_and_cost_labeled():
     assert "/operator/ai/providers/validate" in text
     assert "/operator/ai/supreme-board-packet" in text
 
+
+def test_ai_ask_uses_active_router_provider_and_refreshes_after_settings_save():
+    text = _app_text()
+
+    assert "function aiAskRoutingPayload" in text
+    assert "isExternalAiApiProvider(activeProvider)" in text
+    assert "providerId: activeProvider" in text
+    assert "route_mode: route.routeMode" in text
+    assert "provider_id: route.providerId" in text
+    assert "model_name: route.modelName" in text
+    save_fn = text[text.index("async function saveAiRoutingSettings"):text.index("async function validateSelectedAiProvider")]
+    assert "data = await loadData()" in save_fn
+    assert "renderTopBar()" in save_fn
+    assert "Active Router" in text
+    assert "active ${activeProviderLabel}" in text
+
+
+def test_portfolio_ui_accepts_exact_unavailable_statuses_not_only_old_generic_status():
+    text = _app_text()
+
+    assert "function isPortfolioUnavailableStatus" in text
+    for status in ["BROKER_READ_FAILED", "AUTH_FAILED", "MISSING_CREDENTIALS", "BACKEND_DEGRADED", "STALE_BACKEND"]:
+        assert status in text
+    assert "portfolio.status === \"BROKER_DATA_UNAVAILABLE\"" not in text
+
     for provider_id in [
         "openai",
         "anthropic",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.error import HTTPError
+
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_credentials.store import LocalCredentialStore
@@ -82,9 +84,10 @@ def _broker_payloads():
 def test_portfolio_missing_credentials_is_unavailable_without_fake_positions():
     payload = build_portfolio_snapshot({})
 
-    assert payload["status"] == "BROKER_DATA_UNAVAILABLE"
+    assert payload["status"] == "MISSING_CREDENTIALS"
     assert payload["unavailable_reason"] == "MISSING_ALPACA_PAPER_CREDENTIALS"
     assert payload["positions"] == []
+    assert payload["broker_read_attempted"] is False
     assert payload["broker_read_occurred"] is False
     assert payload["broker_mutation_occurred"] is False
 
@@ -205,6 +208,57 @@ def test_broker_confirmed_portfolio_and_launch_readiness_share_alpaca_truth(tmp_
     assert "alpaca_paper_credentials" not in launch["reason_codes"]
 
 
+def test_alpaca_local_credentials_are_single_truth_for_cards_providers_launch_portfolio_and_supervisor(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider(
+        "alpaca_paper",
+        {
+            "APCA_API_KEY_ID": "id",
+            "APCA_API_SECRET_KEY": "secret",
+            "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+        },
+    )
+    client = FakeReadOnlyClient(_broker_payloads())
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+        portfolio_client=client,
+    )
+    app = create_operator_app(provider=provider)
+
+    credentials = _endpoint(app, "/operator/credentials/providers")()
+    providers = _endpoint(app, "/operator/providers")()
+    provider_readiness = _endpoint(app, "/operator/providers/readiness")()
+    launch = _endpoint(app, "/operator/launch-readiness")()
+    portfolio = _endpoint(app, "/operator/portfolio")()
+    diagnostics = _endpoint(app, "/operator/credentials/diagnostics")()
+
+    credential_row = next(row for row in credentials["providers"] if row["provider_id"] == "alpaca_paper")
+    provider_row = next(row for row in providers["providers"] if row["provider_id"] == "alpaca_paper")
+    source_map = {
+        field["name"]: field["source"]
+        for field in credential_row["fields"]
+    }
+
+    assert credential_row["configured"] is True
+    assert provider_row["status"] in {"CONFIGURED", "READY"}
+    assert provider_readiness["ready_or_configured_count"] >= 1
+    assert source_map["APCA_API_KEY_ID"] == "LOCAL_SECRET_PRESENT"
+    assert source_map["APCA_API_SECRET_KEY"] == "LOCAL_SECRET_PRESENT"
+    assert source_map["APCA_API_BASE_URL"] == "LOCAL_SECRET_PRESENT"
+    assert launch["alpaca_paper_credentials_configured"] is True
+    assert "alpaca_paper_credentials" not in launch["reason_codes"]
+    assert portfolio["status"] == "BROKER_CONFIRMED"
+    assert diagnostics["source_used_by_credential_cards"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_provider_table"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_launch_readiness"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_portfolio"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_paper_supervisor"] == "LOCAL_SECRET_PRESENT"
+    assert all(diagnostics["paper_supervisor_required_field_names_present"].values())
+    assert provider.supervisor.config.process_env["APCA_API_BASE_URL"] == "https://paper-api.alpaca.markets"
+
+
 def test_operator_portfolio_uses_local_vault_and_reports_broker_failure_not_missing_credentials(tmp_path):
     class FailingReadOnlyClient:
         def __init__(self) -> None:
@@ -228,8 +282,39 @@ def test_operator_portfolio_uses_local_vault_and_reports_broker_failure_not_miss
 
     payload = _endpoint(app, "/operator/portfolio")()
 
-    assert payload["status"] == "BROKER_DATA_UNAVAILABLE"
+    assert payload["status"] == "BROKER_READ_FAILED"
     assert payload["unavailable_reason"] == "BROKER_READ_FAILED"
     assert payload["detail"] == "RuntimeError"
+    assert payload["broker_read_attempted"] is True
+    assert client.calls == [("GET", "/v2/account")]
+    assert payload["broker_mutation_occurred"] is False
+
+
+def test_operator_portfolio_reports_auth_failure_not_missing_credentials(tmp_path):
+    class AuthFailingReadOnlyClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_json(self, path, headers):
+            self.calls.append(("GET", path))
+            raise HTTPError("https://paper-api.alpaca.markets/v2/account", 401, "Unauthorized", {}, None)
+
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    client = AuthFailingReadOnlyClient()
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+            provider_env={},
+            credential_store=store,
+            portfolio_client=client,
+        )
+    )
+
+    payload = _endpoint(app, "/operator/portfolio")()
+
+    assert payload["status"] == "AUTH_FAILED"
+    assert payload["unavailable_reason"] == "AUTH_FAILED"
+    assert payload["broker_read_attempted"] is True
     assert client.calls == [("GET", "/v2/account")]
     assert payload["broker_mutation_occurred"] is False
