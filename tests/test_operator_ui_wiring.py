@@ -96,6 +96,9 @@ def test_ai_advisor_is_docked_and_resizes_layout_not_overlay_first():
     assert ".ai-chief-body" in css
     assert "overflow-y: auto" in css
     assert ".ai-chief-backdrop.open" in css
+    assert "--ai-dock-width: clamp(360px, 28vw, 420px)" in css
+    assert "resize: horizontal" in css
+    assert ".compact-actions" in css
 
 
 def test_ai_prompts_are_limited_with_more_prompts_expander():
@@ -107,6 +110,38 @@ def test_ai_prompts_are_limited_with_more_prompts_expander():
     assert "ai-more-prompts" in text
     assert "More prompts" in text
     assert "AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT)" in text
+    assert "const safeItems = (items || []).slice(0, 3)" in text
+
+
+def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
+    text = _app_text()
+
+    assert "Active provider" in text
+    assert "Active model" in text
+    assert "Current answer source" in text
+    assert "Last provider error" in text
+    assert "Selected active provider" in text
+    assert "Currently used for ask" in text
+    assert "Use DeepSeek now" in text
+    assert "Use OpenAI now" in text
+    assert "Use Supreme Board packet mode" in text
+    assert "data-ai-use-provider-now=\"deepseek\"" in text
+    assert "data-ai-use-provider-now=\"openai\"" in text
+    assert "data-ai-use-supreme-board" in text
+    assert "active_provider: id" in text
+    assert "no paid call occurred" in text
+
+
+def test_ai_packet_output_is_collapsed_and_copyable_by_default():
+    text = _app_text()
+
+    assert "renderAiPacketPanel" in text
+    assert "View packet" in text
+    assert "Copy packet" in text
+    assert "data-ai-copy-packet" in text
+    assert "packetText" in text
+    assert "Supreme Board packet is ready. Use View packet" in text
+    assert "Draft packet is ready. Use View packet" in text
 
 
 def test_portfolio_home_has_commercial_cockpit_lane_and_primary_actions():
@@ -211,6 +246,40 @@ def test_provider_setup_uses_beginner_safe_credential_labels():
     assert "/operator/credentials/save" in text
     assert "reason=${reason}" in text
     assert "received_field_presence" in text
+
+
+def test_keys_providers_layout_groups_cards_and_reconciles_table_truth():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert "Trading / Broker Data" in text
+    assert "AI Providers" in text
+    assert "Local / Advanced" in text
+    assert "PROVIDER_GROUPS" in text
+    assert "provider-groups" in text
+    assert "provider-group-grid" in text
+    assert "Provider Table" in text
+    assert "mergeCredentialTruthIntoProviderReadiness" in text
+    assert "credentialSource" in text
+    assert "providerDisplaySource(provider)" in text
+    assert "MISSING_CREDENTIALALS" not in text
+    assert ".provider-group-grid" in css
+    assert ".provider-table-card .table" in css
+    assert "overflow-x: hidden" in css
+
+
+def test_provider_truth_endpoints_use_long_backend_timeout():
+    text = _app_text()
+    heavy_block = text[text.index("const HEAVY_BACKEND_ENDPOINTS"):text.index("const OPTIONAL_BACKEND_ENDPOINTS")]
+
+    assert "HEAVY_BACKEND_FETCH_TIMEOUT_MS = 30000" in text
+    for endpoint in [
+        "/operator/providers",
+        "/operator/providers/readiness",
+        "/operator/portfolio",
+        "/operator/launch-readiness",
+    ]:
+        assert endpoint in heavy_block
 
 
 def test_ai_panel_shows_model_quality_and_lower_reasoning_warning():

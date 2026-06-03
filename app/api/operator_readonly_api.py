@@ -630,6 +630,7 @@ class OperatorSnapshotProvider:
         return {
             "source": "OPERATOR_PROVIDER_READINESS",
             "provider_registry_version": summary["provider_registry_version"],
+            "providers": summary["providers"],
             "provider_count": summary["provider_count"],
             "counts": summary["counts"],
             "ready_or_configured_count": int(summary["counts"].get("READY", 0)) + int(summary["counts"].get("CONFIGURED", 0)),

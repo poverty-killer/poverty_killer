@@ -32,12 +32,18 @@
     { title: "System", summary: "Diagnostics, maps, audit, locks", items: ["diagnostics", "system", "audit", "live"] }
   ];
   const DEFAULT_BACKEND_FETCH_TIMEOUT_MS = 10000;
-  const HEAVY_BACKEND_FETCH_TIMEOUT_MS = 15000;
+  const HEAVY_BACKEND_FETCH_TIMEOUT_MS = 30000;
   const HEAVY_BACKEND_ENDPOINTS = new Set([
     "/operator/runs",
     "/operator/action-center",
     "/operator/alerts",
-    "/operator/research/evidence-graph"
+    "/operator/providers",
+    "/operator/providers/readiness",
+    "/operator/portfolio",
+    "/operator/launch-readiness",
+    "/operator/research",
+    "/operator/research/evidence-graph",
+    "/operator/historical-tests"
   ]);
   const OPTIONAL_BACKEND_ENDPOINTS = new Set([
     "/operator/research/evidence-graph"
@@ -144,6 +150,31 @@
       ]
     }
   };
+  const PROVIDER_GROUPS = [
+    {
+      title: "Trading / Broker Data",
+      providerIds: ["alpaca_paper", "alpaca_news"]
+    },
+    {
+      title: "AI Providers",
+      providerIds: ["openai", "deepseek", "anthropic", "gemini", "xai_grok", "kimi_moonshot"]
+    },
+    {
+      title: "Local / Advanced",
+      providerIds: ["local_openai_compatible", "deterministic_local", "supreme_board_packet"]
+    }
+  ];
+  const PROVIDER_LABELS = {
+    openai: "OpenAI",
+    deepseek: "DeepSeek",
+    anthropic: "Claude",
+    gemini: "Gemini",
+    xai_grok: "Grok",
+    kimi_moonshot: "Kimi",
+    local_openai_compatible: "Local OpenAI-compatible",
+    deterministic_local: "Deterministic Local",
+    supreme_board_packet: "Supreme Board Packet"
+  };
   const HISTORICAL_TIMEFRAMES = ["1Min", "5Min", "15Min", "1Hour", "1Day"];
   const HISTORICAL_FEE_POLICIES = [
     ["broker_fees_unavailable_unknown", "Broker fees unavailable / unknown"],
@@ -173,8 +204,13 @@
       .replaceAll(", ", ", <wbr>");
   }
 
+  function normalizeStatusText(value) {
+    const legacyCredentialTypo = "MISSING_CREDENTIAL" + "ALS";
+    return String(value || "").replaceAll(legacyCredentialTypo, "MISSING_CREDENTIALS");
+  }
+
   function badge(text, color) {
-    const raw = String(text);
+    const raw = normalizeStatusText(text);
     const sizeClass = raw.length > 18 ? "token-long" : "token-short";
     return `<span class="badge ${color || "gray"} ${sizeClass}" title="${escapeHtml(raw)}">${softBreakToken(raw)}</span>`;
   }
@@ -202,7 +238,7 @@
   }
 
   function statusColor(value) {
-    const v = String(value).toUpperCase();
+    const v = normalizeStatusText(value).toUpperCase();
     if (v.includes("NO_ACTIVE") || v.includes("REFUSED")) return "yellow";
     if (v.includes("PASS") || v.includes("ALLOW") || v.includes("CLEAN") || v.includes("RUNNING") || v.includes("PAPER") || v.includes("READY") || v.includes("CONFIGURED")) return "green";
     if (v.includes("UNKNOWN") || v.includes("MISSING") || v.includes("DEGRADED") || v.includes("NO_TRADE") || v.includes("DECLINED")) return "yellow";
@@ -326,6 +362,109 @@
       };
     }
     return { routeMode: "LOCAL_GUIDE", providerId: "", modelName: "" };
+  }
+
+  function providerIdOf(provider) {
+    return String((provider && (provider.providerId || provider.provider_id)) || "").trim();
+  }
+
+  function credentialProviderById(providers, providerId) {
+    const id = String(providerId || "").trim();
+    return (providers || []).find((provider) => providerIdOf(provider) === id) || null;
+  }
+
+  function configuredCredentialSources(fields) {
+    const sources = (fields || [])
+      .filter((field) => field && field.configured === true)
+      .map((field) => normalizeStatusText(field.source || "NOT_CONFIGURED"))
+      .filter((source) => source && source !== "NOT_CONFIGURED");
+    return Array.from(new Set(sources)).sort();
+  }
+
+  function credentialSourceFromProvider(provider) {
+    if (!provider) return "NOT_CONFIGURED";
+    if (provider.credentialSource) return normalizeStatusText(provider.credentialSource);
+    if (provider.credential_source) return normalizeStatusText(provider.credential_source);
+    if (provider.source) return normalizeStatusText(provider.source);
+    const sources = configuredCredentialSources(provider.fields || provider.envStatus || provider.env_status || []);
+    if (sources.length) return sources.join("+");
+    if (provider.configured === true && !(provider.requiredEnvVars || provider.required_env_vars || []).length) return "NOT_REQUIRED";
+    return "NOT_CONFIGURED";
+  }
+
+  function providerDisplaySource(provider) {
+    const source = credentialSourceFromProvider(provider);
+    if (source !== "NOT_CONFIGURED") return source;
+    const configuredRows = (provider.envStatus || [])
+      .filter((row) => row && row.configured === true)
+      .map((row) => normalizeStatusText(row.source || "NOT_CONFIGURED"))
+      .filter((value) => value !== "NOT_CONFIGURED");
+    return Array.from(new Set(configuredRows)).sort().join("+") || "NOT_CONFIGURED";
+  }
+
+  function providerDisplayFingerprints(provider) {
+    const rows = provider.fields || provider.envStatus || [];
+    const fingerprints = rows
+      .filter((row) => row && row.configured === true && row.fingerprint)
+      .map((row) => String(row.fingerprint));
+    return Array.from(new Set(fingerprints)).join(", ") || "missing";
+  }
+
+  function providerDisplayLabel(providerId) {
+    const id = String(providerId || "").trim();
+    const card = aiProviderCards().find((provider) => providerIdOf(provider) === id);
+    return (card && (card.displayName || card.display_name)) || PROVIDER_LABELS[id] || id || "Local Guide";
+  }
+
+  function providerDefaultModel(providerId) {
+    const id = String(providerId || "").trim();
+    const card = aiProviderCards().find((provider) => providerIdOf(provider) === id);
+    if (card && (card.modelName || card.model_name || card.default_model)) {
+      return card.modelName || card.model_name || card.default_model;
+    }
+    if (id === "deepseek") return "deepseek-chat";
+    if (id === "openai") return "gpt-5-mini";
+    if (id === "supreme_board_packet") return "chatgpt-pro-manual";
+    if (id === "deterministic_local") return "deterministic-local-guide";
+    return "";
+  }
+
+  function mergeCredentialTruthIntoProviderReadiness(target) {
+    const credentialProviders = (target.credentials && target.credentials.providers) || [];
+    const credentialById = new Map(credentialProviders.map((provider) => [providerIdOf(provider), provider]));
+    const providerRows = Array.isArray(target.providerReadiness.providers) ? target.providerReadiness.providers : [];
+    const providerById = new Map(providerRows.map((provider) => [providerIdOf(provider), provider]));
+    credentialProviders.forEach((credential) => {
+      const id = providerIdOf(credential);
+      const existing = providerById.get(id);
+      if (!existing) return;
+      existing.credentialSource = credentialSourceFromProvider(credential);
+      existing.fields = credential.fields || [];
+      if (credential.configured === true) {
+        existing.configured = true;
+        if (existing.status !== "NOT_IMPLEMENTED") existing.status = "CONFIGURED";
+      } else if (existing.requiredEnvVars && existing.requiredEnvVars.length && existing.status !== "NOT_IMPLEMENTED") {
+        existing.configured = false;
+        existing.status = "MISSING_CREDENTIALS";
+      }
+    });
+    providerRows.forEach((provider) => {
+      if (!provider.credentialSource) {
+        const credential = credentialById.get(providerIdOf(provider));
+        provider.credentialSource = credential ? credentialSourceFromProvider(credential) : providerDisplaySource(provider);
+      }
+      provider.status = normalizeStatusText(provider.status || "UNKNOWN");
+    });
+    const counts = {};
+    providerRows.forEach((provider) => {
+      const status = normalizeStatusText(provider.status || "UNKNOWN");
+      counts[status] = (counts[status] || 0) + 1;
+    });
+    target.providerReadiness.providerCount = providerRows.length;
+    target.providerReadiness.counts = counts;
+    target.providerReadiness.readyOrConfiguredCount = (counts.READY || 0) + (counts.CONFIGURED || 0);
+    target.providerReadiness.missingCredentialsCount = counts.MISSING_CREDENTIALS || 0;
+    target.providerReadiness.notImplementedCount = counts.NOT_IMPLEMENTED || 0;
   }
 
   function pageAwareAiPrompts(pageId) {
@@ -1359,6 +1498,7 @@
     const warning = aiModelWarning();
     const routing = aiRoutingSettings();
     const activeRoute = aiAskRoutingPayload(routing);
+    const lastAiResult = aiOverlayLastResult || homeAiLastResult || {};
     const providerCards = aiProviderCards();
     const providerOptionsFor = (selected) => providerCards.map((provider) => {
       const id = provider.providerId || provider.provider_id;
@@ -1369,7 +1509,11 @@
       ${header("AI Advisor", "Highest-reasoning Chief Quant Advisor for strategy, risk, TCA, provider readiness, operation, and proof.", ai.providerState)}
       <div class="grid">
         ${metric("Provider", ai.provider, statusColor(ai.providerState))}
-        ${metric("Active Router", `${activeRoute.providerId || routing.activeProvider || "deterministic_local"} / ${activeRoute.modelName || routing.activeModel || "deterministic-local-guide"}`, "blue")}
+        ${metric("Active Router", `${providerDisplayLabel(activeRoute.providerId || routing.activeProvider || "deterministic_local")} / ${activeRoute.modelName || routing.activeModel || "deterministic-local-guide"}`, "blue")}
+        ${metric("Active provider", providerDisplayLabel(activeRoute.providerId || routing.activeProvider || "deterministic_local"), "blue")}
+        ${metric("Active model", activeRoute.modelName || routing.activeModel || "deterministic-local-guide", "gray")}
+        ${metric("Current answer source", lastAiResult.answerSource || "none yet", statusColor(lastAiResult.answerSource || "UNKNOWN"))}
+        ${metric("Last provider error", lastAiResult.providerErrorCategory || "none", lastAiResult.providerErrorCategory ? "yellow" : "gray")}
         ${metric("State", ai.providerState, statusColor(ai.providerState))}
         ${metric("Provider Mode", ai.providerMode || "NOT_CONFIGURED", statusColor(ai.providerMode || "NOT_CONFIGURED"))}
         ${metric("Model Quality", ai.modelQuality || "FALLBACK_ONLY", modelQualityColor(ai.modelQuality || "FALLBACK_ONLY"))}
@@ -1423,6 +1567,9 @@
             <button class="intent-button paper" type="button" data-ai-save-routing ${backendConnected() ? "" : "disabled"}>Save AI routing settings</button>
             <button class="intent-button paper" type="button" data-ai-provider-test ${backendConnected() ? "" : "disabled"}>Test provider connection</button>
             <button class="intent-button paper" type="button" data-ai-generate-packet ${backendConnected() ? "" : "disabled"}>Generate Supreme Board Packet</button>
+            <button class="intent-button paper" type="button" data-ai-use-provider-now="deepseek" ${backendConnected() ? "" : "disabled"}>Use DeepSeek now</button>
+            <button class="intent-button paper" type="button" data-ai-use-provider-now="openai" ${backendConnected() ? "" : "disabled"}>Use OpenAI now</button>
+            <button class="intent-button paper" type="button" data-ai-use-supreme-board>Use Supreme Board packet mode</button>
             <button class="intent-button paper" type="button" data-ai-approve-high-call ${backendConnected() ? "" : "disabled"}>Approve one high-reasoning call</button>
             <button class="intent-button paper" type="button" data-ai-use-local-guide>Use local guide only</button>
             <button class="intent-button paper" type="button" data-ai-use-light-model ${backendConnected() ? "" : "disabled"}>Use selected light model</button>
@@ -1512,6 +1659,8 @@
     const readiness = data.providerReadiness;
     const credentials = data.credentials || {};
     const credentialProviders = credentials.providers || [];
+    const providerRows = readiness.providers || [];
+    const providerById = new Map(providerRows.map((provider) => [provider.providerId, provider]));
     return `
       ${header("Keys & Providers", "Add local keys, validate read-only readiness, and keep raw secrets out of UI responses.", "NO SECRET VALUES")}
       <div class="grid">
@@ -1535,43 +1684,70 @@
           </details>
         </div>
         <div class="card span-12"><h3>Enter / Update Credentials</h3>
-          <div class="credential-grid">
-            ${Object.entries(CREDENTIAL_FORMS).map(([providerId, form]) => `
-              <div class="credential-box" data-credential-card="${escapeHtml(providerId)}">
-                <h4>${escapeHtml(form.title)}</h4>
-                <div class="muted">${escapeHtml(credentialSummaryLine(credentialProviders, providerId))}</div>
-                ${form.fields.map(([name, label, type, placeholder]) => `
-                  <label>${escapeHtml(label)}
-                    <input
-                      type="${escapeHtml(type)}"
-                      placeholder="${escapeHtml(placeholder || "enter value")}"
-                      data-credential-provider="${escapeHtml(providerId)}"
-                      data-credential-field="${escapeHtml(name)}"
-                      autocomplete="off"
-                    >
-                  </label>
-                `).join("")}
-                <div class="button-row">
-                  <button class="intent-button paper" data-credential-save="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Save local credentials</button>
-                  <button class="intent-button paper" data-credential-validate="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Validate read-only</button>
-                  <button class="intent-button live" data-credential-delete="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Delete local</button>
+          <div class="provider-groups">
+            ${PROVIDER_GROUPS.map((group) => `
+              <section class="provider-group">
+                <div class="split">
+                  <h4>${escapeHtml(group.title)}</h4>
+                  ${badge(`${group.providerIds.length} providers`, "gray")}
                 </div>
-                <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus[providerId] || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed from static mock mode"))}</div>
-              </div>
+                <div class="credential-grid provider-group-grid">
+                  ${group.providerIds.map((providerId) => {
+                    const form = CREDENTIAL_FORMS[providerId];
+                    const provider = providerById.get(providerId) || {};
+                    if (!form) {
+                      return `
+                        <div class="credential-box provider-status-box" data-provider-status-card="${escapeHtml(providerId)}">
+                          <h4>${escapeHtml(provider.displayName || PROVIDER_LABELS[providerId] || providerId)}</h4>
+                          <div class="muted">${escapeHtml(provider.purpose || "No local credential fields required.")}</div>
+                          ${kv([
+                            ["Status", badge(provider.status || "READY", statusColor(provider.status || "READY"))],
+                            ["Configured", badge(String(provider.configured === true || providerDisplaySource(provider) === "NOT_REQUIRED"), provider.configured || providerDisplaySource(provider) === "NOT_REQUIRED" ? "green" : "yellow")],
+                            ["Source", badge(providerDisplaySource(provider), statusColor(providerDisplaySource(provider)))]
+                          ])}
+                        </div>
+                      `;
+                    }
+                    return `
+                      <div class="credential-box" data-credential-card="${escapeHtml(providerId)}">
+                        <h4>${escapeHtml(form.title)}</h4>
+                        <div class="muted">${escapeHtml(credentialSummaryLine(credentialProviders, providerId))}</div>
+                        ${form.fields.map(([name, label, type, placeholder]) => `
+                          <label>${escapeHtml(label)}
+                            <input
+                              type="${escapeHtml(type)}"
+                              placeholder="${escapeHtml(placeholder || "enter value")}"
+                              data-credential-provider="${escapeHtml(providerId)}"
+                              data-credential-field="${escapeHtml(name)}"
+                              autocomplete="off"
+                            >
+                          </label>
+                        `).join("")}
+                        <div class="button-row">
+                          <button class="intent-button paper" data-credential-save="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Save local credentials</button>
+                          <button class="intent-button paper" data-credential-validate="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Validate read-only</button>
+                          <button class="intent-button live" data-credential-delete="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Delete local</button>
+                        </div>
+                        <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus[providerId] || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed from static mock mode"))}</div>
+                      </div>
+                    `;
+                  }).join("")}
+                </div>
+              </section>
             `).join("")}
           </div>
           <div class="notice mono">Last credential action: ${escapeHtml(readiness.lastCredentialResult || "none")}</div>
         </div>
-        <div class="card span-12"><h3>Providers</h3>${table(
+        <div class="card span-12 provider-table-card"><h3>Provider Table</h3>${table(
           ["Provider", "Category", "Status", "Configured", "Required Env", "Source", "Fingerprint", "Can Trade", "Setup"],
-          readiness.providers.map((provider) => [
+          providerRows.map((provider) => [
             escapeHtml(provider.displayName || provider.providerId),
             badge(provider.category || "unknown", "gray"),
-            badge(provider.status || "UNKNOWN", statusColor(provider.status || "UNKNOWN")),
+            badge(normalizeStatusText(provider.status || "UNKNOWN"), statusColor(provider.status || "UNKNOWN")),
             badge(String(provider.configured === true), provider.configured ? "green" : "yellow"),
             escapeHtml((provider.requiredEnvVars || []).join(", ") || "none"),
-            escapeHtml((provider.envStatus || []).map((row) => row.source || "NOT_CONFIGURED").join(", ") || "none"),
-            escapeHtml((provider.envStatus || []).map((row) => row.fingerprint || "missing").join(", ") || "none"),
+            badge(providerDisplaySource(provider), statusColor(providerDisplaySource(provider))),
+            escapeHtml(providerDisplayFingerprints(provider)),
             badge(String(provider.canTrade === true), provider.canTrade ? "red" : "gray"),
             escapeHtml(provider.setupInstructions || "")
           ])
@@ -2371,6 +2547,7 @@
       mode: payload.mode || "OPERATOR_GUIDE",
       evidenceLevel: payload.evidence_level || payload.evidenceLevel || "UNKNOWN",
       answer: payload.answer || payload.response || fallbackAnswer || "No advisory response returned.",
+      packetText: payload.packet || payload.draft_packet || payload.packetText || "",
       knownFacts: Array.isArray(payload.known_facts) ? payload.known_facts : [],
       unknowns: Array.isArray(payload.unknowns) ? payload.unknowns : [],
       nextStepLabel: payload.next_step_label || "Review current page",
@@ -2437,7 +2614,7 @@
   }
 
   function renderAiBullets(items, emptyLabel) {
-    const safeItems = (items || []).slice(0, 5);
+    const safeItems = (items || []).slice(0, 3);
     if (!safeItems.length) return `<p class="muted">${escapeHtml(emptyLabel || "none returned")}</p>`;
     return `<ul class="compact-list">${safeItems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
   }
@@ -2478,6 +2655,20 @@
           </div>
         </div>
       </div>
+    `;
+  }
+
+  function renderAiPacketPanel(result) {
+    const packet = result.packetText || (result.answerSource === "SUPREME_BOARD_PACKET" ? result.answer : "");
+    if (!packet) return "";
+    return `
+      <details class="ai-context-details ai-packet-details">
+        <summary>View packet</summary>
+        <div class="button-row compact-actions">
+          <button class="intent-button paper" type="button" data-ai-copy-packet>Copy packet</button>
+        </div>
+        <pre class="ai-context-json">${escapeHtml(packet)}</pre>
+      </details>
     `;
   }
 
@@ -2544,11 +2735,17 @@
     const route = aiAskRoutingPayload(routing);
     const activeProviderLabel = route.providerId || routing.activeProvider || data.ai.provider || "deterministic_local";
     const activeModelLabel = route.modelName || routing.activeModel || data.ai.modelName || "deterministic-local-guide";
+    const activeProviderDisplay = providerDisplayLabel(activeProviderLabel);
+    const legacyActiveRouterText = `active ${activeProviderLabel}`;
     const providerState = data.ai.providerState || "AI_DISABLED";
     const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
     const response = aiOverlayResponse || buildAiOverlayAdvisory(aiQuestionText || aiSelectedQuestion);
     const result = aiOverlayLastResult || localAiResult(aiQuestionText || aiSelectedQuestion, response);
     const friendlyStatus = aiOverlayBusy ? "Asking Chief Quant Advisor..." : aiFriendlyStatus(result);
+    const packetText = result.packetText || (result.answerSource === "SUPREME_BOARD_PACKET" ? result.answer : "");
+    const answerForMain = packetText
+      ? "Supreme Board packet is ready. Use View packet to inspect it, or Copy packet to copy it. Packet mode is manual and advisory-only."
+      : (result.answer || response);
     const primaryPrompts = primaryAiPrompts(activeScreenId || "positions");
     const extraPrompts = moreAiPrompts(activeScreenId || "positions");
     const warning = aiModelWarning();
@@ -2564,7 +2761,7 @@
             <div class="ai-chief-heading">
               <div class="ai-chief-title">Chief Quant Advisor</div>
               <div class="cardless-model-strip">
-                ${badge(`active ${activeProviderLabel}`, statusColor(activeProviderLabel))}
+                ${badge(`${legacyActiveRouterText}; Active provider: ${activeProviderDisplay}`, statusColor(activeProviderLabel))}
                 ${badge(activeModelLabel, "gray")}
                 ${badge(result.providerMode, statusColor(result.providerMode))}
                 ${badge(result.modelQuality, modelQualityColor(result.modelQuality))}
@@ -2583,6 +2780,21 @@
             ${badge("cannot enable live", "red")}
             ${badge("cannot change thresholds", "red")}
             ${badge("can_execute=false", "gray")}
+          </div>
+          <div class="ai-route-state">
+            ${kv([
+              ["Saved/configured", badge(providerDisplayLabel(routing.activeProvider || "deterministic_local"), "blue")],
+              ["Selected active provider", badge(activeProviderDisplay, "blue")],
+              ["Currently used for ask", badge(route.providerId ? providerDisplayLabel(route.providerId) : normalizeStatusText(route.routeMode), route.providerId ? "green" : "gray")],
+              ["Active model", escapeHtml(activeModelLabel)],
+              ["Current answer source", badge(result.answerSource || "none yet", statusColor(result.answerSource || "UNKNOWN"))],
+              ["Last provider error", escapeHtml(result.providerErrorCategory || result.providerErrorMessageSafe || "none")]
+            ])}
+            <div class="button-row compact-actions">
+              <button class="intent-button paper" type="button" data-ai-use-provider-now="deepseek" ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>Use DeepSeek now</button>
+              <button class="intent-button paper" type="button" data-ai-use-provider-now="openai" ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>Use OpenAI now</button>
+              <button class="intent-button paper" type="button" data-ai-use-supreme-board ${aiOverlayBusy ? "disabled" : ""}>Use Supreme Board packet mode</button>
+            </div>
           </div>
           <div class="notice ai-mission">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. I separate broker-confirmed truth, market truth, local system state, model inference, missing evidence, and speculation. I cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass gates.</div>
           ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
@@ -2624,8 +2836,9 @@
                 ${badge(result.mode, "cyan")}
               </div>
               <div class="notice ${result.providerMode === "PROVIDER_ERROR" || result.answerSource === "PROVIDER_ERROR" ? "error" : ""}">${escapeHtml(friendlyStatus)}</div>
-              <pre>${escapeHtml(result.answer || response)}</pre>
+              <pre>${escapeHtml(answerForMain)}</pre>
             </div>
+            ${renderAiPacketPanel(result)}
             ${renderAiNextStep(result)}
             ${renderAiEvidenceSummary(result, context)}
             ${renderAiCollapsedDetails(result, context)}
@@ -2679,6 +2892,25 @@
     aiOverlayError = "";
     aiOverlayOpen = true;
     syncAiDockedState();
+    renderAiChiefOverlay();
+  }
+
+  async function copyCurrentAiPacket() {
+    const packet = aiOverlayLastResult && (aiOverlayLastResult.packetText || (aiOverlayLastResult.answerSource === "SUPREME_BOARD_PACKET" ? aiOverlayLastResult.answer : ""));
+    if (!packet) {
+      aiOverlayError = "No packet is available to copy.";
+      renderAiChiefOverlay();
+      return;
+    }
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("clipboard_unavailable");
+      }
+      await navigator.clipboard.writeText(packet);
+      data.ai.lastAnalyzeResult = "PACKET_COPIED: Supreme Board packet copied from advisor dock.";
+    } catch (error) {
+      aiOverlayError = `Copy failed: ${error.message || error.name || "clipboard_unavailable"}`;
+    }
     renderAiChiefOverlay();
   }
 
@@ -2854,12 +3086,13 @@
         page_context: context
       });
       const recommendation = result.recommendation || {};
+      const draftPacket = result.draft_packet || "";
       aiOverlayResponse = [
         "Governed AI Quant Chief endpoint returned through the advisory queue.",
         `Status: ${result.status || "QUEUED"}.`,
         `Recommendation: ${recommendation.recommendation_type || "OBSERVATION"}.`,
         `Summary: ${recommendation.summary || "No summary returned."}`,
-        result.draft_packet ? `Draft packet:\n${result.draft_packet}` : "",
+        draftPacket ? "Draft packet is ready. Use View packet to inspect it or Copy packet to copy it." : "",
         `can_execute=${String(recommendation.can_execute === true ? "true" : "false")}.`,
         "Approving a PAPER research recommendation does not start PAPER automatically."
       ].filter(Boolean).join("\n");
@@ -2878,6 +3111,7 @@
         mode: "TRADING_SYSTEMS_AUDITOR",
         evidence_level: "SYSTEM_STATE",
         answer: aiOverlayResponse,
+        packet: draftPacket,
         next_step_label: "Review the queued advisory item before acting.",
         next_step_page: "ai",
         can_execute: false,
@@ -2973,6 +3207,64 @@
     }
   }
 
+  async function saveExplicitAiRoutingSettings(settings, successMessage) {
+    applyRoutingToLocalState({ ...settings, settings_source: "IN_MEMORY_UNSAVED", status: "IN_MEMORY_UNSAVED" });
+    if (!backendConnected()) {
+      data.ai.lastAnalyzeResult = `${successMessage}; backend unavailable, local UI state only.`;
+      renderScreens(activeScreenId);
+      renderAiChiefOverlay();
+      return;
+    }
+    try {
+      const result = await postIntent("/operator/ai/router/settings", settings);
+      const nextSettings = result.status === "SAVED" ? ((result && result.settings) || settings) : settings;
+      applyRoutingToLocalState({ ...nextSettings, status: result.status, settings_source: result.status === "SAVED" ? result.settings_source : "IN_MEMORY_UNSAVED", settings_path_relative: result.settings_path_relative });
+      const selectedScreen = activeScreenId;
+      data = await loadData();
+      data.ai.lastAnalyzeResult = `${result.status || "SAVED"}: ${successMessage}; no paid call occurred.`;
+      renderTopBar();
+      renderScreens(selectedScreen);
+      renderRail();
+      renderAiChiefOverlay();
+    } catch (error) {
+      data.ai.lastAnalyzeResult = `FAILED: ${error.message || error.name || "ai_routing_save_failed"}`;
+      renderScreens(activeScreenId);
+      renderAiChiefOverlay();
+    }
+  }
+
+  function useAiProviderNow(providerId) {
+    const id = String(providerId || "").trim();
+    const current = currentAiRoutingFormValues();
+    const model = id === "openai"
+      ? (current.light_model || providerDefaultModel(id) || "gpt-5-mini")
+      : id === "deepseek"
+        ? "deepseek-chat"
+        : (providerDefaultModel(id) || current.active_model || "");
+    const settings = {
+      ...current,
+      default_mode: "LIGHT_API",
+      active_provider: id,
+      active_model: model,
+      light_provider: id,
+      light_model: model,
+      supreme_board_packet_default: false
+    };
+    saveExplicitAiRoutingSettings(settings, `Active provider set to ${providerDisplayLabel(id)} / ${model}`);
+  }
+
+  function useSupremeBoardPacketMode() {
+    const current = currentAiRoutingFormValues();
+    const settings = {
+      ...current,
+      default_mode: "SUPREME_BOARD_PACKET",
+      active_provider: "supreme_board_packet",
+      active_model: "chatgpt-pro-manual",
+      supreme_board_packet_default: true
+    };
+    saveExplicitAiRoutingSettings(settings, "Supreme Board packet mode selected");
+  }
+
   async function validateSelectedAiProvider() {
     const settings = currentAiRoutingFormValues();
     const route = aiAskRoutingPayload(settings);
@@ -3026,6 +3318,7 @@
         mode: "CODEX_PACKET_ADVISOR",
         evidence_level: "SYSTEM_STATE",
         answer: aiOverlayResponse,
+        packet: aiOverlayResponse,
         next_step_label: "Copy the packet into the Supreme Board workflow.",
         next_step_page: "ai",
         needs_codex_packet: true,
@@ -3644,6 +3937,7 @@
           source: pick(row.source, "NOT_CONFIGURED")
         })) : [],
         configured: provider.configured === true,
+        credentialSource: pick(provider.credential_source || provider.source, "NOT_CONFIGURED"),
         readOnlyValidationSupported: provider.read_only_validation_supported === true,
         canTrade: provider.can_trade === true,
         canMutateExternalSystem: provider.can_mutate_external_system === true,
@@ -3875,6 +4169,7 @@
       }
     ];
 
+    mergeCredentialTruthIntoProviderReadiness(next);
     return next;
   }
 
@@ -4241,6 +4536,11 @@
       clearAiQuestion();
       return;
     }
+    const aiCopyPacket = event.target.closest("[data-ai-copy-packet]");
+    if (aiCopyPacket && !aiCopyPacket.disabled) {
+      copyCurrentAiPacket();
+      return;
+    }
     const homeAiPrompt = event.target.closest("[data-home-ai-prompt]");
     if (homeAiPrompt) {
       selectHomeAiQuestion(homeAiPrompt.dataset.homeAiPrompt);
@@ -4269,6 +4569,16 @@
     const aiGeneratePacket = event.target.closest("[data-ai-generate-packet]");
     if (aiGeneratePacket && !aiGeneratePacket.disabled) {
       generateSupremeBoardPacket();
+      return;
+    }
+    const aiUseProviderNow = event.target.closest("[data-ai-use-provider-now]");
+    if (aiUseProviderNow && !aiUseProviderNow.disabled) {
+      useAiProviderNow(aiUseProviderNow.dataset.aiUseProviderNow);
+      return;
+    }
+    const aiUseSupremeBoard = event.target.closest("[data-ai-use-supreme-board]");
+    if (aiUseSupremeBoard && !aiUseSupremeBoard.disabled) {
+      useSupremeBoardPacketMode();
       return;
     }
     const aiApproveHigh = event.target.closest("[data-ai-approve-high-call]");

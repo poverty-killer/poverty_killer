@@ -265,6 +265,64 @@ def test_alpaca_save_refreshes_credentials_readiness_launch_and_diagnostics(tmp_
     assert diagnostics["secrets_values_exposed"] is False
 
 
+def test_local_alpaca_vault_truth_matches_cards_provider_table_launch_and_portfolio(tmp_path):
+    class FailingReadOnlyClient:
+        def get_json(self, path, headers):
+            raise RuntimeError("simulated read failure")
+
+    store = _store(tmp_path)
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+        portfolio_client=FailingReadOnlyClient(),
+    )
+    app = create_operator_app(provider=provider)
+
+    saved = _endpoint(app, "/operator/credentials/save", "POST")(
+        {
+            "provider_id": "alpaca_paper",
+            "credentials": {
+                "APCA_API_KEY_ID": "alpaca-local-key",
+                "APCA_API_SECRET_KEY": "alpaca-local-secret",
+                "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+            },
+        }
+    )
+    credential_cards = _endpoint(app, "/operator/credentials/providers")()
+    provider_table = _endpoint(app, "/operator/providers")()
+    readiness = _endpoint(app, "/operator/providers/readiness")()
+    diagnostics = _endpoint(app, "/operator/credentials/diagnostics")()
+    launch = _endpoint(app, "/operator/launch-readiness")()
+    portfolio = _endpoint(app, "/operator/portfolio")()
+    text = str((saved, credential_cards, provider_table, readiness, diagnostics, launch, portfolio))
+
+    card_alpaca = next(row for row in credential_cards["providers"] if row["provider_id"] == "alpaca_paper")
+    table_alpaca = next(row for row in provider_table["providers"] if row["provider_id"] == "alpaca_paper")
+    readiness_alpaca = next(row for row in readiness["providers"] if row["provider_id"] == "alpaca_paper")
+
+    assert saved["status"] == "SAVED"
+    assert card_alpaca["configured"] is True
+    assert card_alpaca["source"] == "LOCAL_SECRET_PRESENT"
+    assert table_alpaca["configured"] is True
+    assert table_alpaca["status"] == "CONFIGURED"
+    assert table_alpaca["credential_source"] == "LOCAL_SECRET_PRESENT"
+    assert readiness_alpaca["configured"] is True
+    assert readiness_alpaca["credential_source"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_credential_cards"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_provider_table"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_provider_readiness"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_launch_readiness"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_portfolio"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_paper_supervisor"] == "LOCAL_SECRET_PRESENT"
+    assert launch["alpaca_paper_credentials_configured"] is True
+    assert portfolio["status"] == "BROKER_READ_FAILED"
+    assert portfolio["unavailable_reason"] == "BROKER_READ_FAILED"
+    assert "alpaca-local-secret" not in text
+    assert "alpaca-local-key" not in text
+    assert "MISSING_CREDENTIALALS" not in text
+
+
 def test_credential_diagnostics_records_last_refusal_reason_without_raw_values(tmp_path):
     store = _store(tmp_path)
     provider = OperatorSnapshotProvider(

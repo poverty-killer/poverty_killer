@@ -101,6 +101,15 @@ def build_provider_readiness(
     configured = not missing_required
     reason_codes: list[str] = []
     configured_sources = {row.source for row in env_rows if row.configured}
+    required_sources = {
+        row.source
+        for row in env_rows
+        if row.name in profile.required_env_vars and row.configured
+    }
+    if profile.required_env_vars:
+        credential_source = "+".join(sorted(required_sources)) if configured else "NOT_CONFIGURED"
+    else:
+        credential_source = "NOT_REQUIRED"
 
     if not profile.implemented:
         status = "NOT_IMPLEMENTED"
@@ -132,6 +141,7 @@ def build_provider_readiness(
         read_only_validation_supported=profile.read_only_validation_supported,
         can_trade=False,
         can_mutate_external_system=False,
+        credential_source=credential_source,
         last_validation_status="NOT_RUN",
         last_validation_at=None,
         setup_instructions=profile.setup_instructions,
@@ -158,6 +168,7 @@ def provider_readiness_summary(
         "providers": providers,
         "provider_count": len(providers),
         "counts": counts,
+        "providers_source": "OPERATOR_PROVIDER_READINESS",
         "secrets_values_exposed": False,
         "raw_secret_values_included": False,
         "broker_call_occurred": False,

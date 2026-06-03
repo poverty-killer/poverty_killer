@@ -72,6 +72,7 @@ class ProviderReadiness:
     read_only_validation_supported: bool = False
     can_trade: bool = False
     can_mutate_external_system: bool = False
+    credential_source: str = "NOT_CONFIGURED"
     last_validation_status: str = "NOT_RUN"
     last_validation_at: str | None = None
     setup_instructions: str = ""
