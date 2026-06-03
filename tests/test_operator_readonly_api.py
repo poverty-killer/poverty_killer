@@ -141,6 +141,48 @@ def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
     assert runtime_payload["paper_stop_allowed"] is True
 
 
+def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoint_truth(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    app = create_operator_app(provider=provider)
+    _endpoint(app, "/operator/credentials/save", "POST")(
+        {
+            "provider_id": "alpaca_paper",
+            "credentials": {
+                "APCA_API_KEY_ID": "paper-key",
+                "APCA_API_SECRET_KEY": "paper-secret",
+            },
+        }
+    )
+
+    status = _endpoint(app, "/operator/status")()
+    runtime = _endpoint(app, "/operator/runtime")()
+    launch = _endpoint(app, "/operator/launch-readiness")()
+    diagnostics = _endpoint(app, "/operator/credentials/diagnostics")()
+    text = str((status, runtime, launch, diagnostics))
+
+    assert status["supervisor"]["paper_credentials_configured"] is True
+    assert status["supervisor"]["paper_endpoint_only"] is True
+    assert status["supervisor"]["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert status["supervisor"]["paper_start_allowed"] is True
+    assert runtime["paper_credentials_configured"] is True
+    assert runtime["paper_endpoint_only"] is True
+    assert runtime["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert runtime["paper_start_allowed"] is True
+    assert launch["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
+    assert launch["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert diagnostics["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert diagnostics["paper_endpoint_source"] == "CONFIGURED"
+    assert "paper-secret" not in text
+    assert status["manual_trading_available"] is False
+    assert status["force_trade_available"] is False
+    assert launch["broker_mutation_occurred"] is False
+
+
 def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     app = _app(tmp_path)
 

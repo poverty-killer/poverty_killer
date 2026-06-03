@@ -42,6 +42,7 @@ from app.operator_credentials.store import (
     DEFAULT_RELATIVE_STORE_PATH,
     PROVIDER_CREDENTIAL_FIELDS,
     LocalCredentialStore,
+    alpaca_endpoint_authority,
     default_credential_store_path,
     normalize_provider_id,
 )
@@ -283,13 +284,17 @@ class OperatorSnapshotProvider:
         refreshed.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         if refreshed != self.provider_env:
             self.provider_env = refreshed
-            self.supervisor.config.process_env = self._paper_process_env(refreshed)
             self.ai_gateway = AIProviderGateway(
                 AIChiefConfig.from_env(refreshed),
                 credential_env=refreshed,
                 http_post=self.ai_gateway.http_post,
             )
+        self.supervisor.config.process_env = self._paper_process_env(refreshed)
         return self.provider_env
+
+    def _supervisor_snapshot(self) -> dict[str, Any]:
+        self._refresh_provider_env()
+        return self.supervisor.status_snapshot()
 
     def _alpaca_paper_configured(self) -> bool:
         summary = self.credential_store.provider_summary("alpaca_paper", self.process_env)
@@ -303,7 +308,7 @@ class OperatorSnapshotProvider:
         return provider_id, model_name
 
     def status(self) -> dict[str, Any]:
-        supervisor = self.supervisor.status_snapshot()
+        supervisor = self._supervisor_snapshot()
         active = supervisor.get("active_session") or {}
         session_status = active.get("status")
         active_profile = active.get("profile") or "UNKNOWN_NO_ACTIVE_RUNTIME"
@@ -337,7 +342,7 @@ class OperatorSnapshotProvider:
         }
 
     def health(self) -> dict[str, Any]:
-        supervisor = self.supervisor.status_snapshot()
+        supervisor = self._supervisor_snapshot()
         storage = self.storage()
         config_status = self.runtime_config.status()
         world_runtime = self.world_awareness_runtime.status_snapshot()
@@ -443,7 +448,7 @@ class OperatorSnapshotProvider:
         }
 
     def runtime(self) -> dict[str, Any]:
-        supervisor = self.supervisor.status_snapshot()
+        supervisor = self._supervisor_snapshot()
         latest = supervisor.get("latest_session") or {}
         return {
             "process_state": latest.get("status") or "NO_ACTIVE_RUNTIME_ATTACHED",
@@ -473,12 +478,17 @@ class OperatorSnapshotProvider:
             "paper_credentials_configured": supervisor.get("paper_credentials_configured"),
             "paper_credential_refusal_reason": supervisor.get("paper_credential_refusal_reason"),
             "paper_credential_source": supervisor.get("paper_credential_source"),
+            "paper_endpoint_only": supervisor.get("paper_endpoint_only"),
+            "paper_endpoint_status": supervisor.get("paper_endpoint_status"),
+            "paper_endpoint_source": supervisor.get("paper_endpoint_source"),
+            "paper_endpoint_refusal_reason": supervisor.get("paper_endpoint_refusal_reason"),
+            "paper_endpoint_operator_action": supervisor.get("paper_endpoint_operator_action"),
             "min_paper_duration_seconds": supervisor.get("min_paper_duration_seconds"),
             "max_paper_duration_seconds": supervisor.get("max_paper_duration_seconds"),
         }
 
     def profile(self) -> dict[str, Any]:
-        supervisor = self.supervisor.status_snapshot()
+        supervisor = self._supervisor_snapshot()
         latest = supervisor.get("latest_session") or {}
         profile = latest.get("profile") or "UNKNOWN_NO_ACTIVE_RUNTIME"
         return {
@@ -490,7 +500,7 @@ class OperatorSnapshotProvider:
         }
 
     def universe(self) -> dict[str, Any]:
-        supervisor = self.supervisor.status_snapshot()
+        supervisor = self._supervisor_snapshot()
         active = supervisor.get("active_session") or {}
         symbols = active.get("watchlist") or []
         return {
@@ -526,7 +536,7 @@ class OperatorSnapshotProvider:
             "legacy_dashboard_command_routes_present": False,
             "legacy_dashboard_status": "QUARANTINED_FROM_OPERATOR_PATH",
             "legacy_dashboard_reuse_allowed": False,
-            "supervisor_version": self.supervisor.status_snapshot().get("supervisor_version"),
+            "supervisor_version": self._supervisor_snapshot().get("supervisor_version"),
         }
 
     def live_readiness(self) -> dict[str, Any]:
@@ -718,11 +728,13 @@ class OperatorSnapshotProvider:
             }
         alpaca_sources = diagnostics["providers"]["alpaca_paper"]["source_used_by_provider_readiness"]
         supervisor_env = self.supervisor.config.process_env
+        endpoint_authority = alpaca_endpoint_authority(supervisor_env)
         supervisor_present = {
             "APCA_API_KEY_ID": bool(str(supervisor_env.get("APCA_API_KEY_ID") or "").strip()),
             "APCA_API_SECRET_KEY": bool(str(supervisor_env.get("APCA_API_SECRET_KEY") or "").strip()),
             "APCA_API_BASE_URL": bool(str(supervisor_env.get("APCA_API_BASE_URL") or "").strip()),
         }
+        supervisor_keys_present = supervisor_present["APCA_API_KEY_ID"] and supervisor_present["APCA_API_SECRET_KEY"]
         diagnostics["source_used_by_credential_cards"] = alpaca_sources
         diagnostics["source_used_by_provider_table"] = alpaca_sources
         diagnostics["source_used_by_provider_readiness"] = alpaca_sources
@@ -735,7 +747,12 @@ class OperatorSnapshotProvider:
             str(effective_env.get("APCA_API_KEY_ID") or "").strip()
             and str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()
         ) else "NOT_CONFIGURED"
-        diagnostics["source_used_by_paper_supervisor"] = alpaca_sources if all(supervisor_present.values()) else "NOT_CONFIGURED"
+        diagnostics["source_used_by_paper_supervisor"] = alpaca_sources if supervisor_keys_present else "NOT_CONFIGURED"
+        diagnostics["paper_endpoint_authority"] = endpoint_authority
+        diagnostics["paper_endpoint_only"] = endpoint_authority["paper_endpoint_only"]
+        diagnostics["paper_endpoint_status"] = endpoint_authority["status"]
+        diagnostics["paper_endpoint_source"] = endpoint_authority["endpoint_source"]
+        diagnostics["paper_endpoint_operator_action"] = endpoint_authority["operator_action"]
         diagnostics["portfolio_required_field_names_present"] = {
             "APCA_API_KEY_ID": bool(str(effective_env.get("APCA_API_KEY_ID") or "").strip()),
             "APCA_API_SECRET_KEY": bool(str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()),
@@ -913,7 +930,7 @@ class OperatorSnapshotProvider:
         return self.historical_tests_service.report(test_id)
 
     def audit_summary(self) -> dict[str, Any]:
-        supervisor = self.supervisor.status_snapshot()
+        supervisor = self._supervisor_snapshot()
         persisted_events = self.supervisor.session_store.audit_events(limit=1)
         last_event = supervisor.get("last_audit_event") or (persisted_events[-1] if persisted_events else None)
         return {
@@ -1012,7 +1029,7 @@ class OperatorSnapshotProvider:
         return deepcopy(READ_ONLY_CONTRACTS)
 
     def latest_run(self) -> dict[str, Any]:
-        return self.supervisor.status_snapshot()
+        return self._supervisor_snapshot()
 
     def runs(self) -> dict[str, Any]:
         return self.run_archive.list_runs()

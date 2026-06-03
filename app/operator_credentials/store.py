@@ -20,6 +20,10 @@ STORE_VERSION = "operator-local-credential-store-v1"
 DEFAULT_RELATIVE_STORE_PATH = ".operator_secrets/provider_credentials.json"
 ALPACA_PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
 ALPACA_LIVE_ENDPOINT = "https://api.alpaca.markets"
+ALPACA_ENDPOINT_CONFIGURATION_ACTION = (
+    "Set APCA_API_BASE_URL to https://paper-api.alpaca.markets in Keys & Providers -> "
+    "Alpaca PAPER Broker/Data -> PAPER base URL, or in the Windows process environment."
+)
 
 
 PROVIDER_CREDENTIAL_FIELDS: dict[str, dict[str, object]] = {
@@ -127,6 +131,43 @@ def fingerprint_secret(value: str | None) -> str | None:
         return None
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
     return f"sha256:{digest}:len={len(text)}"
+
+
+def alpaca_endpoint_authority(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Return safe Alpaca endpoint authority without exposing credentials."""
+    env = env or {}
+    raw_endpoint = str(env.get("APCA_API_BASE_URL") or "").strip()
+    endpoint = (raw_endpoint or ALPACA_PAPER_ENDPOINT).rstrip("/")
+    if endpoint == ALPACA_PAPER_ENDPOINT:
+        status = "PAPER_ENDPOINT_CONFIRMED"
+        reason_code = None
+        actual_endpoint = ALPACA_PAPER_ENDPOINT
+        detail = "Alpaca PAPER endpoint is confirmed."
+        action = "No endpoint action required."
+    elif endpoint == ALPACA_LIVE_ENDPOINT:
+        status = "LIVE_ENDPOINT_BLOCKED"
+        reason_code = "LIVE_ENDPOINT_BLOCKED"
+        actual_endpoint = ALPACA_LIVE_ENDPOINT
+        detail = "Alpaca live endpoint is configured and remains blocked for this operator."
+        action = ALPACA_ENDPOINT_CONFIGURATION_ACTION
+    else:
+        status = "ALPACA_PAPER_ENDPOINT_REQUIRED"
+        reason_code = "ALPACA_PAPER_ENDPOINT_REQUIRED"
+        actual_endpoint = "NON_PAPER_ENDPOINT_CONFIGURED"
+        detail = "Configured Alpaca endpoint is not the required PAPER endpoint."
+        action = ALPACA_ENDPOINT_CONFIGURATION_ACTION
+    return {
+        "status": status,
+        "reason_code": reason_code,
+        "paper_endpoint_only": status == "PAPER_ENDPOINT_CONFIRMED",
+        "endpoint_source": "CONFIGURED" if raw_endpoint else "SAFE_DEFAULT_PAPER_ENDPOINT",
+        "actual_endpoint": actual_endpoint,
+        "expected_paper_endpoint": ALPACA_PAPER_ENDPOINT,
+        "safe_detail": detail,
+        "operator_action": action,
+        "secrets_values_exposed": False,
+        "raw_secret_values_included": False,
+    }
 
 
 def normalize_provider_id(provider_id: str) -> str:

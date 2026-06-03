@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
-from app.operator_credentials.store import ALPACA_LIVE_ENDPOINT, ALPACA_PAPER_ENDPOINT
+from app.operator_credentials.store import alpaca_endpoint_authority
 
 
 SUPERVISOR_VERSION = "operator-paper-supervisor-v1"
@@ -254,24 +254,32 @@ class OperatorPaperSupervisor:
         stale_after_restart = bool(self._session and self._session.status == "PROCESS_STATE_UNKNOWN_AFTER_RESTART")
         latest_session = self._session.as_dict() if self._session else None
         active_session = latest_session if is_active else None
-        paper_credential_refusal = self._paper_credential_refusal()
+        paper_key_refusal = self._paper_key_refusal()
+        endpoint_authority = self._paper_endpoint_authority()
+        paper_start_refusal = self._paper_start_prerequisite_refusal()
         return {
             "supervisor_version": SUPERVISOR_VERSION,
             "state": "RUNNING" if is_active else ("STALE_ACTIVE_SESSION" if stale_after_restart else "IDLE"),
             "active_session": active_session,
             "latest_session": latest_session,
             "active_session_id": self._session.session_id if is_active and self._session else None,
-            "paper_start_allowed": not is_active and not stale_after_restart and paper_credential_refusal is None,
+            "paper_start_allowed": not is_active and not stale_after_restart and paper_start_refusal is None,
             "paper_stop_allowed": is_active,
             "paper_start_refusal_reason": (
                 "DUPLICATE_ACTIVE_RUN" if is_active else (
-                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART" if stale_after_restart else paper_credential_refusal
+                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART" if stale_after_restart else paper_start_refusal
                 )
             ),
             "paper_stop_refusal_reason": None if is_active else "NO_ACTIVE_RUN",
-            "paper_credentials_configured": paper_credential_refusal is None,
-            "paper_credential_refusal_reason": paper_credential_refusal,
-            "paper_credential_source": "PROCESS_ENV_PRESENT" if paper_credential_refusal is None else "MISSING_OR_INVALID",
+            "paper_credentials_configured": paper_key_refusal is None,
+            "paper_credential_refusal_reason": paper_key_refusal,
+            "paper_credential_source": "PROCESS_ENV_PRESENT" if paper_key_refusal is None else "MISSING_OR_INVALID",
+            "paper_endpoint_only": endpoint_authority["paper_endpoint_only"],
+            "paper_endpoint_status": endpoint_authority["status"],
+            "paper_endpoint_source": endpoint_authority["endpoint_source"],
+            "paper_endpoint_refusal_reason": endpoint_authority["reason_code"],
+            "paper_endpoint_operator_action": endpoint_authority["operator_action"],
+            "paper_endpoint_authority": endpoint_authority,
             "allowed_profile": self.config.allowed_profile,
             "allowed_watchlist": list(self.config.allowed_watchlist),
             "allowed_durations": sorted(self.config.allowed_durations),
@@ -473,22 +481,27 @@ class OperatorPaperSupervisor:
         allowed = set(self.config.allowed_watchlist)
         if any(symbol not in allowed for symbol in watchlist):
             return "UNSUPPORTED_WATCHLIST_SYMBOL"
-        credential_refusal = self._paper_credential_refusal()
-        if credential_refusal:
-            return credential_refusal
+        prerequisite_refusal = self._paper_start_prerequisite_refusal()
+        if prerequisite_refusal:
+            return prerequisite_refusal
         return None
 
-    def _paper_credential_refusal(self) -> str | None:
+    def _paper_key_refusal(self) -> str | None:
         key_id = str(self.config.process_env.get("APCA_API_KEY_ID") or "").strip()
         secret_key = str(self.config.process_env.get("APCA_API_SECRET_KEY") or "").strip()
         if not key_id or not secret_key:
             return "ALPACA_PAPER_CREDENTIALS_NOT_CONFIGURED"
-        endpoint = str(self.config.process_env.get("APCA_API_BASE_URL") or ALPACA_PAPER_ENDPOINT).strip().rstrip("/")
-        if endpoint == ALPACA_LIVE_ENDPOINT:
-            return "LIVE_ENDPOINT_BLOCKED"
-        if endpoint != ALPACA_PAPER_ENDPOINT:
-            return "ALPACA_PAPER_ENDPOINT_REQUIRED"
         return None
+
+    def _paper_endpoint_authority(self) -> dict[str, Any]:
+        return alpaca_endpoint_authority(self.config.process_env)
+
+    def _paper_start_prerequisite_refusal(self) -> str | None:
+        key_refusal = self._paper_key_refusal()
+        if key_refusal:
+            return key_refusal
+        endpoint_authority = self._paper_endpoint_authority()
+        return endpoint_authority["reason_code"]
 
     def _normalize_watchlist(self, raw: Any) -> tuple[str, ...]:
         if raw is None:

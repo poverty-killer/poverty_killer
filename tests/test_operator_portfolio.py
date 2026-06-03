@@ -134,6 +134,8 @@ def test_empty_broker_portfolio_is_honest():
     )
 
     assert payload["status"] == "BROKER_CONFIRMED_EMPTY"
+    assert payload["paper_endpoint_only"] is True
+    assert payload["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
     assert payload["empty"] is True
     assert payload["message"] == "No current PAPER positions."
     assert payload["positions"] == []

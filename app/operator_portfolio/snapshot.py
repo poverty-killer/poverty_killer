@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Protocol
 
-from app.operator_credentials.store import ALPACA_LIVE_ENDPOINT, ALPACA_PAPER_ENDPOINT
+from app.operator_credentials.store import (
+    ALPACA_LIVE_ENDPOINT,
+    ALPACA_PAPER_ENDPOINT,
+    alpaca_endpoint_authority,
+)
 
 
 PORTFOLIO_SOURCE = "OPERATOR_PORTFOLIO_READ_ONLY"
@@ -100,8 +104,10 @@ def _empty_unavailable(
     *,
     detail: str | None = None,
     broker_read_attempted: bool = False,
+    endpoint_authority: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status = _portfolio_unavailable_status(reason)
+    endpoint_truth = endpoint_authority or alpaca_endpoint_authority({})
     return {
         "source": PORTFOLIO_SOURCE,
         "data_source": "UNAVAILABLE",
@@ -133,6 +139,10 @@ def _empty_unavailable(
         "data_freshness_ts": None,
         "broker_read_attempted": broker_read_attempted,
         "broker_read_occurred": False,
+        "paper_endpoint_authority": endpoint_truth,
+        "paper_endpoint_only": endpoint_truth["paper_endpoint_only"],
+        "paper_endpoint_status": endpoint_truth["status"],
+        "paper_endpoint_operator_action": endpoint_truth["operator_action"],
         "broker_mutation_occurred": False,
         "order_submission_occurred": False,
         "cancel_occurred": False,
@@ -303,10 +313,11 @@ def build_portfolio_snapshot(
         return _empty_unavailable("MISSING_ALPACA_PAPER_CREDENTIALS")
 
     base_url = _base_url(env)
+    endpoint_truth = alpaca_endpoint_authority(env)
     if base_url == ALPACA_LIVE_ENDPOINT:
-        return _empty_unavailable("LIVE_ENDPOINT_BLOCKED")
+        return _empty_unavailable("LIVE_ENDPOINT_BLOCKED", endpoint_authority=endpoint_truth)
     if base_url != ALPACA_PAPER_ENDPOINT:
-        return _empty_unavailable("ALPACA_PAPER_ENDPOINT_REQUIRED")
+        return _empty_unavailable("ALPACA_PAPER_ENDPOINT_REQUIRED", endpoint_authority=endpoint_truth)
 
     broker_client = client or AlpacaPaperReadOnlyClient(base_url=base_url)
     freshness = now or _utc_now()
@@ -394,6 +405,10 @@ def build_portfolio_snapshot(
         "data_freshness_ts": freshness,
         "broker_read_attempted": True,
         "broker_read_occurred": True,
+        "paper_endpoint_authority": endpoint_truth,
+        "paper_endpoint_only": endpoint_truth["paper_endpoint_only"],
+        "paper_endpoint_status": endpoint_truth["status"],
+        "paper_endpoint_operator_action": endpoint_truth["operator_action"],
         "broker_mutation_occurred": False,
         "order_submission_occurred": False,
         "cancel_occurred": False,

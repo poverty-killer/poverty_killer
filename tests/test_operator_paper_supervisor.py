@@ -90,6 +90,55 @@ def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
     assert result["session"]["runtime_profile"] == "LOCAL_PAPER"
 
 
+def test_supervisor_allows_missing_base_url_by_safe_paper_default():
+    runner = FakeRunner()
+    config = PaperSupervisorConfig(
+        repo_root=runner.repo_root,
+        process_env={
+            "APCA_API_KEY_ID": "test-paper-key",
+            "APCA_API_SECRET_KEY": "test-paper-secret",
+        },
+    )
+    supervisor = OperatorPaperSupervisor(config=config, runner=runner)
+
+    snapshot = supervisor.status_snapshot()
+    result = supervisor.start_paper(_valid_request())
+
+    assert snapshot["paper_credentials_configured"] is True
+    assert snapshot["paper_endpoint_only"] is True
+    assert snapshot["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert snapshot["paper_endpoint_source"] == "SAFE_DEFAULT_PAPER_ENDPOINT"
+    assert snapshot["paper_start_allowed"] is True
+    assert result["allowed"] is True
+    assert result["reason_code"] == "PAPER_RUN_STARTED"
+
+
+def test_supervisor_splits_live_endpoint_block_from_key_presence():
+    runner = FakeRunner()
+    config = PaperSupervisorConfig(
+        repo_root=runner.repo_root,
+        process_env={
+            "APCA_API_KEY_ID": "test-paper-key",
+            "APCA_API_SECRET_KEY": "test-paper-secret",
+            "APCA_API_BASE_URL": "https://api.alpaca.markets",
+        },
+    )
+    supervisor = OperatorPaperSupervisor(config=config, runner=runner)
+
+    snapshot = supervisor.status_snapshot()
+    result = supervisor.start_paper(_valid_request())
+
+    assert snapshot["paper_credentials_configured"] is True
+    assert snapshot["paper_credential_refusal_reason"] is None
+    assert snapshot["paper_endpoint_only"] is False
+    assert snapshot["paper_endpoint_status"] == "LIVE_ENDPOINT_BLOCKED"
+    assert snapshot["paper_endpoint_refusal_reason"] == "LIVE_ENDPOINT_BLOCKED"
+    assert snapshot["paper_start_allowed"] is False
+    assert result["allowed"] is False
+    assert result["reason_code"] == "LIVE_ENDPOINT_BLOCKED"
+    assert runner.started_specs == []
+
+
 def test_supervisor_rejects_duplicate_active_run():
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)

@@ -47,6 +47,8 @@ def test_launch_readiness_allows_bounded_paper_when_required_checks_pass(tmp_pat
 
     assert payload["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
     assert payload["paper_endpoint_only"] is True
+    assert payload["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert payload["paper_endpoint_source"] == "CONFIGURED"
     assert payload["paper_start_allowed"] is True
     assert payload["portfolio_read_availability"] == "BROKER_READ_READY"
     assert payload["can_execute"] is False
@@ -102,7 +104,9 @@ def test_launch_readiness_blocks_live_endpoint_even_with_local_credentials(tmp_p
     payload = _endpoint(app, "/operator/launch-readiness")()
 
     assert payload["final_launch_readiness"] == "BLOCKED"
+    assert payload["alpaca_paper_credentials_configured"] is True
     assert payload["paper_endpoint_only"] is False
+    assert payload["paper_endpoint_status"] == "LIVE_ENDPOINT_BLOCKED"
     assert "paper_endpoint_only" in payload["reason_codes"]
     assert payload["live_enabled"] is False
     assert payload["real_money_enabled"] is False

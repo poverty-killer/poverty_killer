@@ -756,6 +756,8 @@
         ["Can I run PAPER right now?", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
         ["Exact blockers", tokenText((launch.reasonCodes || []).join(", ") || "none reported")],
         ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
+        ["Alpaca PAPER endpoint", badge(launch.paperEndpointStatus || "UNKNOWN", launch.paperEndpointOnly ? "green" : "red")],
+        ["Endpoint source", badge(launch.paperEndpointSource || "UNKNOWN", launch.paperEndpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" ? "cyan" : "gray")],
         ["Provider status", escapeHtml(`${readiness.readyOrConfiguredCount || 0} ready/configured, ${readiness.missingCredentialsCount || providerCounts.MISSING_CREDENTIALS || 0} missing`)],
         ["Live", badge("LOCKED", "red")],
         ["Real money", badge("BLOCKED", "red")],
@@ -765,6 +767,7 @@
         ["Portfolio read", badge(launch.portfolioReadAvailability || "UNKNOWN", statusColor(launch.portfolioReadAvailability || "UNKNOWN"))]
       ])}
         <div class="notice">What this means: if this card says READY_FOR_BOUNDED_PAPER, the backend sees the required PAPER-safe prerequisites. If it is blocked, fix the listed blocker before pressing Start.</div>
+        ${launch.paperEndpointOnly ? "" : `<div class="notice error">Endpoint action: ${escapeHtml(launch.paperEndpointOperatorAction || "Set APCA_API_BASE_URL to https://paper-api.alpaca.markets in Keys & Providers.")}</div>`}
         ${blockerChecks.length ? `<div class="notice error">Current blocker detail: ${escapeHtml(blockerChecks.map((check) => check.detail || check.title || check.checkId || "unknown").join(" | "))}</div>` : ""}
         <details class="ai-context-details">
           <summary>Advanced readiness checks</summary>
@@ -1367,13 +1370,15 @@
         <div class="card span-12"><h3>Launch Readiness</h3>${kv([
           ["Final", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
           ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
-          ["PAPER endpoint", badge(launch.paperEndpointOnly ? "confirmed" : "blocked/unknown", launch.paperEndpointOnly ? "green" : "red")],
+          ["PAPER endpoint", badge(launch.paperEndpointStatus || (launch.paperEndpointOnly ? "confirmed" : "blocked/unknown"), launch.paperEndpointOnly ? "green" : "red")],
+          ["Endpoint source", badge(launch.paperEndpointSource || "UNKNOWN", launch.paperEndpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" ? "cyan" : "gray")],
           ["Paper start", badge(launch.paperStartAllowed ? "allowed" : "blocked", launch.paperStartAllowed ? "green" : "red")],
           ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
           ["Backend checks", badge((launch.backendDegradedReasons || []).length ? `${launch.backendDegradedReasons.length} degraded` : "no degraded checks", (launch.backendDegradedReasons || []).length ? "yellow" : "green")]
         ])}
           <details class="ai-context-details">
             <summary>Advanced launch readiness details</summary>
+            <div class="notice mono">Endpoint authority: ${escapeHtml(launch.paperEndpointStatus || "UNKNOWN")} / source=${escapeHtml(launch.paperEndpointSource || "UNKNOWN")} / action=${escapeHtml(launch.paperEndpointOperatorAction || "none")}</div>
             <div class="notice mono">Backend degraded reasons: ${escapeHtml((launch.backendDegradedReasons || []).join(", ") || "none")}</div>
             <div class="status-strip detail-strip">${(launch.checks || []).map((check) => badge(`${check.checkId}:${check.status}`, statusColor(check.status))).join("")}</div>
           </details>
@@ -3999,6 +4004,10 @@
         reasonCodes: Array.isArray(launchReadiness.reason_codes) ? launchReadiness.reason_codes : [],
         alpacaPaperCredentialsConfigured: launchReadiness.alpaca_paper_credentials_configured === true,
         paperEndpointOnly: launchReadiness.paper_endpoint_only === true,
+        paperEndpointStatus: pick(launchReadiness.paper_endpoint_status, "UNKNOWN"),
+        paperEndpointSource: pick(launchReadiness.paper_endpoint_source, "UNKNOWN"),
+        paperEndpointOperatorAction: pick(launchReadiness.paper_endpoint_operator_action, ""),
+        paperEndpointAuthority: launchReadiness.paper_endpoint_authority || {},
         paperStartAllowed: launchReadiness.paper_start_allowed === true,
         safeStopStatus: pick(launchReadiness.safe_stop_status, "UNKNOWN"),
         portfolioReadAvailability: pick(launchReadiness.portfolio_read_availability, "UNKNOWN"),

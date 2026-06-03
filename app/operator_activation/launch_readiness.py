@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.operator_credentials.store import ALPACA_LIVE_ENDPOINT, ALPACA_PAPER_ENDPOINT
+from app.operator_credentials.store import alpaca_endpoint_authority
 
 
 def _find_provider(provider_readiness: dict[str, Any], provider_id: str) -> dict[str, Any]:
@@ -50,15 +50,14 @@ def build_launch_readiness(
         )
     )
 
-    endpoint = str(effective_env.get("APCA_API_BASE_URL") or ALPACA_PAPER_ENDPOINT).rstrip("/")
-    endpoint_ok = endpoint == ALPACA_PAPER_ENDPOINT
-    live_endpoint = endpoint == ALPACA_LIVE_ENDPOINT
+    endpoint_authority = alpaca_endpoint_authority(effective_env)
+    endpoint_ok = endpoint_authority["paper_endpoint_only"] is True
     checks.append(
         _check(
             "paper_endpoint_only",
             "PAPER endpoint only",
             "PASS" if endpoint_ok else "BLOCKED",
-            "https://paper-api.alpaca.markets" if endpoint_ok else ("live endpoint blocked" if live_endpoint else "non-paper endpoint configured"),
+            str(endpoint_authority["safe_detail"] if endpoint_ok else endpoint_authority["operator_action"]),
             blocker=not endpoint_ok,
         )
     )
@@ -169,6 +168,10 @@ def build_launch_readiness(
         "alpaca_paper_credentials_configured": alpaca_configured,
         "credential_precedence": credentials.get("precedence") or "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
         "paper_endpoint_only": endpoint_ok,
+        "paper_endpoint_authority": endpoint_authority,
+        "paper_endpoint_status": endpoint_authority["status"],
+        "paper_endpoint_source": endpoint_authority["endpoint_source"],
+        "paper_endpoint_operator_action": endpoint_authority["operator_action"],
         "live_blocked": True,
         "real_money_blocked": True,
         "paper_start_allowed": paper_start_allowed,

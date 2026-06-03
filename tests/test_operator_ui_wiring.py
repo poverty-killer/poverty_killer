@@ -191,6 +191,11 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     text = _app_text()
 
     assert "PAPER Launch Control" in text
+    assert "Alpaca PAPER endpoint" in text
+    assert "Endpoint source" in text
+    assert "paperEndpointStatus" in text
+    assert "paperEndpointOperatorAction" in text
+    assert "Endpoint action:" in text
     assert "data-paper-watchlist" in text
     assert "data-paper-duration" in text
     assert "data-paper-duration-amount" in text
