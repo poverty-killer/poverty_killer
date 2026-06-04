@@ -310,10 +310,24 @@ class OperatorSnapshotProvider:
     def status(self) -> dict[str, Any]:
         supervisor = self._supervisor_snapshot()
         active = supervisor.get("active_session") or {}
+        latest = supervisor.get("latest_session") or {}
         session_status = active.get("status")
         active_profile = active.get("profile") or "UNKNOWN_NO_ACTIVE_RUNTIME"
         watchlist = active.get("watchlist") or []
         process_state = session_status or "NO_ACTIVE_RUNTIME_ATTACHED"
+        paper_start_allowed = supervisor.get("paper_start_allowed") is True
+        ready_idle = not watchlist and paper_start_allowed and supervisor.get("state") == "IDLE"
+        historical_refusal = latest if latest.get("status") == "REFUSED" else None
+        runtime_attachment_state = "READY_IDLE_NO_ACTIVE_RUNTIME" if ready_idle else process_state
+        runtime_attachment_detail = (
+            "Ready. No PAPER run currently attached."
+            if ready_idle
+            else (
+                f"No PAPER run currently attached; start blocked by {supervisor.get('paper_start_refusal_reason') or 'supervisor authority'}."
+                if not watchlist
+                else "PAPER supervisor process is attached."
+            )
+        )
         return {
             "api_version": API_VERSION,
             "data_source": "OPERATOR_BACKEND",
@@ -328,7 +342,11 @@ class OperatorSnapshotProvider:
             "universe": watchlist,
             "asset_classes": ["crypto"] if watchlist else [],
             "last_heartbeat_ts": None,
-            "dominant_blocker": "NO_ACTIVE_RUNTIME_ATTACHED" if not watchlist else "SUPERVISOR_PROCESS_RUNNING_OR_RECENT",
+            "dominant_blocker": runtime_attachment_state if not watchlist else "SUPERVISOR_PROCESS_RUNNING_OR_RECENT",
+            "runtime_attachment_state": runtime_attachment_state,
+            "runtime_attachment_detail": runtime_attachment_detail,
+            "last_historical_refusal": historical_refusal,
+            "last_historical_refusal_reason": historical_refusal.get("refusal_reason") if historical_refusal else None,
             "safety_verdict": "OPERATOR_SUPERVISOR_READY",
             "live_blocked": True,
             "real_money_blocked": True,
@@ -449,26 +467,43 @@ class OperatorSnapshotProvider:
 
     def runtime(self) -> dict[str, Any]:
         supervisor = self._supervisor_snapshot()
+        active = supervisor.get("active_session") or {}
         latest = supervisor.get("latest_session") or {}
+        historical_refusal = latest if latest.get("status") == "REFUSED" else None
+        current_attached = bool(active)
+        runtime_attachment_state = active.get("status") or "NO_ACTIVE_RUNTIME_ATTACHED"
         return {
-            "process_state": latest.get("status") or "NO_ACTIVE_RUNTIME_ATTACHED",
-            "launch_command": latest.get("command_summary"),
-            "duration_seconds": latest.get("duration_seconds"),
-            "started_at": latest.get("started_at"),
-            "shutdown_reason": latest.get("stop_reason"),
-            "bounded_timer_started": bool(latest),
-            "bounded_duration_elapsed": latest.get("status") in {"EXITED", "STOPPED"},
+            "process_state": runtime_attachment_state,
+            "current_runtime_attached": current_attached,
+            "runtime_attachment_state": runtime_attachment_state,
+            "runtime_attachment_detail": (
+                "PAPER supervisor process is attached."
+                if current_attached
+                else "Ready. No PAPER run currently attached."
+                if supervisor.get("paper_start_allowed") is True and supervisor.get("state") == "IDLE"
+                else "No PAPER run currently attached."
+            ),
+            "launch_command": active.get("command_summary"),
+            "duration_seconds": active.get("duration_seconds"),
+            "started_at": active.get("started_at"),
+            "shutdown_reason": active.get("stop_reason"),
+            "bounded_timer_started": bool(active.get("bounded_timer_started")) if active else False,
+            "bounded_duration_elapsed": active.get("status") in {"EXITED", "STOPPED"} if active else False,
             "runtime_commit": None,
-            "session_id": latest.get("session_id"),
-            "pid": latest.get("pid"),
-            "stdout_path": latest.get("stdout_path"),
-            "stderr_path": latest.get("stderr_path"),
-            "wrapper_stdout_path": latest.get("wrapper_stdout_path"),
-            "wrapper_stderr_path": latest.get("wrapper_stderr_path"),
-            "child_stdout_path": latest.get("child_stdout_path"),
-            "child_stderr_path": latest.get("child_stderr_path"),
-            "exit_code": latest.get("exit_code"),
-            "runtime_profile": latest.get("runtime_profile") or self.runtime_config.runtime_profile,
+            "session_id": active.get("session_id"),
+            "pid": active.get("pid"),
+            "stdout_path": active.get("stdout_path"),
+            "stderr_path": active.get("stderr_path"),
+            "wrapper_stdout_path": active.get("wrapper_stdout_path"),
+            "wrapper_stderr_path": active.get("wrapper_stderr_path"),
+            "child_stdout_path": active.get("child_stdout_path"),
+            "child_stderr_path": active.get("child_stderr_path"),
+            "exit_code": active.get("exit_code"),
+            "runtime_profile": active.get("runtime_profile") or self.runtime_config.runtime_profile,
+            "latest_session": latest,
+            "historical_latest_session": latest,
+            "historical_refusal_reason": historical_refusal.get("refusal_reason") if historical_refusal else None,
+            "historical_refusal_session_id": historical_refusal.get("session_id") if historical_refusal else None,
             "supervisor_state": supervisor["state"],
             "duplicate_run_prevention": "ACTIVE",
             "paper_start_allowed": supervisor["paper_start_allowed"],
@@ -485,17 +520,19 @@ class OperatorSnapshotProvider:
             "paper_endpoint_operator_action": supervisor.get("paper_endpoint_operator_action"),
             "min_paper_duration_seconds": supervisor.get("min_paper_duration_seconds"),
             "max_paper_duration_seconds": supervisor.get("max_paper_duration_seconds"),
+            "runner_max_paper_duration_seconds": supervisor.get("runner_max_paper_duration_seconds"),
+            "duration_authority": supervisor.get("duration_authority"),
         }
 
     def profile(self) -> dict[str, Any]:
         supervisor = self._supervisor_snapshot()
-        latest = supervisor.get("latest_session") or {}
-        profile = latest.get("profile") or "UNKNOWN_NO_ACTIVE_RUNTIME"
+        active = supervisor.get("active_session") or {}
+        profile = active.get("profile") or "UNKNOWN_NO_ACTIVE_RUNTIME"
         return {
             "active_threshold_profile": profile,
             "paper_exploration_alpha_active": profile == "PAPER_EXPLORATION_ALPHA",
             "paper_only": True,
-            "activation_status": latest.get("status") or "NO_ACTIVE_RUNTIME_ATTACHED",
+            "activation_status": active.get("status") or "NO_ACTIVE_RUNTIME_ATTACHED",
             "activation_refusal_reason": None,
         }
 

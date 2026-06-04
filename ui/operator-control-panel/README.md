@@ -129,7 +129,8 @@ Operator activation:
   invent positions.
 - The bounded PAPER setup flow calls only `/operator/intent/paper/start` with
   PAPER-only/live-locked/real-money-blocked confirmations. Run PAPER accepts
-  bounded minutes/hours/days from 60 seconds through 7 days.
+  bounded minutes/hours from 60 seconds through 1 day. Longer multi-day runs
+  require separate approval/readiness.
 
 Reality audit / historical test control:
 

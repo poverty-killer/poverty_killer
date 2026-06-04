@@ -5,6 +5,7 @@ import time
 from app.api.operator_readonly_api import API_VERSION, OPERATOR_ACTIVATION_VERSION, OperatorSnapshotProvider, create_operator_app
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.api.operator_session_store import OperatorSessionStore
 from app.operator_credentials.store import LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
 
@@ -139,6 +140,67 @@ def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
     assert runtime_payload["process_state"] == "RUNNING"
     assert runtime_payload["paper_start_allowed"] is False
     assert runtime_payload["paper_stop_allowed"] is True
+
+
+def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
+    runner = FakeRunner()
+    store_path = tmp_path / "state" / "operator" / "sessions.jsonl"
+    store = OperatorSessionStore(path=store_path)
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=runner.repo_root,
+            process_env=dict(PAPER_ENV),
+            session_store_path=str(store_path),
+        ),
+        runner=runner,
+        session_store=store,
+    )
+    first = supervisor.start_paper(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "approve_autonomous_paper": True,
+        }
+    )
+    duplicate = supervisor.start_paper(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "approve_autonomous_paper": True,
+        }
+    )
+    runner.process.exit_code = 0
+    supervisor.status_snapshot()
+    reloaded = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=runner.repo_root,
+            process_env=dict(PAPER_ENV),
+            session_store_path=str(store_path),
+        ),
+        runner=runner,
+        session_store=OperatorSessionStore(path=store_path),
+    )
+    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=reloaded, provider_env=dict(PAPER_ENV)))
+
+    status = _endpoint(app, "/operator/status")()
+    runtime = _endpoint(app, "/operator/runtime")()
+    launch = _endpoint(app, "/operator/launch-readiness")()
+
+    assert first["allowed"] is True
+    assert duplicate["allowed"] is False
+    assert duplicate["reason_code"] == "DUPLICATE_ACTIVE_RUN"
+    assert status["dominant_blocker"] == "READY_IDLE_NO_ACTIVE_RUNTIME"
+    assert status["runtime_attachment_detail"] == "Ready. No PAPER run currently attached."
+    assert status["last_historical_refusal_reason"] == "DUPLICATE_ACTIVE_RUN"
+    assert runtime["process_state"] == "NO_ACTIVE_RUNTIME_ATTACHED"
+    assert runtime["current_runtime_attached"] is False
+    assert runtime["historical_refusal_reason"] == "DUPLICATE_ACTIVE_RUN"
+    assert runtime["paper_start_allowed"] is True
+    assert launch["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
 
 
 def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoint_truth(tmp_path):

@@ -15,7 +15,7 @@ def test_operator_runtime_config_defaults_are_safe(tmp_path):
     assert cfg.allowed_profile == "PAPER_EXPLORATION_ALPHA"
     assert cfg.allowed_watchlist == ("BTC/USD", "ETH/USD", "SOL/USD")
     assert cfg.min_paper_duration_seconds == 60
-    assert cfg.max_paper_duration_seconds == 604800
+    assert cfg.max_paper_duration_seconds == 86400
     assert cfg.operator_session_store_path == tmp_path / "state" / "operator" / "sessions.jsonl"
     assert cfg.world_awareness_cache_path == tmp_path / "state" / "world_awareness" / "operator_events.jsonl"
 
@@ -54,3 +54,17 @@ def test_operator_runtime_config_env_overrides_without_secret_values(tmp_path):
     assert status["real_money_status"] == "BLOCKED"
     assert "PK_LIVE_ENABLED_IGNORED_BY_OPERATOR_API" in status["warnings"]
     assert "PK_REAL_MONEY_ENABLED_IGNORED_BY_OPERATOR_API" in status["warnings"]
+
+
+def test_operator_runtime_config_caps_duration_to_runner_authority(tmp_path):
+    cfg = OperatorRuntimeConfig.from_env(
+        {
+            "PK_ALLOWED_DURATIONS": "300,86400,604800",
+            "PK_MAX_PAPER_DURATION_SECONDS": "604800",
+        },
+        repo_root=tmp_path,
+    )
+
+    assert cfg.max_paper_duration_seconds == 86400
+    assert cfg.allowed_durations == (300, 86400)
+    assert cfg.safe_summary()["runner_max_paper_duration_seconds"] == 86400

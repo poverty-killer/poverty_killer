@@ -58,7 +58,8 @@ def build_watchdog_alerts(
     archive: dict[str, Any],
 ) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
-    if not status.get("supervisor", {}).get("active_session"):
+    supervisor = status.get("supervisor", {})
+    if not supervisor.get("active_session") and supervisor.get("paper_start_allowed") is not True:
         alerts.append(_alert("no_active_runtime", "WARNING", "No active runtime", "No active PAPER process is attached.", source="status"))
     if runtime.get("process_state") in {"FAILED"} or runtime.get("exit_code") not in (None, 0, "0"):
         alerts.append(_alert("session_nonzero_exit", "SAFETY_CRITICAL", "Runtime exited nonzero", f"exit_code={runtime.get('exit_code')}", source="runtime"))

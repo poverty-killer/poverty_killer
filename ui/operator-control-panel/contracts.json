@@ -418,7 +418,7 @@
       "secrets_values_exposed": false
     },
     "/operator/runtime": {
-      "process_state": "RUNNING | STOPPED | REFUSED | NO_ACTIVE_RUNTIME_ATTACHED",
+      "process_state": "RUNNING | STOP_REQUESTED | NO_ACTIVE_RUNTIME_ATTACHED",
       "launch_command": "redacted command or null",
       "duration_seconds": 0,
       "started_at": "ISO-8601 or null",
@@ -673,7 +673,9 @@
       "paper_stop_allowed": false,
       "allowed_durations": [180, 300, 1200, 7200, 10800, 14400],
       "min_paper_duration_seconds": 60,
-      "max_paper_duration_seconds": 604800
+      "max_paper_duration_seconds": 86400,
+      "runner_max_paper_duration_seconds": 86400,
+      "duration_authority": "scripts/run_bounded_paper.ps1"
     },
     "/operator/runs": {
       "source": "OPERATOR_SESSION_STORE",
@@ -1094,7 +1096,7 @@
       "required_body": {
         "mode": "PAPER",
         "profile": "PAPER_EXPLORATION_ALPHA",
-        "duration_seconds": "bounded seconds from 60 to 604800",
+        "duration_seconds": "bounded seconds from 60 to 86400",
         "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
         "approve_autonomous_paper": true,
         "real_money": false,

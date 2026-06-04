@@ -172,22 +172,37 @@ def test_supervisor_rejects_missing_approval_and_out_of_range_duration():
     supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
 
     missing_approval = dict(_valid_request(), approve_autonomous_paper=False)
-    duration = dict(_valid_request(), duration_seconds=604801)
+    duration = dict(_valid_request(), duration_seconds=86401)
 
     assert supervisor.start_paper(missing_approval)["reason_code"] == "AUTONOMOUS_PAPER_APPROVAL_REQUIRED"
     assert supervisor.start_paper(duration)["reason_code"] == "DURATION_ABOVE_MAXIMUM_SECONDS"
     assert runner.started_specs == []
 
 
-def test_supervisor_accepts_custom_duration_up_to_seven_days():
+def test_supervisor_accepts_custom_duration_up_to_one_day():
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+
+    result = supervisor.start_paper(dict(_valid_request(), duration_seconds=86400))
+    snapshot = supervisor.status_snapshot()
+
+    assert result["allowed"] is True
+    assert result["session"]["duration_seconds"] == 86400
+    assert "86400" in runner.started_specs[0].command
+    assert snapshot["max_paper_duration_seconds"] == 86400
+    assert snapshot["runner_max_paper_duration_seconds"] == 86400
+    assert snapshot["duration_authority"] == "scripts/run_bounded_paper.ps1"
+
+
+def test_supervisor_rejects_multi_day_duration_that_runner_would_fail_close():
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
 
     result = supervisor.start_paper(dict(_valid_request(), duration_seconds=604800))
 
-    assert result["allowed"] is True
-    assert result["session"]["duration_seconds"] == 604800
-    assert "604800" in runner.started_specs[0].command
+    assert result["allowed"] is False
+    assert result["reason_code"] == "DURATION_ABOVE_MAXIMUM_SECONDS"
+    assert runner.started_specs == []
 
 
 def test_supervisor_tracks_exit_code_and_status():

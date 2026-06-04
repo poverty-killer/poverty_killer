@@ -676,14 +676,40 @@
     const startDisabled = disabledReason ? "disabled" : "";
     const watchlist = (sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"]).join(",");
     const minDuration = Number(sup.minPaperDurationSeconds || sup.min_paper_duration_seconds || 60);
-    const maxDuration = Number(sup.maxPaperDurationSeconds || sup.max_paper_duration_seconds || 604800);
+    const configuredMaxDuration = Number(sup.maxPaperDurationSeconds || sup.max_paper_duration_seconds || 86400);
+    const runnerMaxDuration = Number(sup.runnerMaxPaperDurationSeconds || sup.runner_max_paper_duration_seconds || 86400);
+    const maxDuration = Math.min(configuredMaxDuration || 86400, runnerMaxDuration || 86400, 86400);
+    const durationOptions = [
+      [180, "3 minutes"],
+      [300, "5 minutes"],
+      [900, "15 minutes"],
+      [1800, "30 minutes"],
+      [3600, "1 hour"],
+      [14400, "4 hours"],
+      [86400, "1 day"]
+    ].filter(([seconds]) => seconds >= minDuration && seconds <= maxDuration);
+    const defaultDuration = durationOptions.some(([seconds]) => seconds === 300)
+      ? 300
+      : ((durationOptions[0] || [minDuration])[0]);
+    const runtimeAttachment = sup.sessionId && sup.sessionId !== "none"
+      ? `PAPER run attached: ${sup.sessionId}`
+      : (sup.paperStartAllowed === true ? "Ready. No PAPER run currently attached." : `No PAPER run currently attached; ${sup.paperStartRefusalReason || "start blocked"}.`);
     return `
       <div class="card span-12 paper-launch-card" data-paper-form-card="${escapeHtml(formId)}">
         <div class="split">
           <h3>PAPER Launch Control</h3>
           ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
         </div>
-        <p class="muted">Starts the existing governed PAPER runner only. Pick minutes, hours, or a 7-day run; the server refuses anything outside ${escapeHtml(formatDuration(minDuration))} to ${escapeHtml(formatDuration(maxDuration))}.</p>
+        <p class="muted">Starts the existing governed PAPER runner only. Current execution-authority max: ${escapeHtml(formatDuration(maxDuration))}. Longer multi-day runs require separate approval/readiness.</p>
+        <div class="status-strip detail-strip">
+          ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
+          ${badge(`Supervisor ${sup.state || "UNKNOWN"}`, statusColor(sup.state || "UNKNOWN"))}
+          ${badge(sup.paperStartAllowed ? "Start allowed" : "Start blocked", sup.paperStartAllowed ? "green" : "yellow")}
+          ${badge("Live locked", "red")}
+          ${badge("Real-money blocked", "red")}
+        </div>
+        <div class="notice">${escapeHtml(runtimeAttachment)}</div>
+        ${sup.lastHistoricalRefusal ? `<div class="notice mono">Last historical refusal: ${tokenText(sup.lastHistoricalRefusal)}. Not current start authority.</div>` : ""}
         <div class="launch-control-layout">
           <div class="launch-input-panel">
             <div class="form-grid">
@@ -691,27 +717,18 @@
                 <input data-paper-watchlist type="text" value="${escapeHtml(watchlist)}" autocomplete="off">
               </label>
               <label>Run length
-                <select data-paper-duration>
-                  ${[
-                    [300, "5 minutes"],
-                    [900, "15 minutes"],
-                    [1800, "30 minutes"],
-                    [3600, "1 hour"],
-                    [14400, "4 hours"],
-                    [86400, "1 day"],
-                    [604800, "7 days"],
-                    ["custom", "Custom minutes / hours / days"]
-                  ].map(([seconds, label]) => `<option value="${seconds}" ${seconds === 604800 ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+                <select data-paper-duration data-paper-duration-max="${escapeHtml(maxDuration)}">
+                  ${durationOptions.map(([seconds, label]) => `<option value="${seconds}" ${seconds === defaultDuration ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+                  <option value="custom">Custom minutes / hours</option>
                 </select>
               </label>
               <label>Custom amount
-                <input data-paper-duration-amount type="number" min="1" max="7" value="7" inputmode="numeric">
+                <input data-paper-duration-amount type="number" min="1" max="24" value="5" inputmode="numeric">
               </label>
               <label>Custom unit
                 <select data-paper-duration-unit>
-                  <option value="minutes">minutes</option>
+                  <option value="minutes" selected>minutes</option>
                   <option value="hours">hours</option>
-                  <option value="days" selected>days</option>
                 </select>
               </label>
             </div>
@@ -825,7 +842,7 @@
           escapeHtml(p.exposurePercentOfPortfolio || "unknown"),
           p.brokerConfirmed ? badge("broker-confirmed", "green") : badge(p.source || portfolio.dataSource || "unavailable", statusColor(p.source || portfolio.dataSource || "unavailable"))
         ])
-      ) : `<p class="muted">${escapeHtml(unavailable ? `No current PAPER positions shown; broker status is ${portfolio.status || "UNKNOWN"}: ${portfolio.unavailableReason || "UNKNOWN"}.` : "No current PAPER positions.")}</p>`}</div>
+      ) : `<p class="muted">${escapeHtml(unavailable ? `No current PAPER positions shown; broker data unavailable; broker status is ${portfolio.status || "UNKNOWN"}: ${portfolio.unavailableReason || "UNKNOWN"}.` : "No current PAPER positions.")}</p>`}</div>
     `;
   }
 
@@ -858,7 +875,7 @@
         ["Decision summary", escapeHtml(explain.headline || data.status.lastDecision || "unavailable")],
         ["Output", badge(explain.output || "UNKNOWN", statusColor(explain.output || "UNKNOWN"))],
         ["NetEdge", badge(explain.netEdge || "UNKNOWN", statusColor(explain.netEdge || "UNKNOWN"))],
-        ["Biggest blocker", tokenText(data.status.dominantBlocker || (blockers[0] || "none reported"))],
+        ["Current runtime state", tokenText(data.status.dominantBlocker || (blockers[0] || "none reported"))],
         ["Evaluating", escapeHtml(explain.nextBestAction || "No DecisionFrame summary loaded.")]
       ])}
         <div class="status-strip">${blockers.length ? blockers.map((item) => badge(item, statusColor(item))).join("") : badge("no blockers loaded", "gray")}</div>
@@ -998,7 +1015,7 @@
           ["Last heartbeat", badge(s.lastHeartbeat, "green")],
           ["Market data", escapeHtml(s.marketData)],
           ["Universe", escapeHtml(s.universe.join(", "))],
-          ["Dominant blocker", badge(s.dominantBlocker, "yellow")]
+          ["Current runtime state", badge(s.dominantBlocker, s.dominantBlocker === "READY_IDLE_NO_ACTIVE_RUNTIME" ? "green" : "yellow")]
         ])}</div>
         <div class="card span-4"><h3>Broker Boundary</h3>${kv([
           ["POST count", escapeHtml(s.brokerPostCount)],
@@ -1373,6 +1390,8 @@
           ["PAPER endpoint", badge(launch.paperEndpointStatus || (launch.paperEndpointOnly ? "confirmed" : "blocked/unknown"), launch.paperEndpointOnly ? "green" : "red")],
           ["Endpoint source", badge(launch.paperEndpointSource || "UNKNOWN", launch.paperEndpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" ? "cyan" : "gray")],
           ["Paper start", badge(launch.paperStartAllowed ? "allowed" : "blocked", launch.paperStartAllowed ? "green" : "red")],
+          ["Runtime attachment", escapeHtml(sup.runtimeAttachmentDetail || "No PAPER run currently attached.")],
+          ["Max duration", escapeHtml(formatDuration(sup.maxPaperDurationSeconds || 86400))],
           ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
           ["Backend checks", badge((launch.backendDegradedReasons || []).length ? `${launch.backendDegradedReasons.length} degraded` : "no degraded checks", (launch.backendDegradedReasons || []).length ? "yellow" : "green")]
         ])}
@@ -1394,8 +1413,10 @@
           ["Supervisor", badge(sup.state, statusColor(sup.state))],
           ["Session", escapeHtml(sup.sessionId || "none")],
           ["Paper start", badge(sup.paperStartAllowed ? "allowed" : "blocked", sup.paperStartAllowed ? "green" : "yellow")],
+          ["Runtime attachment", escapeHtml(sup.runtimeAttachmentDetail || "No PAPER run currently attached.")],
           ["PID", escapeHtml(sup.pid || "none")],
           ["Duration", escapeHtml(duration)],
+          ["Max duration", escapeHtml(formatDuration(sup.maxPaperDurationSeconds || 86400))],
           ["Wrapper stdout", escapeHtml(sup.wrapperStdoutPath || sup.stdoutPath || "not available")],
           ["Wrapper stderr", escapeHtml(sup.wrapperStderrPath || sup.stderrPath || "not available")],
           ["Child stdout", escapeHtml(sup.childStdoutPath || "not available")],
@@ -1413,7 +1434,7 @@
             <button class="intent-button paper" disabled>Export run report - future server-authorized intent</button>
             <button class="intent-button live" disabled>Live start locked - LIVE_NOT_APPROVED</button>
             <div class="notice mono">Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
-            <div class="notice mono">Last refused intent: ${sup.lastRefusedIntent ? tokenText(sup.lastRefusedIntent) : "none"}</div>
+            <div class="notice mono">Last historical refusal: ${sup.lastHistoricalRefusal ? tokenText(sup.lastHistoricalRefusal) : "none"}</div>
           </div>
         </div>
       </div>
@@ -2222,7 +2243,7 @@
         `supervisor=${data.supervisor.state}`,
         `session=${data.supervisor.sessionId || "none"}`,
         `paper_start_allowed=${data.supervisor.paperStartAllowed === true}`,
-        `last_refused_intent=${data.supervisor.lastRefusedIntent || "none"}`
+        `last_historical_refusal=${data.supervisor.lastHistoricalRefusal || "none"}`
       ],
       decision: [
         `headline=${explain.headline}`,
@@ -2357,7 +2378,7 @@
         uptime: data.status.uptime,
         paper_start_allowed: data.supervisor.paperStartAllowed === true,
         paper_stop_allowed: data.supervisor.paperStopAllowed === true,
-        last_refused_intent: data.supervisor.lastRefusedIntent || "none"
+        last_historical_refusal: data.supervisor.lastHistoricalRefusal || "none"
       },
       selected_run: latestRun,
       model_policy: {
@@ -3388,6 +3409,10 @@
   function renderRail() {
     const critical = data.alerts.filter((alert) => alert.severity === "SAFETY_CRITICAL").length;
     const pendingAI = data.ai.pendingReviewCount || 0;
+    const readyIdle = data.status.dominantBlocker === "READY_IDLE_NO_ACTIVE_RUNTIME";
+    const currentStateTitle = readyIdle ? "Current Runtime State" : "Dominant Blocker";
+    const currentStateColor = readyIdle ? "green" : "yellow";
+    const historicalRefusal = data.supervisor.lastHistoricalRefusal || "none";
     document.querySelector(".rail").innerHTML = `
       <div class="card rail-card"><h3>Current Alerts</h3>
         <div class="stack">
@@ -3398,11 +3423,17 @@
           ${badge(`${critical} critical`, critical ? "red" : "gray")}
         </div>
       </div>
-      <div class="card rail-card"><h3>Dominant Blocker</h3>
-        <div class="mono">${tokenText(data.status.dominantBlocker)}</div>
+      <div class="card rail-card"><h3>${escapeHtml(currentStateTitle)}</h3>
+        <div class="stack">
+          ${badge(data.status.dominantBlocker, currentStateColor)}
+          <div>${escapeHtml(data.supervisor.runtimeAttachmentDetail || data.status.lastDecision)}</div>
+        </div>
       </div>
       <div class="card rail-card"><h3>Last Decision</h3>
         <div>${escapeHtml(data.status.lastDecision)}</div>
+      </div>
+      <div class="card rail-card"><h3>Last Historical Refusal</h3>
+        <div class="mono">${historicalRefusal === "none" ? "none" : tokenText(historicalRefusal)}</div>
       </div>
       <div class="card rail-card"><h3>Supervisor</h3>
         <div class="stack">
@@ -3667,13 +3698,21 @@
     const endpointFailures = payload.endpointFailures || {};
     const supervisor = status.supervisor || latestRun || {};
     const activeSession = supervisor.active_session || {};
-    const latestSession = supervisor.latest_session || latestRun.latest_session || {};
+    const latestSession = supervisor.latest_session || latestRun.latest_session || runtime.historical_latest_session || runtime.latest_session || {};
     const hasActiveSession = Boolean(activeSession && activeSession.session_id);
-    const latestRefused = latestSession.status === "REFUSED" || runtime.process_state === "REFUSED";
-    const latestRefusalReason = pick(latestSession.refusal_reason || runtime.refusal_reason, null);
-    const latestRefusedIntent = latestRefused
+    const latestRefused = latestSession.status === "REFUSED";
+    const latestRefusalReason = pick(latestSession.refusal_reason || runtime.historical_refusal_reason, null);
+    const latestHistoricalRefusal = latestRefused
       ? `paper_start: ${latestRefusalReason || "REFUSED"}${latestSession.session_id ? ` (${latestSession.session_id})` : ""}`
       : null;
+    const supervisorStartAllowed = supervisor.paper_start_allowed === true || runtime.paper_start_allowed === true;
+    const readyIdleNoRuntime = !hasActiveSession
+      && supervisorStartAllowed
+      && (
+        status.dominant_blocker === "READY_IDLE_NO_ACTIVE_RUNTIME"
+        || runtime.runtime_attachment_state === "NO_ACTIVE_RUNTIME_ATTACHED"
+        || launchReadiness.final_launch_readiness === "READY_FOR_BOUNDED_PAPER"
+      );
 
     next.meta.dataSource = "OPERATOR_BACKEND";
     next.meta.buildMode = "operator_backend_supervisor_ready";
@@ -3700,10 +3739,12 @@
     next.status.brokerDeleteCount = pick(status.broker_delete_count, 0);
     next.status.mutationAuthorizedCount = pick(status.mutation_authorized_count, 0);
     next.status.safetyVerdict = pick(status.safety_verdict, "READ_ONLY_BACKEND_IDLE");
-    next.status.dominantBlocker = pick(status.dominant_blocker, "NO_ACTIVE_RUNTIME_ATTACHED");
+    next.status.dominantBlocker = readyIdleNoRuntime
+      ? "READY_IDLE_NO_ACTIVE_RUNTIME"
+      : pick(status.dominant_blocker, "NO_ACTIVE_RUNTIME_ATTACHED");
     next.status.lastDecision = hasActiveSession
       ? "Decision detail unavailable from backend summary"
-      : (latestRefusedIntent ? `No active PAPER run; last refused intent ${latestRefusedIntent}` : "No active PAPER run");
+      : (readyIdleNoRuntime ? "Ready. No PAPER run currently attached." : (latestHistoricalRefusal ? `No active PAPER run. Last historical refusal ${latestHistoricalRefusal}` : "No active PAPER run"));
     next.supervisor.state = pick(supervisor.state, "UNKNOWN");
     next.supervisor.sessionId = hasActiveSession ? pick(activeSession.session_id || supervisor.active_session_id, "none") : "none";
     next.supervisor.pid = hasActiveSession ? pick(activeSession.pid || runtime.pid, "none") : "none";
@@ -3717,13 +3758,17 @@
     next.supervisor.wrapperStderrPath = hasActiveSession ? pick(activeSession.wrapper_stderr_path || runtime.wrapper_stderr_path, next.supervisor.stderrPath) : "not available";
     next.supervisor.childStdoutPath = hasActiveSession ? pick(activeSession.child_stdout_path || runtime.child_stdout_path, "not available") : "not available";
     next.supervisor.childStderrPath = hasActiveSession ? pick(activeSession.child_stderr_path || runtime.child_stderr_path, "not available") : "not available";
-    next.supervisor.paperStartAllowed = supervisor.paper_start_allowed === true || runtime.paper_start_allowed === true;
+    next.supervisor.paperStartAllowed = supervisorStartAllowed;
     next.supervisor.paperStopAllowed = supervisor.paper_stop_allowed === true || runtime.paper_stop_allowed === true;
     next.supervisor.paperStartRefusalReason = pick(supervisor.paper_start_refusal_reason || runtime.paper_start_refusal_reason, null);
     next.supervisor.paperStopRefusalReason = pick(supervisor.paper_stop_refusal_reason || runtime.paper_stop_refusal_reason, null);
     next.supervisor.minPaperDurationSeconds = pick(supervisor.min_paper_duration_seconds || runtime.min_paper_duration_seconds, 60);
-    next.supervisor.maxPaperDurationSeconds = pick(supervisor.max_paper_duration_seconds || runtime.max_paper_duration_seconds, 604800);
-    next.supervisor.lastRefusedIntent = latestRefusedIntent;
+    next.supervisor.maxPaperDurationSeconds = pick(supervisor.max_paper_duration_seconds || runtime.max_paper_duration_seconds, 86400);
+    next.supervisor.runnerMaxPaperDurationSeconds = pick(supervisor.runner_max_paper_duration_seconds || runtime.runner_max_paper_duration_seconds, 86400);
+    next.supervisor.durationAuthority = pick(supervisor.duration_authority || runtime.duration_authority, "scripts/run_bounded_paper.ps1");
+    next.supervisor.runtimeAttachmentDetail = pick(status.runtime_attachment_detail || runtime.runtime_attachment_detail, readyIdleNoRuntime ? "Ready. No PAPER run currently attached." : "No active PAPER run currently attached.");
+    next.supervisor.lastHistoricalRefusal = latestHistoricalRefusal;
+    next.supervisor.lastRefusedIntent = latestHistoricalRefusal;
 
     next.liveReadiness.state = pick(readiness.live_status, "LIVE_LOCKED");
     next.liveReadiness.refusal = pick(readiness.refusal_reason, "LIVE_NOT_APPROVED");
@@ -4301,8 +4346,10 @@
     const card = document.querySelector(`[data-paper-form-card="${formId || "command"}"]`) || document.querySelector("[data-paper-form-card]");
     const watchlistRaw = ((card && card.querySelector("[data-paper-watchlist]")) || {}).value || "BTC/USD,ETH/USD,SOL/USD";
     const durationRaw = ((card && card.querySelector("[data-paper-duration]")) || {}).value || "300";
-    const customAmountRaw = ((card && card.querySelector("[data-paper-duration-amount]")) || {}).value || "7";
-    const customUnit = ((card && card.querySelector("[data-paper-duration-unit]")) || {}).value || "days";
+    const durationSelect = card && card.querySelector("[data-paper-duration]");
+    const maxDurationSeconds = Number((durationSelect && durationSelect.dataset && durationSelect.dataset.paperDurationMax) || data.supervisor.maxPaperDurationSeconds || 86400);
+    const customAmountRaw = ((card && card.querySelector("[data-paper-duration-amount]")) || {}).value || "5";
+    const customUnit = ((card && card.querySelector("[data-paper-duration-unit]")) || {}).value || "minutes";
     const profileAlpha = ((card && card.querySelector("[data-paper-profile-alpha]")) || {}).checked !== false;
     const confirmPaper = ((card && card.querySelector("[data-paper-confirm-paper]")) || {}).checked === true;
     const confirmLiveLocked = ((card && card.querySelector("[data-paper-confirm-live-locked]")) || {}).checked === true;
@@ -4317,6 +4364,7 @@
       watchlist: watchlistRaw.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean),
       durationSeconds,
       profile: profileAlpha ? "PAPER_EXPLORATION_ALPHA" : data.status.activeProfile,
+      maxDurationSeconds,
       confirmPaper,
       confirmLiveLocked,
       confirmRealMoneyBlocked,
@@ -4368,6 +4416,10 @@
         const form = paperRunFormValues(sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "command");
         if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked || !form.confirmNoManualTrades) {
           window.alert("Confirm PAPER-only, live locked, real-money blocked, and no manual trades before requesting the governed PAPER start.");
+          return;
+        }
+        if (form.durationSeconds > form.maxDurationSeconds) {
+          window.alert(`Selected duration exceeds the current runner authority max of ${formatDuration(form.maxDurationSeconds)}. Longer multi-day runs require separate approval/readiness.`);
           return;
         }
         const confirmed = window.confirm(

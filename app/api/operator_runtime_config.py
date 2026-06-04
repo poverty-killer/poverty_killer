@@ -24,7 +24,8 @@ RUNTIME_PROFILES = {
 DEFAULT_ALLOWED_WATCHLIST = ("BTC/USD", "ETH/USD", "SOL/USD")
 DEFAULT_ALLOWED_DURATIONS = (180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400)
 DEFAULT_MIN_PAPER_DURATION_SECONDS = 60
-DEFAULT_MAX_PAPER_DURATION_SECONDS = 604800
+RUNNER_MAX_PAPER_DURATION_SECONDS = 86400
+DEFAULT_MAX_PAPER_DURATION_SECONDS = RUNNER_MAX_PAPER_DURATION_SECONDS
 
 
 def repo_root_from_here() -> Path:
@@ -44,7 +45,7 @@ def _split_csv(value: str | None, fallback: tuple[str, ...]) -> tuple[str, ...]:
     return rows or fallback
 
 
-def _split_ints(value: str | None, fallback: tuple[int, ...]) -> tuple[int, ...]:
+def _split_ints(value: str | None, fallback: tuple[int, ...], *, maximum: int | None = None) -> tuple[int, ...]:
     if not value:
         return fallback
     parsed: list[int] = []
@@ -56,6 +57,10 @@ def _split_ints(value: str | None, fallback: tuple[int, ...]) -> tuple[int, ...]
             parsed.append(int(text))
         except ValueError:
             continue
+    if maximum is not None:
+        parsed = [item for item in parsed if 0 < item <= maximum]
+    else:
+        parsed = [item for item in parsed if item > 0]
     return tuple(dict.fromkeys(parsed)) or fallback
 
 
@@ -126,6 +131,21 @@ class OperatorRuntimeConfig:
             env_map.get("PK_WORLD_AWARENESS_CACHE_PATH"),
             "state/world_awareness/operator_events.jsonl",
         )
+        max_duration = max(
+            min(
+                _positive_int(
+                    env_map.get("PK_MAX_PAPER_DURATION_SECONDS"),
+                    DEFAULT_MAX_PAPER_DURATION_SECONDS,
+                ),
+                RUNNER_MAX_PAPER_DURATION_SECONDS,
+            ),
+            DEFAULT_MIN_PAPER_DURATION_SECONDS,
+        )
+        allowed_durations = _split_ints(
+            env_map.get("PK_ALLOWED_DURATIONS"),
+            tuple(item for item in DEFAULT_ALLOWED_DURATIONS if item <= max_duration),
+            maximum=max_duration,
+        )
         return cls(
             repo_root=root,
             runtime_profile=profile,
@@ -140,15 +160,12 @@ class OperatorRuntimeConfig:
             paper_runner_mode=str(env_map.get("PK_PAPER_RUNNER_MODE") or "LOCAL_POWERSHELL").strip().upper(),
             allowed_watchlist=_split_csv(env_map.get("PK_ALLOWED_WATCHLIST"), DEFAULT_ALLOWED_WATCHLIST),
             allowed_profile=str(env_map.get("PK_ALLOWED_PROFILE") or "PAPER_EXPLORATION_ALPHA").strip().upper(),
-            allowed_durations=_split_ints(env_map.get("PK_ALLOWED_DURATIONS"), DEFAULT_ALLOWED_DURATIONS),
+            allowed_durations=allowed_durations,
             min_paper_duration_seconds=_positive_int(
                 env_map.get("PK_MIN_PAPER_DURATION_SECONDS"),
                 DEFAULT_MIN_PAPER_DURATION_SECONDS,
             ),
-            max_paper_duration_seconds=_positive_int(
-                env_map.get("PK_MAX_PAPER_DURATION_SECONDS"),
-                DEFAULT_MAX_PAPER_DURATION_SECONDS,
-            ),
+            max_paper_duration_seconds=max_duration,
             live_enabled=_truthy(env_map.get("PK_LIVE_ENABLED")),
             real_money_enabled=_truthy(env_map.get("PK_REAL_MONEY_ENABLED")),
             alpaca_credentials_present=bool(
@@ -179,6 +196,7 @@ class OperatorRuntimeConfig:
             "allowed_durations": list(self.allowed_durations),
             "min_paper_duration_seconds": self.min_paper_duration_seconds,
             "max_paper_duration_seconds": self.max_paper_duration_seconds,
+            "runner_max_paper_duration_seconds": RUNNER_MAX_PAPER_DURATION_SECONDS,
             "live_enabled": self.live_enabled,
             "real_money_enabled": self.real_money_enabled,
             "alpaca_credentials_present": self.alpaca_credentials_present,

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.api.operator_runtime_config import OperatorRuntimeConfig, RUNNER_MAX_PAPER_DURATION_SECONDS
 from app.api.operator_session_store import OperatorSessionStore
 from app.operator_credentials.store import alpaca_endpoint_authority
 
@@ -28,7 +28,7 @@ PAPER_PROFILE = "PAPER_EXPLORATION_ALPHA"
 DEFAULT_WATCHLIST = ("BTC/USD", "ETH/USD", "SOL/USD")
 DEFAULT_ALLOWED_DURATIONS = frozenset({180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400})
 DEFAULT_MIN_PAPER_DURATION_SECONDS = 60
-DEFAULT_MAX_PAPER_DURATION_SECONDS = 604800
+DEFAULT_MAX_PAPER_DURATION_SECONDS = RUNNER_MAX_PAPER_DURATION_SECONDS
 
 
 def utc_now_iso() -> str:
@@ -202,13 +202,15 @@ class PaperSupervisorConfig:
 
     @classmethod
     def from_runtime_config(cls, runtime_config: OperatorRuntimeConfig) -> "PaperSupervisorConfig":
+        max_duration = min(runtime_config.max_paper_duration_seconds, RUNNER_MAX_PAPER_DURATION_SECONDS)
+        allowed_durations = frozenset(duration for duration in runtime_config.allowed_durations if duration <= max_duration)
         return cls(
             repo_root=runtime_config.repo_root,
             allowed_profile=runtime_config.allowed_profile,
             allowed_watchlist=runtime_config.allowed_watchlist,
-            allowed_durations=frozenset(runtime_config.allowed_durations),
+            allowed_durations=allowed_durations,
             min_paper_duration_seconds=runtime_config.min_paper_duration_seconds,
-            max_paper_duration_seconds=runtime_config.max_paper_duration_seconds,
+            max_paper_duration_seconds=max_duration,
             log_directory=str(runtime_config.log_dir.relative_to(runtime_config.repo_root) / "operator_runs")
             if runtime_config.log_dir.is_relative_to(runtime_config.repo_root)
             else str(runtime_config.log_dir / "operator_runs"),
@@ -285,6 +287,8 @@ class OperatorPaperSupervisor:
             "allowed_durations": sorted(self.config.allowed_durations),
             "min_paper_duration_seconds": self.config.min_paper_duration_seconds,
             "max_paper_duration_seconds": self.config.max_paper_duration_seconds,
+            "runner_max_paper_duration_seconds": RUNNER_MAX_PAPER_DURATION_SECONDS,
+            "duration_authority": "scripts/run_bounded_paper.ps1",
             "session_store": self.session_store.status(),
             "audit_event_count": len(self._audit_events),
             "last_audit_event": self._audit_events[-1].as_dict() if self._audit_events else None,

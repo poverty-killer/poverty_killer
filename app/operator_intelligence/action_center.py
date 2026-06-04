@@ -38,8 +38,14 @@ def build_action_center(
         _item("live_locked", "BLOCKER", "Live trading is locked", "LIVE_NOT_APPROVED remains the active live state.", source="readiness"),
         _item("real_money_blocked", "BLOCKER", "Real-money mode is blocked", "Real-money authority is not available to operator UI or AI.", source="readiness"),
     ]
-    if not status.get("supervisor", {}).get("active_session"):
-        items.append(_item("no_active_runtime", "INFO", "No active runtime", "No active PAPER supervisor process is attached.", source="status"))
+    supervisor = status.get("supervisor", {})
+    if not supervisor.get("active_session"):
+        detail = (
+            "Ready. No PAPER run currently attached."
+            if supervisor.get("paper_start_allowed") is True
+            else "No active PAPER supervisor process is attached."
+        )
+        items.append(_item("no_active_runtime", "INFO", "No active runtime", detail, source="status"))
     for code in readiness.get("cloud_missing_prerequisites") or ():
         items.append(_item(f"cloud_missing:{code}", "WARNING", "Cloud prerequisite missing", str(code), source="readiness"))
     for code in readiness.get("missing_prerequisites") or ():
