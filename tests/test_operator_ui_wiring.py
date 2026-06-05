@@ -22,27 +22,31 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     assert "data-ai-chief-ask" in text
     assert "data-ai-chief-clear" in text
     assert "/operator/ai/ask" in text
-    assert "Ask a page-aware question" in text
-    assert "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" in text
-    assert "provider_mode=" in text
-    assert "model_quality=" in text
-    assert "reasoning_policy=" in text
-    assert "governance_suitable=" in text
-    assert "Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Trading Strategist + Market Research Chief + Risk Officer + Execution/TCA Auditor + Operator Guide" in text
-    assert "Advisor Answer" in text
-    assert "Next Step" in text
-    assert "Compact Evidence Summary" in text
-    assert "Advanced details: context, provider diagnostics, safety flags" in text
+    assert "Ask what is blocking PAPER, whether the bot is ready, or what to do next..." in text
+    assert "aiConversation" in text
+    assert "appendAiMessage" in text
+    assert "replaceAiMessage" in text
+    assert "renderAiConversationThread" in text
+    assert "data-ai-assistant-loading" in text
+    assert "Asking Chief Quant Advisor..." in text
+    assert "data-ai-answer-card" in text
+    assert "data-ai-copy-answer" in text
+    assert "Copy answer" in text
+    assert "Next step:" in text
+    assert "Evidence Summary" in text
+    assert "Advanced details" in text
     assert "data-ai-chat-scroll-container" in text
     assert "ai-chief-response-end" in text
     assert "scheduleAiOverlayScroll" in text
     assert "requestAnimationFrame" in text
-    assert "AI provider error. Local fallback can still explain operator status." in text
-    assert "DETERMINISTIC FALLBACK - not a full AI quant reasoning response." in text
+    assert "Type a question first." in text
+    assert "Provider error shown. Local fallback is labeled; no silent provider switch occurred." in text
+    assert "Deterministic local fallback. Limited advisory answer." in text
+    assert "Fallback:" in text
     assert "More prompts" in text
     assert "AI_PRIMARY_PROMPT_LIMIT" in text
     overlay = text[text.index("function renderAiChiefOverlay"):text.index("function setAiOverlayOpen")]
-    assert overlay.index("Advisor Answer") < overlay.index("renderAiCollapsedDetails")
+    assert overlay.index("renderAiConversationThread") < overlay.index("ai-composer")
 
 
 def test_commercial_navigation_groups_keep_all_pages_accessible():
@@ -94,7 +98,9 @@ def test_ai_advisor_is_docked_and_resizes_layout_not_overlay_first():
     assert ".ai-chief-drawer.open" in css
     assert "pointer-events: auto" in css
     assert ".ai-chief-body" in css
+    assert ".ai-chat-thread" in css
     assert "overflow-y: auto" in css
+    assert "overflow: hidden" in css
     assert ".ai-chief-backdrop.open" in css
     assert "--ai-dock-width: clamp(360px, 28vw, 420px)" in css
     assert "resize: horizontal" in css
@@ -106,11 +112,17 @@ def test_ai_prompts_are_limited_with_more_prompts_expander():
 
     assert "primaryAiPrompts" in text
     assert "moreAiPrompts" in text
-    assert "AI_PRIMARY_PROMPT_LIMIT = 6" in text
+    assert "AI_PRIMARY_PROMPT_LIMIT = 4" in text
+    assert "What is blocking PAPER?" in text
+    assert "Can I start PAPER?" in text
+    assert "Summarize portfolio truth" in text
+    assert "Draft Codex packet" in text
     assert "ai-more-prompts" in text
     assert "More prompts" in text
     assert "AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT)" in text
-    assert "const safeItems = (items || []).slice(0, 3)" in text
+    assert "askAiChiefQuestion(aiPrompt.dataset.aiChiefPrompt)" in text
+    assert "const bullets = aiEvidenceBullets" in text
+    assert "uniquePrompts(bullets).slice(0, 3)" in text
 
 
 def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
@@ -130,6 +142,9 @@ def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
     assert "data-ai-use-supreme-board" in text
     assert "active_provider: id" in text
     assert "no paid call occurred" in text
+    assert "safe local fallback answered this question" in text
+    assert "Safe local fallback" in text
+    assert "LOCAL_DETERMINISTIC" in text
 
 
 def test_ai_packet_output_is_collapsed_and_copyable_by_default():
@@ -142,6 +157,21 @@ def test_ai_packet_output_is_collapsed_and_copyable_by_default():
     assert "packetText" in text
     assert "Supreme Board packet is ready. Use View packet" in text
     assert "Draft packet is ready. Use View packet" in text
+
+
+def test_ai_chat_thread_has_user_loading_answer_and_latest_anchor_slots():
+    text = _app_text()
+
+    assert "aiConversation" in text
+    assert "appendAiMessage({ role: \"user\", status: \"complete\"" in text
+    assert "status: \"loading\"" in text
+    assert "data-ai-assistant-loading" in text
+    assert "replaceAiMessage(loadingMessage.id" in text
+    assert "data-ai-answer-card" in text
+    assert "data-ai-copy-answer" in text
+    assert "data-ai-chat-scroll-container" in text
+    assert "ai-chief-response-end" in text
+    assert "container.scrollTop = container.scrollHeight" in text
 
 
 def test_portfolio_home_has_commercial_cockpit_lane_and_primary_actions():
@@ -353,7 +383,9 @@ def test_ai_ask_uses_active_router_provider_and_refreshes_after_settings_save():
     assert "data = await loadData()" in save_fn
     assert "renderTopBar()" in save_fn
     assert "Active Router" in text
-    assert "active ${activeProviderLabel}" in text
+    assert "compactLine = `${currentProviderDisplay} active" in text
+    assert "safe local fallback answered this question" in text
+    assert "Currently used for ask" in text
 
 
 def test_portfolio_ui_accepts_exact_unavailable_statuses_not_only_old_generic_status():

@@ -50,12 +50,15 @@
   ]);
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
   const AI_QUICK_PROMPTS = [
+    "What is blocking PAPER?",
+    "Can I start PAPER?",
+    "Summarize portfolio truth",
+    "Draft Codex packet",
     "Explain this page.",
     "What do I do next?",
     "Why is this blocked?",
-    "Why is PAPER run blocked?",
     "Explain my positions.",
-    "Plan my PAPER run.",
+    "Plan my PAPER smoke test.",
     "Audit readiness.",
     "Where is the edge?",
     "What is the weakest assumption?",
@@ -66,11 +69,10 @@
     "What evidence blocks live readiness?",
     "Critique latest run.",
     "Compare latest run to expected behavior.",
-    "Draft a Codex packet.",
     "Draft Codex packet request.",
     "Review provider/data readiness."
   ];
-  const AI_PRIMARY_PROMPT_LIMIT = 6;
+  const AI_PRIMARY_PROMPT_LIMIT = 4;
   const AI_PRESERVED_BOOLEAN_KEYS = new Set([
     "secrets_values_exposed",
     "secretsValuesExposed",
@@ -184,11 +186,14 @@
   let aiOverlayOpen = false;
   let aiWideMode = false;
   let aiSelectedQuestion = AI_QUICK_PROMPTS[0];
-  let aiQuestionText = AI_QUICK_PROMPTS[0];
+  let aiQuestionText = "";
   let aiOverlayResponse = "";
   let aiOverlayLastResult = null;
   let aiOverlayError = "";
   let aiOverlayBusy = false;
+  let aiConversation = [];
+  let aiMessageSequence = 0;
+  let aiUserPinnedScroll = false;
   let homeAiQuestionText = "Review launch readiness, portfolio state, and the safest next PAPER step.";
   let homeAiResponse = "";
   let homeAiLastResult = null;
@@ -471,7 +476,7 @@
     const common = ["Explain this page.", "What do I do next?"];
     const byPage = {
       positions: ["Explain my positions.", "What is my exposure?", "What is risky in my portfolio?"],
-      command: ["Why is PAPER run blocked?", "Plan my PAPER run.", "How do I start a 7-day PAPER run?"],
+      command: ["Why is PAPER run blocked?", "Plan my PAPER smoke test.", "How do I start an approved PAPER smoke test?"],
       providers: ["Where do I enter Alpaca keys?", "Why is Alpaca missing if I entered keys?", "What does Local credential vault mean?"],
       activity: ["Why is this blocked?", "Plan my PAPER run.", "What should be monitored during the run?"],
       ai: ["Audit readiness.", "Draft Codex packet request.", "What should I ask Codex to fix?"],
@@ -487,7 +492,7 @@
   }
 
   function primaryAiPrompts(pageId) {
-    return uniquePrompts(pageAwareAiPrompts(pageId || activeScreenId || "positions").concat(AI_QUICK_PROMPTS)).slice(0, AI_PRIMARY_PROMPT_LIMIT);
+    return AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT);
   }
 
   function moreAiPrompts(pageId) {
@@ -2631,12 +2636,126 @@
     if (aiOverlayBusy && !result) return "Asking Chief Quant Advisor...";
     if (!result) return "Local deterministic guide preview. Ask a question for a fresh advisory response.";
     if (result.providerMode === "PROVIDER_ERROR" || result.answerSource === "PROVIDER_ERROR") {
-      return "AI provider error. Local fallback can still explain operator status.";
+      return "Provider error shown. Local fallback is labeled; no silent provider switch occurred.";
     }
     if (result.providerMode === "DETERMINISTIC_FALLBACK" || result.modelQuality === "FALLBACK_ONLY") {
-      return "DETERMINISTIC FALLBACK - not a full AI quant reasoning response.";
+      return "Deterministic local fallback. Limited advisory answer.";
     }
     return "Live advisory response returned. Advisory only.";
+  }
+
+  function aiPacketText(result) {
+    if (!result) return "";
+    return result.packetText || (result.answerSource === "SUPREME_BOARD_PACKET" ? result.answer : "");
+  }
+
+  function aiProviderErrorText(result) {
+    if (!result) return "";
+    return result.providerErrorCategory || result.providerErrorMessageSafe || "";
+  }
+
+  function aiResultIsFallback(result) {
+    if (!result) return false;
+    return result.providerMode === "DETERMINISTIC_FALLBACK" || result.modelQuality === "FALLBACK_ONLY" || result.answerSource === "LOCAL_DETERMINISTIC";
+  }
+
+  function aiResultIsProviderError(result) {
+    if (!result) return false;
+    return result.providerMode === "PROVIDER_ERROR" || result.answerSource === "PROVIDER_ERROR" || Boolean(aiProviderErrorText(result));
+  }
+
+  function aiMessageTime(value) {
+    const date = value ? new Date(value) : new Date();
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function nextAiMessageId(prefix) {
+    aiMessageSequence += 1;
+    return `${prefix || "ai"}-${aiMessageSequence}`;
+  }
+
+  function appendAiMessage(message) {
+    const now = new Date().toISOString();
+    const next = {
+      id: message.id || nextAiMessageId(message.role || "message"),
+      role: message.role || "assistant",
+      status: message.status || "complete",
+      question: message.question || "",
+      answer: message.answer || "",
+      result: message.result || null,
+      routeLabel: message.routeLabel || "",
+      createdAt: message.createdAt || now,
+      updatedAt: message.updatedAt || now,
+      error: message.error || ""
+    };
+    aiConversation = aiConversation.concat(next);
+    return next;
+  }
+
+  function replaceAiMessage(messageId, patch) {
+    const now = new Date().toISOString();
+    aiConversation = aiConversation.map((message) => (
+      message.id === messageId ? { ...message, ...patch, updatedAt: now } : message
+    ));
+  }
+
+  function appendAiCompletedExchange(question, result, options) {
+    const normalized = result && result.providerMode ? result : normalizeAiAskResult(result || {}, result && result.answer);
+    if (options && options.includeUser === true) {
+      appendAiMessage({ role: "user", status: "complete", question, answer: question });
+    }
+    appendAiMessage({
+      role: "assistant",
+      status: (options && options.status) || "complete",
+      question,
+      answer: normalized.answer,
+      result: normalized,
+      error: (options && options.error) || ""
+    });
+    aiOverlayResponse = normalized.answer;
+    aiOverlayLastResult = normalized;
+    return normalized;
+  }
+
+  function latestAiAssistantResult() {
+    for (let index = aiConversation.length - 1; index >= 0; index -= 1) {
+      const message = aiConversation[index];
+      if (message && message.role === "assistant" && message.result) return message.result;
+    }
+    return aiOverlayLastResult;
+  }
+
+  function aiActiveRouteLabels(routing, result) {
+    const route = aiAskRoutingPayload(routing);
+    const selectedProviderId = routing.activeProvider || (result && result.providerId) || "deterministic_local";
+    const routeMode = route.routeMode || routing.defaultMode || "LOCAL_GUIDE";
+    const currentProviderId = route.providerId || (routeMode === "SUPREME_BOARD_PACKET" ? "supreme_board_packet" : "deterministic_local");
+    const activeModel = route.modelName || routing.activeModel || (result && result.modelName) || "deterministic-local-guide";
+    const selectedProviderDisplay = providerDisplayLabel(selectedProviderId || "deterministic_local");
+    const currentAnswerSource = result && result.answerSource ? result.answerSource : "none yet";
+    const fallbackAnswered = Boolean(result && aiResultIsFallback(result) && currentAnswerSource === "LOCAL_DETERMINISTIC");
+    const externalProviderSelected = isExternalAiApiProvider(selectedProviderId) || isExternalAiApiProvider(currentProviderId);
+    let currentProviderDisplay = providerDisplayLabel(currentProviderId || "deterministic_local");
+    let compactLine = `${currentProviderDisplay} active | Advisory only | Broker actions blocked`;
+    if (fallbackAnswered && externalProviderSelected) {
+      currentProviderDisplay = "Safe local fallback";
+      compactLine = `${selectedProviderDisplay} selected | safe local fallback answered this question | Broker actions blocked`;
+    } else if (fallbackAnswered) {
+      currentProviderDisplay = "Safe local fallback";
+      compactLine = "Safe local fallback active | Advisory only | Broker actions blocked";
+    }
+    return {
+      route,
+      selectedProviderId,
+      currentProviderId,
+      selectedProviderDisplay,
+      currentProviderDisplay,
+      activeModel,
+      currentAnswerSource,
+      routeMode,
+      compactLine
+    };
   }
 
   function renderAiBullets(items, emptyLabel) {
@@ -2648,44 +2767,35 @@
   function renderAiNextStep(result) {
     return `
       <div class="ai-next-step">
-        <h3>Next Step</h3>
-        ${kv([
-          ["Action", escapeHtml(result.nextStepLabel || "Review current page")],
-          ["Page", escapeHtml(result.nextStepPage || "not specified")],
-          ["Control", escapeHtml(result.nextStepControlId || "not specified")],
-          ["Codex packet needed", badge(String(result.needsCodexPacket === true), result.needsCodexPacket ? "yellow" : "gray")]
-        ])}
+        <strong>Next step:</strong> ${escapeHtml(result.nextStepLabel || "Review current page")}
+        ${result.nextStepPage ? `<span class="muted"> | ${escapeHtml(result.nextStepPage)}</span>` : ""}
         ${result.suggestedCodexPacketSummary ? `<div class="notice">${escapeHtml(result.suggestedCodexPacketSummary)}</div>` : ""}
       </div>
     `;
   }
 
+  function aiEvidenceBullets(result, context) {
+    const bullets = [];
+    if (result.evidenceLevel) bullets.push(`Evidence level: ${result.evidenceLevel}`);
+    const blocker = context && Array.isArray(context.blockers) ? context.blockers[0] : "";
+    if (blocker) bullets.push(`Current blocker: ${blocker}`);
+    (result.knownFacts || []).slice(0, 1).forEach((item) => bullets.push(`Known: ${item}`));
+    (result.unknowns || []).slice(0, 1).forEach((item) => bullets.push(`Unknown: ${item}`));
+    return uniquePrompts(bullets).slice(0, 3);
+  }
+
   function renderAiEvidenceSummary(result, context) {
+    const bullets = aiEvidenceBullets(result, context);
     return `
       <div class="ai-evidence-summary">
-        <h3>Compact Evidence Summary</h3>
-        ${kv([
-          ["Evidence level", badge(result.evidenceLevel || "UNKNOWN", statusColor(result.evidenceLevel || "UNKNOWN"))],
-          ["Major blocker", tokenText((context.blockers || [])[0] || "none reported")],
-          ["Known facts", escapeHtml(result.knownFacts.length ? `${result.knownFacts.length} returned` : "none returned")],
-          ["Unknowns", escapeHtml(result.unknowns.length ? `${result.unknowns.length} returned` : "none returned")]
-        ])}
-        <div class="two-column-summary">
-          <div>
-            <h4>Known facts</h4>
-            ${renderAiBullets(result.knownFacts, "No known facts returned.")}
-          </div>
-          <div>
-            <h4>Unknowns</h4>
-            ${renderAiBullets(result.unknowns, "No unknowns returned.")}
-          </div>
-        </div>
+        <h3>Evidence Summary</h3>
+        ${bullets.length ? `<ul class="compact-list">${bullets.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p class="muted">No evidence bullets returned.</p>`}
       </div>
     `;
   }
 
   function renderAiPacketPanel(result) {
-    const packet = result.packetText || (result.answerSource === "SUPREME_BOARD_PACKET" ? result.answer : "");
+    const packet = aiPacketText(result);
     if (!packet) return "";
     return `
       <details class="ai-context-details ai-packet-details">
@@ -2701,7 +2811,7 @@
   function renderAiCollapsedDetails(result, context) {
     return `
       <details class="ai-context-details ai-diagnostics-details">
-        <summary>Advanced details: context, provider diagnostics, safety flags</summary>
+        <summary>Advanced details</summary>
         ${renderAiContextPreview(context)}
         <div class="ai-context-preview">
           <h3>Provider / Model Diagnostics</h3>
@@ -2738,46 +2848,126 @@
     `;
   }
 
-  function scheduleAiOverlayScroll() {
+  function renderAiConversationMessage(message, context) {
+    if (message.role === "user") {
+      return `
+        <article class="ai-chat-message user" data-ai-message-id="${escapeHtml(message.id)}">
+          <div class="ai-message-bubble">${escapeHtml(message.question || message.answer || "")}</div>
+          <div class="ai-message-meta">${escapeHtml(aiMessageTime(message.createdAt))}</div>
+        </article>
+      `;
+    }
+    if (message.status === "loading") {
+      return `
+        <article class="ai-chat-message assistant loading" data-ai-message-id="${escapeHtml(message.id)}" data-ai-assistant-loading>
+          <div class="ai-answer-card">
+            <div class="ai-loading-row"><span class="ai-loading-dot" aria-hidden="true"></span><span>Asking Chief Quant Advisor...</span></div>
+            <div class="ai-answer-meta">${escapeHtml(message.routeLabel || "Advisory only | Broker actions blocked")}</div>
+          </div>
+        </article>
+      `;
+    }
+    const result = message.result || localAiResult(message.question || aiSelectedQuestion, message.answer || "");
+    const packet = aiPacketText(result);
+    const answer = packet
+      ? "Supreme Board packet is ready. Use View packet to inspect it, or Copy packet to copy it. Packet mode is manual and advisory-only."
+      : (message.answer || result.answer || "No advisory response returned.");
+    const providerError = aiProviderErrorText(result);
+    const fallback = aiResultIsFallback(result);
+    const error = message.status === "error" || aiResultIsProviderError(result);
+    return `
+      <article class="ai-chat-message assistant" data-ai-message-id="${escapeHtml(message.id)}">
+        <div class="ai-answer-card ${error ? "provider-error" : ""}" data-ai-answer-card>
+          <div class="split ai-answer-toolbar">
+            <h3>Answer</h3>
+            <button class="ai-copy-answer" type="button" data-ai-copy-answer="${escapeHtml(message.id)}">Copy answer</button>
+          </div>
+          <div class="ai-answer-text">${escapeHtml(answer)}</div>
+          <div class="ai-answer-meta">
+            ${escapeHtml(`${result.providerId || "deterministic_local"} | ${result.modelName || "deterministic-local-guide"} | ${result.answerSource || "LOCAL_DETERMINISTIC"} | ${aiMessageTime(message.updatedAt || message.createdAt)}`)}
+          </div>
+          ${error ? `<div class="notice error">Provider error: ${escapeHtml(providerError || message.error || "request failed")}</div>` : ""}
+          ${fallback && !error ? `<div class="notice ai-fallback-note">Fallback: ${escapeHtml(aiFriendlyStatus(result))}</div>` : ""}
+          ${renderAiNextStep(result)}
+          ${renderAiEvidenceSummary(result, context)}
+          ${renderAiPacketPanel(result)}
+          ${renderAiCollapsedDetails(result, context)}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderAiConversationThread(context) {
+    const messages = aiConversation.length
+      ? aiConversation.map((message) => renderAiConversationMessage(message, context)).join("")
+      : `
+        <div class="ai-empty-state">
+          <h3>Ask a question to start.</h3>
+          <p>Advisor answers are advisory-only, evidence-labeled, and blocked from broker actions.</p>
+        </div>
+      `;
+    return `
+      <div class="ai-chat-thread" data-ai-chat-scroll-container>
+        ${messages}
+        <div id="ai-chief-response-end" class="ai-chief-response-end" aria-hidden="true"></div>
+      </div>
+    `;
+  }
+
+  function aiChatIsNearBottom(container) {
+    if (!container) return true;
+    return container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+  }
+
+  function attachAiChatScrollHandler() {
+    const container = document.querySelector("[data-ai-chat-scroll-container]");
+    if (!container) return;
+    container.addEventListener("scroll", () => {
+      aiUserPinnedScroll = !aiChatIsNearBottom(container);
+    }, { passive: true });
+  }
+
+  function scheduleAiOverlayScroll(options) {
     if (!aiOverlayOpen) return;
+    const force = options && options.force === true;
+    if (aiUserPinnedScroll && !force) return;
     const doScroll = () => {
       const container = document.querySelector("[data-ai-chat-scroll-container]");
-      const endTarget = document.getElementById("ai-chief-response-end");
-      if (container) container.scrollTop = container.scrollHeight;
-      if (endTarget && typeof endTarget.scrollIntoView === "function") {
-        endTarget.scrollIntoView({ block: "end" });
+      if (!container) return;
+      if (force) {
+        container.scrollTop = container.scrollHeight;
+      } else {
+        container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
       }
     };
+    if (force) doScroll();
     window.requestAnimationFrame(doScroll);
     window.setTimeout(doScroll, 80);
+    if (force) {
+      window.setTimeout(doScroll, 240);
+      window.setTimeout(doScroll, 520);
+      window.setTimeout(doScroll, 1000);
+      window.setTimeout(doScroll, 1800);
+    }
   }
 
   function renderAiChiefOverlay() {
     const host = document.querySelector(".ai-chief-global");
     if (!host) return;
     syncAiDockedState();
-    const context = buildAiChiefContext(aiSelectedQuestion);
+    const activeQuestion = aiQuestionText || aiSelectedQuestion || "Review current operator state.";
+    const context = buildAiChiefContext(activeQuestion);
     const routing = aiRoutingSettings();
-    const route = aiAskRoutingPayload(routing);
-    const activeProviderLabel = route.providerId || routing.activeProvider || data.ai.provider || "deterministic_local";
-    const activeModelLabel = route.modelName || routing.activeModel || data.ai.modelName || "deterministic-local-guide";
-    const activeProviderDisplay = providerDisplayLabel(activeProviderLabel);
-    const legacyActiveRouterText = `active ${activeProviderLabel}`;
-    const providerState = data.ai.providerState || "AI_DISABLED";
-    const providerLabel = `${data.ai.provider || "disabled"} / ${providerState}`;
-    const response = aiOverlayResponse || buildAiOverlayAdvisory(aiQuestionText || aiSelectedQuestion);
-    const result = aiOverlayLastResult || localAiResult(aiQuestionText || aiSelectedQuestion, response);
-    const friendlyStatus = aiOverlayBusy ? "Asking Chief Quant Advisor..." : aiFriendlyStatus(result);
-    const packetText = result.packetText || (result.answerSource === "SUPREME_BOARD_PACKET" ? result.answer : "");
-    const answerForMain = packetText
-      ? "Supreme Board packet is ready. Use View packet to inspect it, or Copy packet to copy it. Packet mode is manual and advisory-only."
-      : (result.answer || response);
+    const lastResult = latestAiAssistantResult();
+    const routeLabels = aiActiveRouteLabels(routing, lastResult);
     const primaryPrompts = primaryAiPrompts(activeScreenId || "positions");
     const extraPrompts = moreAiPrompts(activeScreenId || "positions");
     const warning = aiModelWarning();
+    const providerError = aiProviderErrorText(lastResult);
+    const answerSource = lastResult && lastResult.answerSource ? lastResult.answerSource : "none yet";
     host.innerHTML = `
       <button class="ai-chief-fab ${aiOverlayOpen ? "open" : ""}" type="button" data-ai-chief-open aria-expanded="${aiOverlayOpen ? "true" : "false"}">
-        <span>Ask Quant Chief</span>
+        <span>Chief Quant Advisor</span>
         <span class="ai-chief-fab-sub">${escapeHtml(screenTitle(activeScreenId))}</span>
       </button>
       <div class="ai-chief-backdrop ${aiOverlayOpen ? "open" : ""}" data-ai-chief-close></div>
@@ -2786,104 +2976,92 @@
           <div class="ai-chief-header">
             <div class="ai-chief-heading">
               <div class="ai-chief-title">Chief Quant Advisor</div>
-              <div class="cardless-model-strip">
-                ${badge(`${legacyActiveRouterText}; Active provider: ${activeProviderDisplay}`, statusColor(activeProviderLabel))}
-                ${badge(activeModelLabel, "gray")}
-                ${badge(result.providerMode, statusColor(result.providerMode))}
-                ${badge(result.modelQuality, modelQualityColor(result.modelQuality))}
-                ${badge(result.answerSource, statusColor(result.answerSource))}
-                ${badge("advisory only", "gray")}
-              </div>
+              <div class="ai-chief-subtitle">Ask about readiness, runtime, portfolio, risk, AI route, and Codex packets.</div>
+              <div class="ai-route-compact">${escapeHtml(routeLabels.compactLine)}</div>
+              ${providerError ? `<div class="ai-provider-error-line">Last provider error: ${escapeHtml(providerError)}</div>` : ""}
             </div>
             <div class="ai-chief-header-actions">
               <button class="ai-chief-close" type="button" data-ai-chief-wide aria-label="${aiWideMode ? "Use normal advisor width" : "Use wide advisor width"}">${aiWideMode ? "Normal" : "Wide"}</button>
               <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Collapse</button>
             </div>
           </div>
-          <div class="ai-boundary">
-            ${badge("cannot trade", "red")}
-            ${badge("cannot call broker", "red")}
-            ${badge("cannot enable live", "red")}
-            ${badge("cannot change thresholds", "red")}
-            ${badge("can_execute=false", "gray")}
-          </div>
           <div class="ai-route-state">
-            ${kv([
-              ["Saved/configured", badge(providerDisplayLabel(routing.activeProvider || "deterministic_local"), "blue")],
-              ["Selected active provider", badge(activeProviderDisplay, "blue")],
-              ["Currently used for ask", badge(route.providerId ? providerDisplayLabel(route.providerId) : normalizeStatusText(route.routeMode), route.providerId ? "green" : "gray")],
-              ["Active model", escapeHtml(activeModelLabel)],
-              ["Current answer source", badge(result.answerSource || "none yet", statusColor(result.answerSource || "UNKNOWN"))],
-              ["Last provider error", escapeHtml(result.providerErrorCategory || result.providerErrorMessageSafe || "none")]
-            ])}
+            <div class="ai-route-summary-grid">
+              <div><span>Saved/configured</span><strong>${escapeHtml(providerDisplayLabel(routing.activeProvider || "deterministic_local"))}</strong></div>
+              <div><span>Selected active provider</span><strong>${escapeHtml(routeLabels.selectedProviderDisplay)}</strong></div>
+              <div><span>Currently used for ask</span><strong>${escapeHtml(routeLabels.currentProviderDisplay)}</strong></div>
+              <div><span>Active model</span><strong>${escapeHtml(routeLabels.activeModel || "deterministic-local-guide")}</strong></div>
+              <div><span>Current answer source</span><strong>${escapeHtml(answerSource)}</strong></div>
+              <div><span>Last provider error</span><strong>${escapeHtml(providerError || "none")}</strong></div>
+            </div>
             <div class="button-row compact-actions">
               <button class="intent-button paper" type="button" data-ai-use-provider-now="deepseek" ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>Use DeepSeek now</button>
               <button class="intent-button paper" type="button" data-ai-use-provider-now="openai" ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>Use OpenAI now</button>
               <button class="intent-button paper" type="button" data-ai-use-supreme-board ${aiOverlayBusy ? "disabled" : ""}>Use Supreme Board packet mode</button>
             </div>
           </div>
-          <div class="notice ai-mission">Chief Quant Advisor + Quant Engineer + Trading Systems Auditor + Operator Guide. I separate broker-confirmed truth, market truth, local system state, model inference, missing evidence, and speculation. I cannot trade, call broker, enable live, expose secrets, mutate strategy, or bypass gates.</div>
+          <div class="ai-boundary">
+            ${badge("advisory only", "gray")}
+            ${badge("broker actions blocked", "red")}
+            ${badge("live locked", "red")}
+            ${badge("real money blocked", "red")}
+            ${badge("secrets hidden", "green")}
+          </div>
           ${warning ? `<div class="notice error">${escapeHtml(warning)}</div>` : ""}
-          <div class="ai-chief-body" data-ai-chat-scroll-container>
-            <div class="ai-ask-box">
-              <label for="ai-chief-question">Ask a page-aware question</label>
-              <textarea id="ai-chief-question" data-ai-chief-question rows="4" placeholder="Ask about edge, risk, TCA, provider readiness, launch blockers, or latest run evidence.">${escapeHtml(aiQuestionText || "")}</textarea>
-              <div class="button-row">
+          <div class="ai-chief-body">
+            ${renderAiConversationThread(context)}
+            <div class="ai-composer">
+              <label for="ai-chief-question">Ask Chief Quant Advisor</label>
+              <textarea id="ai-chief-question" data-ai-chief-question rows="3" placeholder="Ask what is blocking PAPER, whether the bot is ready, or what to do next...">${escapeHtml(aiQuestionText || "")}</textarea>
+              <div class="button-row ai-composer-actions">
                 <button class="intent-button paper" type="button" data-ai-chief-ask ${aiOverlayBusy ? "disabled" : ""}>
-                  ${aiOverlayBusy ? "Asking..." : "Ask Quant Chief"}
+                  ${aiOverlayBusy ? "Asking..." : "Ask"}
                 </button>
                 <button class="intent-button paper" type="button" data-ai-chief-clear ${aiOverlayBusy ? "disabled" : ""}>Clear</button>
-                <button class="intent-button paper" type="button" data-ai-chief-close>Collapse</button>
+                ${aiUserPinnedScroll ? `<button class="intent-button paper" type="button" data-ai-jump-latest>Jump to latest</button>` : ""}
               </div>
               ${aiOverlayError ? `<div class="notice error">Error: ${escapeHtml(aiOverlayError)}</div>` : ""}
             </div>
-            <div class="ai-question-bank compact" aria-label="AI Chief quick questions">
-              ${primaryPrompts.map((prompt) => `
-                <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
-                  ${escapeHtml(prompt)}
-                </button>
-              `).join("")}
-            </div>
-            ${extraPrompts.length ? `
-              <details class="ai-context-details ai-more-prompts">
-                <summary>More prompts</summary>
-                <div class="ai-question-bank compact">
-                  ${extraPrompts.map((prompt) => `
-                    <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
-                      ${escapeHtml(prompt)}
-                    </button>
-                  `).join("")}
-                </div>
-              </details>
-            ` : ""}
-            <div class="ai-response advisor-answer">
-              <div class="split">
-                <h3>Advisor Answer</h3>
-                ${badge(result.mode, "cyan")}
+            <div class="ai-prompt-section">
+              <div class="ai-question-bank compact" aria-label="AI Chief quick questions">
+                ${primaryPrompts.map((prompt) => `
+                  <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
+                    ${escapeHtml(prompt)}
+                  </button>
+                `).join("")}
               </div>
-              <div class="notice ${result.providerMode === "PROVIDER_ERROR" || result.answerSource === "PROVIDER_ERROR" ? "error" : ""}">${escapeHtml(friendlyStatus)}</div>
-              <pre>${escapeHtml(answerForMain)}</pre>
+              ${extraPrompts.length ? `
+                <details class="ai-context-details ai-more-prompts">
+                  <summary>More prompts</summary>
+                  <div class="ai-question-bank compact">
+                    ${extraPrompts.map((prompt) => `
+                      <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
+                        ${escapeHtml(prompt)}
+                      </button>
+                    `).join("")}
+                  </div>
+                </details>
+              ` : ""}
             </div>
-            ${renderAiPacketPanel(result)}
-            ${renderAiNextStep(result)}
-            ${renderAiEvidenceSummary(result, context)}
-            ${renderAiCollapsedDetails(result, context)}
-            <div class="ai-chief-actions">
-              <button class="intent-button paper" type="button" data-ai-chief-analyze ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>
-                ${aiOverlayBusy ? "Queueing advisory analysis..." : "Queue advisory analysis"}
-              </button>
-              <button class="intent-button live" type="button" disabled>Broker execution unavailable to AI</button>
-            </div>
-            <div class="notice mono">
-              ${backendConnected()
-                ? "Ask uses /operator/ai/ask. With a saved OpenAI or Anthropic key, the backend attempts a real advisory model call. If the provider is missing or errors, it returns an honest fallback instead of pretending a model answered. Analyze uses the governed AI endpoint and governance queue."
-                : "Backend unreachable: overlay can show sample context only and will not queue runtime recommendations."}
-            </div>
-            <div id="ai-chief-response-end" class="ai-chief-response-end" aria-hidden="true"></div>
+            <details class="ai-context-details ai-advisory-queue-details">
+              <summary>Governed advisory queue</summary>
+              <div class="ai-chief-actions">
+                <button class="intent-button paper" type="button" data-ai-chief-analyze ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>
+                  ${aiOverlayBusy ? "Queueing governed review..." : "Queue governed advisory review"}
+                </button>
+                <button class="intent-button live" type="button" disabled>Broker execution unavailable to AI</button>
+              </div>
+              <div class="notice mono">
+                ${backendConnected()
+                  ? "Ask uses /operator/ai/ask. Provider errors are shown in the answer area and fallbacks are labeled. Queue review uses governed AI endpoints without trading authority."
+                  : "Backend unreachable: advisor can show local deterministic guidance only and will not queue runtime recommendations."}
+              </div>
+            </details>
           </div>
         </div>
       </section>
     `;
+    attachAiChatScrollHandler();
     scheduleAiOverlayScroll();
   }
 
@@ -2903,8 +3081,6 @@
   function selectAiQuestion(question) {
     aiSelectedQuestion = question;
     aiQuestionText = question;
-    aiOverlayResponse = buildAiOverlayAdvisory(question);
-    aiOverlayLastResult = localAiResult(question, aiOverlayResponse);
     aiOverlayError = "";
     aiOverlayOpen = true;
     syncAiDockedState();
@@ -2916,13 +3092,16 @@
     aiOverlayResponse = "";
     aiOverlayLastResult = null;
     aiOverlayError = "";
+    aiConversation = [];
+    aiUserPinnedScroll = false;
     aiOverlayOpen = true;
     syncAiDockedState();
     renderAiChiefOverlay();
   }
 
   async function copyCurrentAiPacket() {
-    const packet = aiOverlayLastResult && (aiOverlayLastResult.packetText || (aiOverlayLastResult.answerSource === "SUPREME_BOARD_PACKET" ? aiOverlayLastResult.answer : ""));
+    const result = latestAiAssistantResult();
+    const packet = aiPacketText(result);
     if (!packet) {
       aiOverlayError = "No packet is available to copy.";
       renderAiChiefOverlay();
@@ -2934,6 +3113,27 @@
       }
       await navigator.clipboard.writeText(packet);
       data.ai.lastAnalyzeResult = "PACKET_COPIED: Supreme Board packet copied from advisor dock.";
+    } catch (error) {
+      aiOverlayError = `Copy failed: ${error.message || error.name || "clipboard_unavailable"}`;
+    }
+    renderAiChiefOverlay();
+  }
+
+  async function copyAiAnswer(messageId) {
+    const message = aiConversation.find((item) => item.id === messageId);
+    const result = message && message.result;
+    const answer = (message && (message.answer || (result && result.answer))) || "";
+    if (!answer) {
+      aiOverlayError = "No answer is available to copy.";
+      renderAiChiefOverlay();
+      return;
+    }
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("clipboard_unavailable");
+      }
+      await navigator.clipboard.writeText(answer);
+      data.ai.lastAnalyzeResult = "ANSWER_COPIED: Advisor answer copied.";
     } catch (error) {
       aiOverlayError = `Copy failed: ${error.message || error.name || "clipboard_unavailable"}`;
     }
@@ -2965,24 +3165,50 @@
     ].join("\n");
   }
 
-  async function askAiChiefQuestion() {
+  async function askAiChiefQuestion(questionOverride) {
     const input = document.querySelector("[data-ai-chief-question]");
-    const question = String((input && input.value) || aiQuestionText || aiSelectedQuestion || "").trim();
-    aiQuestionText = question;
-    aiSelectedQuestion = AI_QUICK_PROMPTS.includes(question) ? question : aiSelectedQuestion;
-    aiOverlayError = "";
-    if (!backendConnected()) {
-      aiOverlayResponse = buildAiOverlayAdvisory(question);
-      aiOverlayLastResult = localAiResult(question, aiOverlayResponse);
+    const question = String(questionOverride || (input && input.value) || aiQuestionText || "").trim();
+    if (!question) {
+      aiOverlayError = "Type a question first.";
       aiOverlayOpen = true;
       renderAiChiefOverlay();
       return;
     }
+    aiSelectedQuestion = question;
+    aiOverlayError = "";
+    aiQuestionText = "";
+    aiOverlayResponse = "";
+    aiUserPinnedScroll = false;
+    const routing = aiRoutingSettings();
+    const routeLabels = aiActiveRouteLabels(routing, aiOverlayLastResult);
+    appendAiMessage({ role: "user", status: "complete", question, answer: question });
+    const loadingMessage = appendAiMessage({
+      role: "assistant",
+      status: "loading",
+      question,
+      routeLabel: routeLabels.compactLine
+    });
     aiOverlayBusy = true;
+    aiOverlayOpen = true;
     renderAiChiefOverlay();
+    scheduleAiOverlayScroll({ force: true });
+    if (!backendConnected()) {
+      const localAnswer = buildAiOverlayAdvisory(question);
+      const localResult = localAiResult(question, localAnswer);
+      aiOverlayResponse = localAnswer;
+      aiOverlayLastResult = localResult;
+      replaceAiMessage(loadingMessage.id, {
+        status: "complete",
+        answer: localResult.answer,
+        result: localResult
+      });
+      aiOverlayBusy = false;
+      renderAiChiefOverlay();
+      scheduleAiOverlayScroll({ force: true });
+      return;
+    }
     try {
       const context = buildAiChiefContext(question);
-      const routing = aiRoutingSettings();
       const route = aiAskRoutingPayload(routing);
       const result = await postIntent("/operator/ai/ask", {
         question,
@@ -2994,12 +3220,18 @@
         model_name: route.modelName,
         approved_paid_call: false
       });
-      aiOverlayResponse = formatAiAskResult(result);
-      aiOverlayLastResult = normalizeAiAskResult(result);
+      const normalized = normalizeAiAskResult(result);
+      aiOverlayResponse = normalized.answer;
+      aiOverlayLastResult = normalized;
+      replaceAiMessage(loadingMessage.id, {
+        status: "complete",
+        answer: normalized.answer,
+        result: normalized
+      });
     } catch (error) {
       aiOverlayError = error.message || error.name || "ai_ask_failed";
-      aiOverlayResponse = buildAiOverlayAdvisory(question);
-      aiOverlayLastResult = localAiResult(question, aiOverlayResponse, {
+      const fallbackAnswer = buildAiOverlayAdvisory(question);
+      const fallbackResult = localAiResult(question, fallbackAnswer, {
         status: "PROVIDER_ERROR",
         provider_mode: "PROVIDER_ERROR",
         provider_state: "PROVIDER_ERROR",
@@ -3007,10 +3239,19 @@
         provider_error_category: "UI_AI_ASK_REQUEST_FAILED",
         provider_error_message_safe: aiOverlayError
       });
+      aiOverlayResponse = fallbackAnswer;
+      aiOverlayLastResult = fallbackResult;
+      replaceAiMessage(loadingMessage.id, {
+        status: "error",
+        answer: fallbackResult.answer,
+        result: fallbackResult,
+        error: aiOverlayError
+      });
     } finally {
       aiOverlayBusy = false;
       aiOverlayOpen = true;
       renderAiChiefOverlay();
+      scheduleAiOverlayScroll({ force: true });
     }
   }
 
@@ -3091,6 +3332,7 @@
     if (!backendConnected() || aiOverlayBusy) {
       aiOverlayResponse = buildAiOverlayAdvisory(aiSelectedQuestion);
       aiOverlayLastResult = localAiResult(aiSelectedQuestion, aiOverlayResponse);
+      appendAiCompletedExchange(aiSelectedQuestion, aiOverlayLastResult, { includeUser: true });
       renderAiChiefOverlay();
       return;
     }
@@ -3101,7 +3343,8 @@
     const selectedScreen = activeScreenId;
     try {
       const context = buildAiChiefContext(aiSelectedQuestion);
-      const path = aiSelectedQuestion === "Draft a Codex packet."
+      const wantsCodexPacket = aiSelectedQuestion.toLowerCase().includes("draft") && aiSelectedQuestion.toLowerCase().includes("codex");
+      const path = wantsCodexPacket
         ? "/operator/ai/draft-codex-packet"
         : "/operator/ai/quant-review";
       const result = await postIntent(path, {
@@ -3122,7 +3365,7 @@
         `can_execute=${String(recommendation.can_execute === true ? "true" : "false")}.`,
         "Approving a PAPER research recommendation does not start PAPER automatically."
       ].filter(Boolean).join("\n");
-      aiOverlayLastResult = normalizeAiAskResult({
+      const normalized = normalizeAiAskResult({
         status: result.status || "QUEUED",
         provider_id: "operator_ai_queue",
         provider_mode: "DETERMINISTIC_FALLBACK",
@@ -3146,6 +3389,7 @@
         live_enabled: false,
         real_money_enabled: false
       }, aiOverlayResponse);
+      appendAiCompletedExchange(aiSelectedQuestion, normalized, { includeUser: true });
       data = await loadData();
       data.ai.lastAnalyzeResult = `${result.status || "QUEUED"}: ${recommendation.recommendation_type || "OBSERVATION"}`;
       renderTopBar();
@@ -3160,10 +3404,12 @@
         provider_error_category: "UI_AI_ANALYZE_REQUEST_FAILED",
         provider_error_message_safe: error.message || error.name || "ai_analyze_error"
       });
+      appendAiCompletedExchange(aiSelectedQuestion, aiOverlayLastResult, { includeUser: true, status: "error", error: error.message || error.name || "ai_analyze_error" });
     } finally {
       aiOverlayBusy = false;
       aiOverlayOpen = true;
       renderAiChiefOverlay();
+      scheduleAiOverlayScroll({ force: true });
     }
   }
 
@@ -3316,6 +3562,7 @@
     if (!backendConnected()) {
       aiOverlayResponse = buildAiOverlayAdvisory("Draft a Codex packet.");
       aiOverlayLastResult = localAiResult("Draft a Codex packet.", aiOverlayResponse);
+      appendAiCompletedExchange("Draft a Codex packet.", aiOverlayLastResult, { includeUser: true });
       aiOverlayOpen = true;
       renderAiChiefOverlay();
       return;
@@ -3328,7 +3575,7 @@
         advisory_only: true
       });
       aiOverlayResponse = result.packet || result.answer || "No packet returned.";
-      aiOverlayLastResult = normalizeAiAskResult({
+      const normalized = normalizeAiAskResult({
         status: result.status || "PACKET_READY",
         provider_id: "supreme_board_packet",
         provider_mode: "DETERMINISTIC_FALLBACK",
@@ -3354,6 +3601,7 @@
         live_enabled: false,
         real_money_enabled: false
       }, aiOverlayResponse);
+      appendAiCompletedExchange(question, normalized, { includeUser: true });
       aiOverlayOpen = true;
       data.ai.lastAnalyzeResult = "PACKET_READY: Supreme Board Packet generated; no API call occurred.";
       renderScreens(activeScreenId);
@@ -3367,6 +3615,7 @@
         provider_error_category: "UI_SUPREME_BOARD_PACKET_FAILED",
         provider_error_message_safe: error.message || error.name || "supreme_board_packet_failed"
       });
+      appendAiCompletedExchange(question, aiOverlayLastResult, { includeUser: true, status: "error", error: error.message || error.name || "supreme_board_packet_failed" });
       aiOverlayOpen = true;
       renderAiChiefOverlay();
     }
@@ -3388,10 +3637,13 @@
         approved_paid_call: true,
         advisory_only: true
       });
-      aiOverlayResponse = formatAiAskResult(result);
-      aiOverlayLastResult = normalizeAiAskResult(result);
+      const normalized = normalizeAiAskResult(result);
+      aiOverlayResponse = normalized.answer;
+      aiOverlayLastResult = normalized;
+      appendAiCompletedExchange(question, normalized, { includeUser: true });
       aiOverlayOpen = true;
       renderAiChiefOverlay();
+      scheduleAiOverlayScroll({ force: true });
     } catch (error) {
       aiOverlayResponse = `FAILED: ${error.message || error.name || "high_reasoning_call_failed"}\nNo broker or trading mutation was requested.`;
       aiOverlayLastResult = localAiResult(question, aiOverlayResponse, {
@@ -3401,8 +3653,10 @@
         provider_error_category: "UI_HIGH_REASONING_CALL_FAILED",
         provider_error_message_safe: error.message || error.name || "high_reasoning_call_failed"
       });
+      appendAiCompletedExchange(question, aiOverlayLastResult, { includeUser: true, status: "error", error: error.message || error.name || "high_reasoning_call_failed" });
       aiOverlayOpen = true;
       renderAiChiefOverlay();
+      scheduleAiOverlayScroll({ force: true });
     }
   }
 
@@ -4561,6 +4815,32 @@
     }
   }
 
+  document.addEventListener("input", (event) => {
+    const aiQuestion = event.target.closest("[data-ai-chief-question]");
+    if (aiQuestion) {
+      aiQuestionText = aiQuestion.value;
+      return;
+    }
+    const homeQuestion = event.target.closest("[data-home-ai-question]");
+    if (homeQuestion) {
+      homeAiQuestionText = homeQuestion.value;
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const aiQuestion = event.target.closest("[data-ai-chief-question]");
+    if (aiQuestion && event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (!aiOverlayBusy) askAiChiefQuestion();
+      return;
+    }
+    const homeQuestion = event.target.closest("[data-home-ai-question]");
+    if (homeQuestion && event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (!homeAiBusy) askHomeAiQuestion();
+    }
+  });
+
   document.addEventListener("click", (event) => {
     const aiOpen = event.target.closest("[data-ai-chief-open]");
     if (aiOpen) {
@@ -4579,7 +4859,7 @@
     }
     const aiPrompt = event.target.closest("[data-ai-chief-prompt]");
     if (aiPrompt) {
-      selectAiQuestion(aiPrompt.dataset.aiChiefPrompt);
+      if (!aiOverlayBusy) askAiChiefQuestion(aiPrompt.dataset.aiChiefPrompt);
       return;
     }
     const aiAnalyze = event.target.closest("[data-ai-chief-analyze]");
@@ -4600,6 +4880,18 @@
     const aiCopyPacket = event.target.closest("[data-ai-copy-packet]");
     if (aiCopyPacket && !aiCopyPacket.disabled) {
       copyCurrentAiPacket();
+      return;
+    }
+    const aiCopyAnswer = event.target.closest("[data-ai-copy-answer]");
+    if (aiCopyAnswer && !aiCopyAnswer.disabled) {
+      copyAiAnswer(aiCopyAnswer.dataset.aiCopyAnswer);
+      return;
+    }
+    const aiJumpLatest = event.target.closest("[data-ai-jump-latest]");
+    if (aiJumpLatest) {
+      aiUserPinnedScroll = false;
+      renderAiChiefOverlay();
+      scheduleAiOverlayScroll({ force: true });
       return;
     }
     const homeAiPrompt = event.target.closest("[data-home-ai-prompt]");

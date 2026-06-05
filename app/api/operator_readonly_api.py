@@ -1286,6 +1286,20 @@ class OperatorSnapshotProvider:
                 response = f"{limited}\n{response}".strip()
         known_facts, unknowns = self._ai_answer_facts(mode, context)
         next_step = self._ai_next_step(mode, context, page_id)
+        route_decision = gateway_answer.get("route_decision") if isinstance(gateway_answer, dict) else {}
+        route_decision = route_decision if isinstance(route_decision, dict) else {}
+        route_reason = str(route_decision.get("reason_code") or "")
+        answer_source_for_truth = str(provider.get("answer_source") or provider.get("response_source") or "")
+        local_truth_fallback = (
+            mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR"}
+            and answer_source_for_truth in {"LOCAL_DETERMINISTIC", "DETERMINISTIC_FALLBACK_NO_MODEL_CALL", "DETERMINISTIC_FALLBACK_MODEL_POLICY"}
+        )
+        if classification.get("allowed") is True and (local_truth_fallback or route_reason in {
+            "HIGH_REASONING_API_APPROVAL_REQUIRED",
+            "SERIOUS_PROMPT_REQUIRES_HIGH_REASONING_OR_PACKET",
+            "NO_SILENT_DOWNGRADE_TO_LOWER_REASONING_MODEL",
+        }):
+            response = self._ai_current_truth_operational_answer(mode, question, known_facts, unknowns, next_step)
         empty_model_answer = response.strip() == "Provider returned an empty advisory response."
         if empty_model_answer:
             status = "PROVIDER_ERROR"
@@ -1554,11 +1568,35 @@ class OperatorSnapshotProvider:
             facts.append(f"Portfolio status: {portfolio.get('status') or 'UNKNOWN'}; positions={summary.get('position_count', 0)}; open_orders={summary.get('open_order_count', 0)}.")
             if portfolio.get("status") not in {"BROKER_CONFIRMED", "BROKER_CONFIRMED_EMPTY"}:
                 unknowns.append(f"Broker portfolio truth unavailable: {portfolio.get('unavailable_reason') or 'UNKNOWN'}.")
-        if mode == "RUN_PLANNER":
+        if mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE"}:
             facts.append(f"Launch readiness: {readiness.get('final_launch_readiness') or 'UNKNOWN'}.")
             if readiness.get("reason_codes"):
                 unknowns.append(f"Run blockers/warnings: {', '.join(str(item) for item in readiness.get('reason_codes') or [])}.")
+            else:
+                facts.append("Launch readiness reports no current blocker reason codes.")
         return facts[:8], unknowns[:8]
+
+    def _ai_current_truth_operational_answer(
+        self,
+        mode: str,
+        question: str,
+        known_facts: list[str],
+        unknowns: list[str],
+        next_step: dict[str, str | None],
+    ) -> str:
+        return "\n".join(
+            [
+                "I can answer from current backend truth. Final quant/risk/governance judgment still requires the high-reasoning model or a Supreme Board packet.",
+                f"Question: {question or 'No question supplied.'}",
+                f"Mode: {mode}.",
+                "Current truth:",
+                *[f"- {item}" for item in known_facts[:5]],
+                "Missing or limited evidence:",
+                *[f"- {item}" for item in unknowns[:4]],
+                f"Next step: {next_step.get('label') or 'Review the current page.'}",
+                "Safety: advisory-only, can_execute=false, no broker calls, no live or real-money enablement, no strategy or threshold mutation.",
+            ]
+        )
 
     def _ai_limited_operational_answer(
         self,

@@ -79,6 +79,9 @@ DOMAIN_TERMS = (
     "validation",
     "evidence",
     "readiness",
+    "blocker",
+    "blocking",
+    "bot",
     "p&l",
     "profit",
 )
@@ -133,6 +136,8 @@ MODE_KEYWORDS = {
         "7-day",
         "7 day",
         "paper run",
+        "start paper",
+        "can i start paper",
         "duration",
         "watchlist",
         "stop condition",
@@ -152,6 +157,10 @@ MODE_KEYWORDS = {
         "audit",
         "readiness",
         "blocked",
+        "blocking",
+        "blocker",
+        "what is blocking",
+        "blocking the bot",
         "broker truth",
         "market truth",
         "netedge",
@@ -281,6 +290,9 @@ def classify_quant_prompt(prompt: str, *, page_id: str | None = None) -> dict[st
         "operator launch status",
         "launch status",
         "current operator",
+        "what is blocking",
+        "current blocker",
+        "blocking the bot",
     )
     mode_terms = tuple(term for keywords in MODE_KEYWORDS.values() for term in keywords)
     in_domain = (

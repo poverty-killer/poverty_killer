@@ -192,6 +192,48 @@ def test_ai_ask_treats_alive_launch_status_as_operator_prompt(tmp_path):
     assert payload["can_execute"] is False
 
 
+def test_ai_ask_treats_blocking_bot_question_as_operator_prompt(tmp_path):
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    app = create_operator_app(provider=provider)
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "What is blocking the bot right now?",
+            "route_mode": "LOCAL_GUIDE",
+            "page_context": {"page_id": "positions", "page_title": "Portfolio Home"},
+        }
+    )
+
+    assert payload["status"] != "REFUSED"
+    assert payload["refusal_reason"] is None
+    assert payload["mode"] in {"TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE", "PORTFOLIO_REVIEW"}
+    assert "cannot trade" not in payload["answer"]
+    assert "Current truth:" in payload["answer"]
+    assert "Launch readiness:" in payload["answer"]
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+
+
+def test_ai_ask_can_i_start_paper_uses_run_planner_truth(tmp_path):
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    app = create_operator_app(provider=provider)
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "Can I start PAPER?",
+            "route_mode": "LOCAL_GUIDE",
+            "page_context": {"page_id": "command", "page_title": "Run PAPER"},
+        }
+    )
+
+    assert payload["status"] != "REFUSED"
+    assert payload["mode"] == "RUN_PLANNER"
+    assert "Current truth:" in payload["answer"]
+    assert "Launch readiness:" in payload["answer"]
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+
+
 def test_ai_ask_local_guide_uses_light_context_without_heavy_evidence_graph(tmp_path):
     provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
 
