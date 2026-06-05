@@ -334,6 +334,71 @@ def test_ai_ask_ready_paper_run_answers_yes_without_fake_blocker(tmp_path):
     assert payload["real_money_enabled"] is False
 
 
+def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    store.save_provider(
+        "deepseek",
+        {
+            "DEEPSEEK_API_KEY": "deepseek-test-token-value",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        },
+    )
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+
+    def fail_if_external_called(url, headers, body, timeout_seconds):
+        raise AssertionError("RUN_PLANNER readiness truth must not call an external provider")
+
+    provider.ai_gateway = AIProviderGateway(
+        AIChiefConfig.from_env(provider.provider_env),
+        credential_env=provider.provider_env,
+        http_post=fail_if_external_called,
+    )
+    app = create_operator_app(provider=provider)
+    saved = _endpoint(app, "/operator/ai/router/settings", "POST")(
+        {
+            "default_mode": "LIGHT_API",
+            "active_provider": "deepseek",
+            "active_model": "deepseek-chat",
+            "light_provider": "openai",
+            "light_model": "gpt-5-mini",
+            "high_reasoning_provider": "openai",
+            "high_reasoning_model": "gpt-5.5-pro",
+            "local_model": "local-model",
+        }
+    )
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "can i do paper run?",
+            "page_context": {"page_id": "command", "page_title": "Run PAPER"},
+        }
+    )
+    answer = payload["answer"]
+
+    assert saved["settings"]["active_provider"] == "deepseek"
+    assert payload["mode"] == "RUN_PLANNER"
+    assert payload["status"] == "ANSWERED_LOCAL_GUIDE"
+    assert payload["provider_id"] == "deterministic_local"
+    assert payload["answer_source"] == "LOCAL_DETERMINISTIC"
+    assert payload["route_decision"]["reason_code"] == "RUN_PLANNER_LOCAL_RUNTIME_TRUTH"
+    assert answer.startswith("Yes - our bot is ready for a bounded PAPER run")
+    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
+    assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" in answer
+    assert "it is not a blocker" in answer
+    assert "Use Run PAPER only after readiness blockers are cleared" not in answer
+    assert "readiness blockers are cleared" not in payload["next_step_label"]
+    assert "Current blocker: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+    assert payload["live_enabled"] is False
+    assert payload["real_money_enabled"] is False
+
+
 def test_ai_ask_alive_is_concise_health_answer_when_ready_idle(tmp_path):
     app = _ready_app(tmp_path)
 

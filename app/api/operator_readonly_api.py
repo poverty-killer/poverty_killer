@@ -1195,6 +1195,7 @@ class OperatorSnapshotProvider:
         mode = str(classification.get("mode") or "OPERATOR_GUIDE")
         evidence_level = str(classification.get("evidence_level") or "UNKNOWN")
         simple_health_question = self._ai_is_simple_health_question(question)
+        local_runtime_truth_question = self._ai_should_answer_from_runtime_truth(mode, question)
         if not classification["allowed"]:
             context = self._ai_light_context()
             response = (
@@ -1207,7 +1208,7 @@ class OperatorSnapshotProvider:
             gateway_answer: dict[str, Any] = {}
         else:
             route_mode = router_mode_for_gateway(body.get("route_mode") or body.get("mode") or self.ai_routing_settings.get("default_mode") or LOCAL_GUIDE)
-            context = self._ai_light_context() if route_mode == LOCAL_GUIDE or simple_health_question else self._ai_context()
+            context = self._ai_light_context() if route_mode == LOCAL_GUIDE or simple_health_question or local_runtime_truth_question else self._ai_context()
             route_provider = str(body.get("provider_id") or "").strip()
             route_model = str(body.get("model_name") or "").strip()
             if not route_provider:
@@ -1221,7 +1222,8 @@ class OperatorSnapshotProvider:
                 elif route_mode == LOCAL_MODEL_MODE:
                     route_provider = "local_openai_compatible"
                     route_model = route_model or str(self.ai_routing_settings.get("local_model") or "")
-            if simple_health_question:
+            if simple_health_question or local_runtime_truth_question:
+                route_reason = "SIMPLE_HEALTH_LOCAL_TRUTH" if simple_health_question else "RUN_PLANNER_LOCAL_RUNTIME_TRUTH"
                 gateway_answer = {
                     "status": "ANSWERED_LOCAL_GUIDE",
                     "provider": "deterministic_local",
@@ -1229,7 +1231,7 @@ class OperatorSnapshotProvider:
                     "provider_state": "LOCAL_GUIDE",
                     "response_source": "LOCAL_DETERMINISTIC",
                     "answer_source": "LOCAL_DETERMINISTIC",
-                    "response": self._ai_health_answer(context),
+                    "response": self._ai_health_answer(context) if simple_health_question else self._ai_paper_readiness_answer(question, context),
                     "model_call_occurred": False,
                     "provider_mode": "DETERMINISTIC_FALLBACK",
                     "model_name": "deterministic-local-guide",
@@ -1240,7 +1242,7 @@ class OperatorSnapshotProvider:
                     "persona_enforced": True,
                     "expert_roles_applied": ["Chief Quant Advisor", "Operator Guide"],
                     "route_decision": {
-                        "reason_code": "SIMPLE_HEALTH_LOCAL_TRUTH",
+                        "reason_code": route_reason,
                         "provider_id": "deterministic_local",
                         "model_name": "deterministic-local-guide",
                     },
@@ -1663,6 +1665,22 @@ class OperatorSnapshotProvider:
             return False
         health_terms = ("are you alive", "you alive", "are we alive", "is the backend alive", "status check")
         return any(term in lowered for term in health_terms) and not self._ai_wants_detailed_answer(lowered)
+
+    def _ai_should_answer_from_runtime_truth(self, mode: str, question: str) -> bool:
+        if mode != "RUN_PLANNER" or self._ai_wants_detailed_answer(question):
+            return False
+        lowered = str(question or "").strip().lower()
+        runtime_terms = (
+            "can i do paper",
+            "can i start paper",
+            "can i run paper",
+            "do paper run",
+            "start paper",
+            "paper ready",
+            "ready for paper",
+            "paper run",
+        )
+        return any(term in lowered for term in runtime_terms)
 
     def _ai_ready_idle_no_active_runtime(self, context: dict[str, Any]) -> bool:
         readiness = context.get("launch_readiness") or {}
