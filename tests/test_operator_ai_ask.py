@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from app.ai_chief_operator.config import AIChiefConfig
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
+from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.api.operator_session_store import OperatorSessionStore
 from app.operator_credentials.store import LocalCredentialStore
+from tests.test_operator_paper_supervisor import FakeRunner
 
 
 def _endpoint(app, path: str, method: str = "GET"):
@@ -12,6 +15,72 @@ def _endpoint(app, path: str, method: str = "GET"):
         if route.path == path and method in (route.methods or set()):
             return route.endpoint
     raise AssertionError(f"route not found: {method} {path}")
+
+
+PAPER_ENV = {
+    "APCA_API_KEY_ID": "test-paper-key",
+    "APCA_API_SECRET_KEY": "test-paper-secret",
+    "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+}
+
+
+def _ready_app(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    return create_operator_app(provider=provider)
+
+
+def _ready_app_with_historical_duplicate(tmp_path):
+    runner = FakeRunner()
+    repo_root = runner.repo_root
+    store_path = repo_root / "state" / "session_journal.jsonl"
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=repo_root,
+            process_env=dict(PAPER_ENV),
+            session_store_path=str(store_path),
+        ),
+        runner=runner,
+        session_store=OperatorSessionStore(path=store_path),
+    )
+    supervisor.start_paper(
+        {
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "approve_autonomous_paper": True,
+        }
+    )
+    supervisor.start_paper(
+        {
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "approve_autonomous_paper": True,
+        }
+    )
+    runner.process.exit_code = 0
+    supervisor.status_snapshot()
+    reloaded = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=repo_root,
+            process_env=dict(PAPER_ENV),
+            session_store_path=str(store_path),
+        ),
+        runner=runner,
+        session_store=OperatorSessionStore(path=store_path),
+    )
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=repo_root),
+        supervisor=reloaded,
+        provider_env=dict(PAPER_ENV),
+    )
+    return create_operator_app(provider=provider)
 
 
 def test_ai_ask_returns_advisory_fallback_and_cannot_execute(tmp_path):
@@ -208,7 +277,7 @@ def test_ai_ask_treats_blocking_bot_question_as_operator_prompt(tmp_path):
     assert payload["refusal_reason"] is None
     assert payload["mode"] in {"TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE", "PORTFOLIO_REVIEW"}
     assert "cannot trade" not in payload["answer"]
-    assert "Current truth:" in payload["answer"]
+    assert "Current backend truth:" in payload["answer"]
     assert "Launch readiness:" in payload["answer"]
     assert payload["can_execute"] is False
     assert payload["broker_call_occurred"] is False
@@ -228,8 +297,89 @@ def test_ai_ask_can_i_start_paper_uses_run_planner_truth(tmp_path):
 
     assert payload["status"] != "REFUSED"
     assert payload["mode"] == "RUN_PLANNER"
-    assert "Current truth:" in payload["answer"]
+    assert "No - current blocker is alpaca_paper_credentials." in payload["answer"]
     assert "Launch readiness:" in payload["answer"]
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+
+
+def test_ai_ask_ready_paper_run_answers_yes_without_fake_blocker(tmp_path):
+    app = _ready_app(tmp_path)
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "can i do paper run?",
+            "route_mode": "LOCAL_GUIDE",
+            "page_context": {"page_id": "command", "page_title": "Run PAPER"},
+        }
+    )
+    answer = payload["answer"]
+
+    assert payload["mode"] == "RUN_PLANNER"
+    assert answer.startswith("Yes - our bot is ready for a bounded PAPER run")
+    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
+    assert "Supervisor: IDLE" in answer
+    assert "Paper start allowed: true" in answer
+    assert "Live: locked" in answer
+    assert "Real money: blocked" in answer
+    assert "Max duration: 86400 seconds / 1 day" in answer
+    assert "Recommended first run: 10-20 minutes only." in answer
+    assert "Shan must click Start PAPER" in answer
+    assert "readiness blockers are cleared" not in answer
+    assert "Current blocker: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+    assert payload["live_enabled"] is False
+    assert payload["real_money_enabled"] is False
+
+
+def test_ai_ask_alive_is_concise_health_answer_when_ready_idle(tmp_path):
+    app = _ready_app(tmp_path)
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "are you alive?",
+            "route_mode": "LOCAL_GUIDE",
+            "page_context": {"page_id": "positions", "page_title": "Portfolio Home"},
+        }
+    )
+    answer = payload["answer"]
+
+    assert payload["mode"] == "OPERATOR_GUIDE"
+    assert answer.startswith("Yes. The backend is connected and our bot is idle-ready.")
+    assert "Runtime: IDLE / no active PAPER run" in answer
+    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
+    assert "No PAPER run is currently active." in answer
+    assert "Current backend truth:" not in answer
+    assert "Redacted JSON" not in answer
+    assert len(answer.splitlines()) <= 12
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+
+
+def test_ai_ask_historical_duplicate_is_audit_context_not_cleanup_target(tmp_path):
+    app = _ready_app_with_historical_duplicate(tmp_path)
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "can i do paper run?",
+            "route_mode": "LOCAL_GUIDE",
+            "page_context": {"page_id": "command", "page_title": "Run PAPER"},
+        }
+    )
+    answer = payload["answer"]
+    lowered = answer.lower()
+
+    assert "Historical duplicate refusal exists as audit context, but it is not current start authority." in answer
+    assert "clean" not in lowered
+    assert "clear stale" not in lowered
+    assert "delete" not in lowered
+    assert "reset" not in lowered
+    assert "prune" not in lowered
+    assert "Run Manager" not in answer
+    assert "Start Governed PAPER" not in answer
+    assert "Operator Dashboard" not in answer
     assert payload["can_execute"] is False
     assert payload["broker_call_occurred"] is False
 

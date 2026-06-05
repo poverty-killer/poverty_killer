@@ -1194,6 +1194,7 @@ class OperatorSnapshotProvider:
         classification = classify_quant_prompt(question, page_id=page_id)
         mode = str(classification.get("mode") or "OPERATOR_GUIDE")
         evidence_level = str(classification.get("evidence_level") or "UNKNOWN")
+        simple_health_question = self._ai_is_simple_health_question(question)
         if not classification["allowed"]:
             context = self._ai_light_context()
             response = (
@@ -1206,7 +1207,7 @@ class OperatorSnapshotProvider:
             gateway_answer: dict[str, Any] = {}
         else:
             route_mode = router_mode_for_gateway(body.get("route_mode") or body.get("mode") or self.ai_routing_settings.get("default_mode") or LOCAL_GUIDE)
-            context = self._ai_light_context() if route_mode == LOCAL_GUIDE else self._ai_context()
+            context = self._ai_light_context() if route_mode == LOCAL_GUIDE or simple_health_question else self._ai_context()
             route_provider = str(body.get("provider_id") or "").strip()
             route_model = str(body.get("model_name") or "").strip()
             if not route_provider:
@@ -1220,19 +1221,44 @@ class OperatorSnapshotProvider:
                 elif route_mode == LOCAL_MODEL_MODE:
                     route_provider = "local_openai_compatible"
                     route_model = route_model or str(self.ai_routing_settings.get("local_model") or "")
-            gateway_answer = self.ai_gateway.ask(
-                question,
-                context,
-                page_context,
-                routing={
-                    "route_mode": route_mode,
-                    "provider_id": route_provider,
-                    "model_name": route_model,
-                    "approved_paid_call": body.get("approved_paid_call") is True,
-                    "max_output_tokens": body.get("max_output_tokens"),
-                    "reasoning_effort": body.get("reasoning_effort"),
-                },
-            )
+            if simple_health_question:
+                gateway_answer = {
+                    "status": "ANSWERED_LOCAL_GUIDE",
+                    "provider": "deterministic_local",
+                    "provider_id": "deterministic_local",
+                    "provider_state": "LOCAL_GUIDE",
+                    "response_source": "LOCAL_DETERMINISTIC",
+                    "answer_source": "LOCAL_DETERMINISTIC",
+                    "response": self._ai_health_answer(context),
+                    "model_call_occurred": False,
+                    "provider_mode": "DETERMINISTIC_FALLBACK",
+                    "model_name": "deterministic-local-guide",
+                    "model_quality": "FALLBACK_ONLY",
+                    "reasoning_policy": "FALLBACK_ONLY_LIMITED",
+                    "model_suitable_for_governance": False,
+                    "cost_mode": "FREE_LOCAL",
+                    "persona_enforced": True,
+                    "expert_roles_applied": ["Chief Quant Advisor", "Operator Guide"],
+                    "route_decision": {
+                        "reason_code": "SIMPLE_HEALTH_LOCAL_TRUTH",
+                        "provider_id": "deterministic_local",
+                        "model_name": "deterministic-local-guide",
+                    },
+                }
+            else:
+                gateway_answer = self.ai_gateway.ask(
+                    question,
+                    context,
+                    page_context,
+                    routing={
+                        "route_mode": route_mode,
+                        "provider_id": route_provider,
+                        "model_name": route_model,
+                        "approved_paid_call": body.get("approved_paid_call") is True,
+                        "max_output_tokens": body.get("max_output_tokens"),
+                        "reasoning_effort": body.get("reasoning_effort"),
+                    },
+                )
             response = str(gateway_answer.get("response") or "")
             status = str(gateway_answer.get("status") or "ANSWERED_FALLBACK")
             provider_state = str(gateway_answer.get("provider_state") or provider_state)
@@ -1291,7 +1317,7 @@ class OperatorSnapshotProvider:
         route_reason = str(route_decision.get("reason_code") or "")
         answer_source_for_truth = str(provider.get("answer_source") or provider.get("response_source") or "")
         local_truth_fallback = (
-            mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR"}
+            (mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR"} or simple_health_question)
             and answer_source_for_truth in {"LOCAL_DETERMINISTIC", "DETERMINISTIC_FALLBACK_NO_MODEL_CALL", "DETERMINISTIC_FALLBACK_MODEL_POLICY"}
         )
         if classification.get("allowed") is True and (local_truth_fallback or route_reason in {
@@ -1299,7 +1325,7 @@ class OperatorSnapshotProvider:
             "SERIOUS_PROMPT_REQUIRES_HIGH_REASONING_OR_PACKET",
             "NO_SILENT_DOWNGRADE_TO_LOWER_REASONING_MODEL",
         }):
-            response = self._ai_current_truth_operational_answer(mode, question, known_facts, unknowns, next_step)
+            response = self._ai_current_truth_operational_answer(mode, question, known_facts, unknowns, next_step, context)
         empty_model_answer = response.strip() == "Provider returned an empty advisory response."
         if empty_model_answer:
             status = "PROVIDER_ERROR"
@@ -1552,6 +1578,7 @@ class OperatorSnapshotProvider:
 
     def _ai_answer_facts(self, mode: str, context: dict[str, Any]) -> tuple[list[str], list[str]]:
         readiness = context.get("launch_readiness") or {}
+        runtime = context.get("runtime") or {}
         portfolio = context.get("portfolio") or {}
         providers = context.get("provider_readiness") or {}
         facts = [
@@ -1570,10 +1597,23 @@ class OperatorSnapshotProvider:
                 unknowns.append(f"Broker portfolio truth unavailable: {portfolio.get('unavailable_reason') or 'UNKNOWN'}.")
         if mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE"}:
             facts.append(f"Launch readiness: {readiness.get('final_launch_readiness') or 'UNKNOWN'}.")
+            if self._ai_ready_idle_no_active_runtime(context):
+                facts.append("Current state: READY_IDLE_NO_ACTIVE_RUNTIME (ready/idle; no active PAPER run attached).")
+            if runtime.get("supervisor_state"):
+                facts.append(f"Supervisor: {runtime.get('supervisor_state')}.")
+            if runtime.get("paper_start_allowed") is not None or readiness.get("paper_start_allowed") is not None:
+                facts.append(f"Paper start allowed: {str(runtime.get('paper_start_allowed') is True or readiness.get('paper_start_allowed') is True).lower()}.")
+            max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds")
+            if max_duration:
+                facts.append(f"Max duration: {max_duration} seconds / {int(max_duration) // 86400 if int(max_duration) >= 86400 else 'less than 1'} day.")
             if readiness.get("reason_codes"):
                 unknowns.append(f"Run blockers/warnings: {', '.join(str(item) for item in readiness.get('reason_codes') or [])}.")
             else:
                 facts.append("Launch readiness reports no current blocker reason codes.")
+            if self._ai_historical_duplicate_refusal(context):
+                facts.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
+            if self._ai_ready_idle_no_active_runtime(context):
+                unknowns.append("No active DecisionFrame, NetEdge, fills, fees, or TCA evidence exists because no PAPER run is active.")
         return facts[:8], unknowns[:8]
 
     def _ai_current_truth_operational_answer(
@@ -1583,7 +1623,22 @@ class OperatorSnapshotProvider:
         known_facts: list[str],
         unknowns: list[str],
         next_step: dict[str, str | None],
+        context: dict[str, Any],
     ) -> str:
+        if self._ai_is_simple_health_question(question) and not self._ai_wants_detailed_answer(question):
+            return self._ai_health_answer(context)
+        if mode == "RUN_PLANNER":
+            return self._ai_paper_readiness_answer(question, context)
+        if not self._ai_wants_detailed_answer(question):
+            return "\n".join(
+                [
+                    "Current backend truth:",
+                    *[f"- {item}" for item in known_facts[:4]],
+                    *([f"- {unknowns[0]}"] if unknowns else []),
+                    f"Next step: {next_step.get('label') or 'Review the current page.'}",
+                    "Safety: advisory-only; no broker calls; no live or real-money enablement.",
+                ]
+            )
         return "\n".join(
             [
                 "I can answer from current backend truth. Final quant/risk/governance judgment still requires the high-reasoning model or a Supreme Board packet.",
@@ -1597,6 +1652,114 @@ class OperatorSnapshotProvider:
                 "Safety: advisory-only, can_execute=false, no broker calls, no live or real-money enablement, no strategy or threshold mutation.",
             ]
         )
+
+    def _ai_wants_detailed_answer(self, question: str) -> bool:
+        lowered = str(question or "").lower()
+        return any(term in lowered for term in ("full report", "details", "diagnostics", "audit", "deep dive", "explain fully"))
+
+    def _ai_is_simple_health_question(self, question: str) -> bool:
+        lowered = str(question or "").strip().lower()
+        if not lowered:
+            return False
+        health_terms = ("are you alive", "you alive", "are we alive", "is the backend alive", "status check")
+        return any(term in lowered for term in health_terms) and not self._ai_wants_detailed_answer(lowered)
+
+    def _ai_ready_idle_no_active_runtime(self, context: dict[str, Any]) -> bool:
+        readiness = context.get("launch_readiness") or {}
+        runtime = context.get("runtime") or {}
+        return (
+            readiness.get("final_launch_readiness") == "READY_FOR_BOUNDED_PAPER"
+            and (readiness.get("paper_start_allowed") is True or runtime.get("paper_start_allowed") is True)
+            and str(runtime.get("supervisor_state") or "").upper() == "IDLE"
+            and bool(runtime.get("current_runtime_attached")) is False
+        )
+
+    def _ai_historical_duplicate_refusal(self, context: dict[str, Any]) -> bool:
+        runtime = context.get("runtime") or {}
+        return runtime.get("historical_refusal_reason") == "DUPLICATE_ACTIVE_RUN"
+
+    def _ai_runtime_truth(self, context: dict[str, Any]) -> dict[str, Any]:
+        readiness = context.get("launch_readiness") or {}
+        runtime = context.get("runtime") or {}
+        max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds") or 86400
+        try:
+            max_duration_int = int(max_duration)
+        except (TypeError, ValueError):
+            max_duration_int = 86400
+        blocking_codes = list(readiness.get("reason_codes") or []) if readiness.get("final_launch_readiness") == "BLOCKED" else []
+        return {
+            "launch": readiness.get("final_launch_readiness") or "UNKNOWN",
+            "supervisor": runtime.get("supervisor_state") or "UNKNOWN",
+            "paper_start_allowed": readiness.get("paper_start_allowed") is True or runtime.get("paper_start_allowed") is True,
+            "live": "locked" if readiness.get("live_blocked") is not False else "UNKNOWN",
+            "real_money": "blocked" if readiness.get("real_money_blocked") is not False else "UNKNOWN",
+            "max_duration": max_duration_int,
+            "blocking_codes": blocking_codes,
+            "ready_idle": self._ai_ready_idle_no_active_runtime(context),
+            "historical_duplicate": self._ai_historical_duplicate_refusal(context),
+        }
+
+    def _ai_next_action_for_blocker(self, reason_code: str) -> str:
+        if reason_code == "alpaca_paper_credentials":
+            return "Open Keys & Providers, save Alpaca PAPER credentials, then validate read-only."
+        if reason_code == "paper_endpoint_only":
+            return "Set APCA_API_BASE_URL to https://paper-api.alpaca.markets, then recheck launch readiness."
+        if reason_code == "paper_start_authority":
+            return "Open the Run PAPER page and review the current supervisor refusal reason."
+        if reason_code == "audit_session_storage":
+            return "Fix audit/session storage readiness before any PAPER start."
+        return f"Review launch readiness reason code {reason_code} in the operator UI."
+
+    def _ai_paper_readiness_answer(self, question: str, context: dict[str, Any]) -> str:
+        truth = self._ai_runtime_truth(context)
+        if truth["launch"] == "READY_FOR_BOUNDED_PAPER" and truth["paper_start_allowed"] is True:
+            lines = [
+                "Yes - our bot is ready for a bounded PAPER run based on current backend truth.",
+                "",
+                "Current backend truth:",
+                f"- Launch readiness: {truth['launch']}",
+                f"- Supervisor: {truth['supervisor']}",
+                f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}",
+                f"- Live: {truth['live']}",
+                f"- Real money: {truth['real_money']}",
+                f"- Max duration: {truth['max_duration']} seconds / 1 day",
+                "",
+                "Recommended first run: 10-20 minutes only.",
+                "I cannot start it for you. Shan must click Start PAPER on the Run PAPER page.",
+            ]
+            if truth["ready_idle"]:
+                lines.append("Current state: READY_IDLE_NO_ACTIVE_RUNTIME means ready/idle with no active PAPER run attached; it is not a blocker.")
+            if truth["historical_duplicate"]:
+                lines.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
+            return "\n".join(lines)
+        reason = str((truth["blocking_codes"] or ["UNKNOWN_BLOCKER"])[0])
+        return "\n".join(
+            [
+                f"No - current blocker is {reason}.",
+                f"Launch readiness: {truth['launch']}.",
+                f"Paper start allowed: {str(truth['paper_start_allowed']).lower()}.",
+                f"Next action: {self._ai_next_action_for_blocker(reason)}",
+                "I cannot start PAPER, mutate state, call broker, enable live, or enable real money.",
+            ]
+        )
+
+    def _ai_health_answer(self, context: dict[str, Any]) -> str:
+        truth = self._ai_runtime_truth(context)
+        ready_phrase = "and our bot is idle-ready" if truth["ready_idle"] else "but PAPER readiness is not fully ready"
+        lines = [
+            f"Yes. The backend is connected {ready_phrase}.",
+            "",
+            f"- Runtime: {truth['supervisor']} / no active PAPER run",
+            f"- Launch readiness: {truth['launch']}",
+            "- AI: advisory only",
+            f"- Live: {truth['live']}",
+            f"- Real money: {truth['real_money']}",
+            "",
+            "No PAPER run is currently active.",
+        ]
+        if truth["historical_duplicate"]:
+            lines.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
+        return "\n".join(lines)
 
     def _ai_limited_operational_answer(
         self,
@@ -1631,7 +1794,10 @@ class OperatorSnapshotProvider:
         if mode == "PORTFOLIO_REVIEW":
             return {"label": "Review Portfolio Home positions, exposure, open orders, and unavailable broker truth.", "page": "positions", "control_id": "positions_preview_table"}
         if mode == "RUN_PLANNER":
-            return {"label": "Use Run PAPER only after readiness blockers are cleared and safety confirmations are checked.", "page": "command", "control_id": "paper_start"}
+            if readiness.get("final_launch_readiness") == "READY_FOR_BOUNDED_PAPER" and readiness.get("paper_start_allowed") is True:
+                return {"label": "Recommended first run: 10-20 minutes. I cannot start it; Shan must click Start PAPER.", "page": "command", "control_id": "paper_start"}
+            reason = str((readiness.get("reason_codes") or ["UNKNOWN_BLOCKER"])[0])
+            return {"label": f"Do not start PAPER until {reason} is resolved.", "page": "command", "control_id": "paper_start"}
         if mode == "CODEX_PACKET_ADVISOR":
             return {"label": "Draft a scoped Codex packet with exact blocker, file area, tests, and safety limits.", "page": "ai", "control_id": "ai_ask"}
         if mode == "TRADING_SYSTEMS_AUDITOR":
@@ -1697,6 +1863,7 @@ class OperatorSnapshotProvider:
         context["provider_readiness"] = self.providers()
         context["provider_setup"] = self.credentials_providers()
         context["launch_readiness"] = self.launch_readiness()
+        context["runtime"] = self.runtime()
         context["portfolio"] = {
             "status": "PAGE_CONTEXT_OR_PORTFOLIO_ENDPOINT_REQUIRED",
             "detail": "AI context does not call broker. Use existing UI page context or /operator/portfolio endpoint output.",

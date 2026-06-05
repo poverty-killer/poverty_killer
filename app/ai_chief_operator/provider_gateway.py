@@ -398,7 +398,11 @@ class ExternalAdvisoryProvider:
             "Focus on current holdings, blockers, PAPER readiness, P&L/exposure truth, execution quality, and proof needed. "
             "For quant questions include hypothesis, evidence, counterargument, risk, missing data, proof/disproof, and safe next test. "
             "For portfolio questions separate exposure, concentration, P&L, fees, TCA, slippage, stale/conflicted data, and broker-confirmed versus inferred truth. "
-            "For operator questions name the page/control, why blocked, exact next step, what not to do, and whether a Codex packet is needed.\n\n"
+            "For operator questions name the page/control, why blocked, exact next step, what not to do, and whether a Codex packet is needed. "
+            "Use current UI terms only: Run PAPER page, Start PAPER button, operator UI, Chief Quant Advisor, and AI Advisor. "
+            "Do not use stale labels like Run Manager, Start Governed PAPER, or Operator Dashboard unless they appear in the provided context. "
+            "Do not recommend cleaning, clearing, deleting, resetting, pruning, or manually mutating state/session/log/runtime records. "
+            "Historical duplicate PAPER refusals are audit context only unless current backend authority says they block start.\n\n"
             f"{serialized}"
         )
 

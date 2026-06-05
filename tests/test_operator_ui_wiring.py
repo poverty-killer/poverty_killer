@@ -145,6 +145,8 @@ def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
     assert "safe local fallback answered this question" in text
     assert "Safe local fallback" in text
     assert "LOCAL_DETERMINISTIC" in text
+    assert "Safe local fallback | ${source}" in text
+    assert "`${currentProviderDisplay} answered | Advisory only | Broker actions blocked`" in text
 
 
 def test_ai_packet_output_is_collapsed_and_copyable_by_default():
@@ -172,6 +174,15 @@ def test_ai_chat_thread_has_user_loading_answer_and_latest_anchor_slots():
     assert "data-ai-chat-scroll-container" in text
     assert "ai-chief-response-end" in text
     assert "container.scrollTop = container.scrollHeight" in text
+
+
+def test_ai_evidence_labels_ready_idle_as_state_not_blocker():
+    text = _app_text()
+
+    assert "function aiReadyIdleNoActiveRuntime" in text
+    assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" in text
+    assert "Current blocker: ${blocker}" in text
+    assert "value === \"READY_IDLE_NO_ACTIVE_RUNTIME\"" in text
 
 
 def test_portfolio_home_has_commercial_cockpit_lane_and_primary_actions():

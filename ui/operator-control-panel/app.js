@@ -2744,6 +2744,10 @@
     } else if (fallbackAnswered) {
       currentProviderDisplay = "Safe local fallback";
       compactLine = "Safe local fallback active | Advisory only | Broker actions blocked";
+    } else if (result && currentAnswerSource === "SUPREME_BOARD_PACKET") {
+      compactLine = "Supreme Board packet mode | Advisory only | Broker actions blocked";
+    } else if (result && currentAnswerSource !== "none yet") {
+      compactLine = `${currentProviderDisplay} answered | Advisory only | Broker actions blocked`;
     }
     return {
       route,
@@ -2774,12 +2778,70 @@
     `;
   }
 
+  function aiContextLaunchReadiness(context) {
+    const readiness = context && (context.launch_readiness || context.launchReadiness);
+    return readiness && (readiness.final_launch_readiness || readiness.finalLaunchReadiness || readiness.final || "");
+  }
+
+  function aiContextPaperStartAllowed(context) {
+    const readiness = context && (context.launch_readiness || context.launchReadiness);
+    const runtime = context && context.runtime;
+    return Boolean(
+      (readiness && (readiness.paper_start_allowed === true || readiness.paperStartAllowed === true)) ||
+      (runtime && (runtime.paper_start_allowed === true || runtime.paperStartAllowed === true))
+    );
+  }
+
+  function aiReadyIdleNoActiveRuntime(context) {
+    const blockers = context && Array.isArray(context.blockers) ? context.blockers : [];
+    const runtime = context && context.runtime;
+    const supervisorState = runtime && String(runtime.supervisor_state || runtime.supervisorState || "").toUpperCase();
+    const processState = runtime && String(runtime.process_state || runtime.processState || runtime.bot_status || runtime.botStatus || "").toUpperCase();
+    return (
+      blockers.includes("READY_IDLE_NO_ACTIVE_RUNTIME") ||
+      (aiContextLaunchReadiness(context) === "READY_FOR_BOUNDED_PAPER" && aiContextPaperStartAllowed(context) && supervisorState === "IDLE" && processState !== "RUNNING")
+    );
+  }
+
+  function aiActualBlocker(context) {
+    const blockers = context && Array.isArray(context.blockers) ? context.blockers : [];
+    return blockers.find((item) => {
+      const value = String(item || "");
+      if (!value || value === "READY_IDLE_NO_ACTIVE_RUNTIME") return false;
+      if (value.startsWith("WARNING:")) return false;
+      if (value.startsWith("LIVE_MISSING:")) return false;
+      return value.startsWith("BLOCKER:") || /^[A-Z0-9_]+$/.test(value);
+    }) || "";
+  }
+
+  function aiPreferredKnownFact(result) {
+    const facts = result && Array.isArray(result.knownFacts) ? result.knownFacts : [];
+    return facts.find((item) => /READY_FOR_BOUNDED_PAPER|Supervisor:|Paper start allowed|Launch readiness/i.test(String(item || ""))) || facts[0] || "";
+  }
+
+  function aiAnswerMetaText(result, createdAt) {
+    const timestamp = aiMessageTime(createdAt);
+    const source = result.answerSource || "LOCAL_DETERMINISTIC";
+    if (aiResultIsFallback(result)) {
+      return `Safe local fallback | ${source} | ${timestamp}`;
+    }
+    if (result.answerSource === "SUPREME_BOARD_PACKET") {
+      return `Supreme Board packet mode | ${source} | ${timestamp}`;
+    }
+    return `${providerDisplayLabel(result.providerId || "deterministic_local")} answered | ${result.modelName || "model unknown"} | ${source} | ${timestamp}`;
+  }
+
   function aiEvidenceBullets(result, context) {
     const bullets = [];
     if (result.evidenceLevel) bullets.push(`Evidence level: ${result.evidenceLevel}`);
-    const blocker = context && Array.isArray(context.blockers) ? context.blockers[0] : "";
-    if (blocker) bullets.push(`Current blocker: ${blocker}`);
-    (result.knownFacts || []).slice(0, 1).forEach((item) => bullets.push(`Known: ${item}`));
+    const blocker = aiActualBlocker(context);
+    if (aiReadyIdleNoActiveRuntime(context)) {
+      bullets.push("Current state: READY_IDLE_NO_ACTIVE_RUNTIME");
+    } else if (blocker) {
+      bullets.push(`Current blocker: ${blocker}`);
+    }
+    const known = aiPreferredKnownFact(result);
+    if (known) bullets.push(`Known: ${known}`);
     (result.unknowns || []).slice(0, 1).forEach((item) => bullets.push(`Unknown: ${item}`));
     return uniquePrompts(bullets).slice(0, 3);
   }
@@ -2884,7 +2946,7 @@
           </div>
           <div class="ai-answer-text">${escapeHtml(answer)}</div>
           <div class="ai-answer-meta">
-            ${escapeHtml(`${result.providerId || "deterministic_local"} | ${result.modelName || "deterministic-local-guide"} | ${result.answerSource || "LOCAL_DETERMINISTIC"} | ${aiMessageTime(message.updatedAt || message.createdAt)}`)}
+            ${escapeHtml(aiAnswerMetaText(result, message.updatedAt || message.createdAt))}
           </div>
           ${error ? `<div class="notice error">Provider error: ${escapeHtml(providerError || message.error || "request failed")}</div>` : ""}
           ${fallback && !error ? `<div class="notice ai-fallback-note">Fallback: ${escapeHtml(aiFriendlyStatus(result))}</div>` : ""}
