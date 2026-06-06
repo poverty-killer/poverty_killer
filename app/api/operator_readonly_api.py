@@ -9,6 +9,7 @@ engine or direct broker control surface.
 from __future__ import annotations
 
 import os
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +71,22 @@ OPERATOR_ACTIVATION_VERSION = "operator-activation-e2e-truth6-20260602"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_git_output(repo_root: Path, args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "UNKNOWN_NOT_AVAILABLE"
+    if result.returncode != 0:
+        return "UNKNOWN_NOT_AVAILABLE"
+    return result.stdout.strip() or "UNKNOWN_NOT_AVAILABLE"
 
 
 READ_ONLY_CONTRACTS: dict[str, Any] = {
@@ -193,6 +210,9 @@ class OperatorSnapshotProvider:
         historical_tests: HistoricalTestService | None = None,
     ) -> None:
         self.runtime_config = runtime_config or OperatorRuntimeConfig.from_env()
+        self.process_start_time = _utc_now()
+        self.loaded_git_commit_short = _safe_git_output(self.runtime_config.repo_root, ["rev-parse", "--short", "HEAD"])
+        self.loaded_git_branch = _safe_git_output(self.runtime_config.repo_root, ["branch", "--show-current"])
         self.process_env = provider_env if provider_env is not None else dict(os.environ)
         self.credential_store = credential_store or LocalCredentialStore(
             default_credential_store_path(self.runtime_config.repo_root)
@@ -250,6 +270,18 @@ class OperatorSnapshotProvider:
         self.research_registry = research_registry or ResearchRegistry()
         self.historical_tests_service = historical_tests or HistoricalTestService()
         self.last_credential_save_diagnostic: dict[str, Any] | None = None
+
+    def _backend_process_identity(self) -> dict[str, Any]:
+        return {
+            "git_commit_short": self.loaded_git_commit_short,
+            "git_branch": self.loaded_git_branch,
+            "process_start_time": self.process_start_time,
+            "backend_pid": os.getpid(),
+            "app_version": OPERATOR_ACTIVATION_VERSION,
+            "source_commit": self.loaded_git_commit_short,
+            "backend_repo_root": str(self.runtime_config.repo_root),
+            "secrets_values_exposed": False,
+        }
 
     def _default_ai_router_settings(self, gateway_summary: dict[str, Any] | None = None) -> dict[str, Any]:
         summary = gateway_summary or self.ai_gateway.status().get("router") or {}
@@ -331,6 +363,7 @@ class OperatorSnapshotProvider:
         return {
             "api_version": API_VERSION,
             "data_source": "OPERATOR_BACKEND",
+            **self._backend_process_identity(),
             "bot_status": process_state,
             "runtime_mode": "PAPER",
             "mode_state": "PAPER_ENABLED",
@@ -375,6 +408,7 @@ class OperatorSnapshotProvider:
             "api_status": "DEGRADED" if degraded_reasons else "OK",
             "api_version": API_VERSION,
             "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
+            **self._backend_process_identity(),
             "supervisor_status": supervisor["state"],
             "session_store_status": storage["session_store"]["status"],
             "world_awareness_cache_status": storage["world_awareness_cache"]["status"],
@@ -558,6 +592,7 @@ class OperatorSnapshotProvider:
             "api_version": API_VERSION,
             "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
             "data_source": "OPERATOR_BACKEND",
+            **self._backend_process_identity(),
             "git_commit": "UNKNOWN_NOT_INSPECTED",
             "dirty_worktree": "UNKNOWN_NOT_INSPECTED",
             "python_version": "UNKNOWN_NOT_INSPECTED",

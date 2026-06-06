@@ -74,14 +74,37 @@ def test_hidden_launcher_rejects_and_stops_stale_operator_backend():
     assert "Stop-Process -Id $processId -Force" in text
 
 
-def test_visible_launcher_delegates_to_guarded_hidden_launcher():
+def test_visible_launcher_presents_safe_backend_control_window():
     text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
 
     assert "open_operator_console_hidden.ps1" in text
-    assert "$HiddenLauncher" in text
-    assert "& $HiddenLauncher -Port $Port -HostAddress $HostAddress -OpenBrowser $true" in text
-    assert "uvicorn" not in text
-    assert "Start-Process -FilePath $Python" not in text
+    assert "$GuardedLauncher" in text
+    assert "& $GuardedLauncher -Port $Port -HostAddress $HostAddress -OpenBrowser $false" in text
+    assert "System.Windows.Forms" in text
+    assert "POVERTY_KILLER Operator Launcher" in text
+    assert "Start backend" in text
+    assert "Stop backend" in text
+    assert "Restart backend" in text
+    assert "Open operator UI" in text
+    assert "Refresh status" in text
+    assert "Copy diagnostics" in text
+    assert "Backend may be stale. Restart recommended." in text
+    assert "Restart required after update" in text
+    assert "/operator/health" in text
+    assert "/operator/status" in text
+    assert "/operator/intent/paper/start" not in text
+    assert "broker mutation" in text
+    assert "live enablement" in text
+    assert "real-money enablement" in text
+
+
+def test_desktop_vbs_entrypoint_opens_visible_launcher_not_browser_only():
+    text = Path("scripts/open_operator_console_hidden.vbs").read_text(encoding="utf-8")
+
+    assert "open_operator_console.ps1" in text
+    assert "open_operator_console_hidden.ps1" not in text
+    assert "-STA" in text
+    assert "open_operator_console.ps1" in text
 
 
 def test_operator_ui_assets_are_cache_busted_for_desktop_launcher():

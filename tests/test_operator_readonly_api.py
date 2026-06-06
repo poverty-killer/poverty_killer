@@ -43,6 +43,15 @@ def test_operator_readonly_status_contract_is_safe_default(tmp_path):
     assert payload["force_trade_available"] is False
     assert payload["broker_post_count"] == 0
     assert payload["broker_delete_count"] == 0
+    assert payload["git_commit_short"]
+    assert payload["git_branch"]
+    assert payload["process_start_time"]
+    assert isinstance(payload["backend_pid"], int)
+    assert payload["app_version"] == OPERATOR_ACTIVATION_VERSION
+    assert payload["source_commit"] == payload["git_commit_short"]
+    assert payload["secrets_values_exposed"] is False
+    assert "sk-" not in str(payload)
+    assert "APCA_API_SECRET_KEY" not in str(payload)
 
 
 def test_operator_live_readiness_is_locked_and_refused(tmp_path):
@@ -256,6 +265,10 @@ def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     assert health["live_status"] == "LIVE_LOCKED"
     assert health["api_version"] == API_VERSION
     assert health["operator_activation_version"] == OPERATOR_ACTIVATION_VERSION
+    assert health["git_commit_short"]
+    assert health["git_branch"]
+    assert health["process_start_time"]
+    assert isinstance(health["backend_pid"], int)
     assert health["real_money_status"] == "BLOCKED"
     assert health["broker_call_occurred"] is False
     assert readiness["live_ready"] is False
