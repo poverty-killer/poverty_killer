@@ -31,6 +31,7 @@ from app.ai_chief_operator.router_settings import (
     router_mode_for_gateway,
 )
 from app.ai_chief_operator.quant_persona import (
+    MODEL_IDENTITY_TERMS,
     draft_codex_packet,
     build_quant_review_recommendation,
     classify_quant_prompt,
@@ -349,7 +350,7 @@ class OperatorSnapshotProvider:
         process_state = session_status or "NO_ACTIVE_RUNTIME_ATTACHED"
         paper_start_allowed = supervisor.get("paper_start_allowed") is True
         ready_idle = not watchlist and paper_start_allowed and supervisor.get("state") == "IDLE"
-        historical_refusal = latest if latest.get("status") == "REFUSED" else None
+        historical_refusal = self._latest_historical_refusal(supervisor)
         runtime_attachment_state = "READY_IDLE_NO_ACTIVE_RUNTIME" if ready_idle else process_state
         runtime_attachment_detail = (
             "Ready. No PAPER run currently attached."
@@ -503,7 +504,7 @@ class OperatorSnapshotProvider:
         supervisor = self._supervisor_snapshot()
         active = supervisor.get("active_session") or {}
         latest = supervisor.get("latest_session") or {}
-        historical_refusal = latest if latest.get("status") == "REFUSED" else None
+        historical_refusal = self._latest_historical_refusal(supervisor)
         current_attached = bool(active)
         runtime_attachment_state = active.get("status") or "NO_ACTIVE_RUNTIME_ATTACHED"
         return {
@@ -557,6 +558,24 @@ class OperatorSnapshotProvider:
             "runner_max_paper_duration_seconds": supervisor.get("runner_max_paper_duration_seconds"),
             "duration_authority": supervisor.get("duration_authority"),
         }
+
+    def _latest_historical_refusal(self, supervisor: dict[str, Any]) -> dict[str, Any] | None:
+        latest = supervisor.get("latest_session") if isinstance(supervisor.get("latest_session"), dict) else {}
+        if latest and latest.get("status") == "REFUSED":
+            return dict(latest)
+        for session in self.supervisor.session_store.sessions():
+            if session.get("status") == "REFUSED":
+                return dict(session)
+        for event in reversed(self.supervisor.session_store.audit_events()):
+            if event.get("allowed") is False and event.get("reason_code"):
+                return {
+                    "status": "REFUSED",
+                    "session_id": event.get("session_id"),
+                    "requested_at": event.get("timestamp"),
+                    "refusal_reason": event.get("reason_code"),
+                    "source": "AUDIT_EVENT",
+                }
+        return None
 
     def profile(self) -> dict[str, Any]:
         supervisor = self._supervisor_snapshot()
@@ -1231,6 +1250,7 @@ class OperatorSnapshotProvider:
         evidence_level = str(classification.get("evidence_level") or "UNKNOWN")
         simple_health_question = self._ai_is_simple_health_question(question)
         local_runtime_truth_question = self._ai_should_answer_from_runtime_truth(mode, question)
+        model_identity_question = self._ai_is_model_identity_question(question)
         if not classification["allowed"]:
             context = self._ai_light_context()
             response = (
@@ -1243,11 +1263,19 @@ class OperatorSnapshotProvider:
             gateway_answer: dict[str, Any] = {}
         else:
             route_mode = router_mode_for_gateway(body.get("route_mode") or body.get("mode") or self.ai_routing_settings.get("default_mode") or LOCAL_GUIDE)
-            context = self._ai_light_context() if route_mode == LOCAL_GUIDE or simple_health_question or local_runtime_truth_question else self._ai_context()
             route_provider = str(body.get("provider_id") or "").strip()
             route_model = str(body.get("model_name") or "").strip()
+            active_provider, active_model = self._active_router_api_selection()
+            if model_identity_question and route_mode == LOCAL_GUIDE:
+                route_mode = LIGHT_API
+                route_provider = route_provider or active_provider
+                route_model = route_model or active_model
+            context = (
+                self._ai_light_context()
+                if route_mode == LOCAL_GUIDE or simple_health_question or local_runtime_truth_question or model_identity_question
+                else self._ai_context()
+            )
             if not route_provider:
-                active_provider, active_model = self._active_router_api_selection()
                 if route_mode == HIGH_REASONING_API:
                     route_provider = active_provider or str(self.ai_routing_settings.get("high_reasoning_provider") or "openai")
                     route_model = route_model or active_model or str(self.ai_routing_settings.get("high_reasoning_model") or "")
@@ -1343,16 +1371,42 @@ class OperatorSnapshotProvider:
         model_suitable = provider.get("model_suitable_for_governance")
         if model_suitable is None:
             model_suitable = model_policy.get("model_suitable_for_governance") is True
-        if model_quality != "HIGH_REASONING" and classification.get("allowed") is True:
+        route_decision = gateway_answer.get("route_decision") if isinstance(gateway_answer, dict) else {}
+        route_decision = route_decision if isinstance(route_decision, dict) else {}
+        route_reason = str(route_decision.get("reason_code") or "")
+        answer_source_for_truth = str(provider.get("answer_source") or provider.get("response_source") or "")
+        if (
+            model_identity_question
+            and classification.get("allowed") is True
+            and answer_source_for_truth not in {"API_LIGHT_MODEL", "API_HIGH_REASONING_APPROVED", "LOCAL_MODEL"}
+        ):
+            response = self._ai_model_identity_fallback_answer(provider, route_decision)
+            status = "ANSWERED_FALLBACK"
+            provider_state = "DETERMINISTIC_FALLBACK"
+            provider["provider_mode"] = "DETERMINISTIC_FALLBACK"
+            provider["answer_source"] = "LOCAL_DETERMINISTIC"
+            provider["response_source"] = "LOCAL_DETERMINISTIC"
+            provider["cost_mode"] = "FREE_LOCAL"
+            provider["model_quality"] = "FALLBACK_ONLY"
+            provider["reasoning_policy"] = "FALLBACK_ONLY_LIMITED"
+            provider["model_suitable_for_governance"] = False
+            provider_mode = "DETERMINISTIC_FALLBACK"
+            model_quality = "FALLBACK_ONLY"
+            reasoning_policy = "FALLBACK_ONLY_LIMITED"
+            model_suitable = False
+            answer_source_for_truth = "LOCAL_DETERMINISTIC"
+        elif model_identity_question and classification.get("allowed") is True:
+            response = self._ai_model_identity_provider_answer(provider, route_decision)
+        if (
+            model_quality != "HIGH_REASONING"
+            and classification.get("allowed") is True
+            and not (simple_health_question or local_runtime_truth_question or model_identity_question)
+        ):
             limited = "I can give a limited operational answer, but final quant/risk/governance judgment requires the high-reasoning model."
             if limited not in response:
                 response = f"{limited}\n{response}".strip()
         known_facts, unknowns = self._ai_answer_facts(mode, context)
         next_step = self._ai_next_step(mode, context, page_id)
-        route_decision = gateway_answer.get("route_decision") if isinstance(gateway_answer, dict) else {}
-        route_decision = route_decision if isinstance(route_decision, dict) else {}
-        route_reason = str(route_decision.get("reason_code") or "")
-        answer_source_for_truth = str(provider.get("answer_source") or provider.get("response_source") or "")
         local_truth_fallback = (
             (mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR"} or simple_health_question)
             and answer_source_for_truth in {"LOCAL_DETERMINISTIC", "DETERMINISTIC_FALLBACK_NO_MODEL_CALL", "DETERMINISTIC_FALLBACK_MODEL_POLICY"}
@@ -1651,7 +1705,7 @@ class OperatorSnapshotProvider:
                 facts.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
             if self._ai_ready_idle_no_active_runtime(context):
                 unknowns.append("No active DecisionFrame, NetEdge, fills, fees, or TCA evidence exists because no PAPER run is active.")
-        return facts[:8], unknowns[:8]
+        return facts[:10], unknowns[:8]
 
     def _ai_current_truth_operational_answer(
         self,
@@ -1669,19 +1723,18 @@ class OperatorSnapshotProvider:
         if not self._ai_wants_detailed_answer(question):
             return "\n".join(
                 [
-                    "Current backend truth:",
+                    "Short answer:",
                     *[f"- {item}" for item in known_facts[:4]],
                     *([f"- {unknowns[0]}"] if unknowns else []),
                     f"Next step: {next_step.get('label') or 'Review the current page.'}",
-                    "Safety: advisory-only; no broker calls; no live or real-money enablement.",
                 ]
             )
         return "\n".join(
             [
-                "I can answer from current backend truth. Final quant/risk/governance judgment still requires the high-reasoning model or a Supreme Board packet.",
+                "Detailed backend state:",
                 f"Question: {question or 'No question supplied.'}",
                 f"Mode: {mode}.",
-                "Current truth:",
+                "Known facts:",
                 *[f"- {item}" for item in known_facts[:5]],
                 "Missing or limited evidence:",
                 *[f"- {item}" for item in unknowns[:4]],
@@ -1716,6 +1769,12 @@ class OperatorSnapshotProvider:
             "paper run",
         )
         return any(term in lowered for term in runtime_terms)
+
+    def _ai_is_model_identity_question(self, question: str) -> bool:
+        lowered = str(question or "").strip().lower()
+        if not lowered:
+            return False
+        return any(term in lowered for term in MODEL_IDENTITY_TERMS)
 
     def _ai_ready_idle_no_active_runtime(self, context: dict[str, Any]) -> bool:
         readiness = context.get("launch_readiness") or {}
@@ -1766,25 +1825,17 @@ class OperatorSnapshotProvider:
     def _ai_paper_readiness_answer(self, question: str, context: dict[str, Any]) -> str:
         truth = self._ai_runtime_truth(context)
         if truth["launch"] == "READY_FOR_BOUNDED_PAPER" and truth["paper_start_allowed"] is True:
-            lines = [
-                "Yes - our bot is ready for a bounded PAPER run based on current backend truth.",
-                "",
-                "Current backend truth:",
-                f"- Launch readiness: {truth['launch']}",
-                f"- Supervisor: {truth['supervisor']}",
-                f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}",
-                f"- Live: {truth['live']}",
-                f"- Real money: {truth['real_money']}",
-                f"- Max duration: {truth['max_duration']} seconds / 1 day",
-                "",
-                "Recommended first run: 10-20 minutes only.",
-                "I cannot start it for you. Shan must click Start PAPER on the Run PAPER page.",
-            ]
-            if truth["ready_idle"]:
-                lines.append("Current state: READY_IDLE_NO_ACTIVE_RUNTIME means ready/idle with no active PAPER run attached; it is not a blocker.")
-            if truth["historical_duplicate"]:
-                lines.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
-            return "\n".join(lines)
+            return "\n".join(
+                [
+                    "Yes - bounded PAPER is ready and start is allowed.",
+                    f"- Launch readiness: {truth['launch']}",
+                    f"- Supervisor: {truth['supervisor']}; no active PAPER run attached.",
+                    f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}",
+                    f"- Max duration: {truth['max_duration']} seconds / 1 day",
+                    f"- Live {truth['live']}; real money {truth['real_money']}.",
+                    "Next step: Shan must click Start PAPER on the Run PAPER page. Recommended first run: 10-20 minutes only.",
+                ]
+            )
         reason = str((truth["blocking_codes"] or ["UNKNOWN_BLOCKER"])[0])
         return "\n".join(
             [
@@ -1792,27 +1843,68 @@ class OperatorSnapshotProvider:
                 f"Launch readiness: {truth['launch']}.",
                 f"Paper start allowed: {str(truth['paper_start_allowed']).lower()}.",
                 f"Next action: {self._ai_next_action_for_blocker(reason)}",
-                "I cannot start PAPER, mutate state, call broker, enable live, or enable real money.",
             ]
         )
 
     def _ai_health_answer(self, context: dict[str, Any]) -> str:
         truth = self._ai_runtime_truth(context)
-        ready_phrase = "and our bot is idle-ready" if truth["ready_idle"] else "but PAPER readiness is not fully ready"
+        ready_phrase = "backend connected and our bot is idle-ready" if truth["ready_idle"] else "backend connected, but PAPER readiness is not fully ready"
+        return "\n".join(
+            [
+                f"Yes - {ready_phrase}.",
+                f"- Runtime: {truth['supervisor']} / no active PAPER run",
+                f"- Launch readiness: {truth['launch']}",
+                f"- Live {truth['live']}; real money {truth['real_money']}",
+                "- AI is advisory-only.",
+            ]
+        )
+
+    def _ai_model_identity_fallback_answer(self, provider: dict[str, Any], route_decision: dict[str, Any]) -> str:
+        selected_provider = str(route_decision.get("provider_id") or provider.get("provider_id") or provider.get("provider") or "unknown")
+        selected_model = str(route_decision.get("model_name") or provider.get("model_name") or provider.get("model") or "not selected")
+        reason = str(route_decision.get("reason_code") or provider.get("provider_error_category") or "provider unavailable")
+        provider_error = str(provider.get("provider_error_message_safe") or "").strip()
+        display_provider = self._ai_provider_display_name(selected_provider)
         lines = [
-            f"Yes. The backend is connected {ready_phrase}.",
-            "",
-            f"- Runtime: {truth['supervisor']} / no active PAPER run",
-            f"- Launch readiness: {truth['launch']}",
-            "- AI: advisory only",
-            f"- Live: {truth['live']}",
-            f"- Real money: {truth['real_money']}",
-            "",
-            "No PAPER run is currently active.",
+            f"{display_provider} is selected, but no provider model answered this question.",
+            f"- Selected provider/model: {display_provider} / {selected_model}",
+            "- Actual answer source: LOCAL_DETERMINISTIC",
+            f"- Provider call did not answer: {reason}",
+            "- Broker actions blocked; no secrets exposed.",
         ]
-        if truth["historical_duplicate"]:
-            lines.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
+        if provider_error:
+            lines.insert(4, f"- Safe provider error: {provider_error}")
         return "\n".join(lines)
+
+    def _ai_model_identity_provider_answer(self, provider: dict[str, Any], route_decision: dict[str, Any]) -> str:
+        selected_provider = str(route_decision.get("provider_id") or provider.get("provider_id") or provider.get("provider") or "unknown")
+        selected_model = str(route_decision.get("model_name") or provider.get("model_name") or provider.get("model") or "model unknown")
+        answer_source = str(provider.get("answer_source") or provider.get("response_source") or route_decision.get("answer_source") or "UNKNOWN")
+        route_mode = str(route_decision.get("route_mode") or "UNKNOWN")
+        display_provider = self._ai_provider_display_name(selected_provider)
+        return "\n".join(
+            [
+                f"{display_provider} answered this question using {selected_model}.",
+                f"- Selected provider/model: {display_provider} / {selected_model}",
+                f"- Actual answer source: {answer_source}",
+                f"- Route: {route_mode}",
+                "- Advisory only; broker actions blocked.",
+            ]
+        )
+
+    def _ai_provider_display_name(self, provider_id: str) -> str:
+        labels = {
+            "openai": "OpenAI",
+            "anthropic": "Claude",
+            "deepseek": "DeepSeek",
+            "gemini": "Gemini",
+            "xai_grok": "Grok",
+            "kimi_moonshot": "Kimi",
+            "local_openai_compatible": "Local OpenAI-compatible",
+            "deterministic_local": "Safe local fallback",
+            "supreme_board_packet": "Supreme Board packet",
+        }
+        return labels.get(str(provider_id or "").strip().lower(), str(provider_id or "Unknown provider"))
 
     def _ai_limited_operational_answer(
         self,
@@ -1824,17 +1916,10 @@ class OperatorSnapshotProvider:
     ) -> str:
         return "\n".join(
             [
-                "PROVIDER ERROR - the configured high-reasoning model returned no usable text, so this is a limited operational fallback.",
-                "I can give a limited operational answer, but final quant/risk/governance judgment requires the high-reasoning model.",
-                f"Question: {question or 'No question supplied.'}",
-                f"Mode: {mode}.",
-                "Known facts:",
-                *[f"- {item}" for item in known_facts[:6]],
-                "Unknowns / missing evidence:",
-                *[f"- {item}" for item in unknowns[:6]],
+                "The configured model returned no usable text, so this is a safe local fallback.",
+                *[f"- {item}" for item in known_facts[:4]],
+                *[f"- Missing: {item}" for item in unknowns[:2]],
                 f"Next step: {next_step.get('label') or 'Review the current page.'}",
-                f"Go to: {next_step.get('page') or 'current page'} / control: {next_step.get('control_id') or 'unknown'}.",
-                "Do not treat this as final quant/risk/live-readiness judgment.",
             ]
         )
 

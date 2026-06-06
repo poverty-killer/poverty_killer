@@ -277,7 +277,8 @@ def test_ai_ask_treats_blocking_bot_question_as_operator_prompt(tmp_path):
     assert payload["refusal_reason"] is None
     assert payload["mode"] in {"TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE", "PORTFOLIO_REVIEW"}
     assert "cannot trade" not in payload["answer"]
-    assert "Current backend truth:" in payload["answer"]
+    assert "Current backend truth:" not in payload["answer"]
+    assert "Short answer:" in payload["answer"]
     assert "Launch readiness:" in payload["answer"]
     assert payload["can_execute"] is False
     assert payload["broker_call_occurred"] is False
@@ -316,15 +317,16 @@ def test_ai_ask_ready_paper_run_answers_yes_without_fake_blocker(tmp_path):
     answer = payload["answer"]
 
     assert payload["mode"] == "RUN_PLANNER"
-    assert answer.startswith("Yes - our bot is ready for a bounded PAPER run")
+    assert answer.startswith("Yes - bounded PAPER is ready and start is allowed.")
     assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
     assert "Supervisor: IDLE" in answer
     assert "Paper start allowed: true" in answer
-    assert "Live: locked" in answer
-    assert "Real money: blocked" in answer
+    assert "Live locked; real money blocked" in answer
     assert "Max duration: 86400 seconds / 1 day" in answer
     assert "Recommended first run: 10-20 minutes only." in answer
     assert "Shan must click Start PAPER" in answer
+    assert "Current backend truth:" not in answer
+    assert "Provider readiness loaded" not in answer
     assert "readiness blockers are cleared" not in answer
     assert "Current blocker: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
     assert payload["can_execute"] is False
@@ -386,10 +388,10 @@ def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_pat
     assert payload["provider_id"] == "deterministic_local"
     assert payload["answer_source"] == "LOCAL_DETERMINISTIC"
     assert payload["route_decision"]["reason_code"] == "RUN_PLANNER_LOCAL_RUNTIME_TRUTH"
-    assert answer.startswith("Yes - our bot is ready for a bounded PAPER run")
+    assert answer.startswith("Yes - bounded PAPER is ready and start is allowed.")
     assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
-    assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" in answer
-    assert "it is not a blocker" in answer
+    assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
+    assert "READY_IDLE_NO_ACTIVE_RUNTIME" in " ".join(payload["known_facts"])
     assert "Use Run PAPER only after readiness blockers are cleared" not in answer
     assert "readiness blockers are cleared" not in payload["next_step_label"]
     assert "Current blocker: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
@@ -412,13 +414,13 @@ def test_ai_ask_alive_is_concise_health_answer_when_ready_idle(tmp_path):
     answer = payload["answer"]
 
     assert payload["mode"] == "OPERATOR_GUIDE"
-    assert answer.startswith("Yes. The backend is connected and our bot is idle-ready.")
+    assert answer.startswith("Yes - backend connected and our bot is idle-ready.")
     assert "Runtime: IDLE / no active PAPER run" in answer
     assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
-    assert "No PAPER run is currently active." in answer
     assert "Current backend truth:" not in answer
+    assert "Provider readiness loaded" not in answer
     assert "Redacted JSON" not in answer
-    assert len(answer.splitlines()) <= 12
+    assert len(answer.splitlines()) <= 6
     assert payload["can_execute"] is False
     assert payload["broker_call_occurred"] is False
 
@@ -436,7 +438,8 @@ def test_ai_ask_historical_duplicate_is_audit_context_not_cleanup_target(tmp_pat
     answer = payload["answer"]
     lowered = answer.lower()
 
-    assert "Historical duplicate refusal exists as audit context, but it is not current start authority." in answer
+    assert "Historical duplicate refusal exists as audit context, but it is not current start authority." in " ".join(payload["known_facts"])
+    assert "Historical duplicate refusal" not in answer
     assert "clean" not in lowered
     assert "clear stale" not in lowered
     assert "delete" not in lowered
@@ -532,3 +535,116 @@ def test_ai_ask_uses_saved_active_deepseek_provider_without_silent_openai_fallba
     assert "openai" not in str(captured["url"]).lower()
     assert payload["broker_call_occurred"] is False
     assert payload["trading_mutation_occurred"] is False
+
+
+def test_ai_ask_model_identity_uses_active_deepseek_provider_when_available(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider(
+        "deepseek",
+        {
+            "DEEPSEEK_API_KEY": "deepseek-test-token-value",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def fake_post(url, headers, body, timeout_seconds):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["body"] = body
+        captured["timeout_seconds"] = timeout_seconds
+        return {"choices": [{"message": {"content": "I am DeepSeek answering through deepseek-chat."}}]}
+
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    provider.ai_gateway = AIProviderGateway(
+        AIChiefConfig.from_env(provider.provider_env),
+        credential_env=provider.provider_env,
+        http_post=fake_post,
+    )
+    app = create_operator_app(provider=provider)
+
+    saved = _endpoint(app, "/operator/ai/router/settings", "POST")(
+        {
+            "default_mode": "LOCAL_GUIDE",
+            "active_provider": "deepseek",
+            "active_model": "deepseek-chat",
+            "light_provider": "openai",
+            "light_model": "gpt-5-mini",
+            "high_reasoning_provider": "openai",
+            "high_reasoning_model": "gpt-5.5-pro",
+            "local_model": "local-model",
+        }
+    )
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "which model are you?",
+            "page_context": {"page_id": "ai", "page_title": "AI Advisor"},
+        }
+    )
+
+    assert saved["settings"]["active_provider"] == "deepseek"
+    assert payload["status"] == "ANSWERED_MODEL", payload
+    assert payload["refusal_reason"] is None
+    assert payload["mode"] == "OPERATOR_GUIDE"
+    assert payload["provider_id"] == "deepseek"
+    assert payload["model_name"] == "deepseek-chat"
+    assert payload["answer_source"] == "API_LIGHT_MODEL"
+    assert payload["route_decision"]["reason_code"] == "LIGHT_API_SELECTED"
+    assert payload["answer"].startswith("DeepSeek answered this question using deepseek-chat.")
+    assert "Actual answer source: API_LIGHT_MODEL" in payload["answer"]
+    assert "I can give a limited operational answer" not in payload["answer"]
+    assert "api.deepseek.com" in str(captured["url"])
+    assert captured["body"]["model"] == "deepseek-chat"
+    prompt_text = str(captured["body"])
+    assert "truthfully identify the selected provider/model" in prompt_text
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+    assert payload["live_enabled"] is False
+    assert payload["real_money_enabled"] is False
+
+
+def test_ai_ask_model_identity_fallback_is_clearly_labeled_when_provider_unavailable(tmp_path):
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path), provider_env={})
+    app = create_operator_app(provider=provider)
+
+    saved = _endpoint(app, "/operator/ai/router/settings", "POST")(
+        {
+            "default_mode": "LOCAL_GUIDE",
+            "active_provider": "deepseek",
+            "active_model": "deepseek-chat",
+            "light_provider": "openai",
+            "light_model": "gpt-5-mini",
+            "high_reasoning_provider": "openai",
+            "high_reasoning_model": "gpt-5.5-pro",
+            "local_model": "local-model",
+        }
+    )
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "which model are you?",
+            "page_context": {"page_id": "ai", "page_title": "AI Advisor"},
+        }
+    )
+    answer = payload["answer"]
+
+    assert saved["settings"]["active_provider"] == "deepseek"
+    assert payload["status"] == "ANSWERED_FALLBACK"
+    assert payload["refusal_reason"] is None
+    assert payload["mode"] == "OPERATOR_GUIDE"
+    assert payload["provider_id"] == "deepseek"
+    assert payload["answer_source"] == "LOCAL_DETERMINISTIC"
+    assert "DeepSeek is selected, but no provider model answered this question." in answer
+    assert "Selected provider/model: DeepSeek / deepseek-chat" in answer
+    assert "Actual answer source: LOCAL_DETERMINISTIC" in answer
+    assert "Provider call did not answer:" in answer
+    assert "api key" not in answer.lower()
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+    assert payload["live_enabled"] is False
+    assert payload["real_money_enabled"] is False

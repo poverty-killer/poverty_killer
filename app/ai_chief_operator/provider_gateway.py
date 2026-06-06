@@ -391,10 +391,13 @@ class ExternalAdvisoryProvider:
         return (
             f"{AI_SYSTEM_POLICY}\n"
             "Answer in plain English for a regular operator. "
+            "Default to a concise answer: direct answer first, at most 2-5 useful bullets, and one next step only when useful. "
+            "Keep route diagnostics, raw JSON, provider counts, account dumps, and archived run lists out of the main answer unless the user asks for diagnostics. "
             "Use only the provided redacted operator context. Do not claim broker truth when unavailable. "
             "Do not include local filesystem paths or log paths in the answer. "
             "Do not give instructions to place manual trades. Do not enable live or real-money trading. "
             "You cannot call brokers, execute orders, cancel orders, flatten, liquidate, or change thresholds. "
+            "For model/provider identity questions, truthfully distinguish selected provider/model from the actual answer source and never imply local fallback text was provider-authored. "
             "Focus on current holdings, blockers, PAPER readiness, P&L/exposure truth, execution quality, and proof needed. "
             "For quant questions include hypothesis, evidence, counterargument, risk, missing data, proof/disproof, and safe next test. "
             "For portfolio questions separate exposure, concentration, P&L, fees, TCA, slippage, stale/conflicted data, and broker-confirmed versus inferred truth. "

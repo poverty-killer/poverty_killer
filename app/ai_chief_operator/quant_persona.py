@@ -86,6 +86,20 @@ DOMAIN_TERMS = (
     "profit",
 )
 
+MODEL_IDENTITY_TERMS = (
+    "which model are you",
+    "what model are you",
+    "who answered this",
+    "are you deepseek",
+    "did deepseek answer",
+    "what provider is selected",
+    "what model answered",
+    "are you local fallback",
+    "answer source",
+    "selected provider",
+    "actual answer source",
+)
+
 FORBIDDEN_TERMS = (
     "place a trade",
     "submit order",
@@ -209,6 +223,7 @@ MODE_KEYWORDS = {
         "operator launch status",
         "launch status",
         "current operator",
+        *MODEL_IDENTITY_TERMS,
     ),
 }
 
@@ -296,6 +311,7 @@ def classify_quant_prompt(prompt: str, *, page_id: str | None = None) -> dict[st
         "what is blocking",
         "current blocker",
         "blocking the bot",
+        *MODEL_IDENTITY_TERMS,
     )
     mode_terms = tuple(term for keywords in MODE_KEYWORDS.values() for term in keywords)
     in_domain = (

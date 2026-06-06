@@ -35,6 +35,8 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     assert "Next step:" in text
     assert "Evidence Summary" in text
     assert "Advanced details" in text
+    assert "Known Facts" in text
+    assert "Missing Evidence" in text
     assert "data-ai-chat-scroll-container" in text
     assert "ai-chief-response-end" in text
     assert "scheduleAiOverlayScroll" in text
@@ -47,6 +49,12 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     assert "AI_PRIMARY_PROMPT_LIMIT" in text
     overlay = text[text.index("function renderAiChiefOverlay"):text.index("function setAiOverlayOpen")]
     assert overlay.index("renderAiConversationThread") < overlay.index("ai-composer")
+    message_renderer = text[text.index("function renderAiConversationMessage"):text.index("function renderAiConversationThread")]
+    details_renderer = text[text.index("function renderAiCollapsedDetails"):text.index("function renderAiConversationMessage")]
+    assert "renderAiNextStep(result)" not in message_renderer
+    assert "renderAiEvidenceSummary(result, context)" not in message_renderer
+    assert "renderAiNextStep(result)" in details_renderer
+    assert "renderAiEvidenceSummary(result, context)" in details_renderer
 
 
 def test_commercial_navigation_groups_keep_all_pages_accessible():

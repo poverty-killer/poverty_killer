@@ -2874,6 +2874,14 @@
     return `
       <details class="ai-context-details ai-diagnostics-details">
         <summary>Advanced details</summary>
+        ${renderAiEvidenceSummary(result, context)}
+        ${renderAiNextStep(result)}
+        <div class="ai-context-preview">
+          <h3>Known Facts</h3>
+          ${renderAiBullets(result.knownFacts, "No known facts returned.")}
+          <h3>Missing Evidence</h3>
+          ${renderAiBullets(result.unknowns, "No missing evidence returned.")}
+        </div>
         ${renderAiContextPreview(context)}
         <div class="ai-context-preview">
           <h3>Provider / Model Diagnostics</h3>
@@ -2950,8 +2958,6 @@
           </div>
           ${error ? `<div class="notice error">Provider error: ${escapeHtml(providerError || message.error || "request failed")}</div>` : ""}
           ${fallback && !error ? `<div class="notice ai-fallback-note">Fallback: ${escapeHtml(aiFriendlyStatus(result))}</div>` : ""}
-          ${renderAiNextStep(result)}
-          ${renderAiEvidenceSummary(result, context)}
           ${renderAiPacketPanel(result)}
           ${renderAiCollapsedDetails(result, context)}
         </div>
