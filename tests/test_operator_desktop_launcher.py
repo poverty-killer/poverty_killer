@@ -77,10 +77,16 @@ def test_hidden_launcher_rejects_and_stops_stale_operator_backend():
 def test_visible_launcher_presents_safe_backend_control_window():
     text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
 
-    assert "open_operator_console_hidden.ps1" in text
-    assert "$GuardedLauncher" in text
-    assert 'Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden' in text
-    assert '"-OpenBrowser:`$false"' in text
+    assert "open_operator_console_hidden.ps1" not in text
+    assert "$GuardedLauncher" not in text
+    assert "New-BackendLaunchPlan" in text
+    assert 'Start-Process -FilePath "cmd.exe"' in text
+    assert "-PassThru" in text
+    assert "$script:LastCmdLauncher" in text
+    assert "$script:LastStdoutLog" in text
+    assert "$script:LastStderrLog" in text
+    assert "backend_launch_artifacts" in text
+    assert "backend_start_dispatched" in text
     assert "Wait-ForBackendReady" in text
     assert "System.Windows.Forms" in text
     assert '$form.Text = "POVERTY_KILLER Operator"' in text
@@ -115,6 +121,78 @@ def test_visible_launcher_presents_safe_backend_control_window():
     assert "broker mutation" in text
     assert "live enablement" in text
     assert "real-money enablement" in text
+
+
+def test_visible_launcher_start_backend_creates_artifacts_and_surfaces_spawn_failure():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "function Start-Backend" in text
+    assert "start_operator_backend_$stamp.cmd" in text
+    assert "operator_backend_$stamp.stdout.log" in text
+    assert "operator_backend_$stamp.stderr.log" in text
+    assert "New-Item -Path $plan.StdoutLog -ItemType File -Force" in text
+    assert "New-Item -Path $plan.StderrLog -ItemType File -Force" in text
+    assert "Set-Content -Path $plan.CmdLauncher" in text
+    assert "$script:LastCommand = $plan.Command" in text
+    assert "$script:LastSpawnedPid = [string]$process.Id" in text
+    assert 'Set-LauncherFailure "spawn_failed"' in text
+    assert 'Set-LauncherFailure "wrong_port"' in text
+    assert "Start-Process returned no process id" in text
+
+
+def test_visible_launcher_health_timeout_and_import_crash_are_not_silent():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "function Wait-ForBackendReady" in text
+    assert 'Set-LauncherFailure $phase "Backend did not reach healthy RUNNING state' in text
+    assert '$phase = "health_timeout"' in text
+    assert '$phase = "import_crash"' in text
+    assert "Traceback|ImportError|ModuleNotFoundError|Error loading ASGI app|Exception" in text
+    assert "stderr_tail=" in text
+
+
+def test_visible_launcher_stop_backend_is_port_and_operator_process_scoped():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "function Stop-Backend" in text
+    assert "Get-OperatorBackendProcesses" in text
+    assert "app.api.operator_readonly_api:create_operator_app" in text
+    assert 'Set-LauncherFailure "stop_failed"' in text
+    assert 'Set-LauncherFailure "port_not_released"' in text
+    assert "Port $Port is listening, but no matching operator backend process was found." in text
+    assert "Stop-Process -Id ([int]$process.ProcessId) -Force" in text
+
+
+def test_visible_launcher_restart_reports_stop_port_and_spawn_phases():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "function Restart-Backend" in text
+    assert "restart_backend_requested" in text
+    assert 'Set-LauncherFailure "stop_failed"' in text
+    assert 'Set-LauncherFailure "port_not_released"' in text
+    assert 'Set-LauncherFailure "spawn_failed"' in text
+    assert "Restart-Backend" in text[text.index("$restartButton.Add_Click") :]
+
+
+def test_visible_launcher_diagnostics_include_launch_artifacts_and_redacted_log_tails():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "ConvertTo-SafeLauncherText" in text
+    assert "Bearer REDACTED" in text
+    assert "Launcher version:" in text
+    assert "Repo path:" in text
+    assert "Health URL:" in text
+    assert "Spawned launcher PID:" in text
+    assert "Port listening:" in text
+    assert "Last start attempt:" in text
+    assert "Last failure phase:" in text
+    assert "Start command:" in text
+    assert "Start cmd wrapper:" in text
+    assert "Stdout log:" in text
+    assert "Stderr log:" in text
+    assert "Latest stdout tail:" in text
+    assert "Latest stderr tail:" in text
+    assert "Get-SafeLogTail" in text
 
 
 def test_desktop_vbs_entrypoint_opens_visible_launcher_not_browser_only():

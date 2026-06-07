@@ -7,7 +7,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$GuardedLauncher = Join-Path $PSScriptRoot "open_operator_console_hidden.ps1"
 $Python = Join-Path $RepoRoot "venv\Scripts\python.exe"
 $BaseUrl = "http://$HostAddress`:$Port"
 $UiUrl = "$BaseUrl/operator-ui/?v=operator-activation-e2e-truth6-20260602"
@@ -23,9 +22,109 @@ $LaunchLog = Join-Path $LogRoot "launcher-control.log"
 
 New-Item -Path $LogRoot -ItemType Directory -Force | Out-Null
 
+function ConvertTo-SafeLauncherText {
+    param([object]$Value)
+    $text = [string]$Value
+    $text = $text -replace '(?i)Bearer\s+[A-Za-z0-9._\-]+', 'Bearer REDACTED'
+    $text = $text -replace 'sk-[A-Za-z0-9_-]{10,}', 'sk-REDACTED'
+    $text = $text -replace 'AKIA[0-9A-Z]{12,}', 'AKIA-REDACTED'
+    $text = $text -replace '(?i)(api[_-]?key|secret|token|password|credential|authorization)\s*=\s*[^;\s]+', '$1=REDACTED'
+    return $text
+}
+
 function Write-LauncherLog {
     param([string]$Message)
-    Add-Content -Path $LaunchLog -Value "$((Get-Date).ToString("o")) $Message"
+    Add-Content -Path $LaunchLog -Value "$((Get-Date).ToString("o")) $(ConvertTo-SafeLauncherText $Message)"
+}
+
+$LauncherVersion = "operator-launcher-reliability-v1"
+$script:LauncherStateOverride = $null
+$script:LastStartAttemptTime = "none"
+$script:LastStopAttemptTime = "none"
+$script:LastFailurePhase = "none"
+$script:LastFailureReason = "none"
+$script:LastSpawnedPid = "none"
+$script:LastCmdLauncher = "none"
+$script:LastStdoutLog = "none"
+$script:LastStderrLog = "none"
+$script:LastCommand = "none"
+$script:LastHealthUrl = "$BaseUrl/operator/health"
+
+function Set-LauncherFailure {
+    param(
+        [string]$Phase,
+        [string]$Reason
+    )
+    $script:LauncherStateOverride = "FAILED"
+    $script:LastFailurePhase = if ([string]::IsNullOrWhiteSpace($Phase)) { "unknown" } else { $Phase }
+    $script:LastFailureReason = if ([string]::IsNullOrWhiteSpace($Reason)) { "unknown failure" } else { ConvertTo-SafeLauncherText $Reason }
+    Write-LauncherLog "launcher_failure phase=$script:LastFailurePhase reason=$script:LastFailureReason"
+}
+
+function Clear-LauncherFailure {
+    $script:LastFailurePhase = "none"
+    $script:LastFailureReason = "none"
+}
+
+function Clear-LauncherTransition {
+    $script:LauncherStateOverride = $null
+}
+
+function Test-PortListening {
+    try {
+        $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        return @($listeners).Count -gt 0
+    } catch {
+        Write-LauncherLog "port_listen_check_failed=$($_.Exception.GetType().Name)"
+        return $false
+    }
+}
+
+function New-BackendLaunchPlan {
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+    $stdoutLog = Join-Path $LogRoot "operator_backend_$stamp.stdout.log"
+    $stderrLog = Join-Path $LogRoot "operator_backend_$stamp.stderr.log"
+    $cmdLauncher = Join-Path $LogRoot "start_operator_backend_$stamp.cmd"
+    $backendCommand = '"{0}" -m uvicorn app.api.operator_readonly_api:create_operator_app --factory --host {1} --port {2} > "{3}" 2> "{4}"' -f $Python, $HostAddress, $Port, $stdoutLog, $stderrLog
+    return [pscustomobject]@{
+        Stamp = $stamp
+        StdoutLog = $stdoutLog
+        StderrLog = $stderrLog
+        CmdLauncher = $cmdLauncher
+        Command = $backendCommand
+    }
+}
+
+function Get-SafeLogTail {
+    param(
+        [string]$Path,
+        [int]$Lines = 20
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -eq "none" -or -not (Test-Path $Path)) {
+        return "not available"
+    }
+    try {
+        $tail = Get-Content -Path $Path -Tail $Lines -ErrorAction Stop
+        if (-not $tail) {
+            return "empty"
+        }
+        return (($tail | ForEach-Object { ConvertTo-SafeLauncherText $_ }) -join [Environment]::NewLine)
+    } catch {
+        return "failed to read log tail: $($_.Exception.GetType().Name)"
+    }
+}
+
+function Get-ProcessAlive {
+    param([string]$ProcessId)
+    try {
+        if ([string]::IsNullOrWhiteSpace($ProcessId) -or $ProcessId -eq "none") {
+            return $false
+        }
+        $process = Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue
+        return $null -ne $process
+    } catch {
+        return $false
+    }
 }
 
 function Get-GitValue {
@@ -168,6 +267,7 @@ function Get-LauncherStatus {
     $repoBranch = Get-GitValue @("branch", "--show-current")
     $workingTreeSummary = Get-WorkingTreeSummary
     $processes = @(Get-OperatorBackendProcesses)
+    $portListening = Test-PortListening
     $status = "STOPPED"
     $healthText = "Backend is not listening on $BaseUrl."
     $loadedCommit = "UNKNOWN_NOT_AVAILABLE"
@@ -181,7 +281,29 @@ function Get-LauncherStatus {
     $healthDetail = "Backend is not listening."
     $uiOpenStatus = if ($script:UiOpenedAt) { "Opened by launcher at $script:UiOpenedAt" } else { "Not opened by launcher" }
 
-    if ($processes.Count -gt 0) {
+    if ($script:LauncherStateOverride -eq "FAILED") {
+        $status = "FAILED"
+        $freshnessStatus = "Unknown"
+        $freshnessDetail = "Launcher failure phase: $script:LastFailurePhase"
+        $healthState = "Failed"
+        $healthDetail = $script:LastFailureReason
+        $healthText = "Failure: $script:LastFailurePhase - $script:LastFailureReason"
+        $warning = "Backend control failed at $script:LastFailurePhase. Copy Diagnostics for details."
+    } elseif ($script:LauncherStateOverride -eq "STARTING" -and $processes.Count -eq 0) {
+        $status = $script:LauncherStateOverride
+        $freshnessStatus = "Checking"
+        $freshnessDetail = "Backend transition in progress."
+        $healthState = "Checking"
+        $healthDetail = "Waiting on local backend process/health truth."
+        $healthText = "$status; health URL $script:LastHealthUrl"
+    } elseif ($script:LauncherStateOverride -eq "STOPPING" -and ($processes.Count -gt 0 -or $portListening)) {
+        $status = "STOPPING"
+        $freshnessStatus = "Checking"
+        $freshnessDetail = "Waiting for backend process and port release."
+        $healthState = "Checking"
+        $healthDetail = "Stop requested; verifying port $Port is released."
+        $healthText = "STOPPING; port_listening=$portListening"
+    } elseif ($processes.Count -gt 0) {
         $status = "RUNNING"
         $freshnessStatus = "Checking"
         $freshnessDetail = "Comparing backend loaded commit to repo HEAD."
@@ -218,6 +340,7 @@ function Get-LauncherStatus {
                 $freshnessStatus = "Current"
                 $freshnessDetail = "Backend code current. Loaded commit matches repo HEAD."
             }
+            Clear-LauncherTransition
         } catch {
             $status = "FAILED"
             $freshnessStatus = "Unknown"
@@ -227,18 +350,30 @@ function Get-LauncherStatus {
             $healthText = "Health check failed: $($_.Exception.Message)"
             $warning = "Backend failed health/status check. Restart recommended."
         }
+    } elseif ($portListening) {
+        $status = "FAILED"
+        $freshnessStatus = "Unknown"
+        $freshnessDetail = "Port $Port is listening, but no matching operator backend process was found."
+        $healthState = "Failed"
+        $healthDetail = "Port occupied by non-operator or unrecognized process."
+        $healthText = "Port $Port listening without operator backend match."
+        $warning = "Port $Port is occupied by a non-operator process. Start Backend cannot safely proceed."
     }
 
     return [pscustomobject]@{
+        LauncherVersion = $LauncherVersion
         Status = $status
         BaseUrl = $BaseUrl
         UiUrl = $UiUrl
+        HealthUrl = $script:LastHealthUrl
         RepoHead = $repoHead
         RepoBranch = $repoBranch
         LoadedCommit = $loadedCommit
         LoadedBranch = $loadedBranch
         ProcessStartTime = $startTime
         BackendPid = $backendPid
+        SpawnedPid = $script:LastSpawnedPid
+        PortListening = $portListening
         Health = $healthText
         HealthState = $healthState
         HealthDetail = $healthDetail
@@ -246,6 +381,14 @@ function Get-LauncherStatus {
         FreshnessDetail = $freshnessDetail
         UiOpenStatus = $uiOpenStatus
         Warning = $warning
+        LastStartAttemptTime = $script:LastStartAttemptTime
+        LastStopAttemptTime = $script:LastStopAttemptTime
+        LastFailurePhase = $script:LastFailurePhase
+        LastFailureReason = $script:LastFailureReason
+        LastCommand = $script:LastCommand
+        LastCmdLauncher = $script:LastCmdLauncher
+        LastStdoutLog = $script:LastStdoutLog
+        LastStderrLog = $script:LastStderrLog
         WorkingTreeLabel = Get-WorkingTreeLabel $workingTreeSummary
         WorkingTreeSummary = $workingTreeSummary
         ChangeSummary = $workingTreeSummary
@@ -255,34 +398,116 @@ function Get-LauncherStatus {
 }
 
 function Start-Backend {
+    $script:LauncherStateOverride = "STARTING"
+    $script:LastStartAttemptTime = (Get-Date).ToString("o")
+    Clear-LauncherFailure
+    Write-LauncherLog "start_backend_requested port=$Port"
     if (-not (Test-Path $Python)) {
+        Set-LauncherFailure "spawn_failed" "Python venv not found at $Python"
         throw "Python venv not found at $Python"
     }
-    if (-not (Test-Path $GuardedLauncher)) {
-        throw "Guarded backend launcher not found at $GuardedLauncher"
+    if (Test-PortListening) {
+        $existing = @(Get-OperatorBackendProcesses)
+        if ($existing.Count -gt 0) {
+            Write-LauncherLog "start_backend_skipped_already_running port=$Port"
+            Clear-LauncherTransition
+            return
+        }
+        Set-LauncherFailure "wrong_port" "Port $Port is already listening, but no matching operator backend process was found."
+        throw "Port $Port is already listening, but no matching operator backend process was found."
     }
-    Write-LauncherLog "start_backend_requested port=$Port"
-    $arguments = @(
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "`"$GuardedLauncher`"",
-        "-Port",
-        [string]$Port,
-        "-HostAddress",
-        $HostAddress,
-        "-OpenBrowser:`$false"
-    )
-    Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -WorkingDirectory $RepoRoot | Out-Null
+    try {
+        New-Item -Path $LogRoot -ItemType Directory -Force | Out-Null
+        $plan = New-BackendLaunchPlan
+        $script:LastCmdLauncher = $plan.CmdLauncher
+        $script:LastStdoutLog = $plan.StdoutLog
+        $script:LastStderrLog = $plan.StderrLog
+        $script:LastCommand = $plan.Command
+        New-Item -Path $plan.StdoutLog -ItemType File -Force | Out-Null
+        New-Item -Path $plan.StderrLog -ItemType File -Force | Out-Null
+        Set-Content -Path $plan.CmdLauncher -Value @(
+            "@echo off",
+            "cd /d `"$RepoRoot`"",
+            $plan.Command
+        ) -Encoding ASCII
+        Write-LauncherLog "backend_launch_artifacts cmd=$($plan.CmdLauncher) stdout=$($plan.StdoutLog) stderr=$($plan.StderrLog)"
+        Write-LauncherLog "backend_launch_command=$($plan.Command)"
+        $process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", "`"$($plan.CmdLauncher)`"") -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru -ErrorAction Stop
+        if ($null -eq $process -or $process.Id -le 0) {
+            Set-LauncherFailure "spawn_failed" "Start-Process returned no process id."
+            throw "Start-Process returned no process id."
+        }
+        $script:LastSpawnedPid = [string]$process.Id
+        Write-LauncherLog "backend_start_dispatched=$($plan.CmdLauncher) spawned_pid=$($process.Id)"
+    } catch {
+        if ($script:LauncherStateOverride -ne "FAILED") {
+            Set-LauncherFailure "spawn_failed" $_.Exception.Message
+        }
+        throw
+    }
 }
 
 function Stop-Backend {
+    $script:LauncherStateOverride = "STOPPING"
+    $script:LastStopAttemptTime = (Get-Date).ToString("o")
     Write-LauncherLog "stop_backend_requested port=$Port"
     $processes = @(Get-OperatorBackendProcesses)
+    if ($processes.Count -eq 0) {
+        if (Test-PortListening) {
+            Set-LauncherFailure "stop_failed" "Port $Port is listening, but no matching operator backend process was found."
+            throw "Port $Port is listening, but no matching operator backend process was found."
+        }
+        Write-LauncherLog "stop_backend_no_operator_process port=$Port"
+        Clear-LauncherTransition
+        return
+    }
     foreach ($process in $processes) {
         Write-LauncherLog "stopping_backend_pid=$($process.ProcessId)"
-        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+        try {
+            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+        } catch {
+            Set-LauncherFailure "stop_failed" "Failed to stop backend pid=$($process.ProcessId): $($_.Exception.Message)"
+            throw
+        }
+    }
+    $released = $false
+    for ($i = 0; $i -lt 20; $i += 1) {
+        Start-Sleep -Milliseconds 250
+        [System.Windows.Forms.Application]::DoEvents()
+        if (-not (Test-PortListening)) {
+            $released = $true
+            break
+        }
+    }
+    if (-not $released) {
+        Set-LauncherFailure "port_not_released" "Port $Port did not release after stopping backend process."
+        throw "Port $Port did not release after stopping backend process."
+    }
+    Write-LauncherLog "backend_stop_confirmed port=$Port"
+    Clear-LauncherTransition
+}
+
+function Restart-Backend {
+    Write-LauncherLog "restart_backend_requested port=$Port"
+    try {
+        Stop-Backend
+    } catch {
+        if ($script:LastFailurePhase -eq "none") {
+            Set-LauncherFailure "stop_failed" $_.Exception.Message
+        }
+        throw
+    }
+    if (Test-PortListening) {
+        Set-LauncherFailure "port_not_released" "Port $Port still listening after stop phase."
+        throw "Port $Port still listening after stop phase."
+    }
+    try {
+        Start-Backend
+    } catch {
+        if ($script:LastFailurePhase -eq "none") {
+            Set-LauncherFailure "spawn_failed" $_.Exception.Message
+        }
+        throw
     }
 }
 
@@ -303,21 +528,38 @@ function Get-DiagnosticsText {
     param($Model)
     return @(
         "POVERTY_KILLER Operator Diagnostics",
+        "Launcher version: $($Model.LauncherVersion)",
+        "Repo path: $RepoRoot",
         "Backend status: $($Model.Status)",
         "Backend freshness: $($Model.FreshnessStatus) - $($Model.FreshnessDetail)",
         "Backend URL: $($Model.BaseUrl)",
+        "Health URL: $($Model.HealthUrl)",
         "Operator UI: $($Model.UiUrl)",
         "Repo HEAD: $($Model.RepoHead)",
         "Repo branch: $($Model.RepoBranch)",
         "Backend loaded commit: $($Model.LoadedCommit)",
         "Backend loaded branch: $($Model.LoadedBranch)",
         "Backend PID: $($Model.BackendPid)",
+        "Spawned launcher PID: $($Model.SpawnedPid)",
+        "Port listening: $($Model.PortListening)",
         "Backend process start: $($Model.ProcessStartTime)",
         "Last health: $($Model.Health)",
         "Operator UI: $($Model.UiOpenStatus)",
+        "Last start attempt: $($Model.LastStartAttemptTime)",
+        "Last stop attempt: $($Model.LastStopAttemptTime)",
+        "Last failure phase: $($Model.LastFailurePhase)",
+        "Last failure reason: $($Model.LastFailureReason)",
+        "Start command: $($Model.LastCommand)",
+        "Start cmd wrapper: $($Model.LastCmdLauncher)",
+        "Stdout log: $($Model.LastStdoutLog)",
+        "Stderr log: $($Model.LastStderrLog)",
         "Working tree: $($Model.WorkingTreeSummary)",
         "Warning: $($Model.Warning)",
         "Logs: $($Model.LogRoot)",
+        "Latest stdout tail:",
+        (Get-SafeLogTail $Model.LastStdoutLog 20),
+        "Latest stderr tail:",
+        (Get-SafeLogTail $Model.LastStderrLog 20),
         "Safety: $($Model.Safety)"
     ) -join [Environment]::NewLine
 }
@@ -679,7 +921,7 @@ function Refresh-LauncherStatus {
     } elseif ($model.Status -eq "FAILED") {
         $statusColor = $colorBad
         $statusLabel.ForeColor = $colorBad
-    } elseif ($model.Status -eq "STARTING") {
+    } elseif ($model.Status -in @("STARTING", "STOPPING")) {
         $statusColor = $colorWarn
         $statusLabel.ForeColor = $colorWarn
     } else {
@@ -734,10 +976,10 @@ function Refresh-LauncherStatus {
         $diagnosticsPreview.Text = "$($model.FreshnessDetail) Local files are diagnostics only."
     }
 
-    $startButton.Enabled = $model.Status -ne "RUNNING"
+    $startButton.Enabled = $model.Status -notin @("RUNNING", "STARTING", "STOPPING")
     $stopButton.Enabled = $model.Status -eq "RUNNING" -or $model.Status -eq "FAILED"
     $restartButton.Enabled = $model.Status -eq "RUNNING" -or $model.Status -eq "FAILED"
-    $openButton.Enabled = $model.Status -eq "RUNNING"
+    $openButton.Enabled = $model.Status -eq "RUNNING" -and $model.HealthState -eq "Connected" -and -not $model.Warning
     $refreshButton.Enabled = $true
     $copyButton.Enabled = $true
     $toggleDiagnosticsButton.Enabled = $true
@@ -752,7 +994,9 @@ function Refresh-LauncherStatus {
     if ($model.Status -eq "STOPPED") {
         Set-ButtonTone $startButton "good"
     } elseif ($model.Status -eq "RUNNING") {
-        Set-ButtonTone $openButton "primary"
+        if ($openButton.Enabled) {
+            Set-ButtonTone $openButton "primary"
+        }
         if ($model.FreshnessStatus -eq "Stale" -or $model.FreshnessStatus -eq "Unknown") {
             Set-ButtonTone $restartButton "warning"
         }
@@ -773,6 +1017,15 @@ function Wait-ForBackendReady {
         [System.Windows.Forms.Application]::DoEvents()
         $model = Refresh-LauncherStatus
     }
+    $stderrTail = Get-SafeLogTail $script:LastStderrLog 20
+    $phase = "health_timeout"
+    if ($stderrTail -match "Traceback|ImportError|ModuleNotFoundError|Error loading ASGI app|Exception") {
+        $phase = "import_crash"
+    } elseif (-not (Test-PortListening) -and -not (Get-ProcessAlive $script:LastSpawnedPid)) {
+        $phase = "spawn_failed"
+    }
+    Set-LauncherFailure $phase "Backend did not reach healthy RUNNING state at $script:LastHealthUrl. stderr_tail=$stderrTail"
+    $model = Refresh-LauncherStatus
     return $model
 }
 
@@ -835,9 +1088,7 @@ $stopButton.Add_Click({
 $restartButton.Add_Click({
     try {
         Set-Busy $true "RESTARTING"
-        Stop-Backend
-        Start-Sleep -Milliseconds 700
-        Start-Backend
+        Restart-Backend
         $model = Wait-ForBackendReady
         if ($model.Status -eq "RUNNING" -and -not $model.Warning) {
             Open-OperatorUi
