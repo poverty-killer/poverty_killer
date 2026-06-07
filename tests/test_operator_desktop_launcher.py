@@ -79,17 +79,36 @@ def test_visible_launcher_presents_safe_backend_control_window():
 
     assert "open_operator_console_hidden.ps1" in text
     assert "$GuardedLauncher" in text
-    assert "& $GuardedLauncher -Port $Port -HostAddress $HostAddress -OpenBrowser $false" in text
+    assert 'Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden' in text
+    assert '"-OpenBrowser:`$false"' in text
+    assert "Wait-ForBackendReady" in text
     assert "System.Windows.Forms" in text
-    assert "POVERTY_KILLER Operator Launcher" in text
-    assert "Start backend" in text
-    assert "Stop backend" in text
-    assert "Restart backend" in text
-    assert "Open operator UI" in text
-    assert "Refresh status" in text
-    assert "Copy diagnostics" in text
-    assert "Backend may be stale. Restart recommended." in text
-    assert "Restart required after update" in text
+    assert '$form.Text = "POVERTY_KILLER Operator"' in text
+    assert '$title.Text = "POVERTY_KILLER Operator"' in text
+    assert "New-Object System.Drawing.Size(840, 730)" in text
+    assert "New-Object System.Windows.Forms.Timer" in text
+    assert "Hide-ConsoleHost" in text
+    assert "New-StatusCard" in text
+    assert "Backend status" in text
+    assert "Backend freshness" in text
+    assert "Safety posture" in text
+    assert "Loaded code" in text
+    assert "Local files" in text
+    assert "Start Backend" in text
+    assert "Stop Backend" in text
+    assert "Restart Backend" in text
+    assert "Open Operator UI" in text
+    assert "Refresh" in text
+    assert "Copy Diagnostics" in text
+    assert "Show Diagnostics" in text
+    assert "$diagnosticsPanel.Visible = $false" in text
+    assert "Diagnostics only. Restart only on commit mismatch." in text
+    assert 'Set-ButtonTone $openButton "primary"' in text
+    assert 'Set-ButtonTone $restartButton "restart"' in text
+    assert 'Set-ButtonTone $stopButton "stop"' in text
+    assert "Backend stale. Restart recommended." in text
+    assert "Backend code current. Loaded commit matches repo HEAD." in text
+    assert "Restart required after update" not in text
     assert "/operator/health" in text
     assert "/operator/status" in text
     assert "/operator/intent/paper/start" not in text
@@ -105,6 +124,51 @@ def test_desktop_vbs_entrypoint_opens_visible_launcher_not_browser_only():
     assert "open_operator_console_hidden.ps1" not in text
     assert "-STA" in text
     assert "open_operator_console.ps1" in text
+
+
+def test_visible_launcher_stale_warning_is_commit_based_not_dirty_tree_based():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "Get-WorkingTreeSummary" in text
+    assert "WorkingTreeSummary" in text
+    assert "not a backend freshness signal" in text
+    assert "Backend stale. Restart recommended." in text
+    assert "Loaded commit $loadedCommit differs from repo HEAD $repoHead." in text
+    assert '$freshnessStatus = "Current"' in text
+    assert "Loaded commit matches repo HEAD" in text
+    assert "git -C $RepoRoot status --short -- app scripts ui tests" not in text
+    assert "Restart required after update" not in text
+    assert "$model.Warning" not in text[text.find("Working tree:") : text.find("Warning:")]
+
+
+def test_visible_launcher_forbidden_leftovers_are_diagnostics_only():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert '"state/"' in text
+    assert '"reports/"' in text
+    assert '"scripts/_paper_audit_common.py"' in text
+    assert '"scripts/audit_oms_shutdown.py"' in text
+    assert '"scripts/audit_paper_run.py"' in text
+    assert '"scripts/audit_safety_markers.py"' in text
+    assert "local runtime/journal/audit-helper file(s) present; not a backend freshness signal." in text
+    assert "Local uncommitted files are diagnostics only." in text
+    assert 'return "Local files present"' in text
+
+
+def test_visible_launcher_creates_stable_taskbar_pin_shortcut_identity():
+    text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "Ensure-OperatorShortcut" in text
+    assert '"POVERTY_KILLER Operator.lnk"' in text
+    assert "CreateShortcut" in text
+    assert '$shortcut.TargetPath = "powershell.exe"' in text
+    assert '$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$scriptPath`""' in text
+    assert "ShowWindow($handle, 0)" in text
+    assert "open_operator_console.ps1" in text
+    assert "$shortcut.WorkingDirectory = $RepoRoot" in text
+    assert '$shortcut.Description = "POVERTY_KILLER Operator"' in text
+    assert "APCA_API_SECRET_KEY" not in text
+    assert "DEEPSEEK_API_KEY" not in text
 
 
 def test_operator_ui_assets_are_cache_busted_for_desktop_launcher():
