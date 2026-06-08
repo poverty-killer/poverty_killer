@@ -15,7 +15,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Protocol
 
 from app.operator_credentials.store import (
-    ALPACA_LIVE_ENDPOINT,
     ALPACA_PAPER_ENDPOINT,
     alpaca_endpoint_authority,
 )
@@ -86,7 +85,13 @@ def _portfolio_unavailable_status(reason: str) -> str:
         return "AUTH_FAILED"
     if reason == "BROKER_READ_FAILED":
         return "BROKER_READ_FAILED"
-    if reason in {"LIVE_ENDPOINT_BLOCKED", "ALPACA_PAPER_ENDPOINT_REQUIRED"}:
+    if reason in {
+        "LIVE_ENDPOINT_BLOCKED",
+        "ALPACA_DATA_ENDPOINT_NOT_TRADING",
+        "ALPACA_BROKER_ENDPOINT_UNSUPPORTED",
+        "ALPACA_UNSUPPORTED_ENDPOINT_PATH",
+        "ALPACA_PAPER_ENDPOINT_REQUIRED",
+    }:
         return "BACKEND_DEGRADED"
     return "BACKEND_DEGRADED"
 
@@ -167,7 +172,8 @@ def _headers(env: Mapping[str, str]) -> dict[str, str] | None:
 
 
 def _base_url(env: Mapping[str, str]) -> str:
-    return str(env.get("APCA_API_BASE_URL") or ALPACA_PAPER_ENDPOINT).strip().rstrip("/")
+    endpoint_truth = alpaca_endpoint_authority(env)
+    return str(endpoint_truth["alpaca_endpoint_display"] or ALPACA_PAPER_ENDPOINT)
 
 
 def _active_order(order: Mapping[str, Any]) -> bool:
@@ -312,13 +318,11 @@ def build_portfolio_snapshot(
     if headers is None:
         return _empty_unavailable("MISSING_ALPACA_PAPER_CREDENTIALS")
 
-    base_url = _base_url(env)
     endpoint_truth = alpaca_endpoint_authority(env)
-    if base_url == ALPACA_LIVE_ENDPOINT:
-        return _empty_unavailable("LIVE_ENDPOINT_BLOCKED", endpoint_authority=endpoint_truth)
-    if base_url != ALPACA_PAPER_ENDPOINT:
-        return _empty_unavailable("ALPACA_PAPER_ENDPOINT_REQUIRED", endpoint_authority=endpoint_truth)
+    if endpoint_truth["paper_endpoint_only"] is not True:
+        return _empty_unavailable(str(endpoint_truth["reason_code"] or "ALPACA_PAPER_ENDPOINT_REQUIRED"), endpoint_authority=endpoint_truth)
 
+    base_url = _base_url(env)
     broker_client = client or AlpacaPaperReadOnlyClient(base_url=base_url)
     freshness = now or _utc_now()
     try:

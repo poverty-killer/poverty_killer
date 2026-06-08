@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,14 @@ STORE_VERSION = "operator-local-credential-store-v1"
 DEFAULT_RELATIVE_STORE_PATH = ".operator_secrets/provider_credentials.json"
 ALPACA_PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
 ALPACA_LIVE_ENDPOINT = "https://api.alpaca.markets"
+ALPACA_MARKET_DATA_ENDPOINT = "https://data.alpaca.markets"
+ALPACA_ENDPOINT_SOURCE_ENV_KEY = "APCA_API_BASE_URL_SOURCE"
+ALPACA_BROKER_ENDPOINT_HOSTS = frozenset(
+    {
+        "broker-api.alpaca.markets",
+        "broker-api.sandbox.alpaca.markets",
+    }
+)
 ALPACA_ENDPOINT_CONFIGURATION_ACTION = (
     "Set APCA_API_BASE_URL to https://paper-api.alpaca.markets in Keys & Providers -> "
     "Alpaca PAPER Broker/Data -> PAPER base URL, or in the Windows process environment."
@@ -133,38 +142,175 @@ def fingerprint_secret(value: str | None) -> str | None:
     return f"sha256:{digest}:len={len(text)}"
 
 
+def _parse_endpoint_host_path(endpoint: str) -> tuple[str, str]:
+    candidate = endpoint if "://" in endpoint else f"https://{endpoint}"
+    parsed = urllib.parse.urlsplit(candidate)
+    host = str(parsed.hostname or "").strip().lower()
+    path = "/" + str(parsed.path or "").strip("/")
+    if path == "/":
+        path = ""
+    return host, path
+
+
+def normalize_alpaca_trading_endpoint(raw_endpoint: str | None) -> dict[str, Any]:
+    """Classify a configured Alpaca endpoint without touching the network."""
+    raw = str(raw_endpoint or "").strip()
+    configured = bool(raw)
+    if not configured:
+        return {
+            "raw_endpoint_configured": False,
+            "raw_endpoint_display": None,
+            "normalized_endpoint": ALPACA_PAPER_ENDPOINT,
+            "endpoint_host": "paper-api.alpaca.markets",
+            "endpoint_family": "paper",
+            "paper_endpoint_valid": True,
+            "live_endpoint_blocked": True,
+            "blocker_code": None,
+            "status": "PAPER_ENDPOINT_CONFIRMED",
+            "source": "SAFE_DEFAULT_PAPER_ENDPOINT",
+            "safe_detail": (
+                "Alpaca PAPER trading endpoint was not configured; using the safe official "
+                "PAPER trading default https://paper-api.alpaca.markets. Live endpoint "
+                "api.alpaca.markets remains blocked."
+            ),
+            "operator_action": "No endpoint action required; safe official PAPER trading default is in force.",
+        }
+
+    host, path = _parse_endpoint_host_path(raw)
+    paper_path_ok = path in {"", "/v2"}
+    if host == "paper-api.alpaca.markets" and paper_path_ok:
+        detail = "Alpaca PAPER trading endpoint is confirmed."
+        if raw.rstrip("/") != ALPACA_PAPER_ENDPOINT:
+            detail = "Alpaca PAPER trading endpoint is confirmed and normalized to https://paper-api.alpaca.markets."
+        return {
+            "raw_endpoint_configured": True,
+            "raw_endpoint_display": raw,
+            "normalized_endpoint": ALPACA_PAPER_ENDPOINT,
+            "endpoint_host": host,
+            "endpoint_family": "paper",
+            "paper_endpoint_valid": True,
+            "live_endpoint_blocked": True,
+            "blocker_code": None,
+            "status": "PAPER_ENDPOINT_CONFIRMED",
+            "source": "CONFIGURED",
+            "safe_detail": detail,
+            "operator_action": "No endpoint action required.",
+        }
+
+    if host == "api.alpaca.markets":
+        return {
+            "raw_endpoint_configured": True,
+            "raw_endpoint_display": raw,
+            "normalized_endpoint": ALPACA_LIVE_ENDPOINT,
+            "endpoint_host": host,
+            "endpoint_family": "live",
+            "paper_endpoint_valid": False,
+            "live_endpoint_blocked": True,
+            "blocker_code": "LIVE_ENDPOINT_BLOCKED",
+            "status": "LIVE_ENDPOINT_BLOCKED",
+            "source": "CONFIGURED",
+            "safe_detail": (
+                "Live Alpaca endpoint is blocked for this project. Use the PAPER trading "
+                "endpoint only: https://paper-api.alpaca.markets."
+            ),
+            "operator_action": ALPACA_ENDPOINT_CONFIGURATION_ACTION,
+        }
+
+    if host == "data.alpaca.markets":
+        return {
+            "raw_endpoint_configured": True,
+            "raw_endpoint_display": raw,
+            "normalized_endpoint": ALPACA_MARKET_DATA_ENDPOINT,
+            "endpoint_host": host,
+            "endpoint_family": "data",
+            "paper_endpoint_valid": False,
+            "live_endpoint_blocked": True,
+            "blocker_code": "ALPACA_DATA_ENDPOINT_NOT_TRADING",
+            "status": "ALPACA_DATA_ENDPOINT_NOT_TRADING",
+            "source": "CONFIGURED",
+            "safe_detail": "data.alpaca.markets is a market data endpoint, not the PAPER trading endpoint.",
+            "operator_action": ALPACA_ENDPOINT_CONFIGURATION_ACTION,
+        }
+
+    if host in ALPACA_BROKER_ENDPOINT_HOSTS:
+        return {
+            "raw_endpoint_configured": True,
+            "raw_endpoint_display": raw,
+            "normalized_endpoint": f"https://{host}",
+            "endpoint_host": host,
+            "endpoint_family": "broker",
+            "paper_endpoint_valid": False,
+            "live_endpoint_blocked": True,
+            "blocker_code": "ALPACA_BROKER_ENDPOINT_UNSUPPORTED",
+            "status": "ALPACA_BROKER_ENDPOINT_UNSUPPORTED",
+            "source": "CONFIGURED",
+            "safe_detail": (
+                "Alpaca Broker API endpoints are not approved for this PAPER trading endpoint seam."
+            ),
+            "operator_action": ALPACA_ENDPOINT_CONFIGURATION_ACTION,
+        }
+
+    blocker = "ALPACA_UNSUPPORTED_ENDPOINT_PATH" if host == "paper-api.alpaca.markets" else "ALPACA_PAPER_ENDPOINT_REQUIRED"
+    return {
+        "raw_endpoint_configured": True,
+        "raw_endpoint_display": raw,
+        "normalized_endpoint": f"https://{host}" if host else "UNKNOWN_NON_PAPER_ENDPOINT",
+        "endpoint_host": host or None,
+        "endpoint_family": "unknown",
+        "paper_endpoint_valid": False,
+        "live_endpoint_blocked": True,
+        "blocker_code": blocker,
+        "status": blocker,
+        "source": "CONFIGURED",
+        "safe_detail": (
+            "Configured Alpaca endpoint is not the required PAPER trading endpoint. "
+            "Configure https://paper-api.alpaca.markets. Live endpoint api.alpaca.markets remains blocked."
+        ),
+        "operator_action": ALPACA_ENDPOINT_CONFIGURATION_ACTION,
+    }
+
+
 def alpaca_endpoint_authority(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Return safe Alpaca endpoint authority without exposing credentials."""
     env = env or {}
     raw_endpoint = str(env.get("APCA_API_BASE_URL") or "").strip()
-    endpoint = (raw_endpoint or ALPACA_PAPER_ENDPOINT).rstrip("/")
-    if endpoint == ALPACA_PAPER_ENDPOINT:
-        status = "PAPER_ENDPOINT_CONFIRMED"
-        reason_code = None
-        actual_endpoint = ALPACA_PAPER_ENDPOINT
-        detail = "Alpaca PAPER endpoint is confirmed."
-        action = "No endpoint action required."
-    elif endpoint == ALPACA_LIVE_ENDPOINT:
-        status = "LIVE_ENDPOINT_BLOCKED"
-        reason_code = "LIVE_ENDPOINT_BLOCKED"
-        actual_endpoint = ALPACA_LIVE_ENDPOINT
-        detail = "Alpaca live endpoint is configured and remains blocked for this operator."
-        action = ALPACA_ENDPOINT_CONFIGURATION_ACTION
-    else:
-        status = "ALPACA_PAPER_ENDPOINT_REQUIRED"
-        reason_code = "ALPACA_PAPER_ENDPOINT_REQUIRED"
-        actual_endpoint = "NON_PAPER_ENDPOINT_CONFIGURED"
-        detail = "Configured Alpaca endpoint is not the required PAPER endpoint."
-        action = ALPACA_ENDPOINT_CONFIGURATION_ACTION
+    endpoint_truth = normalize_alpaca_trading_endpoint(raw_endpoint)
+    if (
+        raw_endpoint
+        and str(env.get(ALPACA_ENDPOINT_SOURCE_ENV_KEY) or "").strip().upper() == "SAFE_DEFAULT_PAPER_ENDPOINT"
+        and endpoint_truth["paper_endpoint_valid"] is True
+    ):
+        endpoint_truth = {
+            **endpoint_truth,
+            "raw_endpoint_configured": False,
+            "source": "SAFE_DEFAULT_PAPER_ENDPOINT",
+            "safe_detail": (
+                "Alpaca PAPER trading endpoint was not configured; using the safe official "
+                "PAPER trading default https://paper-api.alpaca.markets. Live endpoint "
+                "api.alpaca.markets remains blocked."
+            ),
+            "operator_action": "No endpoint action required; safe official PAPER trading default is in force.",
+        }
+    reason_code = endpoint_truth["blocker_code"]
     return {
-        "status": status,
+        "status": endpoint_truth["status"],
         "reason_code": reason_code,
-        "paper_endpoint_only": status == "PAPER_ENDPOINT_CONFIRMED",
-        "endpoint_source": "CONFIGURED" if raw_endpoint else "SAFE_DEFAULT_PAPER_ENDPOINT",
-        "actual_endpoint": actual_endpoint,
+        "paper_endpoint_only": endpoint_truth["paper_endpoint_valid"] is True,
+        "endpoint_source": endpoint_truth["source"],
+        "actual_endpoint": endpoint_truth["normalized_endpoint"],
+        "normalized_endpoint": endpoint_truth["normalized_endpoint"],
         "expected_paper_endpoint": ALPACA_PAPER_ENDPOINT,
-        "safe_detail": detail,
-        "operator_action": action,
+        "safe_detail": endpoint_truth["safe_detail"],
+        "operator_action": endpoint_truth["operator_action"],
+        "alpaca_endpoint_configured": endpoint_truth["raw_endpoint_configured"],
+        "alpaca_endpoint_source": endpoint_truth["source"],
+        "alpaca_trading_endpoint_host": endpoint_truth["endpoint_host"],
+        "alpaca_trading_endpoint_family": endpoint_truth["endpoint_family"],
+        "alpaca_paper_endpoint_valid": endpoint_truth["paper_endpoint_valid"],
+        "alpaca_live_endpoint_blocked": endpoint_truth["live_endpoint_blocked"],
+        "alpaca_endpoint_blocker_code": reason_code,
+        "alpaca_endpoint_display": endpoint_truth["normalized_endpoint"],
+        "raw_endpoint_display": endpoint_truth["raw_endpoint_display"],
         "secrets_values_exposed": False,
         "raw_secret_values_included": False,
     }
@@ -187,10 +333,9 @@ def _clean_credentials(provider_id: str, credentials: Mapping[str, Any]) -> dict
     provider = normalize_provider_id(provider_id)
     fields = _provider_fields(provider)
     allowed = set(fields["required"]) | set(fields["optional"])  # type: ignore[arg-type]
-    defaults = dict(fields.get("defaults") or {})
     clean: dict[str, str] = {}
     for name in allowed:
-        raw = credentials.get(name, defaults.get(name, ""))
+        raw = credentials.get(name, "")
         value = str(raw or "").strip()
         if value:
             clean[name] = value
@@ -198,8 +343,6 @@ def _clean_credentials(provider_id: str, credentials: Mapping[str, Any]) -> dict
         clean["GEMINI_API_KEY"] = clean["GOOGLE_API_KEY"]
     if provider == "kimi_moonshot" and not clean.get("KIMI_API_KEY") and clean.get("MOONSHOT_API_KEY"):
         clean["KIMI_API_KEY"] = clean["MOONSHOT_API_KEY"]
-    if provider in {"alpaca_paper", "alpaca_news"} and "APCA_API_BASE_URL" not in clean:
-        clean["APCA_API_BASE_URL"] = ALPACA_PAPER_ENDPOINT
     return clean
 
 
@@ -437,12 +580,15 @@ class LocalCredentialStore:
         process_env = process_env or {}
         defaults = dict(fields.get("defaults") or {})
         effective: dict[str, str] = {}
+        defaulted_alpaca_endpoint = False
         for name in (*fields["required"], *fields["optional"]):  # type: ignore[index]
             field_name = str(name)
             resolved = self.resolve_provider_field(provider, field_name, process_env)
             value = str(resolved.get("value") or "").strip()
             if not value and field_name in defaults:
                 value = str(defaults[field_name] or "").strip()
+                if provider in {"alpaca_paper", "alpaca_news"} and field_name == "APCA_API_BASE_URL" and value:
+                    defaulted_alpaca_endpoint = True
             if value:
                 effective[field_name] = value
         if provider == "gemini" and not effective.get("GEMINI_API_KEY") and effective.get("GOOGLE_API_KEY"):
@@ -451,6 +597,9 @@ class LocalCredentialStore:
             effective["KIMI_API_KEY"] = effective["MOONSHOT_API_KEY"]
         if provider in {"alpaca_paper", "alpaca_news"} and "APCA_API_BASE_URL" not in effective:
             effective["APCA_API_BASE_URL"] = ALPACA_PAPER_ENDPOINT
+            defaulted_alpaca_endpoint = True
+        if defaulted_alpaca_endpoint:
+            effective[ALPACA_ENDPOINT_SOURCE_ENV_KEY] = "SAFE_DEFAULT_PAPER_ENDPOINT"
         return effective
 
     def local_env(self) -> dict[str, str]:
@@ -560,13 +709,10 @@ class LocalCredentialStore:
         status = "READY" if summary["configured"] else "MISSING_CREDENTIALS"
         if provider in {"alpaca_paper", "alpaca_news"} and summary["configured"]:
             effective = self.effective_env(process_env or {})
-            endpoint = str(effective.get("APCA_API_BASE_URL") or ALPACA_PAPER_ENDPOINT).rstrip("/")
-            if endpoint == ALPACA_LIVE_ENDPOINT:
+            endpoint_authority = alpaca_endpoint_authority(effective)
+            if endpoint_authority["paper_endpoint_only"] is not True:
                 status = "VALIDATION_FAILED"
-                reason_codes.append("LIVE_ENDPOINT_BLOCKED")
-            elif endpoint != ALPACA_PAPER_ENDPOINT:
-                status = "VALIDATION_FAILED"
-                reason_codes.append("ALPACA_PAPER_ENDPOINT_REQUIRED")
+                reason_codes.append(str(endpoint_authority["reason_code"] or "ALPACA_PAPER_ENDPOINT_REQUIRED"))
             else:
                 reason_codes.append("PAPER_ENDPOINT_CONFIRMED")
         elif not summary["configured"]:
@@ -579,6 +725,7 @@ class LocalCredentialStore:
             "status": status,
             "summary": summary,
             "reason_codes": reason_codes,
+            "paper_endpoint_authority": alpaca_endpoint_authority(self.effective_env(process_env or {})),
             "read_only_validation": True,
             "broker_call_occurred": False,
             "external_mutation_occurred": False,

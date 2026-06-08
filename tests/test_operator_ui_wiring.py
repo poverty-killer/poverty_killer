@@ -262,7 +262,17 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "Endpoint source" in text
     assert "paperEndpointStatus" in text
     assert "paperEndpointOperatorAction" in text
+    assert "paperEndpointDisplay" in text
+    assert "paperEndpointFamily" in text
+    assert "paperEndpointHost" in text
+    assert "paperEndpointBlockerCode" in text
+    assert "alpacaLiveEndpointBlocked" in text
     assert "Endpoint action:" in text
+    assert "Endpoint display" in text
+    assert "Endpoint family" in text
+    assert "Endpoint host" in text
+    assert "Endpoint proof:" in text
+    assert "Live endpoint blocked" in text
     assert "data-paper-watchlist" in text
     assert "data-paper-duration" in text
     assert "data-paper-duration-max" in text

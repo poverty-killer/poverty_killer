@@ -48,7 +48,9 @@ def test_launch_readiness_allows_bounded_paper_when_required_checks_pass(tmp_pat
     assert payload["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
     assert payload["paper_endpoint_only"] is True
     assert payload["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
-    assert payload["paper_endpoint_source"] == "CONFIGURED"
+    assert payload["paper_endpoint_source"] == "SAFE_DEFAULT_PAPER_ENDPOINT"
+    assert payload["alpaca_endpoint_configured"] is False
+    assert payload["paper_endpoint_display"] == "https://paper-api.alpaca.markets"
     assert payload["paper_start_allowed"] is True
     assert payload["portfolio_read_availability"] == "BROKER_READ_READY"
     assert payload["can_execute"] is False
@@ -107,9 +109,71 @@ def test_launch_readiness_blocks_live_endpoint_even_with_local_credentials(tmp_p
     assert payload["alpaca_paper_credentials_configured"] is True
     assert payload["paper_endpoint_only"] is False
     assert payload["paper_endpoint_status"] == "LIVE_ENDPOINT_BLOCKED"
+    assert payload["paper_endpoint_family"] == "live"
+    assert payload["paper_endpoint_blocker_code"] == "LIVE_ENDPOINT_BLOCKED"
     assert "paper_endpoint_only" in payload["reason_codes"]
     assert payload["live_enabled"] is False
     assert payload["real_money_enabled"] is False
+
+
+def test_launch_readiness_accepts_normalized_paper_endpoint_variant(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider(
+        "alpaca_paper",
+        {
+            "APCA_API_KEY_ID": "id",
+            "APCA_API_SECRET_KEY": "secret",
+            "APCA_API_BASE_URL": " HTTPS://PAPER-API.ALPACA.MARKETS/v2 ",
+        },
+    )
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+            provider_env={},
+            credential_store=store,
+        )
+    )
+
+    payload = _endpoint(app, "/operator/launch-readiness")()
+
+    assert payload["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
+    assert payload["paper_endpoint_only"] is True
+    assert payload["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert payload["paper_endpoint_display"] == "https://paper-api.alpaca.markets"
+    assert payload["paper_endpoint_family"] == "paper"
+    assert payload["paper_endpoint_host"] == "paper-api.alpaca.markets"
+    assert payload["paper_endpoint_blocker_code"] is None
+    assert payload["paper_start_allowed"] is True
+
+
+def test_launch_readiness_rejects_data_endpoint_as_trading_endpoint(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider(
+        "alpaca_paper",
+        {
+            "APCA_API_KEY_ID": "id",
+            "APCA_API_SECRET_KEY": "secret",
+            "APCA_API_BASE_URL": "https://data.alpaca.markets",
+        },
+    )
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+            provider_env={},
+            credential_store=store,
+        )
+    )
+
+    payload = _endpoint(app, "/operator/launch-readiness")()
+    paper_endpoint_check = next(check for check in payload["checks"] if check["check_id"] == "paper_endpoint_only")
+
+    assert payload["final_launch_readiness"] == "BLOCKED"
+    assert payload["paper_endpoint_only"] is False
+    assert payload["paper_endpoint_status"] == "ALPACA_DATA_ENDPOINT_NOT_TRADING"
+    assert payload["paper_endpoint_family"] == "data"
+    assert payload["paper_start_allowed"] is False
+    assert "data.alpaca.markets is a market data endpoint" in paper_endpoint_check["detail"]
+    assert payload["broker_mutation_occurred"] is False
 
 
 def test_governed_paper_start_uses_existing_intent_and_local_credentials_without_exposing_them(tmp_path):

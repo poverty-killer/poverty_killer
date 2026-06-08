@@ -247,7 +247,12 @@ def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoin
     assert launch["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
     assert launch["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
     assert diagnostics["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
-    assert diagnostics["paper_endpoint_source"] == "CONFIGURED"
+    assert diagnostics["paper_endpoint_source"] == "SAFE_DEFAULT_PAPER_ENDPOINT"
+    assert diagnostics["paper_endpoint_display"] == "https://paper-api.alpaca.markets"
+    assert diagnostics["paper_endpoint_family"] == "paper"
+    assert diagnostics["alpaca_endpoint_configured"] is False
+    assert diagnostics["alpaca_paper_endpoint_valid"] is True
+    assert diagnostics["alpaca_live_endpoint_blocked"] is True
     assert "paper-secret" not in text
     assert status["manual_trading_available"] is False
     assert status["force_trade_available"] is False

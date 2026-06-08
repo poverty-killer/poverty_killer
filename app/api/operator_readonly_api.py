@@ -43,6 +43,7 @@ from app.operator_activation.launch_readiness import build_launch_readiness
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_credentials.store import (
+    ALPACA_ENDPOINT_SOURCE_ENV_KEY,
     DEFAULT_RELATIVE_STORE_PATH,
     PROVIDER_CREDENTIAL_FIELDS,
     LocalCredentialStore,
@@ -345,11 +346,17 @@ class OperatorSnapshotProvider:
         effective_env = dict(env if env is not None else self.provider_env)
         if env is None:
             effective_env.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
-        return {
+        paper_env = {
             key: str(value)
             for key, value in effective_env.items()
-            if key in {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"} and str(value).strip()
+            if key in {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL", ALPACA_ENDPOINT_SOURCE_ENV_KEY} and str(value).strip()
         }
+        endpoint_authority = alpaca_endpoint_authority(paper_env)
+        if endpoint_authority["paper_endpoint_only"] is True:
+            paper_env["APCA_API_BASE_URL"] = str(endpoint_authority["alpaca_endpoint_display"])
+            if endpoint_authority["alpaca_endpoint_configured"] is False:
+                paper_env[ALPACA_ENDPOINT_SOURCE_ENV_KEY] = "SAFE_DEFAULT_PAPER_ENDPOINT"
+        return paper_env
 
     def _refresh_provider_env(self) -> dict[str, str]:
         refreshed = self.credential_store.effective_env(self.process_env)
@@ -883,6 +890,13 @@ class OperatorSnapshotProvider:
         diagnostics["paper_endpoint_status"] = endpoint_authority["status"]
         diagnostics["paper_endpoint_source"] = endpoint_authority["endpoint_source"]
         diagnostics["paper_endpoint_operator_action"] = endpoint_authority["operator_action"]
+        diagnostics["paper_endpoint_display"] = endpoint_authority["alpaca_endpoint_display"]
+        diagnostics["paper_endpoint_family"] = endpoint_authority["alpaca_trading_endpoint_family"]
+        diagnostics["paper_endpoint_host"] = endpoint_authority["alpaca_trading_endpoint_host"]
+        diagnostics["paper_endpoint_blocker_code"] = endpoint_authority["alpaca_endpoint_blocker_code"]
+        diagnostics["alpaca_endpoint_configured"] = endpoint_authority["alpaca_endpoint_configured"]
+        diagnostics["alpaca_paper_endpoint_valid"] = endpoint_authority["alpaca_paper_endpoint_valid"]
+        diagnostics["alpaca_live_endpoint_blocked"] = endpoint_authority["alpaca_live_endpoint_blocked"]
         diagnostics["portfolio_required_field_names_present"] = {
             "APCA_API_KEY_ID": bool(str(effective_env.get("APCA_API_KEY_ID") or "").strip()),
             "APCA_API_SECRET_KEY": bool(str(effective_env.get("APCA_API_SECRET_KEY") or "").strip()),
@@ -2484,7 +2498,7 @@ class OperatorSnapshotProvider:
         if reason_code == "alpaca_paper_credentials":
             return "Open Keys & Providers, save Alpaca PAPER credentials, then validate read-only."
         if reason_code == "paper_endpoint_only":
-            return "Set APCA_API_BASE_URL to https://paper-api.alpaca.markets, then recheck launch readiness."
+            return "Configure the Alpaca PAPER trading endpoint as https://paper-api.alpaca.markets; live and market-data endpoints stay blocked for PAPER launch readiness."
         if reason_code == "paper_start_authority":
             return "Open the Run PAPER page and review the current supervisor refusal reason."
         if reason_code == "audit_session_storage":

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
-from app.operator_credentials.store import LocalCredentialStore
+from app.operator_credentials.store import LocalCredentialStore, alpaca_endpoint_authority
 from app.operator_providers.readiness import provider_readiness_summary
 
 
@@ -116,8 +116,59 @@ def test_alpaca_base_url_defaults_to_paper_endpoint_when_blank(tmp_path):
 
     assert saved["status"] == "SAVED"
     assert saved["received_field_presence"]["APCA_API_BASE_URL"] is False
-    assert base_row["source"] == "LOCAL_SECRET_PRESENT"
+    assert base_row["source"] == "SAFE_DEFAULT"
     assert base_row["configured"] is True
+
+
+def test_alpaca_endpoint_authority_normalizes_safe_paper_variants():
+    variants = [
+        "https://paper-api.alpaca.markets",
+        "https://paper-api.alpaca.markets/",
+        " HTTPS://PAPER-API.ALPACA.MARKETS/v2 ",
+    ]
+
+    for raw in variants:
+        authority = alpaca_endpoint_authority({"APCA_API_BASE_URL": raw})
+
+        assert authority["paper_endpoint_only"] is True
+        assert authority["alpaca_paper_endpoint_valid"] is True
+        assert authority["actual_endpoint"] == "https://paper-api.alpaca.markets"
+        assert authority["alpaca_endpoint_display"] == "https://paper-api.alpaca.markets"
+        assert authority["alpaca_trading_endpoint_host"] == "paper-api.alpaca.markets"
+        assert authority["alpaca_trading_endpoint_family"] == "paper"
+        assert authority["alpaca_endpoint_blocker_code"] is None
+        assert authority["alpaca_live_endpoint_blocked"] is True
+
+
+def test_alpaca_endpoint_authority_missing_endpoint_is_safe_default_not_configured():
+    authority = alpaca_endpoint_authority({})
+
+    assert authority["paper_endpoint_only"] is True
+    assert authority["endpoint_source"] == "SAFE_DEFAULT_PAPER_ENDPOINT"
+    assert authority["alpaca_endpoint_configured"] is False
+    assert authority["alpaca_endpoint_display"] == "https://paper-api.alpaca.markets"
+    assert authority["alpaca_trading_endpoint_family"] == "paper"
+    assert authority["alpaca_endpoint_blocker_code"] is None
+
+
+def test_alpaca_endpoint_authority_rejects_live_data_and_broker_endpoints():
+    cases = [
+        ("https://api.alpaca.markets", "LIVE_ENDPOINT_BLOCKED", "live"),
+        ("api.alpaca.markets", "LIVE_ENDPOINT_BLOCKED", "live"),
+        ("https://data.alpaca.markets", "ALPACA_DATA_ENDPOINT_NOT_TRADING", "data"),
+        ("https://broker-api.alpaca.markets", "ALPACA_BROKER_ENDPOINT_UNSUPPORTED", "broker"),
+        ("https://broker-api.sandbox.alpaca.markets", "ALPACA_BROKER_ENDPOINT_UNSUPPORTED", "broker"),
+    ]
+
+    for raw, reason_code, family in cases:
+        authority = alpaca_endpoint_authority({"APCA_API_BASE_URL": raw})
+
+        assert authority["paper_endpoint_only"] is False
+        assert authority["reason_code"] == reason_code
+        assert authority["alpaca_endpoint_blocker_code"] == reason_code
+        assert authority["alpaca_trading_endpoint_family"] == family
+        assert authority["alpaca_live_endpoint_blocked"] is True
+        assert authority["secrets_values_exposed"] is False
 
 
 def test_wrong_provider_id_refuses_with_reason_and_accepted_ids(tmp_path):

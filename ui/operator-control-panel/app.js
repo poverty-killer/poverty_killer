@@ -786,6 +786,7 @@
           ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
           ${badge(`Supervisor ${sup.state || "UNKNOWN"}`, statusColor(sup.state || "UNKNOWN"))}
           ${badge(sup.paperStartAllowed ? "Start allowed" : "Start blocked", sup.paperStartAllowed ? "green" : "yellow")}
+          ${badge(`Endpoint ${launch.paperEndpointFamily || "unknown"}`, launch.paperEndpointOnly ? "green" : "red")}
           ${badge("Live locked", "red")}
           ${badge("Real-money blocked", "red")}
         </div>
@@ -835,6 +836,7 @@
         <details class="ai-context-details">
           <summary>Why this can be disabled</summary>
           <div class="notice">Alpaca key missing means this backend sees neither an environment key nor a Local credential vault entry for Alpaca PAPER. Add it in Keys & Providers, then validate read-only.</div>
+          <div class="notice">Endpoint proof: ${escapeHtml(launch.paperEndpointDisplay || "unavailable")} (${escapeHtml(launch.paperEndpointFamily || "unknown")}; ${escapeHtml(launch.paperEndpointSource || "UNKNOWN")}). ${escapeHtml(launch.paperEndpointBlockerCode || "no endpoint blocker")}</div>
         </details>
         <div class="notice mono">Endpoint target: /operator/intent/paper/start only. Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
       </div>
@@ -855,7 +857,12 @@
         ["Exact blockers", tokenText((launch.reasonCodes || []).join(", ") || "none reported")],
         ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
         ["Alpaca PAPER endpoint", badge(launch.paperEndpointStatus || "UNKNOWN", launch.paperEndpointOnly ? "green" : "red")],
+        ["Endpoint display", escapeHtml(launch.paperEndpointDisplay || "unavailable")],
+        ["Endpoint family", badge(launch.paperEndpointFamily || "unknown", launch.paperEndpointOnly ? "green" : "red")],
+        ["Endpoint host", escapeHtml(launch.paperEndpointHost || "unavailable")],
         ["Endpoint source", badge(launch.paperEndpointSource || "UNKNOWN", launch.paperEndpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" ? "cyan" : "gray")],
+        ["Endpoint configured", badge(launch.alpacaEndpointConfigured ? "yes" : "safe default", launch.alpacaEndpointConfigured ? "gray" : "cyan")],
+        ["Live endpoint blocked", badge(launch.alpacaLiveEndpointBlocked ? "yes" : "no", launch.alpacaLiveEndpointBlocked ? "red" : "yellow")],
         ["Provider status", escapeHtml(`${readiness.readyOrConfiguredCount || 0} ready/configured, ${readiness.missingCredentialsCount || providerCounts.MISSING_CREDENTIALS || 0} missing`)],
         ["Live", badge("LOCKED", "red")],
         ["Real money", badge("BLOCKED", "red")],
@@ -4583,6 +4590,13 @@
         paperEndpointStatus: pick(launchReadiness.paper_endpoint_status, "UNKNOWN"),
         paperEndpointSource: pick(launchReadiness.paper_endpoint_source, "UNKNOWN"),
         paperEndpointOperatorAction: pick(launchReadiness.paper_endpoint_operator_action, ""),
+        paperEndpointDisplay: pick(launchReadiness.paper_endpoint_display, ""),
+        paperEndpointFamily: pick(launchReadiness.paper_endpoint_family, "unknown"),
+        paperEndpointHost: pick(launchReadiness.paper_endpoint_host, ""),
+        paperEndpointBlockerCode: pick(launchReadiness.paper_endpoint_blocker_code, ""),
+        alpacaEndpointConfigured: launchReadiness.alpaca_endpoint_configured === true,
+        alpacaPaperEndpointValid: launchReadiness.alpaca_paper_endpoint_valid === true,
+        alpacaLiveEndpointBlocked: launchReadiness.alpaca_live_endpoint_blocked !== false,
         paperEndpointAuthority: launchReadiness.paper_endpoint_authority || {},
         paperStartAllowed: launchReadiness.paper_start_allowed === true,
         safeStopStatus: pick(launchReadiness.safe_stop_status, "UNKNOWN"),

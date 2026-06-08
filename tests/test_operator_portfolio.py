@@ -141,6 +141,34 @@ def test_empty_broker_portfolio_is_honest():
     assert payload["positions"] == []
 
 
+def test_portfolio_blocks_non_trading_endpoint_before_broker_read():
+    class ExplodingReadOnlyClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_json(self, path, headers):
+            self.calls.append(("GET", path))
+            raise AssertionError("broker read should not occur for invalid trading endpoint")
+
+    client = ExplodingReadOnlyClient()
+    payload = build_portfolio_snapshot(
+        {
+            "APCA_API_KEY_ID": "id",
+            "APCA_API_SECRET_KEY": "secret",
+            "APCA_API_BASE_URL": "https://data.alpaca.markets",
+        },
+        client=client,
+    )
+
+    assert payload["status"] == "BACKEND_DEGRADED"
+    assert payload["unavailable_reason"] == "ALPACA_DATA_ENDPOINT_NOT_TRADING"
+    assert payload["paper_endpoint_only"] is False
+    assert payload["paper_endpoint_authority"]["alpaca_trading_endpoint_family"] == "data"
+    assert payload["broker_read_attempted"] is False
+    assert payload["broker_mutation_occurred"] is False
+    assert client.calls == []
+
+
 def test_operator_portfolio_endpoints_are_read_only(tmp_path):
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})

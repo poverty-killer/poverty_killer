@@ -76,6 +76,47 @@ def test_matching_process_env_and_fallback_file_passes(monkeypatch, tmp_path):
     assert proof.live_endpoint_used is False
 
 
+def test_paper_endpoint_variants_normalize_for_credential_authority(monkeypatch, tmp_path):
+    env_path = tmp_path / "alpaca_paper.env"
+    _write_env_file(
+        env_path,
+        base_url=" HTTPS://PAPER-API.ALPACA.MARKETS/v2 ",
+        key_id="paper-key",
+        secret_key="paper-secret",
+    )
+    monkeypatch.delenv("APCA_API_BASE_URL", raising=False)
+    monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
+    monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
+
+    proof = validate_alpaca_paper_credential_authority(env_path)
+
+    assert proof.status == "CREDENTIAL_AUTHORITY_OK"
+    assert proof.endpoint == EXPECTED_ALPACA_PAPER_BASE_URL
+    assert proof.live_endpoint_used is False
+
+
+def test_missing_base_url_defaults_to_paper_when_key_and_secret_present(monkeypatch, tmp_path):
+    env_path = tmp_path / "missing_base.env"
+    env_path.write_text(
+        "\n".join(
+            (
+                "APCA_API_KEY_ID=paper-key",
+                "APCA_API_SECRET_KEY=paper-secret",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("APCA_API_BASE_URL", raising=False)
+    monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
+    monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
+
+    proof = validate_alpaca_paper_credential_authority(env_path)
+
+    assert proof.status == "CREDENTIAL_AUTHORITY_OK"
+    assert proof.endpoint == EXPECTED_ALPACA_PAPER_BASE_URL
+    assert "CREDENTIALS_MISSING" not in proof.reason_codes
+
+
 def test_mismatched_process_env_and_fallback_file_fails_closed(monkeypatch, tmp_path):
     env_path = tmp_path / "alpaca_paper.env"
     _write_env_file(

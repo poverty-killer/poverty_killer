@@ -57,7 +57,7 @@ def build_launch_readiness(
             "paper_endpoint_only",
             "PAPER endpoint only",
             "PASS" if endpoint_ok else "BLOCKED",
-            str(endpoint_authority["safe_detail"] if endpoint_ok else endpoint_authority["operator_action"]),
+            str(endpoint_authority["safe_detail"]),
             blocker=not endpoint_ok,
         )
     )
@@ -172,6 +172,13 @@ def build_launch_readiness(
         "paper_endpoint_status": endpoint_authority["status"],
         "paper_endpoint_source": endpoint_authority["endpoint_source"],
         "paper_endpoint_operator_action": endpoint_authority["operator_action"],
+        "paper_endpoint_display": endpoint_authority["alpaca_endpoint_display"],
+        "paper_endpoint_family": endpoint_authority["alpaca_trading_endpoint_family"],
+        "paper_endpoint_host": endpoint_authority["alpaca_trading_endpoint_host"],
+        "paper_endpoint_blocker_code": endpoint_authority["alpaca_endpoint_blocker_code"],
+        "alpaca_endpoint_configured": endpoint_authority["alpaca_endpoint_configured"],
+        "alpaca_paper_endpoint_valid": endpoint_authority["alpaca_paper_endpoint_valid"],
+        "alpaca_live_endpoint_blocked": endpoint_authority["alpaca_live_endpoint_blocked"],
         "live_blocked": True,
         "real_money_blocked": True,
         "paper_start_allowed": paper_start_allowed,

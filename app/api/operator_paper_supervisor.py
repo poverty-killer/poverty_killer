@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from app.api.operator_runtime_config import OperatorRuntimeConfig, RUNNER_MAX_PAPER_DURATION_SECONDS
 from app.api.operator_session_store import OperatorSessionStore
-from app.operator_credentials.store import alpaca_endpoint_authority
+from app.operator_credentials.store import ALPACA_ENDPOINT_SOURCE_ENV_KEY, alpaca_endpoint_authority
 
 
 SUPERVISOR_VERSION = "operator-paper-supervisor-v1"
@@ -523,6 +523,12 @@ class OperatorPaperSupervisor:
         repo_root = self.config.repo_root
         log_dir = repo_root / self.config.log_directory
         log_dir.mkdir(parents=True, exist_ok=True)
+        process_env = dict(self.config.process_env)
+        endpoint_authority = alpaca_endpoint_authority(process_env)
+        if endpoint_authority["paper_endpoint_only"] is True:
+            process_env["APCA_API_BASE_URL"] = str(endpoint_authority["alpaca_endpoint_display"])
+            if endpoint_authority["alpaca_endpoint_configured"] is False:
+                process_env[ALPACA_ENDPOINT_SOURCE_ENV_KEY] = "SAFE_DEFAULT_PAPER_ENDPOINT"
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         stdout_path = log_dir / f"operator_paper_{stamp}_{session_id}.out.log"
         stderr_path = log_dir / f"operator_paper_{stamp}_{session_id}.err.log"
@@ -554,7 +560,7 @@ class OperatorPaperSupervisor:
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
             command_summary=command_summary,
-            env=dict(self.config.process_env),
+            env=process_env,
         )
 
     def _build_refused_session(self, request: dict[str, Any], reason: str) -> PaperRunSession:

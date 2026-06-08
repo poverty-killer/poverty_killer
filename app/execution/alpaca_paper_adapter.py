@@ -12,6 +12,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from app.operator_credentials.store import (
+    ALPACA_LIVE_ENDPOINT as FORBIDDEN_ALPACA_LIVE_BASE_URL,
+    ALPACA_PAPER_ENDPOINT as EXPECTED_ALPACA_PAPER_BASE_URL,
+    alpaca_endpoint_authority,
+)
 from app.execution.broker_gateway import (
     BrokerAdapterIdentity,
     BrokerCredentialStatus,
@@ -23,9 +28,8 @@ from app.execution.broker_gateway import (
 )
 
 
-EXPECTED_ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
-FORBIDDEN_ALPACA_LIVE_BASE_URL = "https://api.alpaca.markets"
 ALPACA_PAPER_CREDENTIAL_KEYS = ("APCA_API_BASE_URL", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
+ALPACA_PAPER_REQUIRED_SECRET_KEYS = ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
 
 
 class AlpacaTransport(Protocol):
@@ -204,15 +208,16 @@ def validate_alpaca_paper_credential_authority(
     }
 
     reasons: list[str] = []
-    missing = [key for key in ALPACA_PAPER_CREDENTIAL_KEYS if not effective_values.get(key)]
+    missing = [key for key in ALPACA_PAPER_REQUIRED_SECRET_KEYS if not effective_values.get(key)]
     if missing:
         reasons.append("CREDENTIALS_MISSING")
 
-    endpoint = (effective_values.get("APCA_API_BASE_URL") or "").rstrip("/")
-    if endpoint == FORBIDDEN_ALPACA_LIVE_BASE_URL:
-        reasons.append("LIVE_ENDPOINT_BLOCKED")
-    elif endpoint != EXPECTED_ALPACA_PAPER_BASE_URL:
-        reasons.append("ALPACA_PAPER_ENDPOINT_REQUIRED")
+    endpoint_authority = alpaca_endpoint_authority(effective_values)
+    endpoint = str(endpoint_authority["alpaca_endpoint_display"] or "")
+    if endpoint_authority["paper_endpoint_only"] is not True:
+        reasons.append(str(endpoint_authority["reason_code"] or "ALPACA_PAPER_ENDPOINT_REQUIRED"))
+    else:
+        effective_values["APCA_API_BASE_URL"] = EXPECTED_ALPACA_PAPER_BASE_URL
 
     conflict_keys = [
         key for key in ALPACA_PAPER_CREDENTIAL_KEYS
@@ -249,7 +254,7 @@ def validate_alpaca_paper_credential_authority(
         effective_fingerprints={
             key: _credential_fingerprint(effective_values.get(key, "")) for key in ALPACA_PAPER_CREDENTIAL_KEYS
         },
-        live_endpoint_used=endpoint == FORBIDDEN_ALPACA_LIVE_BASE_URL,
+        live_endpoint_used=endpoint_authority["alpaca_trading_endpoint_family"] == "live",
     )
 
 
@@ -261,7 +266,7 @@ def load_alpaca_paper_credentials(path: Path | None = None, *, enforce_authority
             raise BrokerGatewayError("credential_authority_blocked", message=",".join(proof.reason_codes))
     values = _read_alpaca_paper_env_file(env_path)
     return AlpacaPaperCredentials(
-        base_url=(os.environ.get("APCA_API_BASE_URL") or values.get("APCA_API_BASE_URL") or "").rstrip("/"),
+        base_url=str(alpaca_endpoint_authority({"APCA_API_BASE_URL": os.environ.get("APCA_API_BASE_URL") or values.get("APCA_API_BASE_URL") or ""})["alpaca_endpoint_display"] or ""),
         key_id=os.environ.get("APCA_API_KEY_ID") or values.get("APCA_API_KEY_ID") or "",
         secret_key=os.environ.get("APCA_API_SECRET_KEY") or values.get("APCA_API_SECRET_KEY") or "",
     )
@@ -407,8 +412,8 @@ class AlpacaPaperBrokerAdapter:
             missing.append("APCA_API_SECRET_KEY")
         if missing:
             raise BrokerGatewayError("credentials_missing", message="missing:" + ",".join(missing))
-        base_url = self._credentials.base_url.rstrip("/")
-        if base_url == FORBIDDEN_ALPACA_LIVE_BASE_URL or base_url != EXPECTED_ALPACA_PAPER_BASE_URL:
+        endpoint_authority = alpaca_endpoint_authority({"APCA_API_BASE_URL": self._credentials.base_url})
+        if endpoint_authority["paper_endpoint_only"] is not True:
             raise BrokerGatewayError("live_or_nonpaper_endpoint_blocked", message="alpaca_paper_endpoint_required")
 
     def _headers(self) -> dict[str, str]:

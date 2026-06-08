@@ -113,6 +113,29 @@ def test_supervisor_allows_missing_base_url_by_safe_paper_default():
     assert result["reason_code"] == "PAPER_RUN_STARTED"
 
 
+def test_supervisor_normalizes_paper_endpoint_variant_before_start_authority():
+    runner = FakeRunner()
+    config = PaperSupervisorConfig(
+        repo_root=runner.repo_root,
+        process_env={
+            "APCA_API_KEY_ID": "test-paper-key",
+            "APCA_API_SECRET_KEY": "test-paper-secret",
+            "APCA_API_BASE_URL": " HTTPS://PAPER-API.ALPACA.MARKETS/v2 ",
+        },
+    )
+    supervisor = OperatorPaperSupervisor(config=config, runner=runner)
+
+    snapshot = supervisor.status_snapshot()
+    result = supervisor.start_paper(_valid_request())
+
+    assert snapshot["paper_endpoint_only"] is True
+    assert snapshot["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
+    assert snapshot["paper_endpoint_authority"]["alpaca_endpoint_display"] == "https://paper-api.alpaca.markets"
+    assert result["allowed"] is True
+    assert result["reason_code"] == "PAPER_RUN_STARTED"
+    assert runner.started_specs[0].env["APCA_API_BASE_URL"] == "https://paper-api.alpaca.markets"
+
+
 def test_supervisor_splits_live_endpoint_block_from_key_presence():
     runner = FakeRunner()
     config = PaperSupervisorConfig(
