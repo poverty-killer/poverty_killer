@@ -62,7 +62,7 @@ def test_high_reasoning_api_refuses_lower_model_without_silent_downgrade():
     assert decision.model_suitable_for_governance is False
 
 
-def test_serious_prompt_cannot_route_to_light_api():
+def test_serious_prompt_can_route_to_light_api_as_limited_advisory_not_governance():
     decision = route_ai_request(
         requested_mode=LIGHT_API,
         provider_id="openai",
@@ -73,9 +73,12 @@ def test_serious_prompt_cannot_route_to_light_api():
         provider_implemented=True,
     )
 
-    assert decision.allowed_provider_call is False
-    assert decision.approval_required is True
-    assert decision.reason_code == "SERIOUS_PROMPT_REQUIRES_HIGH_REASONING_OR_PACKET"
+    assert decision.allowed_provider_call is True
+    assert decision.approval_required is False
+    assert decision.answer_source == "API_LIGHT_MODEL"
+    assert decision.reason_code == "LIGHT_API_SELECTED_SERIOUS_ADVISORY_LIMITED"
+    assert decision.model_suitable_for_governance is False
+    assert "not final quant/risk/governance authority" in str(decision.warning)
 
 
 def test_supreme_board_packet_and_local_model_routes_are_labeled():

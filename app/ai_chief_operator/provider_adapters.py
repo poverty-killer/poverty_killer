@@ -8,6 +8,8 @@ from the router/gateway and must include it in the provider payload or packet.
 from __future__ import annotations
 
 import json
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -31,6 +33,11 @@ from app.ai_chief_operator.quant_persona import AI_QUANT_ROLES
 
 
 HttpPost = Callable[[str, dict[str, str], dict[str, Any], int], dict[str, Any]]
+LOCAL_PATH_RE = re.compile(
+    r"([A-Za-z]:\\[^\s\"']+|/mnt/[A-Za-z]/[^\s\"']+|/home/[^\s\"']+|state[/\\][^\s\"']+|logs[/\\][^\s\"']+)",
+    re.IGNORECASE,
+)
+PATH_KEY_PARTS = ("path", "stdout", "stderr", "log_file", "log_path", "report_path")
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,14 @@ class AIProviderResponse:
     provider_error_category: str | None = None
     provider_error_message_safe: str | None = None
     model_call_occurred: bool = False
+    model_call_attempted: bool = False
+    provider_response_received: bool = False
+    fallback_reason: str | None = None
+    actual_model_name: str | None = None
+    provider_request_id: str | None = None
+    endpoint_family: str | None = None
+    latency_ms: int | None = None
+    http_status_code: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +103,14 @@ class AIProviderResponse:
             "provider_error_category": self.provider_error_category,
             "provider_error_message_safe": self.provider_error_message_safe,
             "model_call_occurred": self.model_call_occurred,
+            "model_call_attempted": self.model_call_attempted,
+            "provider_response_received": self.provider_response_received,
+            "fallback_reason": self.fallback_reason,
+            "actual_model_name": self.actual_model_name,
+            "provider_request_id": self.provider_request_id,
+            "endpoint_family": self.endpoint_family,
+            "latency_ms": self.latency_ms,
+            "http_status_code": self.http_status_code,
             "can_execute": False,
             "broker_call_occurred": False,
             "trading_mutation_occurred": False,
@@ -99,11 +122,12 @@ class AIProviderResponse:
 
 
 def compact_safe_payload(request: AIProviderRequest) -> str:
+    safe_context = _redact_local_paths(redact_secrets(request.safe_context))
     payload = {
         "question": request.question,
         "mode": request.mode,
         "request_classification": request.request_classification,
-        "safe_context": redact_secrets(request.safe_context),
+        "safe_context": safe_context,
         "hard_boundaries": {
             "advisory_only": True,
             "can_execute": False,
@@ -118,6 +142,21 @@ def compact_safe_payload(request: AIProviderRequest) -> str:
         },
     }
     return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _redact_local_paths(value: Any, *, key: str = "") -> Any:
+    key_lower = key.lower()
+    if isinstance(value, dict):
+        return {str(k): _redact_local_paths(v, key=str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_local_paths(item, key=key) for item in value[:100]]
+    if isinstance(value, tuple):
+        return tuple(_redact_local_paths(item, key=key) for item in value[:100])
+    if isinstance(value, str):
+        if any(part in key_lower for part in PATH_KEY_PARTS):
+            return "REDACTED_LOCAL_PATH"
+        return LOCAL_PATH_RE.sub("REDACTED_LOCAL_PATH", value)
+    return value
 
 
 def forced_prompt(request: AIProviderRequest) -> str:
@@ -270,6 +309,9 @@ class NotImplementedAdapter(ProviderAdapter):
             provider_error_category="NOT_IMPLEMENTED",
             provider_error_message_safe="Adapter scaffolded but not callable.",
             model_call_occurred=False,
+            model_call_attempted=False,
+            provider_response_received=False,
+            fallback_reason="NOT_IMPLEMENTED",
         )
 
 
@@ -283,6 +325,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         self.provider_id = provider_id
 
     def ask_ai(self, request: AIProviderRequest) -> AIProviderResponse:
+        started = time.monotonic()
         body = {
             "model": request.model_name,
             "input": forced_prompt(request),
@@ -296,9 +339,33 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             body,
             self.timeout_seconds,
         )
+        latency_ms = int((time.monotonic() - started) * 1000)
         text = extract_text_fields(response).strip()
         if not text:
-            return NotImplementedAdapter(self.provider_id, "UNKNOWN").ask_ai(request)
+            return AIProviderResponse(
+                answer="Provider returned an empty advisory response. No provider success is being faked.",
+                provider_id=self.provider_id,
+                provider_mode="PROVIDER_ERROR",
+                model_name=request.model_name,
+                model_quality="UNKNOWN",
+                cost_mode=PROVIDER_ERROR_COST,
+                answer_source=PROVIDER_ERROR_SOURCE,
+                reasoning_policy="FALLBACK_ONLY_LIMITED",
+                model_suitable_for_governance=False,
+                persona_enforced=True,
+                expert_roles_applied=AI_QUANT_ROLES,
+                provider_error_category="EMPTY_MODEL_RESPONSE",
+                provider_error_message_safe="Provider returned empty response.",
+                model_call_occurred=False,
+                model_call_attempted=True,
+                provider_response_received=True,
+                fallback_reason="EMPTY_MODEL_RESPONSE",
+                actual_model_name=str(response.get("model") or request.model_name or ""),
+                provider_request_id=str(response.get("id") or "") or None,
+                endpoint_family="openai_responses",
+                latency_ms=latency_ms,
+                http_status_code=response.get("status_code") if isinstance(response.get("status_code"), int) else None,
+            )
         return AIProviderResponse(
             answer=text,
             provider_id=self.provider_id,
@@ -312,6 +379,13 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             persona_enforced=True,
             expert_roles_applied=AI_QUANT_ROLES,
             model_call_occurred=True,
+            model_call_attempted=True,
+            provider_response_received=True,
+            actual_model_name=str(response.get("model") or request.model_name or ""),
+            provider_request_id=str(response.get("id") or "") or None,
+            endpoint_family="openai_responses",
+            latency_ms=latency_ms,
+            http_status_code=response.get("status_code") if isinstance(response.get("status_code"), int) else None,
         )
 
 
@@ -336,6 +410,7 @@ class OpenAIChatCompatibleAdapter(ProviderAdapter):
         self.provider_mode = provider_mode
 
     def ask_ai(self, request: AIProviderRequest) -> AIProviderResponse:
+        started = time.monotonic()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -350,9 +425,36 @@ class OpenAIChatCompatibleAdapter(ProviderAdapter):
         if request.temperature is not None:
             body["temperature"] = request.temperature
         response = self.http_post(f"{self.base_url}/chat/completions", headers, body, self.timeout_seconds)
+        latency_ms = int((time.monotonic() - started) * 1000)
         text = extract_text_fields(response).strip()
+        actual_model = str(response.get("model") or request.model_name or "") if isinstance(response, dict) else str(request.model_name or "")
+        request_id = str(response.get("id") or response.get("request_id") or "") if isinstance(response, dict) else ""
+        endpoint_family = "deepseek_chat_completions" if self.provider_id == "deepseek" else "openai_chat_completions"
         if not text:
-            return NotImplementedAdapter(self.provider_id, "UNKNOWN").ask_ai(request)
+            return AIProviderResponse(
+                answer="Provider returned an empty advisory response. No provider success is being faked.",
+                provider_id=self.provider_id,
+                provider_mode="PROVIDER_ERROR",
+                model_name=request.model_name,
+                model_quality="UNKNOWN",
+                cost_mode=PROVIDER_ERROR_COST,
+                answer_source=PROVIDER_ERROR_SOURCE,
+                reasoning_policy="FALLBACK_ONLY_LIMITED",
+                model_suitable_for_governance=False,
+                persona_enforced=True,
+                expert_roles_applied=AI_QUANT_ROLES,
+                provider_error_category="EMPTY_MODEL_RESPONSE",
+                provider_error_message_safe="Provider returned empty response.",
+                model_call_occurred=False,
+                model_call_attempted=True,
+                provider_response_received=True,
+                fallback_reason="EMPTY_MODEL_RESPONSE",
+                actual_model_name=actual_model,
+                provider_request_id=request_id or None,
+                endpoint_family=endpoint_family,
+                latency_ms=latency_ms,
+                http_status_code=response.get("status_code") if isinstance(response.get("status_code"), int) else None,
+            )
         source = LOCAL_MODEL if self.provider_mode == "LOCAL_MODEL" else (
             API_HIGH_REASONING_APPROVED if request.mode == "HIGH_REASONING_API" else API_LIGHT_MODEL
         )
@@ -369,6 +471,13 @@ class OpenAIChatCompatibleAdapter(ProviderAdapter):
             persona_enforced=True,
             expert_roles_applied=AI_QUANT_ROLES,
             model_call_occurred=True,
+            model_call_attempted=True,
+            provider_response_received=True,
+            actual_model_name=actual_model,
+            provider_request_id=request_id or None,
+            endpoint_family=endpoint_family,
+            latency_ms=latency_ms,
+            http_status_code=response.get("status_code") if isinstance(response.get("status_code"), int) else None,
         )
 
 
@@ -381,6 +490,7 @@ class AnthropicMessagesAdapter(ProviderAdapter):
         self.model_quality = model_quality
 
     def ask_ai(self, request: AIProviderRequest) -> AIProviderResponse:
+        started = time.monotonic()
         response = self.http_post(
             f"{self.base_url}/v1/messages",
             {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
@@ -392,9 +502,33 @@ class AnthropicMessagesAdapter(ProviderAdapter):
             },
             self.timeout_seconds,
         )
+        latency_ms = int((time.monotonic() - started) * 1000)
         text = extract_text_fields({"content": response.get("content") or response}).strip()
         if not text:
-            return NotImplementedAdapter("anthropic", "UNKNOWN").ask_ai(request)
+            return AIProviderResponse(
+                answer="Provider returned an empty advisory response. No provider success is being faked.",
+                provider_id="anthropic",
+                provider_mode="PROVIDER_ERROR",
+                model_name=request.model_name,
+                model_quality="UNKNOWN",
+                cost_mode=PROVIDER_ERROR_COST,
+                answer_source=PROVIDER_ERROR_SOURCE,
+                reasoning_policy="FALLBACK_ONLY_LIMITED",
+                model_suitable_for_governance=False,
+                persona_enforced=True,
+                expert_roles_applied=AI_QUANT_ROLES,
+                provider_error_category="EMPTY_MODEL_RESPONSE",
+                provider_error_message_safe="Provider returned empty response.",
+                model_call_occurred=False,
+                model_call_attempted=True,
+                provider_response_received=True,
+                fallback_reason="EMPTY_MODEL_RESPONSE",
+                actual_model_name=str(response.get("model") or request.model_name or ""),
+                provider_request_id=str(response.get("id") or "") or None,
+                endpoint_family="anthropic_messages",
+                latency_ms=latency_ms,
+                http_status_code=response.get("status_code") if isinstance(response.get("status_code"), int) else None,
+            )
         return AIProviderResponse(
             answer=text,
             provider_id="anthropic",
@@ -408,4 +542,11 @@ class AnthropicMessagesAdapter(ProviderAdapter):
             persona_enforced=True,
             expert_roles_applied=AI_QUANT_ROLES,
             model_call_occurred=True,
+            model_call_attempted=True,
+            provider_response_received=True,
+            actual_model_name=str(response.get("model") or request.model_name or ""),
+            provider_request_id=str(response.get("id") or "") or None,
+            endpoint_family="anthropic_messages",
+            latency_ms=latency_ms,
+            http_status_code=response.get("status_code") if isinstance(response.get("status_code"), int) else None,
         )

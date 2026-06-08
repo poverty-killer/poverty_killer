@@ -19,8 +19,14 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
     assert "ai-chief-dock" in text
     assert "data-ai-chief-wide" in text
     assert "data-ai-chief-question" in text
-    assert "data-ai-chief-ask" in text
     assert "data-ai-chief-clear" in text
+    assert "data-ai-answer-mode-ask" in text
+    assert "DETERMINISTIC" in text
+    assert "AI_CHAT_MODEL" in text
+    assert "AI_REASONING_STRATEGY" in text
+    assert "Deterministic" in text
+    assert "AI Chat Model" in text
+    assert "AI Reasoning" in text
     assert "/operator/ai/ask" in text
     assert "Ask what is blocking PAPER, whether the bot is ready, or what to do next..." in text
     assert "aiConversation" in text
@@ -128,7 +134,7 @@ def test_ai_prompts_are_limited_with_more_prompts_expander():
     assert "ai-more-prompts" in text
     assert "More prompts" in text
     assert "AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT)" in text
-    assert "askAiChiefQuestion(aiPrompt.dataset.aiChiefPrompt)" in text
+    assert "selectAiQuestion(aiPrompt.dataset.aiChiefPrompt)" in text
     assert "const bullets = aiEvidenceBullets" in text
     assert "uniquePrompts(bullets).slice(0, 3)" in text
 
@@ -138,10 +144,10 @@ def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
 
     assert "Active provider" in text
     assert "Active model" in text
-    assert "Current answer source" in text
+    assert "Last answer source" in text
     assert "Last provider error" in text
     assert "Selected active provider" in text
-    assert "Currently used for ask" in text
+    assert "Default router mode" in text
     assert "Use DeepSeek now" in text
     assert "Use OpenAI now" in text
     assert "Use Supreme Board packet mode" in text
@@ -151,10 +157,22 @@ def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
     assert "active_provider: id" in text
     assert "no paid call occurred" in text
     assert "safe local fallback answered this question" in text
+    assert "provider call failed" in text
     assert "Safe local fallback" in text
     assert "LOCAL_DETERMINISTIC" in text
-    assert "Safe local fallback | ${source}" in text
-    assert "`${currentProviderDisplay} answered | Advisory only | Broker actions blocked`" in text
+    assert "modelCallAttempted" in text
+    assert "modelCallOccurred" in text
+    assert "providerResponseReceived" in text
+    assert "fallbackReason" in text
+    assert "displaySourceLabel" in text
+    assert "effectiveAnswerMode" in text
+    assert "ai_call_trace" in text
+    assert "normalizeAiCallTrace" in text
+    assert "AI Call Trace" in text
+    assert "Safety filter triggered" in text
+    assert "Challenge echoed" in text
+    assert "Safe local fallback | ${fallbackSource} | provider call failed" in text
+    assert "${providerLabel} answered | ${modelName} | ${source}" in text
 
 
 def test_ai_packet_output_is_collapsed_and_copyable_by_default():
@@ -286,7 +304,7 @@ def test_ui_control_inventory_declares_statuses_and_no_broken_defaults():
     assert "NOT_IMPLEMENTED_VISIBLE" in text
     assert "NO_BROKEN_CONTROLS_DECLARED" in text
     assert '["global", "ask_quant_chief"' in text
-    assert '["command", "home_ai_ask"' in text
+    assert '["command", "home_ai_answer_modes"' in text
     assert '["positions", "open_run_paper"' in text
     assert '["positions", "open_orders_preview_table"' in text
 
@@ -298,7 +316,7 @@ def test_provider_setup_uses_beginner_safe_credential_labels():
     assert "stored on this computer only" in text
     assert "Raw secrets are hidden and not sent to AI" in text
     assert "Local store" not in text
-    assert "validation passed" in text
+    assert "credential presence confirmed" in text
     assert "validation failed" in text
     assert "alpaca_paper" in text
     assert "APCA_API_KEY_ID" in text
@@ -393,8 +411,10 @@ def test_ai_ask_uses_active_router_provider_and_refreshes_after_settings_save():
     text = _app_text()
 
     assert "function aiAskRoutingPayload" in text
+    assert "function aiAskRoutingPayloadForMode" in text
     assert "isExternalAiApiProvider(activeProvider)" in text
     assert "providerId: activeProvider" in text
+    assert "answer_mode: answerMode" in text
     assert "route_mode: route.routeMode" in text
     assert "provider_id: route.providerId" in text
     assert "model_name: route.modelName" in text
@@ -404,7 +424,27 @@ def test_ai_ask_uses_active_router_provider_and_refreshes_after_settings_save():
     assert "Active Router" in text
     assert "compactLine = `${currentProviderDisplay} active" in text
     assert "safe local fallback answered this question" in text
-    assert "Currently used for ask" in text
+    assert "Default router mode" in text
+
+
+def test_ai_three_answer_mode_buttons_send_explicit_answer_mode():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert "renderAiAnswerModeButtons" in text
+    assert 'data-ai-answer-mode-ask="${escapeHtml(scope)}:${escapeHtml(mode)}"' in text
+    assert "AI_ANSWER_MODES.DETERMINISTIC" in text
+    assert "AI_ANSWER_MODES.CHAT" in text
+    assert "AI_ANSWER_MODES.REASONING" in text
+    assert "answer_mode: answerMode" in text
+    assert "normalizeAiAnswerMode" in text
+    assert "our bot/local truth, no provider call" in text
+    assert "configured model answers" in text
+    assert "high-reasoning advisory path" in text
+    assert "selectAiQuestion(aiPrompt.dataset.aiChiefPrompt)" in text
+    assert "askAiChiefQuestion(aiPrompt.dataset.aiChiefPrompt)" not in text
+    assert ".ai-answer-mode-group" in css
+    assert ".ai-mode-button.active" in css
 
 
 def test_portfolio_ui_accepts_exact_unavailable_statuses_not_only_old_generic_status():

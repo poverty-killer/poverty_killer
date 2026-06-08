@@ -48,7 +48,7 @@ from app.ai_chief_operator.provider_adapters import (
     OpenAIResponsesAdapter,
     SupremeBoardPacketAdapter,
 )
-from app.ai_chief_operator.quant_persona import AI_SYSTEM_POLICY, classify_quant_prompt
+from app.ai_chief_operator.quant_persona import AI_SYSTEM_POLICY, MODEL_IDENTITY_TERMS, classify_quant_prompt
 
 
 HttpPost = Callable[[str, dict[str, str], dict[str, Any], int], dict[str, Any]]
@@ -57,6 +57,75 @@ LOCAL_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 PATH_KEY_PARTS = ("path", "stdout", "stderr", "log_file", "log_path", "report_path")
+
+
+def _wants_detailed_answer(question: str) -> bool:
+    lowered = str(question or "").lower()
+    return any(term in lowered for term in ("full report", "details", "diagnostics", "audit", "deep dive", "explain fully"))
+
+
+def _clean_provider_answer_text(
+    text: str,
+    *,
+    question: str,
+    classification: Mapping[str, Any],
+    answer_source: str,
+) -> str:
+    cleaned = LOCAL_PATH_RE.sub("REDACTED_LOCAL_PATH", str(text or ""))
+    if _wants_detailed_answer(question):
+        return cleaned.strip()
+    mode = str(classification.get("mode") or "")
+    max_lines = 6 if mode == "OPERATOR_GUIDE" else 10
+    max_chars = 760 if mode == "OPERATOR_GUIDE" else 1100
+    api_answer_source = str(answer_source or "") in {"API_LIGHT_MODEL", "API_HIGH_REASONING_APPROVED", "LOCAL_MODEL"}
+    identity_question = any(term in str(question or "").lower() for term in MODEL_IDENTITY_TERMS)
+    contradictory_identity_terms = (
+        "no external model call",
+        "no model call",
+        "no provider model answered",
+        "local deterministic guide",
+        "answer source: local deterministic",
+        "actual answer source: local deterministic",
+    )
+    noisy_prefixes = (
+        "broker-confirmed truth",
+        "market truth:",
+        "local engine state",
+        "model inference",
+        "request classification:",
+        "route decision:",
+        "safe context:",
+        "operator context:",
+        "current truth:",
+        "missing or limited evidence:",
+    )
+    lines: list[str] = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if lines and lines[-1] != "":
+                lines.append("")
+            continue
+        lower = line.lower()
+        semantic_lower = lower.strip("*_#` >-: ")
+        if any(semantic_lower.startswith(prefix) for prefix in noisy_prefixes):
+            continue
+        if api_answer_source and identity_question and any(term in semantic_lower for term in contradictory_identity_terms):
+            continue
+        if semantic_lower.startswith(("```", "{", "}", '"safe_context"', '"route_decision"')):
+            continue
+        lines.append(line)
+        if len([item for item in lines if item]) >= max_lines:
+            break
+    compact = "\n".join(lines).strip()
+    if len(compact) > max_chars:
+        candidate = compact[: max_chars - 3].rstrip()
+        cutoff = max(candidate.rfind("\n"), candidate.rfind(". "))
+        if cutoff > int(max_chars * 0.55):
+            compact = candidate[: cutoff + 1].rstrip()
+        else:
+            compact = candidate + "..."
+    return compact or cleaned.strip()
 
 
 def _fallback_model_fields(provider: str = "disabled", *, state: str = "AI_DISABLED") -> dict[str, Any]:
@@ -786,6 +855,9 @@ class AIProviderGateway:
             allow_tools=False,
             allow_broker_tools=False,
         )
+        attempted_provider_call = bool(
+            route.allowed_provider_call and route.answer_source not in {LOCAL_DETERMINISTIC, SUPREME_BOARD_PACKET}
+        )
         try:
             if route.answer_source in {LOCAL_DETERMINISTIC, SUPREME_BOARD_PACKET} or not route.allowed_provider_call:
                 if route.answer_source == SUPREME_BOARD_PACKET:
@@ -802,6 +874,7 @@ class AIProviderGateway:
                         result["response"] = f"{route.warning}\n{result['response']}"
                         result["answer"] = result["response"]
                     status = "ANSWERED_FALLBACK"
+                    result.setdefault("fallback_reason", route.reason_code)
                 else:
                     adapter = NotImplementedAdapter(route.provider_id, route.model_quality)
                     result = adapter.ask_ai(request).to_dict()
@@ -809,6 +882,7 @@ class AIProviderGateway:
                         result["response"] = f"{route.warning}\n{result.get('response') or ''}".strip()
                         result["answer"] = result["response"]
                     status = "PROVIDER_ERROR"
+                    result["fallback_reason"] = route.reason_code
             else:
                 adapter = self._adapter_for(route.provider_id, route.model_quality)
                 result = adapter.ask_ai(request).to_dict()
@@ -831,11 +905,18 @@ class AIProviderGateway:
                 "response_source": "PROVIDER_ERROR_NO_MODEL_ANSWER",
                 "answer_source": "PROVIDER_ERROR",
                 "response": (
-                    "Configured high-reasoning AI provider could not return a response, so no model answer is being faked.\n"
-                    f"Provider error: {type(exc).__name__}: {safe_detail}.\n"
-                    "Use Provider Setup to verify the key/model and try again. If the configured high-reasoning model is unavailable in the account, set OPENAI_HIGH_REASONING_MODEL or ANTHROPIC_HIGH_REASONING_MODEL to an available high-reasoning model."
+                    "I could not get a live provider answer, so I am not pretending the selected model replied.\n"
+                    "- no model answer is being faked.\n"
+                    f"- Selected provider/model: {route.provider_id} / {route.model_name or 'model unknown'}\n"
+                    f"- Provider error: {safe_detail}\n"
+                    "- Actual answer source: safe local fallback\n"
+                    "Next step: open Advanced details for the provider error and verify the provider key/model. "
+                    "If the configured OpenAI high-reasoning model is unavailable, set OPENAI_HIGH_REASONING_MODEL to an available model."
                 ),
                 "model_call_occurred": False,
+                "model_call_attempted": True,
+                "provider_response_received": False,
+                "fallback_reason": f"{type(exc).__name__}: {safe_detail}",
                 "cost_mode": "PROVIDER_ERROR",
                 "persona_enforced": True,
                 "expert_roles_applied": [],
@@ -862,6 +943,19 @@ class AIProviderGateway:
         result.setdefault("expert_roles_applied", [])
         result.setdefault("provider_error_category", None)
         result.setdefault("provider_error_message_safe", None)
+        result.setdefault("model_call_attempted", attempted_provider_call)
+        result.setdefault("model_call_occurred", False)
+        result.setdefault("provider_response_received", bool(result.get("model_call_occurred")))
+        result.setdefault("fallback_reason", None if result.get("model_call_occurred") else route.reason_code)
+        if result.get("model_call_attempted") is True and (result.get("answer") or result.get("response")):
+            cleaned_answer = _clean_provider_answer_text(
+                str(result.get("answer") or result.get("response") or ""),
+                question=question,
+                classification=classification,
+                answer_source=str(result.get("answer_source") or result.get("response_source") or route.answer_source),
+            )
+            result["answer"] = cleaned_answer
+            result["response"] = cleaned_answer
         result["route_decision"] = route.to_dict()
         result["request_classification"] = classification
         result.update(

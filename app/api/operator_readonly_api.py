@@ -9,7 +9,10 @@ engine or direct broker control surface.
 from __future__ import annotations
 
 import os
+import re
+import secrets
 import subprocess
+import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +31,6 @@ from app.ai_chief_operator.router_settings import (
     AIRouterSettingsStore,
     default_ai_router_settings,
     default_ai_router_settings_path,
-    router_mode_for_gateway,
 )
 from app.ai_chief_operator.quant_persona import (
     MODEL_IDENTITY_TERMS,
@@ -55,6 +57,43 @@ from app.operator_intelligence.pnl_tca import build_pnl_summary, build_tca_dashb
 from app.operator_intelligence.reports import RunReportGenerator
 from app.operator_intelligence.system_map import SYSTEM_MAP_SUMMARY, render_system_map_markdown
 from app.operator_intelligence.watchdog import AlertQueue, build_watchdog_alerts
+
+
+ANSWER_MODE_DETERMINISTIC = "DETERMINISTIC"
+ANSWER_MODE_AI_CHAT_MODEL = "AI_CHAT_MODEL"
+ANSWER_MODE_AI_REASONING_STRATEGY = "AI_REASONING_STRATEGY"
+ANSWER_MODES = {
+    ANSWER_MODE_DETERMINISTIC,
+    ANSWER_MODE_AI_CHAT_MODEL,
+    ANSWER_MODE_AI_REASONING_STRATEGY,
+}
+
+
+def normalize_ai_answer_mode(value: Any) -> tuple[str, str]:
+    raw = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if not raw:
+        return ANSWER_MODE_DETERMINISTIC, "DEFAULTED_DETERMINISTIC"
+    aliases = {
+        "LOCAL": ANSWER_MODE_DETERMINISTIC,
+        "LOCAL_GUIDE": ANSWER_MODE_DETERMINISTIC,
+        "DETERMINISTIC_LOCAL": ANSWER_MODE_DETERMINISTIC,
+        "CHAT": ANSWER_MODE_AI_CHAT_MODEL,
+        "AI_CHAT": ANSWER_MODE_AI_CHAT_MODEL,
+        "MODEL": ANSWER_MODE_AI_CHAT_MODEL,
+        "AI_MODEL": ANSWER_MODE_AI_CHAT_MODEL,
+        "LIGHT_API": ANSWER_MODE_AI_CHAT_MODEL,
+        "REASONING": ANSWER_MODE_AI_REASONING_STRATEGY,
+        "AI_REASONING": ANSWER_MODE_AI_REASONING_STRATEGY,
+        "AI_STRATEGY": ANSWER_MODE_AI_REASONING_STRATEGY,
+        "STRATEGY": ANSWER_MODE_AI_REASONING_STRATEGY,
+        "HIGH_REASONING": ANSWER_MODE_AI_REASONING_STRATEGY,
+        "HIGH_REASONING_API": ANSWER_MODE_AI_REASONING_STRATEGY,
+        "HIGH_REASONING_API_WITH_APPROVAL": ANSWER_MODE_AI_REASONING_STRATEGY,
+    }
+    normalized = aliases.get(raw, raw)
+    if normalized in ANSWER_MODES:
+        return normalized, "VALID"
+    return ANSWER_MODE_DETERMINISTIC, "UNKNOWN_FELL_BACK_TO_DETERMINISTIC"
 from app.operator_historical_tests.service import HistoricalTestService
 from app.operator_portfolio.snapshot import ReadOnlyBrokerClient, build_portfolio_snapshot
 from app.operator_providers.readiness import provider_readiness_summary, validate_provider_readonly
@@ -1238,9 +1277,12 @@ class OperatorSnapshotProvider:
 
     def ai_ask(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = payload or {}
+        request_id = f"ai-{uuid.uuid4().hex[:12]}"
         question = str(body.get("question") or body.get("prompt") or "").strip()
         page_context = redact_secrets(body.get("page_context") if isinstance(body.get("page_context"), dict) else {})
         page_id = str(body.get("page_id") or page_context.get("page_id") or "")
+        requested_answer_mode_raw = body.get("answer_mode", body.get("answerMode"))
+        effective_answer_mode, answer_mode_status = normalize_ai_answer_mode(requested_answer_mode_raw)
         gateway_status = self.ai_gateway.status()
         provider = gateway_status.get("provider") or {}
         model_policy = gateway_status.get("model_policy") or {}
@@ -1248,9 +1290,23 @@ class OperatorSnapshotProvider:
         classification = classify_quant_prompt(question, page_id=page_id)
         mode = str(classification.get("mode") or "OPERATOR_GUIDE")
         evidence_level = str(classification.get("evidence_level") or "UNKNOWN")
-        simple_health_question = self._ai_is_simple_health_question(question)
-        local_runtime_truth_question = self._ai_should_answer_from_runtime_truth(mode, question)
+        health_intent = self._ai_contains_health_question(question)
+        provider_self_test_question = self._ai_is_provider_self_test_question(question)
         model_identity_question = self._ai_is_model_identity_question(question)
+        local_runtime_truth_question = self._ai_should_answer_from_runtime_truth(mode, question)
+        pure_local_health_question = self._ai_is_simple_health_question(question)
+        pure_local_runtime_truth_question = local_runtime_truth_question and not (model_identity_question or provider_self_test_question)
+        ai_intent = self._ai_intent_label(
+            mode,
+            question,
+            health_intent=health_intent,
+            paper_readiness_intent=local_runtime_truth_question,
+            model_identity_intent=model_identity_question,
+            provider_self_test_intent=provider_self_test_question,
+        )
+        challenge_nonce: str | None = None
+        challenge_echoed = False
+        safety_filter = {"triggered": False, "blocked_terms": []}
         if not classification["allowed"]:
             context = self._ai_light_context()
             response = (
@@ -1262,31 +1318,61 @@ class OperatorSnapshotProvider:
             refusal_reason = classification["reason_code"]
             gateway_answer: dict[str, Any] = {}
         else:
-            route_mode = router_mode_for_gateway(body.get("route_mode") or body.get("mode") or self.ai_routing_settings.get("default_mode") or LOCAL_GUIDE)
+            active_provider, active_model = self._active_router_api_selection()
             route_provider = str(body.get("provider_id") or "").strip()
             route_model = str(body.get("model_name") or "").strip()
-            active_provider, active_model = self._active_router_api_selection()
-            if model_identity_question and route_mode == LOCAL_GUIDE:
+            route_mode = LOCAL_GUIDE
+            if effective_answer_mode == ANSWER_MODE_AI_CHAT_MODEL:
                 route_mode = LIGHT_API
-                route_provider = route_provider or active_provider
-                route_model = route_model or active_model
-            context = (
-                self._ai_light_context()
-                if route_mode == LOCAL_GUIDE or simple_health_question or local_runtime_truth_question or model_identity_question
-                else self._ai_context()
-            )
-            if not route_provider:
-                if route_mode == HIGH_REASONING_API:
-                    route_provider = active_provider or str(self.ai_routing_settings.get("high_reasoning_provider") or "openai")
-                    route_model = route_model or active_model or str(self.ai_routing_settings.get("high_reasoning_model") or "")
-                elif route_mode == LIGHT_API:
-                    route_provider = active_provider or str(self.ai_routing_settings.get("light_provider") or "openai")
-                    route_model = route_model or active_model or str(self.ai_routing_settings.get("light_model") or "")
-                elif route_mode == LOCAL_MODEL_MODE:
-                    route_provider = "local_openai_compatible"
-                    route_model = route_model or str(self.ai_routing_settings.get("local_model") or "")
-            if simple_health_question or local_runtime_truth_question:
-                route_reason = "SIMPLE_HEALTH_LOCAL_TRUTH" if simple_health_question else "RUN_PLANNER_LOCAL_RUNTIME_TRUTH"
+                route_provider = (
+                    route_provider
+                    or active_provider
+                    or str(self.ai_routing_settings.get("light_provider") or "openai")
+                )
+                route_model = (
+                    route_model
+                    or active_model
+                    or str(self.ai_routing_settings.get("light_model") or "")
+                )
+            elif effective_answer_mode == ANSWER_MODE_AI_REASONING_STRATEGY:
+                route_mode = HIGH_REASONING_API
+                route_provider = route_provider or str(self.ai_routing_settings.get("high_reasoning_provider") or active_provider or "openai")
+                route_model = route_model or str(self.ai_routing_settings.get("high_reasoning_model") or active_model or "")
+
+            context = self._ai_light_context() if (
+                effective_answer_mode == ANSWER_MODE_DETERMINISTIC
+                or health_intent
+                or local_runtime_truth_question
+                or model_identity_question
+                or provider_self_test_question
+            ) else self._ai_context()
+            if effective_answer_mode == ANSWER_MODE_DETERMINISTIC:
+                route_reason = "DETERMINISTIC_MODE_LOCAL_TRUTH"
+                if provider_self_test_question:
+                    route_reason = "DETERMINISTIC_MODE_NO_PROVIDER_SELF_TEST"
+                    local_response = self._ai_deterministic_provider_self_test_answer()
+                elif model_identity_question and health_intent:
+                    route_reason = "DETERMINISTIC_COMPOUND_LOCAL_TRUTH"
+                    local_response = f"{self._ai_health_answer(context)}\n\n{self._ai_deterministic_model_route_answer(active_provider, active_model)}"
+                elif model_identity_question:
+                    route_reason = "DETERMINISTIC_MODEL_ROUTE_TRUTH"
+                    local_response = self._ai_deterministic_model_route_answer(active_provider, active_model)
+                elif pure_local_health_question:
+                    route_reason = "SIMPLE_HEALTH_LOCAL_TRUTH"
+                    local_response = self._ai_health_answer(context)
+                elif pure_local_runtime_truth_question:
+                    route_reason = "RUN_PLANNER_LOCAL_RUNTIME_TRUTH"
+                    local_response = self._ai_paper_readiness_answer(question, context)
+                else:
+                    known, missing = self._ai_answer_facts(mode, context)
+                    local_response = self._ai_current_truth_operational_answer(
+                        mode,
+                        question,
+                        known,
+                        missing,
+                        self._ai_next_step(mode, context, page_id),
+                        context,
+                    )
                 gateway_answer = {
                     "status": "ANSWERED_LOCAL_GUIDE",
                     "provider": "deterministic_local",
@@ -1294,8 +1380,11 @@ class OperatorSnapshotProvider:
                     "provider_state": "LOCAL_GUIDE",
                     "response_source": "LOCAL_DETERMINISTIC",
                     "answer_source": "LOCAL_DETERMINISTIC",
-                    "response": self._ai_health_answer(context) if simple_health_question else self._ai_paper_readiness_answer(question, context),
+                    "response": local_response,
                     "model_call_occurred": False,
+                    "model_call_attempted": False,
+                    "provider_response_received": False,
+                    "fallback_reason": route_reason,
                     "provider_mode": "DETERMINISTIC_FALLBACK",
                     "model_name": "deterministic-local-guide",
                     "model_quality": "FALLBACK_ONLY",
@@ -1305,14 +1394,52 @@ class OperatorSnapshotProvider:
                     "persona_enforced": True,
                     "expert_roles_applied": ["Chief Quant Advisor", "Operator Guide"],
                     "route_decision": {
+                        "route_mode": LOCAL_GUIDE,
                         "reason_code": route_reason,
                         "provider_id": "deterministic_local",
                         "model_name": "deterministic-local-guide",
+                        "answer_source": "LOCAL_DETERMINISTIC",
+                        "allowed_provider_call": False,
+                    },
+                }
+            elif provider_self_test_question and effective_answer_mode == ANSWER_MODE_AI_REASONING_STRATEGY:
+                route_reason = "SELF_TEST_REQUIRES_AI_CHAT_MODEL_MODE"
+                gateway_answer = {
+                    "status": "ANSWERED_LOCAL_GUIDE",
+                    "provider": "deterministic_local",
+                    "provider_id": "deterministic_local",
+                    "provider_state": "LOCAL_GUIDE",
+                    "response_source": "LOCAL_DETERMINISTIC",
+                    "answer_source": "LOCAL_DETERMINISTIC",
+                    "response": self._ai_reasoning_not_self_test_answer(),
+                    "model_call_occurred": False,
+                    "model_call_attempted": False,
+                    "provider_response_received": False,
+                    "fallback_reason": route_reason,
+                    "provider_mode": "DETERMINISTIC_FALLBACK",
+                    "model_name": "deterministic-local-guide",
+                    "model_quality": "FALLBACK_ONLY",
+                    "reasoning_policy": "FALLBACK_ONLY_LIMITED",
+                    "model_suitable_for_governance": False,
+                    "cost_mode": "FREE_LOCAL",
+                    "persona_enforced": True,
+                    "expert_roles_applied": ["Chief Quant Advisor", "Operator Guide"],
+                    "route_decision": {
+                        "route_mode": LOCAL_GUIDE,
+                        "reason_code": route_reason,
+                        "provider_id": "deterministic_local",
+                        "model_name": "deterministic-local-guide",
+                        "answer_source": "LOCAL_DETERMINISTIC",
+                        "allowed_provider_call": False,
                     },
                 }
             else:
+                gateway_question = question
+                if provider_self_test_question and effective_answer_mode == ANSWER_MODE_AI_CHAT_MODEL:
+                    challenge_nonce = self._ai_provider_self_test_nonce()
+                    gateway_question = self._ai_provider_self_test_prompt(challenge_nonce)
                 gateway_answer = self.ai_gateway.ask(
-                    question,
+                    gateway_question,
                     context,
                     page_context,
                     routing={
@@ -1324,6 +1451,8 @@ class OperatorSnapshotProvider:
                         "reasoning_effort": body.get("reasoning_effort"),
                     },
                 )
+                gateway_answer["requested_question"] = question
+                gateway_answer["provider_question"] = gateway_question
             response = str(gateway_answer.get("response") or "")
             status = str(gateway_answer.get("status") or "ANSWERED_FALLBACK")
             provider_state = str(gateway_answer.get("provider_state") or provider_state)
@@ -1344,6 +1473,15 @@ class OperatorSnapshotProvider:
             provider["expert_roles_applied"] = gateway_answer.get("expert_roles_applied")
             provider["provider_error_category"] = gateway_answer.get("provider_error_category")
             provider["provider_error_message_safe"] = gateway_answer.get("provider_error_message_safe")
+            provider["model_call_attempted"] = gateway_answer.get("model_call_attempted")
+            provider["model_call_occurred"] = gateway_answer.get("model_call_occurred")
+            provider["provider_response_received"] = gateway_answer.get("provider_response_received")
+            provider["fallback_reason"] = gateway_answer.get("fallback_reason")
+            provider["actual_model_name"] = gateway_answer.get("actual_model_name") or provider.get("model_name")
+            provider["provider_request_id"] = gateway_answer.get("provider_request_id")
+            provider["endpoint_family"] = gateway_answer.get("endpoint_family")
+            provider["latency_ms"] = gateway_answer.get("latency_ms")
+            provider["http_status_code"] = gateway_answer.get("http_status_code")
             if not response.strip():
                 evidence_graph = context.get("evidence_graph") or {}
                 providers = context.get("provider_readiness") or {}
@@ -1362,6 +1500,36 @@ class OperatorSnapshotProvider:
                     ]
                 )
             refusal_reason = None
+        if status == "REFUSED":
+            provider = {
+                "provider": "deterministic_local",
+                "provider_id": "deterministic_local",
+                "provider_mode": "DETERMINISTIC_FALLBACK",
+                "provider_state": "LOCAL_GUIDE",
+                "model_name": "deterministic-local-guide",
+                "model_quality": "FALLBACK_ONLY",
+                "reasoning_policy": "FALLBACK_ONLY_LIMITED",
+                "model_suitable_for_governance": False,
+                "response_source": "LOCAL_DETERMINISTIC",
+                "answer_source": "LOCAL_DETERMINISTIC",
+                "cost_mode": "FREE_LOCAL",
+                "persona_enforced": True,
+                "expert_roles_applied": ["Chief Quant Advisor", "Operator Guide"],
+                "model_call_attempted": False,
+                "model_call_occurred": False,
+                "provider_response_received": False,
+                "fallback_reason": refusal_reason,
+            }
+            gateway_answer = {
+                "route_decision": {
+                    "route_mode": LOCAL_GUIDE,
+                    "provider_id": "deterministic_local",
+                    "model_name": "deterministic-local-guide",
+                    "reason_code": refusal_reason or "UNSAFE_REQUEST_REFUSED_LOCALLY",
+                    "answer_source": "LOCAL_DETERMINISTIC",
+                    "allowed_provider_call": False,
+                }
+            }
         provider_mode = str(provider.get("provider_mode") or model_policy.get("provider_mode") or "DETERMINISTIC_FALLBACK")
         if status == "REFUSED":
             provider_mode = "DETERMINISTIC_FALLBACK"
@@ -1375,8 +1543,35 @@ class OperatorSnapshotProvider:
         route_decision = route_decision if isinstance(route_decision, dict) else {}
         route_reason = str(route_decision.get("reason_code") or "")
         answer_source_for_truth = str(provider.get("answer_source") or provider.get("response_source") or "")
-        if (
+        raw_model_response = str(gateway_answer.get("response") or gateway_answer.get("answer") or "")
+        if provider.get("model_call_occurred") is True:
+            safety_filter = self._ai_live_output_safety_filter(raw_model_response, question=question, mode=mode, context=context)
+        if provider_self_test_question and challenge_nonce:
+            challenge_echoed = challenge_nonce in raw_model_response
+        if safety_filter.get("triggered"):
+            response = self._ai_safety_filtered_live_answer(provider, safety_filter, question=question, context=context)
+            status = "ANSWERED_MODEL_SAFETY_FILTERED"
+            provider["safety_filter_triggered"] = True
+            provider["blocked_terms"] = safety_filter.get("blocked_terms") or []
+        elif provider_self_test_question and effective_answer_mode == ANSWER_MODE_AI_CHAT_MODEL:
+            if provider.get("model_call_occurred") is True and provider.get("provider_response_received") is True and challenge_echoed:
+                response = self._ai_provider_self_test_success_answer(provider, route_decision, challenge_nonce)
+            elif provider.get("model_call_attempted") is True and provider.get("provider_response_received") is True:
+                response = self._ai_provider_self_test_unverified_answer(provider, route_decision, challenge_nonce)
+            else:
+                response = self._ai_provider_self_test_failed_answer(provider, route_decision)
+                provider["answer_source"] = "LOCAL_DETERMINISTIC"
+                provider["response_source"] = "LOCAL_DETERMINISTIC"
+                provider["provider_mode"] = "DETERMINISTIC_FALLBACK"
+                provider["cost_mode"] = "FREE_LOCAL"
+                provider["model_quality"] = "FALLBACK_ONLY"
+                provider["reasoning_policy"] = "FALLBACK_ONLY_LIMITED"
+                provider["model_suitable_for_governance"] = False
+                provider_mode = "DETERMINISTIC_FALLBACK"
+                answer_source_for_truth = "LOCAL_DETERMINISTIC"
+        elif (
             model_identity_question
+            and effective_answer_mode == ANSWER_MODE_AI_CHAT_MODEL
             and classification.get("allowed") is True
             and answer_source_for_truth not in {"API_LIGHT_MODEL", "API_HIGH_REASONING_APPROVED", "LOCAL_MODEL"}
         ):
@@ -1390,28 +1585,46 @@ class OperatorSnapshotProvider:
             provider["model_quality"] = "FALLBACK_ONLY"
             provider["reasoning_policy"] = "FALLBACK_ONLY_LIMITED"
             provider["model_suitable_for_governance"] = False
+            provider["fallback_reason"] = provider.get("fallback_reason") or route_reason or provider.get("provider_error_category") or "provider unavailable"
             provider_mode = "DETERMINISTIC_FALLBACK"
             model_quality = "FALLBACK_ONLY"
             reasoning_policy = "FALLBACK_ONLY_LIMITED"
             model_suitable = False
             answer_source_for_truth = "LOCAL_DETERMINISTIC"
-        elif model_identity_question and classification.get("allowed") is True:
-            response = self._ai_model_identity_provider_answer(provider, route_decision)
-        if (
-            model_quality != "HIGH_REASONING"
-            and classification.get("allowed") is True
-            and not (simple_health_question or local_runtime_truth_question or model_identity_question)
-        ):
-            limited = "I can give a limited operational answer, but final quant/risk/governance judgment requires the high-reasoning model."
-            if limited not in response:
-                response = f"{limited}\n{response}".strip()
         known_facts, unknowns = self._ai_answer_facts(mode, context)
         next_step = self._ai_next_step(mode, context, page_id)
+        reasoning_blocked = (
+            effective_answer_mode == ANSWER_MODE_AI_REASONING_STRATEGY
+            and provider.get("model_call_occurred") is not True
+            and route_reason in {
+                "HIGH_REASONING_API_APPROVAL_REQUIRED",
+                "PROVIDER_CREDENTIALS_MISSING",
+                "PROVIDER_ADAPTER_NOT_IMPLEMENTED",
+                "NO_SILENT_DOWNGRADE_TO_LOWER_REASONING_MODEL",
+            }
+        )
+        if classification.get("allowed") is True and reasoning_blocked:
+            response = self._ai_reasoning_unavailable_answer(route_decision, known_facts, unknowns, next_step)
+            status = "ANSWERED_LOCAL_GUIDE"
+            provider_state = "DETERMINISTIC_FALLBACK"
+            provider["answer_source"] = "LOCAL_DETERMINISTIC"
+            provider["response_source"] = "LOCAL_DETERMINISTIC"
+            provider["provider_mode"] = "DETERMINISTIC_FALLBACK"
+            provider["cost_mode"] = "FREE_LOCAL"
+            provider["model_quality"] = "FALLBACK_ONLY"
+            provider["reasoning_policy"] = "FALLBACK_ONLY_LIMITED"
+            provider["model_suitable_for_governance"] = False
+            provider["fallback_reason"] = provider.get("fallback_reason") or route_reason
+            provider_mode = "DETERMINISTIC_FALLBACK"
+            model_quality = "FALLBACK_ONLY"
+            reasoning_policy = "FALLBACK_ONLY_LIMITED"
+            model_suitable = False
+            answer_source_for_truth = "LOCAL_DETERMINISTIC"
         local_truth_fallback = (
-            (mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR"} or simple_health_question)
+            (mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR"} or pure_local_health_question)
             and answer_source_for_truth in {"LOCAL_DETERMINISTIC", "DETERMINISTIC_FALLBACK_NO_MODEL_CALL", "DETERMINISTIC_FALLBACK_MODEL_POLICY"}
         )
-        if classification.get("allowed") is True and (local_truth_fallback or route_reason in {
+        if not reasoning_blocked and not provider_self_test_question and not model_identity_question and classification.get("allowed") is True and (local_truth_fallback or route_reason in {
             "HIGH_REASONING_API_APPROVAL_REQUIRED",
             "SERIOUS_PROMPT_REQUIRES_HIGH_REASONING_OR_PACKET",
             "NO_SILENT_DOWNGRADE_TO_LOWER_REASONING_MODEL",
@@ -1432,12 +1645,47 @@ class OperatorSnapshotProvider:
             "Draft a scoped Codex packet preserving no-live/no-broker-mutation rules and asking for evidence-backed operator/quant repair."
             if needs_codex else None
         )
+        ai_call_trace = self._ai_call_trace(
+            request_id=request_id,
+            intent=ai_intent,
+            route_mode=str(route_decision.get("route_mode") or route_mode if "route_mode" in locals() else LOCAL_GUIDE),
+            route_decision=route_decision,
+            provider=provider,
+            fallback_reason=provider.get("fallback_reason"),
+            safety_filter=safety_filter,
+            challenge_nonce=challenge_nonce,
+            challenge_echoed=challenge_echoed,
+        )
+        display_source_label = self._ai_display_source_label(
+            provider,
+            answer_mode=effective_answer_mode,
+            safety_filter=safety_filter,
+        )
+        ai_call_trace.update(
+            {
+                "requested_answer_mode": str(requested_answer_mode_raw or ""),
+                "effective_answer_mode": effective_answer_mode,
+                "answer_mode_status": answer_mode_status,
+                "display_source_label": display_source_label,
+            }
+        )
         return {
             "source": "AI_QUANT_RESEARCH_CHIEF_ASK",
             "status": status,
+            "request_id": request_id,
+            "intent": ai_intent,
+            "requested_answer_mode": str(requested_answer_mode_raw or ""),
+            "effective_answer_mode": effective_answer_mode,
+            "answer_mode": effective_answer_mode,
+            "answer_mode_status": answer_mode_status,
+            "display_source_label": display_source_label,
             "provider_state": provider_state,
             "provider": provider.get("provider") or "disabled",
             "provider_id": provider.get("provider_id") or provider.get("provider") or "disabled",
+            "selected_provider": ai_call_trace["selected_provider"],
+            "selected_model": ai_call_trace["selected_model"],
+            "actual_provider": ai_call_trace["actual_provider_id"],
+            "actual_model": ai_call_trace["actual_model_name"],
             "provider_mode": provider_mode,
             "response_source": provider.get("response_source") or (
                 "DETERMINISTIC_FALLBACK_NO_MODEL_CALL" if provider_state != "MOCK_MODE" else "MOCK_MODE_DETERMINISTIC"
@@ -1454,6 +1702,25 @@ class OperatorSnapshotProvider:
             "expert_roles_applied": provider.get("expert_roles_applied") or [],
             "provider_error_category": provider.get("provider_error_category"),
             "provider_error_message_safe": provider.get("provider_error_message_safe"),
+            "model_call_attempted": provider.get("model_call_attempted") is True,
+            "provider_call_attempted": provider.get("model_call_attempted") is True,
+            "model_call_occurred": provider.get("model_call_occurred") is True,
+            "provider_response_received": provider.get("provider_response_received") is True,
+            "fallback_used": ai_call_trace["fallback_used"],
+            "fallback_reason": provider.get("fallback_reason"),
+            "safety_filter_triggered": safety_filter.get("triggered") is True,
+            "safety_filter_applied": safety_filter.get("triggered") is True,
+            "safety_filter_reason": ", ".join(str(item) for item in (safety_filter.get("blocked_terms") or [])) or None,
+            "blocked_terms": safety_filter.get("blocked_terms") or [],
+            "challenge_nonce": challenge_nonce,
+            "challenge_nonce_present": challenge_nonce is not None,
+            "challenge_echoed": challenge_echoed,
+            "actual_model_name": provider.get("actual_model_name"),
+            "provider_request_id": provider.get("provider_request_id"),
+            "endpoint_family": provider.get("endpoint_family") or ai_call_trace["endpoint_family"],
+            "latency_ms": provider.get("latency_ms"),
+            "http_status_code": provider.get("http_status_code"),
+            "ai_call_trace": ai_call_trace,
             "route_decision": gateway_answer.get("route_decision") if isinstance(gateway_answer, dict) else {},
             "question": question,
             "answer": response,
@@ -1608,9 +1875,9 @@ class OperatorSnapshotProvider:
             error_category = "ADAPTER_NOT_IMPLEMENTED"
             safe_error = "Provider registry is scaffolded; live call adapter is not implemented."
         else:
-            validation_status = "CONFIGURED"
+            validation_status = "CREDENTIAL_PRESENCE_CONFIRMED"
             error_category = None
-            safe_error = "Credential presence and metadata check passed without provider call."
+            safe_error = "Credential presence confirmed locally. No live AI API call was made."
         return {
             "source": "AI_PROVIDER_VALIDATION",
             "provider_id": provider_id,
@@ -1621,6 +1888,10 @@ class OperatorSnapshotProvider:
             "validation_status": validation_status,
             "error_category": error_category,
             "safe_error_message": safe_error,
+            "credential_presence_status": "PRESENT" if configured else "MISSING",
+            "local_validation_status": "KEYS_PRESENT_RAW_SECRETS_HIDDEN" if configured else "MISSING_CREDENTIALS",
+            "live_api_test_status": "NOT_TESTED",
+            "last_live_ai_call": None,
             "paid_call_occurred": False,
             "secrets_exposed": False,
             "secrets_values_exposed": False,
@@ -1747,12 +2018,23 @@ class OperatorSnapshotProvider:
         lowered = str(question or "").lower()
         return any(term in lowered for term in ("full report", "details", "diagnostics", "audit", "deep dive", "explain fully"))
 
-    def _ai_is_simple_health_question(self, question: str) -> bool:
+    def _ai_contains_health_question(self, question: str) -> bool:
         lowered = str(question or "").strip().lower()
         if not lowered:
             return False
         health_terms = ("are you alive", "you alive", "are we alive", "is the backend alive", "status check")
-        return any(term in lowered for term in health_terms) and not self._ai_wants_detailed_answer(lowered)
+        return any(term in lowered for term in health_terms)
+
+    def _ai_is_simple_health_question(self, question: str) -> bool:
+        lowered = str(question or "").strip().lower()
+        if not lowered:
+            return False
+        return (
+            self._ai_contains_health_question(lowered)
+            and not self._ai_is_model_identity_question(lowered)
+            and not self._ai_is_provider_self_test_question(lowered)
+            and not self._ai_wants_detailed_answer(lowered)
+        )
 
     def _ai_should_answer_from_runtime_truth(self, mode: str, question: str) -> bool:
         if mode != "RUN_PLANNER" or self._ai_wants_detailed_answer(question):
@@ -1770,11 +2052,398 @@ class OperatorSnapshotProvider:
         )
         return any(term in lowered for term in runtime_terms)
 
+    def _ai_should_try_live_provider(
+        self,
+        mode: str,
+        question: str,
+        simple_health_question: bool,
+        local_runtime_truth_question: bool,
+    ) -> bool:
+        if simple_health_question or local_runtime_truth_question:
+            return False
+        if self._ai_is_model_identity_question(question):
+            return True
+        if mode in {"OPERATOR_GUIDE", "SETUP_HELP", "QUANT_ADVISOR", "TRADING_SYSTEMS_AUDITOR", "PORTFOLIO_REVIEW"}:
+            return True
+        lowered = str(question or "").strip().lower()
+        live_terms = (
+            "plain english",
+            "explain",
+            "assessment",
+            "quant",
+            "advisor",
+            "analyze",
+            "summarize",
+            "what should i know",
+        )
+        return any(term in lowered for term in live_terms)
+
     def _ai_is_model_identity_question(self, question: str) -> bool:
         lowered = str(question or "").strip().lower()
         if not lowered:
             return False
         return any(term in lowered for term in MODEL_IDENTITY_TERMS)
+
+    def _ai_is_provider_self_test_question(self, question: str) -> bool:
+        lowered = str(question or "").strip().lower()
+        if not lowered:
+            return False
+        self_test_terms = (
+            "make a api call",
+            "make an api call",
+            "make the api call",
+            "call the ai api",
+            "test live ai",
+            "test ai provider",
+            "test provider connection",
+            "test provider api",
+            "provider self-test",
+            "api call so i know it works",
+            "api call so i know it is working",
+            "prove deepseek works",
+            "prove openai works",
+            "verify ai api",
+            "verify provider api",
+            "check the model api",
+            "connectivity test",
+        )
+        return any(term in lowered for term in self_test_terms)
+
+    def _ai_intent_label(
+        self,
+        mode: str,
+        question: str,
+        *,
+        health_intent: bool,
+        paper_readiness_intent: bool,
+        model_identity_intent: bool,
+        provider_self_test_intent: bool,
+    ) -> str:
+        provider_intent = provider_self_test_intent or model_identity_intent
+        local_intent = health_intent or paper_readiness_intent
+        if provider_intent and local_intent:
+            return "COMPOUND_LOCAL_AND_PROVIDER"
+        if provider_self_test_intent:
+            return "AI_PROVIDER_SELF_TEST"
+        if model_identity_intent:
+            return "AI_PROVIDER_IDENTITY"
+        if health_intent:
+            return "LOCAL_HEALTH"
+        if paper_readiness_intent:
+            return "LOCAL_PAPER_READINESS"
+        if self._ai_should_try_live_provider(mode, question, False, False):
+            return "AI_PROVIDER_ADVISORY"
+        return "LOCAL_HEALTH" if mode == "OPERATOR_GUIDE" else "AI_PROVIDER_ADVISORY"
+
+    def _ai_deterministic_model_route_answer(self, active_provider: str, active_model: str) -> str:
+        configured_provider = active_provider or str(self.ai_routing_settings.get("active_provider") or "deterministic_local")
+        configured_model = active_model or str(self.ai_routing_settings.get("active_model") or "deterministic-local-guide")
+        display_provider = self._ai_provider_display_name(configured_provider)
+        return "\n".join(
+            [
+                "Deterministic mode is our bot/local backend; no AI provider answered this question.",
+                f"- Configured AI route: {display_provider} / {configured_model or 'not selected'}",
+                "- To ask the configured provider/model itself, use AI Chat Model mode.",
+                "- Advisory only; broker actions blocked.",
+            ]
+        )
+
+    def _ai_deterministic_provider_self_test_answer(self) -> str:
+        return "\n".join(
+            [
+                "Deterministic mode does not call the AI provider.",
+                "- Use AI Chat Model mode for an AI API proof/nonce self-test.",
+                "- This did not call broker, start PAPER, enable live, enable real money, clean state, or mutate strategy/risk/OMS.",
+            ]
+        )
+
+    def _ai_reasoning_not_self_test_answer(self) -> str:
+        return "\n".join(
+            [
+                "AI Reasoning / Strategy mode is for advisory quant, risk, edge, and operator assessment.",
+                "- AI API proof belongs in AI Chat Model mode.",
+                "- No provider self-test, broker call, PAPER start, live enablement, cleanup, or state mutation occurred.",
+            ]
+        )
+
+    def _ai_reasoning_unavailable_answer(
+        self,
+        route_decision: dict[str, Any],
+        known_facts: list[str],
+        unknowns: list[str],
+        next_step: dict[str, str | None],
+    ) -> str:
+        reason = str(route_decision.get("reason_code") or "HIGH_REASONING_UNAVAILABLE")
+        selected_provider = self._ai_provider_display_name(str(route_decision.get("provider_id") or "unknown"))
+        selected_model = str(route_decision.get("model_name") or "model not selected")
+        warning = str(route_decision.get("warning") or "High-reasoning provider path is unavailable or approval is required.")
+        return "\n".join(
+            [
+                "AI Reasoning / Strategy did not run a deep provider call.",
+                f"- Reason: {reason}",
+                f"- Selected high-reasoning route: {selected_provider} / {selected_model}",
+                f"- Truthful status: {warning}",
+                *[f"- Local fact: {item}" for item in known_facts[:3]],
+                *([f"- Missing evidence: {unknowns[0]}"] if unknowns else []),
+                f"Next step: {next_step.get('label') or 'Review high-reasoning provider setup or approval.'}",
+                "- No light-model fallback was treated as deep reasoning; no broker/PAPER/live/state mutation occurred.",
+            ]
+        )
+
+    def _ai_provider_self_test_nonce(self) -> str:
+        return f"PK-AI-{secrets.token_hex(3).upper()}"
+
+    def _ai_provider_self_test_prompt(self, nonce: str) -> str:
+        return (
+            "This is an AI provider connectivity test for POVERTY_KILLER. "
+            "Reply with the exact nonce and one short sentence saying which provider/model answered. "
+            "Do not discuss broker, market data, PAPER runs, orders, trading, cleanup, live trading, or state mutation. "
+            f"Nonce: {nonce}."
+        )
+
+    def _ai_live_output_safety_filter(self, text: str, *, question: str, mode: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        del mode
+        lowered = str(text or "").lower()
+        lowered_question = str(question or "").lower()
+        blocked_terms: list[str] = []
+        checks = (
+            "/operator/intent/paper/start",
+            "/operator/intent/paper/stop",
+            "force stop",
+            "clean stale",
+            "clear stale",
+            "cleaned up",
+            "clean up",
+            "cleanup",
+            "delete state",
+            "reset state",
+            "prune",
+            "cleanup stale registration",
+            "clean up stale registration",
+            "duplicate session",
+            "duplicate active run",
+            "duplicate prevention",
+            "stale-lock",
+            "stale lock",
+            "orphaned session",
+            "you need to clear",
+            "must resolve two historical issues before starting",
+            "would block a fresh start",
+            "blocker #",
+            "start a fresh paper run",
+            "start a fresh bounded paper run",
+            "cleared to start",
+            "cleared for",
+            "start a 10-minute paper smoke run right now",
+            "submit test orders",
+            "submit orders",
+            "place orders",
+            "manual buy",
+            "manual sell",
+            "buy/sell",
+            "broker api call",
+            "call broker",
+            "enable live",
+            "turn on live",
+            "live alpaca account",
+            "live account",
+            "enable real money",
+            "real-money enablement",
+            "no portfolio exposure risk",
+            "will not touch",
+            "broker-confirmed truth",
+            "open positions",
+            "total market value",
+            "buying power",
+            "net unrealized",
+            "previous run",
+            "newer run",
+            "archived run",
+            "submitted 19 orders",
+            "conditional_pass",
+            "raw secrets",
+            "change thresholds",
+            "mutate strategy",
+            "mutate risk",
+            "mutate oms",
+        )
+        for term in checks:
+            if term in lowered:
+                blocked_terms.append(term)
+        if re.search(r"\b(buy|sell)\b.+\border", lowered):
+            blocked_terms.append("buy/sell order")
+        if re.search(r"\bpaper_[a-f0-9]{8,}\b", lowered):
+            blocked_terms.append("archived paper run id")
+        if context is not None:
+            truth = self._ai_runtime_truth(context)
+            paper_readiness_question = (
+                ("paper" in lowered_question or "smoke run" in lowered_question)
+                and any(term in lowered_question for term in ("ready", "assessment", "can i", "run", "start"))
+            )
+            if (
+                paper_readiness_question
+                and truth["launch"] == "READY_FOR_BOUNDED_PAPER"
+                and truth["paper_start_allowed"] is True
+            ):
+                for term in (
+                    "not ready",
+                    "not cleared",
+                    "do not start",
+                    "should not start",
+                    "cannot recommend",
+                    "missing the evidence to justify",
+                    "blind robot",
+                ):
+                    if term in lowered:
+                        blocked_terms.append(term)
+        unique = list(dict.fromkeys(blocked_terms))
+        return {"triggered": bool(unique), "blocked_terms": unique}
+
+    def _ai_safety_filtered_live_answer(
+        self,
+        provider: dict[str, Any],
+        safety_filter: dict[str, Any],
+        *,
+        question: str,
+        context: dict[str, Any],
+    ) -> str:
+        display_provider = self._ai_provider_display_name(str(provider.get("provider_id") or provider.get("provider") or "unknown"))
+        model = str(provider.get("model_name") or provider.get("model") or "model unknown")
+        truth = self._ai_runtime_truth(context)
+        lower_question = str(question or "").lower()
+        if "paper" in lower_question or "smoke run" in lower_question or "bot state" in lower_question or "current state" in lower_question:
+            answer = [
+                "Live AI answered, but its wording was replaced with grounded backend truth.",
+                f"- Provider/model call: {display_provider} / {model}",
+                f"- Launch readiness: {truth['launch']}",
+                f"- Supervisor: {truth['supervisor']}; no active PAPER run attached.",
+                f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}; max duration: {truth['max_duration']} seconds / 1 day.",
+                f"- Live {truth['live']}; real money {truth['real_money']}.",
+            ]
+            if truth["historical_duplicate"]:
+                answer.append("- Historical duplicate refusal exists as audit context only; it is not current start authority.")
+            if truth["launch"] == "READY_FOR_BOUNDED_PAPER" and truth["paper_start_allowed"] is True:
+                answer.append("Next step: Shan may use the Start PAPER button for a 10-20 minute bounded smoke run. AI cannot start it.")
+            else:
+                reason = str((truth["blocking_codes"] or ["UNKNOWN_BLOCKER"])[0])
+                answer.append(f"Next step: resolve current blocker {reason}.")
+            return "\n".join(answer)
+        return "\n".join(
+            [
+                "Live AI API call succeeded, but the model's raw answer was blocked by safety policy.",
+                f"- Provider/model: {display_provider} / {model}",
+                f"- Blocked wording: {', '.join(str(item) for item in (safety_filter.get('blocked_terms') or [])) or 'unsafe operational claim'}",
+                "- No broker, PAPER, live, real-money, cleanup, or state mutation occurred.",
+            ]
+        )
+
+    def _ai_provider_self_test_success_answer(self, provider: dict[str, Any], route_decision: dict[str, Any], nonce: str) -> str:
+        selected_provider = str(route_decision.get("provider_id") or provider.get("provider_id") or provider.get("provider") or "unknown")
+        selected_model = str(route_decision.get("model_name") or provider.get("model_name") or provider.get("model") or "model unknown")
+        display_provider = self._ai_provider_display_name(selected_provider)
+        return "\n".join(
+            [
+                f"Live AI API call succeeded. {display_provider} / {selected_model} answered and echoed the challenge nonce.",
+                f"- Challenge nonce: {nonce}",
+                f"- Actual answer source: {provider.get('answer_source') or provider.get('response_source') or 'UNKNOWN'}",
+                "- Broker actions blocked; no PAPER, live, real-money, order, cleanup, or state mutation occurred.",
+            ]
+        )
+
+    def _ai_provider_self_test_unverified_answer(self, provider: dict[str, Any], route_decision: dict[str, Any], nonce: str) -> str:
+        selected_provider = str(route_decision.get("provider_id") or provider.get("provider_id") or provider.get("provider") or "unknown")
+        selected_model = str(route_decision.get("model_name") or provider.get("model_name") or provider.get("model") or "model unknown")
+        display_provider = self._ai_provider_display_name(selected_provider)
+        return "\n".join(
+            [
+                "Live AI API call did not verify. Provider call returned, but the challenge nonce was not confirmed.",
+                f"- Selected provider/model: {display_provider} / {selected_model}",
+                f"- Challenge nonce expected: {nonce}",
+                "- No broker, PAPER, live, real-money, order, cleanup, or state mutation occurred.",
+            ]
+        )
+
+    def _ai_provider_self_test_failed_answer(self, provider: dict[str, Any], route_decision: dict[str, Any]) -> str:
+        selected_provider = str(route_decision.get("provider_id") or provider.get("provider_id") or provider.get("provider") or "unknown")
+        selected_model = str(route_decision.get("model_name") or provider.get("model_name") or provider.get("model") or "model unknown")
+        reason = str(provider.get("fallback_reason") or provider.get("provider_error_message_safe") or provider.get("provider_error_category") or "provider unavailable")
+        display_provider = self._ai_provider_display_name(selected_provider)
+        return "\n".join(
+            [
+                "Live AI API call did not verify. Provider call was unavailable or failed.",
+                f"- Selected provider/model: {display_provider} / {selected_model}",
+                f"- Failure reason: {reason}",
+                "- No broker, PAPER, live, real-money, order, cleanup, or state mutation occurred.",
+            ]
+        )
+
+    def _ai_display_source_label(self, provider: dict[str, Any], *, answer_mode: str, safety_filter: dict[str, Any]) -> str:
+        if safety_filter.get("triggered") is True:
+            return "Backend safety replacement; provider proof retained"
+        if answer_mode == ANSWER_MODE_DETERMINISTIC:
+            return "Deterministic local backend"
+        if provider.get("model_call_occurred") is True:
+            display_provider = self._ai_provider_display_name(str(provider.get("provider_id") or provider.get("provider") or "unknown"))
+            model = str(provider.get("actual_model_name") or provider.get("model_name") or provider.get("model") or "model unknown")
+            return f"{display_provider} model answer / {model}"
+        if provider.get("model_call_attempted") is True:
+            return "Provider unavailable; safe local fallback"
+        return "Safe local fallback; no provider call"
+
+    def _ai_call_trace(
+        self,
+        *,
+        request_id: str,
+        intent: str,
+        route_mode: str,
+        route_decision: dict[str, Any],
+        provider: dict[str, Any],
+        fallback_reason: Any,
+        safety_filter: dict[str, Any],
+        challenge_nonce: str | None,
+        challenge_echoed: bool,
+    ) -> dict[str, Any]:
+        selected_provider = str(route_decision.get("provider_id") or provider.get("provider_id") or provider.get("provider") or "deterministic_local")
+        selected_model = str(route_decision.get("model_name") or provider.get("model_name") or provider.get("model") or "deterministic-local-guide")
+        answer_source = str(provider.get("answer_source") or provider.get("response_source") or "LOCAL_DETERMINISTIC")
+        attempted = provider.get("model_call_attempted") is True
+        occurred = provider.get("model_call_occurred") is True
+        response_received = provider.get("provider_response_received") is True
+        endpoint_family = str(provider.get("endpoint_family") or "")
+        if not endpoint_family:
+            endpoint_family = {
+                "openai": "openai_responses",
+                "deepseek": "deepseek_chat_completions",
+                "local_openai_compatible": "openai_chat_completions",
+                "xai_grok": "openai_chat_completions",
+                "kimi_moonshot": "openai_chat_completions",
+                "anthropic": "anthropic_messages",
+            }.get(selected_provider, "local_deterministic" if not attempted else "unknown")
+        return {
+            "request_id": request_id,
+            "intent": intent,
+            "selected_provider": selected_provider,
+            "selected_model": selected_model,
+            "actual_provider_id": str(provider.get("provider_id") or provider.get("provider") or selected_provider),
+            "actual_model_name": str(provider.get("actual_model_name") or provider.get("model_name") or provider.get("model") or selected_model),
+            "route_mode": str(route_decision.get("route_mode") or route_mode or LOCAL_GUIDE),
+            "provider_call_attempted": attempted,
+            "provider_response_received": response_received,
+            "model_call_occurred": occurred,
+            "actual_answer_source": answer_source,
+            "fallback_used": answer_source == "LOCAL_DETERMINISTIC" or (attempted and not occurred),
+            "fallback_reason": str(fallback_reason or "") or None,
+            "safety_filter_triggered": safety_filter.get("triggered") is True,
+            "blocked_terms": safety_filter.get("blocked_terms") or [],
+            "challenge_nonce_present": challenge_nonce is not None,
+            "challenge_nonce": challenge_nonce,
+            "challenge_echoed": challenge_echoed,
+            "http_status_code": provider.get("http_status_code"),
+            "provider_request_id": provider.get("provider_request_id"),
+            "latency_ms": provider.get("latency_ms"),
+            "endpoint_family": endpoint_family,
+            "secrets_values_exposed": False,
+        }
 
     def _ai_ready_idle_no_active_runtime(self, context: dict[str, Any]) -> bool:
         readiness = context.get("launch_readiness") or {}
@@ -1875,22 +2544,6 @@ class OperatorSnapshotProvider:
         if provider_error:
             lines.insert(4, f"- Safe provider error: {provider_error}")
         return "\n".join(lines)
-
-    def _ai_model_identity_provider_answer(self, provider: dict[str, Any], route_decision: dict[str, Any]) -> str:
-        selected_provider = str(route_decision.get("provider_id") or provider.get("provider_id") or provider.get("provider") or "unknown")
-        selected_model = str(route_decision.get("model_name") or provider.get("model_name") or provider.get("model") or "model unknown")
-        answer_source = str(provider.get("answer_source") or provider.get("response_source") or route_decision.get("answer_source") or "UNKNOWN")
-        route_mode = str(route_decision.get("route_mode") or "UNKNOWN")
-        display_provider = self._ai_provider_display_name(selected_provider)
-        return "\n".join(
-            [
-                f"{display_provider} answered this question using {selected_model}.",
-                f"- Selected provider/model: {display_provider} / {selected_model}",
-                f"- Actual answer source: {answer_source}",
-                f"- Route: {route_mode}",
-                "- Advisory only; broker actions blocked.",
-            ]
-        )
 
     def _ai_provider_display_name(self, provider_id: str) -> str:
         labels = {

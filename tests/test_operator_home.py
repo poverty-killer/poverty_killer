@@ -79,10 +79,12 @@ def test_home_ai_advisor_is_visible_and_uses_safe_ai_ask_endpoint():
     text = _app_text()
 
     assert "data-home-ai-question" in text
-    assert "data-home-ai-ask" in text
+    assert "data-ai-answer-mode-ask" in text
     assert "data-home-ai-clear" in text
     assert "data-home-ai-prompt" in text
-    assert "Ask AI Quant Advisor" in text
+    assert "AI Chat Model" in text
+    assert "AI Reasoning" in text
+    assert "Deterministic" in text
     assert "Provider mode:" in text
     assert "Model:" in text
     assert "Quality:" in text
@@ -100,14 +102,14 @@ def test_home_control_inventory_covers_required_pages_and_forbidden_controls_abs
 
     required_inventory_fragments = [
         '["command", "paper_start"',
-        '["command", "home_ai_ask"',
+        '["command", "home_ai_answer_modes"',
         '["positions", "open_run_paper"',
         '["positions", "open_keys_providers"',
         '["activity", "paper_stop"',
         '["positions", "positions_preview_table"',
         '["positions", "open_orders_preview_table"',
         '["providers", `credential_save_${providerId}`',
-        '["ai_overlay", "ai_ask"',
+        '["ai_overlay", "ai_answer_mode_deterministic"',
     ]
     for fragment in required_inventory_fragments:
         assert fragment in text

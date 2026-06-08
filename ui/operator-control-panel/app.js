@@ -49,6 +49,11 @@
     "/operator/research/evidence-graph"
   ]);
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
+  const AI_ANSWER_MODES = {
+    DETERMINISTIC: "DETERMINISTIC",
+    CHAT: "AI_CHAT_MODEL",
+    REASONING: "AI_REASONING_STRATEGY"
+  };
   const AI_QUICK_PROMPTS = [
     "What is blocking PAPER?",
     "Can I start PAPER?",
@@ -191,6 +196,7 @@
   let aiOverlayLastResult = null;
   let aiOverlayError = "";
   let aiOverlayBusy = false;
+  let aiSelectedAnswerMode = AI_ANSWER_MODES.DETERMINISTIC;
   let aiConversation = [];
   let aiMessageSequence = 0;
   let aiUserPinnedScroll = false;
@@ -199,6 +205,7 @@
   let homeAiLastResult = null;
   let homeAiError = "";
   let homeAiBusy = false;
+  let homeAiAnswerMode = AI_ANSWER_MODES.DETERMINISTIC;
   let credentialActionStatus = {};
 
   function softBreakToken(value) {
@@ -367,6 +374,75 @@
       };
     }
     return { routeMode: "LOCAL_GUIDE", providerId: "", modelName: "" };
+  }
+
+  function normalizeAiAnswerMode(value) {
+    const raw = String(value || "").trim().toUpperCase().replaceAll("-", "_").replaceAll(" ", "_");
+    if (raw === AI_ANSWER_MODES.CHAT || raw === "AI_CHAT" || raw === "CHAT" || raw === "AI_MODEL" || raw === "LIGHT_API") {
+      return AI_ANSWER_MODES.CHAT;
+    }
+    if (raw === AI_ANSWER_MODES.REASONING || raw === "AI_REASONING" || raw === "REASONING" || raw === "STRATEGY" || raw === "HIGH_REASONING_API") {
+      return AI_ANSWER_MODES.REASONING;
+    }
+    return AI_ANSWER_MODES.DETERMINISTIC;
+  }
+
+  function aiAnswerModeLabel(mode) {
+    const normalized = normalizeAiAnswerMode(mode);
+    if (normalized === AI_ANSWER_MODES.CHAT) return "AI Chat Model";
+    if (normalized === AI_ANSWER_MODES.REASONING) return "AI Reasoning";
+    return "Deterministic";
+  }
+
+  function aiAnswerModeDescription(mode) {
+    const normalized = normalizeAiAnswerMode(mode);
+    if (normalized === AI_ANSWER_MODES.CHAT) return "configured model answers";
+    if (normalized === AI_ANSWER_MODES.REASONING) return "high-reasoning advisory path";
+    return "our bot/local truth, no provider call";
+  }
+
+  function aiAskRoutingPayloadForMode(routing, answerMode) {
+    const mode = normalizeAiAnswerMode(answerMode);
+    if (mode === AI_ANSWER_MODES.DETERMINISTIC) {
+      return { routeMode: "LOCAL_GUIDE", providerId: "", modelName: "", approvedPaidCall: false };
+    }
+    if (mode === AI_ANSWER_MODES.REASONING) {
+      return {
+        routeMode: "HIGH_REASONING_API",
+        providerId: String(routingValue(routing, "highReasoningProvider", "high_reasoning_provider", "openai") || "openai").trim(),
+        modelName: String(routingValue(routing, "highReasoningModel", "high_reasoning_model", "") || "").trim(),
+        approvedPaidCall: false
+      };
+    }
+    const activeProvider = String(routingValue(routing, "activeProvider", "active_provider", "") || "").trim();
+    const activeModel = String(routingValue(routing, "activeModel", "active_model", "") || "").trim();
+    if (isExternalAiApiProvider(activeProvider)) {
+      return { routeMode: "LIGHT_API", providerId: activeProvider, modelName: activeModel, approvedPaidCall: false };
+    }
+    return {
+      routeMode: "LIGHT_API",
+      providerId: String(routingValue(routing, "lightProvider", "light_provider", "openai") || "openai").trim(),
+      modelName: String(routingValue(routing, "lightModel", "light_model", "") || "").trim(),
+      approvedPaidCall: false
+    };
+  }
+
+  function renderAiAnswerModeButtons(scope, selectedMode, busy) {
+    const modes = [
+      [AI_ANSWER_MODES.DETERMINISTIC, "Deterministic"],
+      [AI_ANSWER_MODES.CHAT, "AI Chat Model"],
+      [AI_ANSWER_MODES.REASONING, "AI Reasoning"]
+    ];
+    return `
+      <div class="ai-answer-mode-group" role="group" aria-label="${escapeHtml(scope === "home" ? "Home AI answer source" : "AI answer source")}">
+        ${modes.map(([mode, label]) => `
+          <button class="intent-button ai-mode-button ${normalizeAiAnswerMode(selectedMode) === mode ? "active" : ""}" type="button" data-ai-answer-mode-ask="${escapeHtml(scope)}:${escapeHtml(mode)}" ${busy ? "disabled" : ""}>
+            <span>${escapeHtml(label)}</span>
+            <small>${escapeHtml(aiAnswerModeDescription(mode))}</small>
+          </button>
+        `).join("")}
+      </div>
+    `;
   }
 
   function providerIdOf(provider) {
@@ -922,10 +998,10 @@
             </details>
           ` : ""}
           <div class="button-row">
-            <button class="intent-button paper" type="button" data-home-ai-ask ${homeAiBusy ? "disabled" : ""}>${homeAiBusy ? "Asking..." : "Ask AI Quant Advisor"}</button>
             <button class="intent-button paper" type="button" data-home-ai-clear ${homeAiBusy ? "disabled" : ""}>Clear</button>
             <button class="intent-button paper" type="button" data-ai-chief-open>Open Docked Advisor</button>
           </div>
+          ${renderAiAnswerModeButtons("home", homeAiAnswerMode, homeAiBusy)}
           ${homeAiError ? `<div class="notice error">Error: ${escapeHtml(homeAiError)}</div>` : ""}
         </div>
         <div class="ai-response"><h3>Home Advisory Response</h3><pre>${escapeHtml(response)}</pre></div>
@@ -1704,7 +1780,7 @@
           ["AI secret access", badge("forbidden", "red")],
           ["Browser secret storage", badge("not used", "green")],
           ["Read-only validation", badge("presence / PAPER endpoint only", "yellow")],
-          ["Visible feedback states", escapeHtml("saving / saved / failed / validation passed / validation failed / configured / missing")],
+          ["Visible feedback states", escapeHtml("saving / saved / failed / credential presence confirmed / validation failed / configured / missing")],
           ["Local credential vault", badge(credentials.storeExists ? "stored on this computer only" : "not created yet", credentials.storeExists ? "green" : "yellow")],
           ["Secrets sent to AI", badge("never", "green")],
           ["Precedence", badge(credentials.precedence || "ENV_PRESENT_OVERRIDES_LOCAL_SECRET", "gray")]
@@ -1964,7 +2040,9 @@
       ["global", "live_locked", "Live locked", "button", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
       ["global", "ask_quant_chief", "Ask Quant Chief", "button", "WIRED", "read_only", "", null, "open_ai_drawer"],
       ["ai_overlay", "ai_question_textarea", "Ask a page-aware question", "input", "WIRED", "read_only", "", null, "local_page_context"],
-      ["ai_overlay", "ai_ask", "Ask Quant Chief", "button", "WIRED", "local_advisory_write", "", "POST", "/operator/ai/ask"],
+      ["ai_overlay", "ai_answer_mode_deterministic", "Deterministic AI answer", "button", "WIRED", "local_advisory_write", "", "POST", "/operator/ai/ask"],
+      ["ai_overlay", "ai_answer_mode_chat", "AI Chat Model answer", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; local fallback labeled", "POST", "/operator/ai/ask"],
+      ["ai_overlay", "ai_answer_mode_reasoning", "AI Reasoning answer", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; local fallback labeled", "POST", "/operator/ai/ask"],
       ["ai_overlay", "ai_clear", "Clear", "button", "WIRED", "read_only", "", null, "local_clear"],
       ["ai_overlay", "ai_close", "Close", "button", "WIRED", "read_only", "", null, "local_close"],
       ["ai_overlay", "ai_wide", "Wide advisor", "button", "WIRED", "read_only", "", null, "toggle_ai_dock_width"],
@@ -1972,7 +2050,7 @@
       ["command", "paper_duration", "Run length", "select+number", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_start", "Start Bounded PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
       ["command", "home_ai_question", "Home AI Quant Advisor question", "input", "WIRED", "read_only", "", null, "local_page_context"],
-      ["command", "home_ai_ask", "Ask AI Quant Advisor", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; deterministic local advisory only", "POST", "/operator/ai/ask"],
+      ["command", "home_ai_answer_modes", "Home AI answer modes", "button group", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; local fallback labeled", "POST", "/operator/ai/ask"],
       ["command", "home_ai_clear", "Clear home AI question", "button", "WIRED", "read_only", "", null, "local_clear"],
       ["command", "home_ui_wiring_summary", "Buttons / Controls Status", "summary", "WIRED", "read_only", "", null, "local_inventory_summary"],
       ["positions", "open_run_paper", "Open Run PAPER", "button", "WIRED", "read_only", "", null, "local_navigation"],
@@ -2557,13 +2635,53 @@
     ].join("\n");
   }
 
+  function normalizeAiCallTrace(payload, answerSource) {
+    const trace = payload.ai_call_trace || payload.aiCallTrace || {};
+    const blockedTerms = Array.isArray(trace.blocked_terms)
+      ? trace.blocked_terms
+      : (Array.isArray(payload.blocked_terms) ? payload.blocked_terms : []);
+    return {
+      requestId: trace.request_id || payload.request_id || "",
+      intent: trace.intent || payload.intent || "",
+      selectedProvider: trace.selected_provider || trace.selectedProvider || payload.provider_id || payload.provider || "deterministic_local",
+      selectedModel: trace.selected_model || trace.selectedModel || payload.model_name || payload.model || "deterministic-local-guide",
+      actualProviderId: trace.actual_provider_id || trace.actualProviderId || payload.provider_id || payload.provider || "deterministic_local",
+      actualModelName: trace.actual_model_name || trace.actualModelName || payload.actual_model_name || payload.model_name || payload.model || "deterministic-local-guide",
+      routeMode: trace.route_mode || trace.routeMode || "",
+      providerCallAttempted: trace.provider_call_attempted === true || trace.providerCallAttempted === true || payload.model_call_attempted === true,
+      providerResponseReceived: trace.provider_response_received === true || trace.providerResponseReceived === true || payload.provider_response_received === true,
+      modelCallOccurred: trace.model_call_occurred === true || trace.modelCallOccurred === true || payload.model_call_occurred === true,
+      actualAnswerSource: trace.actual_answer_source || trace.actualAnswerSource || answerSource || "LOCAL_DETERMINISTIC",
+      fallbackUsed: trace.fallback_used === true || trace.fallbackUsed === true,
+      fallbackReason: trace.fallback_reason || trace.fallbackReason || payload.fallback_reason || "",
+      safetyFilterTriggered: trace.safety_filter_triggered === true || trace.safetyFilterTriggered === true || payload.safety_filter_triggered === true,
+      blockedTerms,
+      challengeNoncePresent: trace.challenge_nonce_present === true || trace.challengeNoncePresent === true || payload.challenge_nonce_present === true,
+      challengeNonce: trace.challenge_nonce || trace.challengeNonce || payload.challenge_nonce || "",
+      challengeEchoed: trace.challenge_echoed === true || trace.challengeEchoed === true || payload.challenge_echoed === true,
+      httpStatusCode: trace.http_status_code || trace.httpStatusCode || payload.http_status_code || "",
+      providerRequestId: trace.provider_request_id || trace.providerRequestId || payload.provider_request_id || "",
+      latencyMs: trace.latency_ms || trace.latencyMs || payload.latency_ms || "",
+      endpointFamily: trace.endpoint_family || trace.endpointFamily || payload.endpoint_family || (answerSource === "LOCAL_DETERMINISTIC" ? "local_deterministic" : "unknown"),
+      requestedAnswerMode: trace.requested_answer_mode || trace.requestedAnswerMode || payload.requested_answer_mode || payload.requestedAnswerMode || "",
+      effectiveAnswerMode: normalizeAiAnswerMode(trace.effective_answer_mode || trace.effectiveAnswerMode || payload.effective_answer_mode || payload.answer_mode || payload.answerMode || payload.effectiveAnswerMode),
+      answerModeStatus: trace.answer_mode_status || trace.answerModeStatus || payload.answer_mode_status || payload.answerModeStatus || "",
+      displaySourceLabel: trace.display_source_label || trace.displaySourceLabel || payload.display_source_label || payload.displaySourceLabel || ""
+    };
+  }
+
   function normalizeAiAskResult(result, fallbackAnswer) {
     const payload = result || {};
     const providerMode = payload.provider_mode || payload.providerMode || "DETERMINISTIC_FALLBACK";
     const modelQuality = payload.model_quality || payload.modelQuality || "FALLBACK_ONLY";
     const answerSource = payload.answer_source || payload.response_source || payload.answerSource || "LOCAL_DETERMINISTIC";
+    const aiCallTrace = normalizeAiCallTrace(payload, answerSource);
     return {
       status: payload.status || "ANSWERED_FALLBACK",
+      requestedAnswerMode: payload.requested_answer_mode || payload.requestedAnswerMode || "",
+      effectiveAnswerMode: normalizeAiAnswerMode(payload.effective_answer_mode || payload.answer_mode || payload.answerMode || aiCallTrace.effectiveAnswerMode),
+      answerModeStatus: payload.answer_mode_status || payload.answerModeStatus || aiCallTrace.answerModeStatus || "",
+      displaySourceLabel: payload.display_source_label || payload.displaySourceLabel || aiCallTrace.displaySourceLabel || "",
       providerId: payload.provider_id || payload.provider || payload.providerId || "deterministic_local",
       providerMode,
       providerState: payload.provider_state || payload.providerState || data.ai.providerState || "AI_DISABLED",
@@ -2588,6 +2706,13 @@
       suggestedCodexPacketSummary: payload.suggested_codex_packet_summary || "",
       providerErrorCategory: payload.provider_error_category || payload.error_category || "",
       providerErrorMessageSafe: payload.provider_error_message_safe || payload.safe_error_message || "",
+      modelCallAttempted: payload.model_call_attempted === true || payload.modelCallAttempted === true,
+      modelCallOccurred: payload.model_call_occurred === true || payload.modelCallOccurred === true,
+      providerResponseReceived: payload.provider_response_received === true || payload.providerResponseReceived === true,
+      fallbackReason: payload.fallback_reason || payload.fallbackReason || "",
+      safetyFilterTriggered: payload.safety_filter_triggered === true || payload.safetyFilterTriggered === true || aiCallTrace.safetyFilterTriggered === true,
+      blockedTerms: Array.isArray(payload.blocked_terms) ? payload.blocked_terms : aiCallTrace.blockedTerms,
+      aiCallTrace,
       canExecute: payload.can_execute === true,
       brokerCallOccurred: payload.broker_call_occurred === true,
       tradingMutationOccurred: payload.trading_mutation_occurred === true,
@@ -2601,6 +2726,11 @@
   function localAiResult(question, answer, overrides) {
     const payload = {
       status: "ANSWERED_LOCAL_GUIDE",
+      requested_answer_mode: AI_ANSWER_MODES.DETERMINISTIC,
+      effective_answer_mode: AI_ANSWER_MODES.DETERMINISTIC,
+      answer_mode: AI_ANSWER_MODES.DETERMINISTIC,
+      answer_mode_status: "UI_LOCAL_DETERMINISTIC",
+      display_source_label: "Deterministic local UI fallback",
       provider_id: "deterministic_local",
       provider_mode: "DETERMINISTIC_FALLBACK",
       provider_state: backendConnected() ? "LOCAL_GUIDE" : "BACKEND_UNREACHABLE",
@@ -2735,10 +2865,14 @@
     const selectedProviderDisplay = providerDisplayLabel(selectedProviderId || "deterministic_local");
     const currentAnswerSource = result && result.answerSource ? result.answerSource : "none yet";
     const fallbackAnswered = Boolean(result && aiResultIsFallback(result) && currentAnswerSource === "LOCAL_DETERMINISTIC");
+    const providerFailed = Boolean(result && aiResultIsProviderError(result));
     const externalProviderSelected = isExternalAiApiProvider(selectedProviderId) || isExternalAiApiProvider(currentProviderId);
     let currentProviderDisplay = providerDisplayLabel(currentProviderId || "deterministic_local");
     let compactLine = `${currentProviderDisplay} active | Advisory only | Broker actions blocked`;
-    if (fallbackAnswered && externalProviderSelected) {
+    if (providerFailed && externalProviderSelected) {
+      currentProviderDisplay = "Provider error";
+      compactLine = `${selectedProviderDisplay} selected | provider call failed | Broker actions blocked`;
+    } else if (fallbackAnswered && externalProviderSelected) {
       currentProviderDisplay = "Safe local fallback";
       compactLine = `${selectedProviderDisplay} selected | safe local fallback answered this question | Broker actions blocked`;
     } else if (fallbackAnswered) {
@@ -2821,14 +2955,33 @@
 
   function aiAnswerMetaText(result, createdAt) {
     const timestamp = aiMessageTime(createdAt);
-    const source = result.answerSource || "LOCAL_DETERMINISTIC";
+    const trace = result.aiCallTrace || {};
+    const source = trace.actualAnswerSource || result.answerSource || "LOCAL_DETERMINISTIC";
+    const providerLabel = providerDisplayLabel(trace.actualProviderId || result.providerId || "deterministic_local");
+    const modelName = trace.actualModelName || result.modelName || "model unknown";
+    const fallbackReason = trace.fallbackReason || result.fallbackReason || result.providerErrorMessageSafe || result.providerErrorCategory || "provider unavailable";
+    const modeLabel = aiAnswerModeLabel(result.effectiveAnswerMode || trace.effectiveAnswerMode);
+    const displaySource = result.displaySourceLabel || trace.displaySourceLabel || source;
+    if (trace.safetyFilterTriggered || result.safetyFilterTriggered) {
+      return `${modeLabel} | ${displaySource} | safety filtered | ${timestamp}`;
+    }
+    if ((trace.modelCallOccurred === true || result.modelCallOccurred === true) && ["API_LIGHT_MODEL", "API_HIGH_REASONING_APPROVED", "LOCAL_MODEL"].includes(source)) {
+      return `${modeLabel} | ${providerLabel} answered | ${modelName} | ${source} | ${timestamp}`;
+    }
+    if ((trace.providerCallAttempted === true || result.modelCallAttempted === true) && (trace.modelCallOccurred !== true && result.modelCallOccurred !== true)) {
+      const fallbackSource = source === "PROVIDER_ERROR" ? "LOCAL_DETERMINISTIC" : source;
+      return `${modeLabel} | Safe local fallback | ${fallbackSource} | provider call failed: ${fallbackReason} | ${timestamp}`;
+    }
     if (aiResultIsFallback(result)) {
-      return `Safe local fallback | ${source} | ${timestamp}`;
+      return `${modeLabel} | ${displaySource} | no provider call | ${timestamp}`;
     }
     if (result.answerSource === "SUPREME_BOARD_PACKET") {
-      return `Supreme Board packet mode | ${source} | ${timestamp}`;
+      return `${modeLabel} | Supreme Board packet mode | ${source} | ${timestamp}`;
     }
-    return `${providerDisplayLabel(result.providerId || "deterministic_local")} answered | ${result.modelName || "model unknown"} | ${source} | ${timestamp}`;
+    if (aiResultIsProviderError(result)) {
+      return `${modeLabel} | Provider error | ${source} | no model answer | ${timestamp}`;
+    }
+    return `${modeLabel} | ${providerLabel} selected | ${modelName} | ${source} | ${timestamp}`;
   }
 
   function aiEvidenceBullets(result, context) {
@@ -2884,15 +3037,46 @@
         </div>
         ${renderAiContextPreview(context)}
         <div class="ai-context-preview">
+          <h3>AI Call Trace</h3>
+          ${kv([
+            ["Request ID", escapeHtml(result.aiCallTrace.requestId || "none")],
+            ["Effective answer mode", badge(result.aiCallTrace.effectiveAnswerMode || result.effectiveAnswerMode || "DETERMINISTIC", statusColor(result.aiCallTrace.effectiveAnswerMode || result.effectiveAnswerMode || "DETERMINISTIC"))],
+            ["Answer mode status", escapeHtml(result.aiCallTrace.answerModeStatus || result.answerModeStatus || "none")],
+            ["Display source", escapeHtml(result.aiCallTrace.displaySourceLabel || result.displaySourceLabel || "not returned")],
+            ["Intent", badge(result.aiCallTrace.intent || "UNKNOWN", statusColor(result.aiCallTrace.intent || "UNKNOWN"))],
+            ["Selected provider/model", escapeHtml(`${providerDisplayLabel(result.aiCallTrace.selectedProvider)} / ${result.aiCallTrace.selectedModel || "none"}`)],
+            ["Actual provider/model", escapeHtml(`${providerDisplayLabel(result.aiCallTrace.actualProviderId)} / ${result.aiCallTrace.actualModelName || "none"}`)],
+            ["Endpoint family", badge(result.aiCallTrace.endpointFamily || "unknown", statusColor(result.aiCallTrace.endpointFamily || "unknown"))],
+            ["Provider call attempted", badge(String(result.aiCallTrace.providerCallAttempted), result.aiCallTrace.providerCallAttempted ? "green" : "gray")],
+            ["Provider response received", badge(String(result.aiCallTrace.providerResponseReceived), result.aiCallTrace.providerResponseReceived ? "green" : "gray")],
+            ["Model call occurred", badge(String(result.aiCallTrace.modelCallOccurred), result.aiCallTrace.modelCallOccurred ? "green" : "gray")],
+            ["Actual answer source", badge(result.aiCallTrace.actualAnswerSource || result.answerSource, statusColor(result.aiCallTrace.actualAnswerSource || result.answerSource))],
+            ["Fallback used", badge(String(result.aiCallTrace.fallbackUsed), result.aiCallTrace.fallbackUsed ? "yellow" : "green")],
+            ["Fallback reason", escapeHtml(result.aiCallTrace.fallbackReason || "none")],
+            ["Safety filter triggered", badge(String(result.aiCallTrace.safetyFilterTriggered), result.aiCallTrace.safetyFilterTriggered ? "red" : "green")],
+            ["Blocked terms", escapeHtml((result.aiCallTrace.blockedTerms || []).join(", ") || "none")],
+            ["Challenge nonce present", badge(String(result.aiCallTrace.challengeNoncePresent), result.aiCallTrace.challengeNoncePresent ? "green" : "gray")],
+            ["Challenge echoed", badge(String(result.aiCallTrace.challengeEchoed), result.aiCallTrace.challengeEchoed ? "green" : "gray")],
+            ["Latency ms", escapeHtml(String(result.aiCallTrace.latencyMs || "not returned"))],
+            ["Provider request id", escapeHtml(result.aiCallTrace.providerRequestId || "not returned")]
+          ])}
+        </div>
+        <div class="ai-context-preview">
           <h3>Provider / Model Diagnostics</h3>
           ${kv([
             ["Status", escapeHtml(result.status)],
+            ["Answer mode", badge(result.effectiveAnswerMode || "DETERMINISTIC", statusColor(result.effectiveAnswerMode || "DETERMINISTIC"))],
+            ["Display source", escapeHtml(result.displaySourceLabel || "not returned")],
             ["Provider ID", escapeHtml(result.providerId)],
             ["Provider mode", badge(result.providerMode, statusColor(result.providerMode))],
             ["Provider state", badge(result.providerState, statusColor(result.providerState))],
             ["Model", escapeHtml(result.modelName)],
             ["Model quality", badge(result.modelQuality, modelQualityColor(result.modelQuality))],
             ["Answer source", badge(result.answerSource, statusColor(result.answerSource))],
+            ["Model call attempted", badge(String(result.modelCallAttempted), result.modelCallAttempted ? "green" : "gray")],
+            ["Model call occurred", badge(String(result.modelCallOccurred), result.modelCallOccurred ? "green" : "gray")],
+            ["Provider response received", badge(String(result.providerResponseReceived), result.providerResponseReceived ? "green" : "gray")],
+            ["Fallback reason", escapeHtml(result.fallbackReason || "none")],
             ["Cost mode", badge(result.costMode, statusColor(result.costMode))],
             ["Reasoning policy", badge(result.reasoningPolicy, statusColor(result.reasoningPolicy))],
             ["Governance suitable", badge(String(result.modelSuitableForGovernance), result.modelSuitableForGovernance ? "green" : "red")],
@@ -3057,9 +3241,9 @@
             <div class="ai-route-summary-grid">
               <div><span>Saved/configured</span><strong>${escapeHtml(providerDisplayLabel(routing.activeProvider || "deterministic_local"))}</strong></div>
               <div><span>Selected active provider</span><strong>${escapeHtml(routeLabels.selectedProviderDisplay)}</strong></div>
-              <div><span>Currently used for ask</span><strong>${escapeHtml(routeLabels.currentProviderDisplay)}</strong></div>
+              <div><span>Default router mode</span><strong>${escapeHtml(routeLabels.routeMode || "LOCAL_GUIDE")}</strong></div>
               <div><span>Active model</span><strong>${escapeHtml(routeLabels.activeModel || "deterministic-local-guide")}</strong></div>
-              <div><span>Current answer source</span><strong>${escapeHtml(answerSource)}</strong></div>
+              <div><span>Last answer source</span><strong>${escapeHtml(answerSource)}</strong></div>
               <div><span>Last provider error</span><strong>${escapeHtml(providerError || "none")}</strong></div>
             </div>
             <div class="button-row compact-actions">
@@ -3081,10 +3265,8 @@
             <div class="ai-composer">
               <label for="ai-chief-question">Ask Chief Quant Advisor</label>
               <textarea id="ai-chief-question" data-ai-chief-question rows="3" placeholder="Ask what is blocking PAPER, whether the bot is ready, or what to do next...">${escapeHtml(aiQuestionText || "")}</textarea>
+              ${renderAiAnswerModeButtons("overlay", aiSelectedAnswerMode, aiOverlayBusy)}
               <div class="button-row ai-composer-actions">
-                <button class="intent-button paper" type="button" data-ai-chief-ask ${aiOverlayBusy ? "disabled" : ""}>
-                  ${aiOverlayBusy ? "Asking..." : "Ask"}
-                </button>
                 <button class="intent-button paper" type="button" data-ai-chief-clear ${aiOverlayBusy ? "disabled" : ""}>Clear</button>
                 ${aiUserPinnedScroll ? `<button class="intent-button paper" type="button" data-ai-jump-latest>Jump to latest</button>` : ""}
               </div>
@@ -3233,28 +3415,30 @@
     ].join("\n");
   }
 
-  async function askAiChiefQuestion(questionOverride) {
+  async function askAiChiefQuestion(questionOverride, answerModeOverride) {
     const input = document.querySelector("[data-ai-chief-question]");
     const question = String(questionOverride || (input && input.value) || aiQuestionText || "").trim();
+    const answerMode = normalizeAiAnswerMode(answerModeOverride || aiSelectedAnswerMode || AI_ANSWER_MODES.DETERMINISTIC);
     if (!question) {
       aiOverlayError = "Type a question first.";
       aiOverlayOpen = true;
       renderAiChiefOverlay();
       return;
     }
+    aiSelectedAnswerMode = answerMode;
     aiSelectedQuestion = question;
     aiOverlayError = "";
     aiQuestionText = "";
     aiOverlayResponse = "";
     aiUserPinnedScroll = false;
     const routing = aiRoutingSettings();
-    const routeLabels = aiActiveRouteLabels(routing, aiOverlayLastResult);
+    const routeLabel = `${aiAnswerModeLabel(answerMode)} | ${aiAnswerModeDescription(answerMode)} | Advisory only | Broker actions blocked`;
     appendAiMessage({ role: "user", status: "complete", question, answer: question });
     const loadingMessage = appendAiMessage({
       role: "assistant",
       status: "loading",
       question,
-      routeLabel: routeLabels.compactLine
+      routeLabel
     });
     aiOverlayBusy = true;
     aiOverlayOpen = true;
@@ -3262,7 +3446,13 @@
     scheduleAiOverlayScroll({ force: true });
     if (!backendConnected()) {
       const localAnswer = buildAiOverlayAdvisory(question);
-      const localResult = localAiResult(question, localAnswer);
+      const localResult = localAiResult(question, localAnswer, {
+        requested_answer_mode: answerMode,
+        effective_answer_mode: answerMode,
+        answer_mode: answerMode,
+        display_source_label: "Backend unreachable local UI fallback",
+        fallback_reason: "BACKEND_UNREACHABLE"
+      });
       aiOverlayResponse = localAnswer;
       aiOverlayLastResult = localResult;
       replaceAiMessage(loadingMessage.id, {
@@ -3277,16 +3467,17 @@
     }
     try {
       const context = buildAiChiefContext(question);
-      const route = aiAskRoutingPayload(routing);
+      const route = aiAskRoutingPayloadForMode(routing, answerMode);
       const result = await postIntent("/operator/ai/ask", {
         question,
         page_id: context.page_id,
         page_context: context,
         advisory_only: true,
+        answer_mode: answerMode,
         route_mode: route.routeMode,
         provider_id: route.providerId,
         model_name: route.modelName,
-        approved_paid_call: false
+        approved_paid_call: route.approvedPaidCall === true
       });
       const normalized = normalizeAiAskResult(result);
       aiOverlayResponse = normalized.answer;
@@ -3304,6 +3495,10 @@
         provider_mode: "PROVIDER_ERROR",
         provider_state: "PROVIDER_ERROR",
         answer_source: "LOCAL_DETERMINISTIC",
+        requested_answer_mode: answerMode,
+        effective_answer_mode: answerMode,
+        answer_mode: answerMode,
+        display_source_label: "Request failed local UI fallback",
         provider_error_category: "UI_AI_ASK_REQUEST_FAILED",
         provider_error_message_safe: aiOverlayError
       });
@@ -3326,8 +3521,8 @@
   function selectHomeAiQuestion(question) {
     homeAiQuestionText = question;
     homeAiError = "";
-    homeAiResponse = buildAiOverlayAdvisory(question);
-    homeAiLastResult = localAiResult(question, homeAiResponse);
+    homeAiResponse = "";
+    homeAiLastResult = null;
     renderScreens(activeScreenId);
     renderRail();
     renderAiChiefOverlay();
@@ -3343,14 +3538,22 @@
     renderAiChiefOverlay();
   }
 
-  async function askHomeAiQuestion() {
+  async function askHomeAiQuestion(answerModeOverride) {
     const input = document.querySelector("[data-home-ai-question]");
     const question = String((input && input.value) || homeAiQuestionText || "").trim();
+    const answerMode = normalizeAiAnswerMode(answerModeOverride || homeAiAnswerMode || AI_ANSWER_MODES.DETERMINISTIC);
     homeAiQuestionText = question;
+    homeAiAnswerMode = answerMode;
     homeAiError = "";
     if (!backendConnected()) {
       homeAiResponse = buildAiOverlayAdvisory(question);
-      homeAiLastResult = localAiResult(question, homeAiResponse);
+      homeAiLastResult = localAiResult(question, homeAiResponse, {
+        requested_answer_mode: answerMode,
+        effective_answer_mode: answerMode,
+        answer_mode: answerMode,
+        display_source_label: "Backend unreachable local UI fallback",
+        fallback_reason: "BACKEND_UNREACHABLE"
+      });
       renderScreens(activeScreenId);
       renderRail();
       renderAiChiefOverlay();
@@ -3365,19 +3568,20 @@
       context.page_id = activeScreenId || "positions";
       context.page_title = screenTitle(activeScreenId || "positions");
       const routing = aiRoutingSettings();
-      const route = aiAskRoutingPayload(routing);
+      const route = aiAskRoutingPayloadForMode(routing, answerMode);
       const result = await postIntent("/operator/ai/ask", {
         question,
         page_id: context.page_id,
         page_context: context,
         advisory_only: true,
+        answer_mode: answerMode,
         route_mode: route.routeMode,
         provider_id: route.providerId,
         model_name: route.modelName,
-        approved_paid_call: false
+        approved_paid_call: route.approvedPaidCall === true
       });
-      homeAiResponse = formatAiAskResult(result);
       homeAiLastResult = normalizeAiAskResult(result);
+      homeAiResponse = homeAiLastResult.answer;
     } catch (error) {
       homeAiError = error.message || error.name || "home_ai_ask_failed";
       homeAiResponse = buildAiOverlayAdvisory(question);
@@ -3385,6 +3589,10 @@
         status: "PROVIDER_ERROR",
         provider_mode: "PROVIDER_ERROR",
         provider_state: "PROVIDER_ERROR",
+        requested_answer_mode: answerMode,
+        effective_answer_mode: answerMode,
+        answer_mode: answerMode,
+        display_source_label: "Request failed local UI fallback",
         provider_error_category: "UI_HOME_AI_ASK_REQUEST_FAILED",
         provider_error_message_safe: homeAiError
       });
@@ -3617,7 +3825,7 @@
         validation_mode: "credential_presence",
         approved_paid_call: false
       });
-      data.ai.lastAnalyzeResult = `${providerId}: ${result.validation_status || result.status}; ${result.safe_error_message || "no provider call made"}`;
+      data.ai.lastAnalyzeResult = `${providerId}: credential presence ${result.credential_presence_status || result.validation_status || result.status}; live AI API test ${result.live_api_test_status || "NOT_TESTED"}; ${result.safe_error_message || "no provider call made"}`;
       renderScreens(activeScreenId);
     } catch (error) {
       data.ai.lastAnalyzeResult = `FAILED: ${error.message || error.name || "ai_provider_validate_failed"}`;
@@ -3699,6 +3907,7 @@
       const result = await postIntent("/operator/ai/ask", {
         question,
         page_context: context,
+        answer_mode: AI_ANSWER_MODES.REASONING,
         route_mode: "HIGH_REASONING_API",
         provider_id: settings.high_reasoning_provider,
         model_name: settings.high_reasoning_model,
@@ -4905,7 +5114,7 @@
     const homeQuestion = event.target.closest("[data-home-ai-question]");
     if (homeQuestion && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (!homeAiBusy) askHomeAiQuestion();
+      if (!homeAiBusy) askHomeAiQuestion(homeAiAnswerMode || AI_ANSWER_MODES.DETERMINISTIC);
     }
   });
 
@@ -4927,17 +5136,22 @@
     }
     const aiPrompt = event.target.closest("[data-ai-chief-prompt]");
     if (aiPrompt) {
-      if (!aiOverlayBusy) askAiChiefQuestion(aiPrompt.dataset.aiChiefPrompt);
+      selectAiQuestion(aiPrompt.dataset.aiChiefPrompt);
+      return;
+    }
+    const aiAnswerModeAsk = event.target.closest("[data-ai-answer-mode-ask]");
+    if (aiAnswerModeAsk && !aiAnswerModeAsk.disabled) {
+      const [scope, mode] = String(aiAnswerModeAsk.dataset.aiAnswerModeAsk || "overlay:DETERMINISTIC").split(":");
+      if (scope === "home") {
+        askHomeAiQuestion(mode);
+      } else {
+        askAiChiefQuestion(undefined, mode);
+      }
       return;
     }
     const aiAnalyze = event.target.closest("[data-ai-chief-analyze]");
     if (aiAnalyze && !aiAnalyze.disabled) {
       runAiOverlayAnalyze();
-      return;
-    }
-    const aiAsk = event.target.closest("[data-ai-chief-ask]");
-    if (aiAsk && !aiAsk.disabled) {
-      askAiChiefQuestion();
       return;
     }
     const aiClear = event.target.closest("[data-ai-chief-clear]");
@@ -4965,11 +5179,6 @@
     const homeAiPrompt = event.target.closest("[data-home-ai-prompt]");
     if (homeAiPrompt) {
       selectHomeAiQuestion(homeAiPrompt.dataset.homeAiPrompt);
-      return;
-    }
-    const homeAiAsk = event.target.closest("[data-home-ai-ask]");
-    if (homeAiAsk && !homeAiAsk.disabled) {
-      askHomeAiQuestion();
       return;
     }
     const homeAiClear = event.target.closest("[data-home-ai-clear]");

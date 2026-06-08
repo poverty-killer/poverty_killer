@@ -244,20 +244,6 @@ def route_ai_request(
         )
 
     if mode == LIGHT_API:
-        if serious:
-            return AIRouteDecision(
-                route_mode=PROVIDER_DISABLED,
-                provider_id=chosen_provider,
-                model_name=chosen_model,
-                model_quality=model_quality,
-                cost_mode=PROVIDER_ERROR_COST,
-                answer_source=PROVIDER_ERROR_SOURCE,
-                allowed_provider_call=False,
-                approval_required=True,
-                reason_code="SERIOUS_PROMPT_REQUIRES_HIGH_REASONING_OR_PACKET",
-                warning="Serious quant/governance prompt cannot be routed to a light model.",
-                model_suitable_for_governance=False,
-            )
         if not provider_configured or not provider_implemented:
             return AIRouteDecision(
                 route_mode=PROVIDER_DISABLED,
@@ -281,8 +267,12 @@ def route_ai_request(
             answer_source=API_LIGHT_MODEL,
             allowed_provider_call=True,
             approval_required=False,
-            reason_code="LIGHT_API_SELECTED",
-            warning="Light API is not suitable for final quant/risk/governance decisions.",
+            reason_code="LIGHT_API_SELECTED_SERIOUS_ADVISORY_LIMITED" if serious else "LIGHT_API_SELECTED",
+            warning=(
+                "Light API may answer this serious advisory prompt, but it is not final quant/risk/governance authority."
+                if serious
+                else "Light API is not suitable for final quant/risk/governance decisions."
+            ),
             model_suitable_for_governance=False,
         )
 
