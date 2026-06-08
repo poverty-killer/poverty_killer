@@ -95,6 +95,95 @@
       alpacaPaperCredentialsConfigured: false,
       paperEndpointOnly: true,
       paperStartAllowed: false,
+      runPaperOperatorState: {
+        source: "MOCK_DATA",
+        schemaVersion: "run-paper-command-center-v1",
+        overallStatus: {
+          code: "BLOCKED",
+          label: "Mock data cannot start PAPER",
+          severity: "red",
+          detail: "Connect OPERATOR_BACKEND for current launch readiness truth."
+        },
+        canRunPaper: {
+          allowed: false,
+          label: "Start blocked",
+          reason: "Mock/sample mode cannot start PAPER.",
+          reasonCodes: ["MOCK_DATA_NO_BACKEND"],
+          warningCodes: [],
+          usesExistingGovernedStartIntent: "/operator/intent/paper/start",
+          requiresOperatorConfirmations: true
+        },
+        nextSafeAction: "Start the operator backend before using Run PAPER controls.",
+        endpoint: {
+          label: "Mock PAPER endpoint sample",
+          display: "https://paper-api.alpaca.markets",
+          family: "paper",
+          host: "paper-api.alpaca.markets",
+          source: "MOCK_DATA",
+          configured: false,
+          valid: true,
+          status: "PAPER_ENDPOINT_CONFIRMED",
+          blockerCode: null,
+          operatorAction: "Connect backend for real endpoint authority."
+        },
+        credentials: {
+          label: "Mock credentials missing",
+          configured: false,
+          missingFields: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
+          source: "MOCK_DATA",
+          precedence: "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+          rawSecretValuesIncluded: false,
+          secretsValuesExposed: false
+        },
+        runtime: {
+          label: "Mock runtime only",
+          state: "MOCK_ONLY",
+          processState: "MOCK_ONLY",
+          activeSessionId: null,
+          paperStartRefusalReason: "MOCK_DATA_NO_BACKEND",
+          paperStopAllowed: false,
+          safeStopStatus: "NO_ACTIVE_RUNTIME"
+        },
+        brokerTruth: {
+          status: "MOCK_SAMPLE_NOT_BROKER_TRUTH",
+          label: "Broker truth unavailable in mock mode",
+          detail: "No broker portfolio truth is invented without OPERATOR_BACKEND.",
+          brokerConfirmed: false,
+          brokerReadOccurred: false,
+          brokerReadAttempted: false,
+          brokerMutationOccurred: false,
+          orderSubmissionOccurred: false,
+          cancelOccurred: false,
+          liquidationOccurred: false
+        },
+        safetyLocks: {
+          live: { label: "Live locked", locked: true, enabled: false },
+          realMoney: { label: "Real money blocked", blocked: true, enabled: false },
+          manualTrading: { label: "Manual trading unavailable", available: false },
+          forceTrade: { label: "Force trade unavailable", available: false },
+          brokerMutation: { label: "No broker mutation from mock readiness", occurred: false }
+        },
+        advanced: {
+          finalLaunchReadiness: "BLOCKED",
+          reasonCodes: ["MOCK_DATA_NO_BACKEND"],
+          checks: [],
+          paperEndpointDisplay: "https://paper-api.alpaca.markets",
+          paperEndpointFamily: "paper",
+          paperEndpointHost: "paper-api.alpaca.markets",
+          paperEndpointBlockerCode: null,
+          alpacaEndpointConfigured: false,
+          alpacaEndpointSource: "MOCK_DATA",
+          alpacaPaperEndpointValid: true,
+          alpacaLiveEndpointBlocked: true,
+          paperStartAllowed: false,
+          brokerMutationOccurred: false,
+          tradingMutationOccurred: false,
+          liveEnabled: false,
+          realMoneyEnabled: false,
+          secretsValuesExposed: false,
+          backendDegradedReasons: []
+        }
+      },
       safeStopStatus: "NO_ACTIVE_RUNTIME",
       portfolioReadAvailability: "UNAVAILABLE_MISSING_CREDENTIALS",
       backendDegradedReasons: []

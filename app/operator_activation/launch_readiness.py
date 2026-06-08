@@ -26,6 +26,284 @@ def _check(check_id: str, title: str, status: str, detail: str, *, blocker: bool
     }
 
 
+def _check_by_id(checks: list[dict[str, Any]], check_id: str) -> dict[str, Any]:
+    for check in checks:
+        if check.get("check_id") == check_id:
+            return check
+    return {}
+
+
+def _missing_required_fields(provider: dict[str, Any]) -> list[str]:
+    required = [str(name) for name in provider.get("required_env_vars") or []]
+    rows = provider.get("env_status") if isinstance(provider.get("env_status"), list) else []
+    if not required:
+        return []
+    configured = {
+        str(row.get("name"))
+        for row in rows
+        if isinstance(row, dict) and row.get("configured") is True
+    }
+    missing = [name for name in required if name not in configured]
+    return missing or ([] if provider.get("configured") is True else required)
+
+
+def _first_blocker_detail(checks: list[dict[str, Any]]) -> str | None:
+    for check in checks:
+        if check.get("blocker") is True:
+            return _plain_check_detail(check)
+    return None
+
+
+def _plain_check_detail(check: dict[str, Any]) -> str:
+    check_id = str(check.get("check_id") or "")
+    if check_id == "alpaca_paper_credentials":
+        return "Alpaca PAPER key ID and secret are missing."
+    if check_id == "paper_endpoint_only":
+        return str(check.get("detail") or "Only the Alpaca PAPER trading endpoint is accepted.")
+    if check_id == "no_active_runtime":
+        return "A PAPER runtime is already active or cannot be proven stopped."
+    if check_id == "audit_session_storage":
+        return "Audit/session storage is not ready."
+    if check_id == "paper_start_authority":
+        return "Supervisor start authority is blocked."
+    return str(check.get("detail") or check.get("title") or check_id or "Start authority is blocked.")
+
+
+def _operator_status(
+    *,
+    final: str,
+    blockers: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+    supervisor: dict[str, Any],
+    paper_start_allowed: bool,
+) -> dict[str, Any]:
+    state = str(supervisor.get("state") or "UNKNOWN").upper()
+    if state == "RUNNING":
+        return {
+            "code": "ACTIVE",
+            "label": "PAPER run active",
+            "severity": "yellow",
+            "detail": "A PAPER runtime is already attached; duplicate start is blocked.",
+        }
+    if state == "STALE_ACTIVE_SESSION":
+        return {
+            "code": "STALE",
+            "label": "Previous PAPER state needs review",
+            "severity": "red",
+            "detail": "The supervisor found a prior active session after restart and cannot prove it is stopped.",
+        }
+    if blockers or final == "BLOCKED" or not paper_start_allowed:
+        return {
+            "code": "BLOCKED",
+            "label": "PAPER start blocked",
+            "severity": "red",
+            "detail": _first_blocker_detail(blockers) or str(supervisor.get("paper_start_refusal_reason") or "Start authority is blocked."),
+        }
+    if warnings or final == "DEGRADED_BUT_RUNNABLE":
+        return {
+            "code": "READY",
+            "label": "PAPER start allowed with warnings",
+            "severity": "yellow",
+            "detail": "Backend start authority is available, but warnings remain in advanced readiness.",
+        }
+    return {
+        "code": "READY",
+        "label": "Ready for bounded PAPER",
+        "severity": "green",
+        "detail": "Backend start authority is available and required launch checks passed.",
+    }
+
+
+def _plain_endpoint_label(endpoint_authority: dict[str, Any]) -> str:
+    family = str(endpoint_authority.get("alpaca_trading_endpoint_family") or "unknown")
+    source = str(endpoint_authority.get("endpoint_source") or "UNKNOWN")
+    display = str(endpoint_authority.get("alpaca_endpoint_display") or "unavailable")
+    if endpoint_authority.get("paper_endpoint_only") is True:
+        if source == "SAFE_DEFAULT_PAPER_ENDPOINT":
+            return f"Safe default PAPER endpoint in use: {display}"
+        return f"PAPER endpoint confirmed: {display}"
+    if family == "live":
+        return "Live Alpaca endpoint is blocked for PAPER readiness."
+    if family == "data":
+        return "Alpaca data endpoint is not a trading endpoint."
+    if family == "broker":
+        return "Alpaca Broker API endpoint is unsupported for this PAPER seam."
+    return "A valid Alpaca PAPER trading endpoint is required."
+
+
+def _next_safe_action(
+    *,
+    blockers: list[dict[str, Any]],
+    endpoint_ok: bool,
+    alpaca_configured: bool,
+    supervisor: dict[str, Any],
+    paper_start_allowed: bool,
+) -> str:
+    state = str(supervisor.get("state") or "UNKNOWN").upper()
+    if state == "RUNNING":
+        return "Monitor the active PAPER run from Bot Runtime; do not request another start."
+    if state == "STALE_ACTIVE_SESSION":
+        return "Review Bot Runtime and reconcile the stale supervisor session before any new PAPER start."
+    if not endpoint_ok:
+        return "Fix the Alpaca endpoint in Keys & Providers; only https://paper-api.alpaca.markets is accepted."
+    if not alpaca_configured:
+        return "Add Alpaca PAPER key ID and secret in Keys & Providers; raw values stay hidden."
+    if blockers:
+        first = blockers[0]
+        title = str(first.get("title") or first.get("check_id") or "the current blocker")
+        return f"Resolve {title} before requesting a bounded PAPER start."
+    if paper_start_allowed:
+        return "Confirm PAPER-only, live locked, real-money blocked, and no manual trades before requesting Start."
+    return "Review the supervisor refusal reason before trying to start PAPER."
+
+
+def _broker_truth_summary(*, alpaca_configured: bool, endpoint_ok: bool, endpoint_authority: dict[str, Any]) -> dict[str, Any]:
+    if not alpaca_configured:
+        status = "UNAVAILABLE_MISSING_CREDENTIALS"
+        label = "Broker portfolio truth unavailable"
+        detail = "No broker portfolio read is attempted because Alpaca PAPER credentials are missing."
+    elif not endpoint_ok:
+        status = str(endpoint_authority.get("reason_code") or "PAPER_ENDPOINT_BLOCKED")
+        label = "Broker portfolio truth blocked"
+        detail = "No broker portfolio read is attempted until the PAPER trading endpoint is valid."
+    else:
+        status = "BROKER_READ_READY_NOT_IN_THIS_VIEW"
+        label = "Read-only portfolio check available"
+        detail = "The Portfolio Snapshot loads broker-confirmed truth separately; this readiness view does not invent positions."
+    return {
+        "status": status,
+        "label": label,
+        "detail": detail,
+        "broker_confirmed": False,
+        "broker_read_occurred": False,
+        "broker_read_attempted": False,
+        "broker_mutation_occurred": False,
+        "order_submission_occurred": False,
+        "cancel_occurred": False,
+        "liquidation_occurred": False,
+    }
+
+
+def _build_run_paper_operator_state(
+    *,
+    checks: list[dict[str, Any]],
+    blockers: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+    final: str,
+    alpaca: dict[str, Any],
+    alpaca_configured: bool,
+    endpoint_authority: dict[str, Any],
+    endpoint_ok: bool,
+    paper_start_allowed: bool,
+    safe_stop_status: str,
+    supervisor: dict[str, Any],
+    runtime: dict[str, Any],
+    credentials: dict[str, Any],
+    health: dict[str, Any],
+) -> dict[str, Any]:
+    blocker_codes = [str(check.get("check_id") or "unknown") for check in blockers]
+    warning_codes = [str(check.get("check_id") or "unknown") for check in warnings]
+    first_blocker = blockers[0] if blockers else {}
+    disabled_reason = (
+        _plain_check_detail(first_blocker)
+        if blockers else str(supervisor.get("paper_start_refusal_reason") or "")
+    )
+    overall = _operator_status(
+        final=final,
+        blockers=blockers,
+        warnings=warnings,
+        supervisor=supervisor,
+        paper_start_allowed=paper_start_allowed,
+    )
+    endpoint_source = str(endpoint_authority.get("endpoint_source") or "UNKNOWN")
+    runtime_state = str(supervisor.get("state") or runtime.get("process_state") or "UNKNOWN")
+    return {
+        "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
+        "schema_version": "run-paper-command-center-v1",
+        "overall_status": overall,
+        "can_run_paper": {
+            "allowed": paper_start_allowed and not blockers,
+            "label": "Start allowed" if paper_start_allowed and not blockers else "Start blocked",
+            "reason": disabled_reason or None,
+            "reason_codes": blocker_codes,
+            "warning_codes": warning_codes,
+            "uses_existing_governed_start_intent": "/operator/intent/paper/start",
+            "requires_operator_confirmations": True,
+        },
+        "next_safe_action": _next_safe_action(
+            blockers=blockers,
+            endpoint_ok=endpoint_ok,
+            alpaca_configured=alpaca_configured,
+            supervisor=supervisor,
+            paper_start_allowed=paper_start_allowed,
+        ),
+        "endpoint": {
+            "label": _plain_endpoint_label(endpoint_authority),
+            "display": endpoint_authority.get("alpaca_endpoint_display"),
+            "family": endpoint_authority.get("alpaca_trading_endpoint_family"),
+            "host": endpoint_authority.get("alpaca_trading_endpoint_host"),
+            "source": endpoint_source,
+            "configured": endpoint_authority.get("alpaca_endpoint_configured") is True,
+            "valid": endpoint_ok,
+            "status": endpoint_authority.get("status"),
+            "blocker_code": endpoint_authority.get("alpaca_endpoint_blocker_code"),
+            "operator_action": endpoint_authority.get("operator_action"),
+        },
+        "credentials": {
+            "label": "Alpaca PAPER credentials configured" if alpaca_configured else "Alpaca PAPER credentials missing",
+            "configured": alpaca_configured,
+            "missing_fields": _missing_required_fields(alpaca),
+            "source": alpaca.get("credential_source") or "NOT_CONFIGURED",
+            "precedence": credentials.get("precedence") or "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+            "raw_secret_values_included": False,
+            "secrets_values_exposed": False,
+        },
+        "runtime": {
+            "label": "No active PAPER run" if runtime_state == "IDLE" else runtime_state,
+            "state": runtime_state,
+            "process_state": runtime.get("process_state") or "UNKNOWN",
+            "active_session_id": supervisor.get("active_session_id"),
+            "paper_start_refusal_reason": supervisor.get("paper_start_refusal_reason") or runtime.get("paper_start_refusal_reason"),
+            "paper_stop_allowed": supervisor.get("paper_stop_allowed") is True or runtime.get("paper_stop_allowed") is True,
+            "safe_stop_status": safe_stop_status,
+        },
+        "broker_truth": _broker_truth_summary(
+            alpaca_configured=alpaca_configured,
+            endpoint_ok=endpoint_ok,
+            endpoint_authority=endpoint_authority,
+        ),
+        "safety_locks": {
+            "live": {"label": "Live locked", "locked": True, "enabled": False},
+            "real_money": {"label": "Real money blocked", "blocked": True, "enabled": False},
+            "manual_trading": {"label": "Manual trading unavailable", "available": False},
+            "force_trade": {"label": "Force trade unavailable", "available": False},
+            "broker_mutation": {"label": "No broker mutation from this readiness view", "occurred": False},
+        },
+        "advanced": {
+            "final_launch_readiness": final,
+            "reason_codes": blocker_codes + warning_codes,
+            "checks": checks,
+            "paper_endpoint_authority": endpoint_authority,
+            "paper_endpoint_display": endpoint_authority.get("alpaca_endpoint_display"),
+            "paper_endpoint_family": endpoint_authority.get("alpaca_trading_endpoint_family"),
+            "paper_endpoint_host": endpoint_authority.get("alpaca_trading_endpoint_host"),
+            "paper_endpoint_blocker_code": endpoint_authority.get("alpaca_endpoint_blocker_code"),
+            "alpaca_endpoint_configured": endpoint_authority.get("alpaca_endpoint_configured") is True,
+            "alpaca_endpoint_source": endpoint_source,
+            "alpaca_paper_endpoint_valid": endpoint_authority.get("alpaca_paper_endpoint_valid") is True,
+            "alpaca_live_endpoint_blocked": endpoint_authority.get("alpaca_live_endpoint_blocked") is True,
+            "paper_start_allowed": paper_start_allowed,
+            "broker_mutation_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+            "backend_degraded_reasons": list(health.get("degraded_reasons") or []),
+            "paper_start_authority_detail": _check_by_id(checks, "paper_start_authority").get("detail"),
+        },
+    }
+
+
 def build_launch_readiness(
     *,
     provider_readiness: dict[str, Any],
@@ -160,6 +438,22 @@ def build_launch_readiness(
         final = "DEGRADED_BUT_RUNNABLE"
     else:
         final = "READY_FOR_BOUNDED_PAPER"
+    run_paper_operator_state = _build_run_paper_operator_state(
+        checks=checks,
+        blockers=blockers,
+        warnings=warnings,
+        final=final,
+        alpaca=alpaca,
+        alpaca_configured=alpaca_configured,
+        endpoint_authority=endpoint_authority,
+        endpoint_ok=endpoint_ok,
+        paper_start_allowed=paper_start_allowed,
+        safe_stop_status=safe_stop_status,
+        supervisor=supervisor,
+        runtime=runtime,
+        credentials=credentials,
+        health=health,
+    )
     return {
         "source": "OPERATOR_LAUNCH_READINESS",
         "final_launch_readiness": final,
@@ -182,6 +476,7 @@ def build_launch_readiness(
         "live_blocked": True,
         "real_money_blocked": True,
         "paper_start_allowed": paper_start_allowed,
+        "run_paper_operator_state": run_paper_operator_state,
         "safe_stop_status": safe_stop_status,
         "portfolio_read_availability": "BROKER_READ_READY" if alpaca_configured else "UNAVAILABLE_MISSING_CREDENTIALS",
         "backend_degraded_reasons": list(health.get("degraded_reasons") or []),

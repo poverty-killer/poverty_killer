@@ -20,6 +20,7 @@ def test_command_center_home_contains_operator_answer_sections():
         "Next Useful Action",
         "Operator Shortcuts",
         "Launch Readiness",
+        "Run PAPER Command Center",
         "PAPER Launch Control",
         "Portfolio Snapshot",
         "Current Assets / Positions Preview",
@@ -136,3 +137,5 @@ def test_operator_home_contract_is_recorded():
     assert '"home_ai_endpoint": "/operator/ai/ask"' in text
     assert '"paper_start_endpoint": "/operator/intent/paper/start"' in text
     assert '"fake_broker_truth_allowed": false' in text
+    assert '"run_paper_operator_state": "single derived read-only command-center view model"' in text
+    assert '"raw_codes_in_advanced_details": true' in text

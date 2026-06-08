@@ -267,6 +267,9 @@
   },
   "launch_readiness_contract": {
     "answers_can_i_run_paper_now": true,
+    "run_paper_operator_state": "single derived read-only command-center view model",
+    "raw_codes_in_advanced_details": true,
+    "main_answer_plain_english": true,
     "final_states": ["READY_FOR_BOUNDED_PAPER", "BLOCKED", "DEGRADED_BUT_RUNNABLE", "UNKNOWN"],
     "uses_existing_governed_start_intent": "/operator/intent/paper/start",
     "manual_trading_available": false,
@@ -935,6 +938,55 @@
       "paper_endpoint_display": "safe endpoint display, no secrets",
       "paper_endpoint_family": "paper | live | data | broker | unknown",
       "paper_endpoint_source": "CONFIGURED | SAFE_DEFAULT_PAPER_ENDPOINT",
+      "run_paper_operator_state": {
+        "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
+        "schema_version": "run-paper-command-center-v1",
+        "overall_status": {
+          "code": "READY | BLOCKED | ACTIVE | STALE | ERROR",
+          "label": "plain-English operator status",
+          "severity": "green | yellow | red | gray",
+          "detail": "concise operator-facing detail"
+        },
+        "can_run_paper": {
+          "allowed": false,
+          "label": "Start allowed | Start blocked",
+          "reason": "plain-English disabled reason or null",
+          "reason_codes": [],
+          "warning_codes": [],
+          "uses_existing_governed_start_intent": "/operator/intent/paper/start",
+          "requires_operator_confirmations": true
+        },
+        "endpoint": {
+          "display": "https://paper-api.alpaca.markets",
+          "family": "paper | live | data | broker | unknown",
+          "source": "CONFIGURED | SAFE_DEFAULT_PAPER_ENDPOINT",
+          "configured": false,
+          "valid": true,
+          "blocker_code": "raw code or null"
+        },
+        "credentials": {
+          "configured": false,
+          "missing_fields": ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
+          "raw_secret_values_included": false,
+          "secrets_values_exposed": false
+        },
+        "runtime": {
+          "state": "IDLE | RUNNING | STALE_ACTIVE_SESSION | UNKNOWN",
+          "safe_stop_status": "NO_ACTIVE_RUNTIME | SAFE_STOP_AVAILABLE | SAFE_STOP_UNAVAILABLE"
+        },
+        "broker_truth": {
+          "broker_confirmed": false,
+          "broker_read_occurred": false,
+          "broker_mutation_occurred": false
+        },
+        "safety_locks": {
+          "live": {"locked": true, "enabled": false},
+          "real_money": {"blocked": true, "enabled": false},
+          "manual_trading": {"available": false},
+          "force_trade": {"available": false}
+        },
+        "advanced": "raw proof fields and reason codes, collapsed by default in UI"
+      },
       "live_blocked": true,
       "real_money_blocked": true,
       "uses_existing_governed_start_intent": true,

@@ -142,6 +142,23 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "operator_actions_are_intents": True,
         "server_authority_required": True,
     },
+    "view_models": {
+        "run_paper_operator_state": {
+            "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
+            "canonical_authority": "OPERATOR_LAUNCH_READINESS",
+            "endpoint": "/operator/launch-readiness",
+            "schema_version": "run-paper-command-center-v1",
+            "main_answer_plain_english": True,
+            "raw_codes_in_advanced_details": True,
+            "uses_existing_governed_start_intent": "/operator/intent/paper/start",
+            "can_execute": False,
+            "broker_mutation_occurred": False,
+            "trading_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+    },
     "endpoints": {
         "/operator/status": "read_only_runtime_status",
         "/operator/health": "read_only_operator_health",

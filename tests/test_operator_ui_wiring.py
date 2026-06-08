@@ -257,6 +257,20 @@ def test_responsive_css_wraps_header_tables_cards_and_ai_drawer():
 def test_command_center_has_paper_launch_control_and_safe_duration_options():
     text = _app_text()
 
+    assert "Run PAPER Command Center" in text
+    assert "runPaperOperatorState" in text
+    assert "normalizeRunPaperOperatorState" in text
+    assert "data-run-paper-command-center" in text
+    assert "data-run-paper-top-status" in text
+    assert "data-run-paper-start-control" in text
+    assert "data-run-paper-start-state" in text
+    assert "data-run-paper-advanced" in text
+    assert "run-paper-proof-grid" in text
+    assert "Start readiness" in text
+    assert "Broker / portfolio truth" in text
+    assert "Next safe action:" in text
+    assert "Advanced endpoint and start proof" in text
+    assert "Raw blocker code is kept here" in text
     assert "PAPER Launch Control" in text
     assert "Alpaca PAPER endpoint" in text
     assert "Endpoint source" in text
@@ -292,6 +306,26 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "Portfolio Snapshot" in text
     assert "Current Assets / Positions Preview" in text
     assert "AI Quant Advisor" in text
+
+
+def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert "canRun.reason" in text
+    assert "Advanced endpoint and start proof" in text
+    assert "runPaperAdvancedRows" in text
+    assert "paper_endpoint_blocker_code" in text
+    assert "secrets_values_exposed" in text
+    assert "rawSecretValuesIncluded" in text
+    assert "broker_mutation_occurred" in text
+    assert "trading_mutation_occurred" in text
+    assert "orderSubmissionOccurred" in text
+    assert "liquidationOccurred" in text
+    assert "No broker mutation" in text
+    assert ".run-paper-status-banner" in css
+    assert ".run-paper-proof-grid" in css
+    assert ".run-paper-proof-tile" in css
 
 
 def test_historical_test_control_is_visible_and_honest():

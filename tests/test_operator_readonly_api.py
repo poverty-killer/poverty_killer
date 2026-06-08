@@ -74,6 +74,9 @@ def test_operator_contracts_distinguish_truth_authorities(tmp_path):
     assert payload["control_policy"]["ui_is_trading_engine"] is False
     assert payload["control_policy"]["manual_trading_available"] is False
     assert payload["control_policy"]["live_operation_available"] is False
+    assert payload["view_models"]["run_paper_operator_state"]["canonical_authority"] == "OPERATOR_LAUNCH_READINESS"
+    assert payload["view_models"]["run_paper_operator_state"]["raw_codes_in_advanced_details"] is True
+    assert payload["view_models"]["run_paper_operator_state"]["broker_mutation_occurred"] is False
     assert payload["truth_labels"]["broker_confirmed"].startswith("Canonical")
     assert payload["truth_labels"]["unknown"].startswith("Truth unavailable")
 

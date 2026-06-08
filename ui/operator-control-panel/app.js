@@ -735,7 +735,7 @@
     ].filter(Boolean).join("");
   }
 
-  function paperLaunchDisabledReason() {
+  function legacyPaperLaunchDisabledReason() {
     const launch = data.launchReadiness || {};
     const sup = data.supervisor || {};
     if (!backendConnected()) return "Disabled: backend unavailable; mock/sample mode cannot start PAPER.";
@@ -750,9 +750,75 @@
     return "";
   }
 
+  function runPaperState() {
+    return (data.launchReadiness && data.launchReadiness.runPaperOperatorState) || {};
+  }
+
+  function severityColor(value) {
+    const v = String(value || "").toLowerCase();
+    if (["green", "yellow", "red", "gray", "cyan", "blue", "purple"].includes(v)) return v;
+    return statusColor(value);
+  }
+
+  function paperLaunchDisabledReason() {
+    const op = runPaperState();
+    const canRun = op.canRunPaper || {};
+    const overall = op.overallStatus || {};
+    if (op.source && canRun.allowed !== true) {
+      const reason = canRun.reason || overall.detail || "backend start authority is blocked";
+      return `Disabled: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
+    }
+    return legacyPaperLaunchDisabledReason();
+  }
+
+  function renderRunPaperProofTile(label, value, detail, color) {
+    return `
+      <div class="run-paper-proof-tile">
+        <div class="proof-label">${escapeHtml(label)}</div>
+        <div class="proof-value">${color ? badge(value, color) : escapeHtml(value || "unknown")}</div>
+        <div class="proof-detail">${escapeHtml(detail || "")}</div>
+      </div>
+    `;
+  }
+
+  function runPaperAdvancedRows(op, launch) {
+    const advanced = op.advanced || {};
+    return [
+      ["final_launch_readiness", tokenText(advanced.finalLaunchReadiness || launch.finalLaunchReadiness || "UNKNOWN")],
+      ["reason_codes", tokenText((advanced.reasonCodes || launch.reasonCodes || []).join(", ") || "none")],
+      ["paper_endpoint_display", escapeHtml(advanced.paperEndpointDisplay || launch.paperEndpointDisplay || "unavailable")],
+      ["paper_endpoint_family", tokenText(advanced.paperEndpointFamily || launch.paperEndpointFamily || "unknown")],
+      ["paper_endpoint_host", escapeHtml(advanced.paperEndpointHost || launch.paperEndpointHost || "unavailable")],
+      ["paper_endpoint_blocker_code", tokenText(advanced.paperEndpointBlockerCode || launch.paperEndpointBlockerCode || "none")],
+      ["alpaca_endpoint_configured", badge(advanced.alpacaEndpointConfigured === true ? "true" : "false", advanced.alpacaEndpointConfigured === true ? "gray" : "cyan")],
+      ["alpaca_endpoint_source", tokenText(advanced.alpacaEndpointSource || launch.paperEndpointSource || "UNKNOWN")],
+      ["alpaca_paper_endpoint_valid", badge(advanced.alpacaPaperEndpointValid === true ? "true" : "false", advanced.alpacaPaperEndpointValid === true ? "green" : "red")],
+      ["alpaca_live_endpoint_blocked", badge(advanced.alpacaLiveEndpointBlocked !== false ? "true" : "false", advanced.alpacaLiveEndpointBlocked !== false ? "red" : "yellow")],
+      ["paper_start_allowed", badge(advanced.paperStartAllowed === true ? "true" : "false", advanced.paperStartAllowed === true ? "green" : "red")],
+      ["broker_mutation_occurred", badge(advanced.brokerMutationOccurred === true ? "true" : "false", advanced.brokerMutationOccurred === true ? "red" : "green")],
+      ["trading_mutation_occurred", badge(advanced.tradingMutationOccurred === true ? "true" : "false", advanced.tradingMutationOccurred === true ? "red" : "green")],
+      ["live_enabled", badge(advanced.liveEnabled === true ? "true" : "false", advanced.liveEnabled === true ? "red" : "green")],
+      ["real_money_enabled", badge(advanced.realMoneyEnabled === true ? "true" : "false", advanced.realMoneyEnabled === true ? "red" : "green")],
+      ["secrets_values_exposed", badge(advanced.secretsValuesExposed === true ? "true" : "false", advanced.secretsValuesExposed === true ? "red" : "green")]
+    ];
+  }
+
   function renderPaperLaunchControl(formId) {
     const launch = data.launchReadiness || {};
     const sup = data.supervisor || {};
+    const op = runPaperState();
+    const overall = op.overallStatus || {
+      label: launch.finalLaunchReadiness || "Launch readiness unknown",
+      code: launch.finalLaunchReadiness || "UNKNOWN",
+      severity: statusColor(launch.finalLaunchReadiness || "UNKNOWN"),
+      detail: "Launch readiness loaded from legacy fields."
+    };
+    const canRun = op.canRunPaper || {};
+    const endpoint = op.endpoint || {};
+    const credentials = op.credentials || {};
+    const runtime = op.runtime || {};
+    const brokerTruth = op.brokerTruth || {};
+    const safetyLocks = op.safetyLocks || {};
     const disabledReason = paperLaunchDisabledReason();
     const startDisabled = disabledReason ? "disabled" : "";
     const watchlist = (sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"]).join(",");
@@ -775,22 +841,43 @@
     const runtimeAttachment = sup.sessionId && sup.sessionId !== "none"
       ? `PAPER run attached: ${sup.sessionId}`
       : (sup.paperStartAllowed === true ? "Ready. No PAPER run currently attached." : `No PAPER run currently attached; ${sup.paperStartRefusalReason || "start blocked"}.`);
+    const endpointSourceLabel = endpoint.configured === true ? "Operator configured" : "Safe default";
+    const blockerText = canRun.allowed === true
+      ? "No blocking readiness checks reported by backend start authority."
+      : (canRun.reason || overall.detail || "Backend start authority is blocked.");
+    const credentialDetail = credentials.configured === true
+      ? `Source: ${credentials.source || "configured"}; precedence: ${credentials.precedence || "ENV_PRESENT_OVERRIDES_LOCAL_SECRET"}.`
+      : `Missing fields: ${(credentials.missingFields || ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"]).join(", ")}.`;
+    const safetyDetail = [
+      safetyLocks.live && safetyLocks.live.locked ? "live locked" : "live status unknown",
+      safetyLocks.realMoney && safetyLocks.realMoney.blocked ? "real money blocked" : "real money status unknown",
+      safetyLocks.manualTrading && safetyLocks.manualTrading.available === false ? "manual trading unavailable" : "manual trading status unknown",
+      safetyLocks.forceTrade && safetyLocks.forceTrade.available === false ? "force trade unavailable" : "force trade status unknown"
+    ].join("; ");
     return `
-      <div class="card span-12 paper-launch-card" data-paper-form-card="${escapeHtml(formId)}">
+      <div class="card span-12 paper-launch-card run-paper-command-center" data-run-paper-command-center data-paper-form-card="${escapeHtml(formId)}">
         <div class="split">
-          <h3>PAPER Launch Control</h3>
-          ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
+          <h3>Run PAPER Command Center</h3>
+          ${badge(overall.label || overall.code || "UNKNOWN", severityColor(overall.severity || overall.code))}
         </div>
-        <p class="muted">Starts the existing governed PAPER runner only. Current execution-authority max: ${escapeHtml(formatDuration(maxDuration))}. Longer multi-day runs require separate approval/readiness.</p>
-        <div class="status-strip detail-strip">
-          ${badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))}
-          ${badge(`Supervisor ${sup.state || "UNKNOWN"}`, statusColor(sup.state || "UNKNOWN"))}
-          ${badge(sup.paperStartAllowed ? "Start allowed" : "Start blocked", sup.paperStartAllowed ? "green" : "yellow")}
-          ${badge(`Endpoint ${launch.paperEndpointFamily || "unknown"}`, launch.paperEndpointOnly ? "green" : "red")}
-          ${badge("Live locked", "red")}
-          ${badge("Real-money blocked", "red")}
+        <p class="muted">PAPER Launch Control. Starts the existing governed PAPER runner only. Current execution-authority max: ${escapeHtml(formatDuration(maxDuration))}. Longer multi-day runs require separate approval/readiness.</p>
+        <div class="run-paper-status-banner ${escapeHtml(severityColor(overall.severity || overall.code))}" data-run-paper-top-status>
+          <div>
+            <div class="run-paper-status-title">${escapeHtml(overall.label || overall.code || "Readiness unknown")}</div>
+            <div class="run-paper-status-detail">${escapeHtml(overall.detail || "Backend launch-readiness state is unavailable.")}</div>
+          </div>
+          ${badge(canRun.allowed === true ? "Start allowed" : "Start blocked", canRun.allowed === true ? "green" : "red")}
         </div>
-        <div class="notice">${escapeHtml(runtimeAttachment)}</div>
+        <div class="run-paper-proof-grid">
+          ${renderRunPaperProofTile("Alpaca PAPER endpoint", endpoint.label || launch.paperEndpointDisplay || "Endpoint unavailable", `${endpointSourceLabel}; family ${endpoint.family || launch.paperEndpointFamily || "unknown"}; host ${endpoint.host || launch.paperEndpointHost || "unavailable"}.`, endpoint.valid === true || launch.paperEndpointOnly ? "green" : "red")}
+          ${renderRunPaperProofTile("Credentials", credentials.label || (launch.alpacaPaperCredentialsConfigured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing"), credentialDetail, credentials.configured === true || launch.alpacaPaperCredentialsConfigured ? "green" : "red")}
+          ${renderRunPaperProofTile("Runtime", runtime.label || runtimeAttachment, `Supervisor ${runtime.state || sup.state || "UNKNOWN"}; safe stop ${runtime.safeStopStatus || launch.safeStopStatus || "UNKNOWN"}.`, (runtime.state || sup.state) === "RUNNING" ? "yellow" : "green")}
+          ${renderRunPaperProofTile("Broker / portfolio truth", brokerTruth.label || "Broker truth not loaded in this card", brokerTruth.detail || "Portfolio Snapshot remains the broker-confirmed truth area; no positions are invented here.", brokerTruth.status === "BROKER_READ_READY_NOT_IN_THIS_VIEW" ? "yellow" : "red")}
+          ${renderRunPaperProofTile("Safety locks", "Live locked / real money blocked", safetyDetail, "red")}
+          ${renderRunPaperProofTile("Start readiness", canRun.allowed === true ? "Start allowed" : "Start blocked", blockerText, canRun.allowed === true ? "green" : "red")}
+        </div>
+        <div class="notice ${canRun.allowed === true ? "" : "error"}" data-run-paper-blocker-text>${escapeHtml(blockerText)}</div>
+        <div class="notice" data-run-paper-next-action>Next safe action: ${escapeHtml(op.nextSafeAction || "Review launch readiness and do not run PAPER without approval.")}</div>
         ${sup.lastHistoricalRefusal ? `<div class="notice mono">Last historical refusal: ${tokenText(sup.lastHistoricalRefusal)}. Not current start authority.</div>` : ""}
         <div class="launch-control-layout">
           <div class="launch-input-panel">
@@ -827,16 +914,17 @@
           </div>
         </div>
         <div class="button-row">
-          <button class="intent-button paper primary-action" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" ${startDisabled}>
+          <button class="intent-button paper primary-action" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" data-run-paper-start-control ${startDisabled}>
             Start Bounded PAPER Run
           </button>
           <button class="intent-button live" disabled>No manual trades / force trade unavailable</button>
         </div>
-        <div class="notice ${disabledReason ? "error" : ""}">${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
-        <details class="ai-context-details">
-          <summary>Why this can be disabled</summary>
-          <div class="notice">Alpaca key missing means this backend sees neither an environment key nor a Local credential vault entry for Alpaca PAPER. Add it in Keys & Providers, then validate read-only.</div>
-          <div class="notice">Endpoint proof: ${escapeHtml(launch.paperEndpointDisplay || "unavailable")} (${escapeHtml(launch.paperEndpointFamily || "unknown")}; ${escapeHtml(launch.paperEndpointSource || "UNKNOWN")}). ${escapeHtml(launch.paperEndpointBlockerCode || "no endpoint blocker")}</div>
+        <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
+        <details class="ai-context-details" data-run-paper-advanced>
+          <summary>Advanced endpoint and start proof</summary>
+          <div class="notice">Endpoint proof: ${escapeHtml(endpoint.display || launch.paperEndpointDisplay || "unavailable")} (${escapeHtml(endpoint.family || launch.paperEndpointFamily || "unknown")}; ${escapeHtml(endpoint.source || launch.paperEndpointSource || "UNKNOWN")}). Raw blocker code is kept here: ${escapeHtml(endpoint.blockerCode || launch.paperEndpointBlockerCode || "none")}.</div>
+          ${kv(runPaperAdvancedRows(op, launch))}
+          <div class="status-strip detail-strip">${(launch.checks || []).map((check) => badge(`${check.checkId}:${check.status}`, statusColor(check.status))).join("")}</div>
         </details>
         <div class="notice mono">Endpoint target: /operator/intent/paper/start only. Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
       </div>
@@ -845,6 +933,11 @@
 
   function renderHomeLaunchReadiness() {
     const launch = data.launchReadiness || {};
+    const op = runPaperState();
+    const overall = op.overallStatus || {};
+    const canRun = op.canRunPaper || {};
+    const endpoint = op.endpoint || {};
+    const credentials = op.credentials || {};
     const readiness = data.providerReadiness || {};
     const providerCounts = readiness.counts || {};
     const blockerChecks = (launch.checks || []).filter((check) => {
@@ -853,10 +946,11 @@
     });
     return `
       <div class="card span-12" data-home-section="launch-readiness"><h3>Launch Readiness</h3>${kv([
-        ["Can I run PAPER right now?", badge(launch.finalLaunchReadiness || "UNKNOWN", statusColor(launch.finalLaunchReadiness || "UNKNOWN"))],
-        ["Exact blockers", tokenText((launch.reasonCodes || []).join(", ") || "none reported")],
-        ["Alpaca PAPER credentials", badge(launch.alpacaPaperCredentialsConfigured ? "configured" : "missing", launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
-        ["Alpaca PAPER endpoint", badge(launch.paperEndpointStatus || "UNKNOWN", launch.paperEndpointOnly ? "green" : "red")],
+        ["Can I run PAPER right now?", badge(overall.label || launch.finalLaunchReadiness || "UNKNOWN", severityColor(overall.severity || launch.finalLaunchReadiness || "UNKNOWN"))],
+        ["Why / why not", escapeHtml(canRun.allowed === true ? "Backend start authority is available after confirmations." : (canRun.reason || overall.detail || "Start authority is blocked."))],
+        ["Next safe action", escapeHtml(op.nextSafeAction || "Review the blocked readiness detail before requesting Start.")],
+        ["Alpaca PAPER credentials", badge(credentials.label || (launch.alpacaPaperCredentialsConfigured ? "configured" : "missing"), launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
+        ["Alpaca PAPER endpoint", badge(endpoint.label || launch.paperEndpointStatus || "UNKNOWN", launch.paperEndpointOnly ? "green" : "red")],
         ["Endpoint display", escapeHtml(launch.paperEndpointDisplay || "unavailable")],
         ["Endpoint family", badge(launch.paperEndpointFamily || "unknown", launch.paperEndpointOnly ? "green" : "red")],
         ["Endpoint host", escapeHtml(launch.paperEndpointHost || "unavailable")],
@@ -871,9 +965,9 @@
         ["Storage/audit", badge(data.diagnostics.sessionStoreStatus || "UNKNOWN", statusColor(data.diagnostics.sessionStoreStatus || "UNKNOWN"))],
         ["Portfolio read", badge(launch.portfolioReadAvailability || "UNKNOWN", statusColor(launch.portfolioReadAvailability || "UNKNOWN"))]
       ])}
-        <div class="notice">What this means: if this card says READY_FOR_BOUNDED_PAPER, the backend sees the required PAPER-safe prerequisites. If it is blocked, fix the listed blocker before pressing Start.</div>
+        <div class="notice">What this means: backend readiness is the source of truth. If this card says blocked, fix the plain-English blocker before pressing Start.</div>
         ${launch.paperEndpointOnly ? "" : `<div class="notice error">Endpoint action: ${escapeHtml(launch.paperEndpointOperatorAction || "Set APCA_API_BASE_URL to https://paper-api.alpaca.markets in Keys & Providers.")}</div>`}
-        ${blockerChecks.length ? `<div class="notice error">Current blocker detail: ${escapeHtml(blockerChecks.map((check) => check.detail || check.title || check.checkId || "unknown").join(" | "))}</div>` : ""}
+        ${blockerChecks.length ? `<div class="notice error">Current blocker detail: ${escapeHtml(canRun.reason || overall.detail || "See advanced readiness checks.")}</div>` : ""}
         <details class="ai-context-details">
           <summary>Advanced readiness checks</summary>
           ${table(
@@ -4198,6 +4292,126 @@
     };
   }
 
+  function normalizeRunPaperOperatorState(state) {
+    const payload = state || {};
+    const overall = payload.overall_status || {};
+    const canRun = payload.can_run_paper || {};
+    const endpoint = payload.endpoint || {};
+    const credentials = payload.credentials || {};
+    const runtime = payload.runtime || {};
+    const brokerTruth = payload.broker_truth || {};
+    const safetyLocks = payload.safety_locks || {};
+    const advanced = payload.advanced || {};
+    return {
+      source: pick(payload.source, ""),
+      schemaVersion: pick(payload.schema_version, "run-paper-command-center-v1"),
+      overallStatus: {
+        code: pick(overall.code, "UNKNOWN"),
+        label: pick(overall.label, "Readiness unknown"),
+        severity: pick(overall.severity, "gray"),
+        detail: pick(overall.detail, "")
+      },
+      canRunPaper: {
+        allowed: canRun.allowed === true,
+        label: pick(canRun.label, "Start blocked"),
+        reason: pick(canRun.reason, null),
+        reasonCodes: Array.isArray(canRun.reason_codes) ? canRun.reason_codes : [],
+        warningCodes: Array.isArray(canRun.warning_codes) ? canRun.warning_codes : [],
+        usesExistingGovernedStartIntent: pick(canRun.uses_existing_governed_start_intent, "/operator/intent/paper/start"),
+        requiresOperatorConfirmations: canRun.requires_operator_confirmations !== false
+      },
+      nextSafeAction: pick(payload.next_safe_action, ""),
+      endpoint: {
+        label: pick(endpoint.label, ""),
+        display: pick(endpoint.display, ""),
+        family: pick(endpoint.family, "unknown"),
+        host: pick(endpoint.host, ""),
+        source: pick(endpoint.source, "UNKNOWN"),
+        configured: endpoint.configured === true,
+        valid: endpoint.valid === true,
+        status: pick(endpoint.status, "UNKNOWN"),
+        blockerCode: pick(endpoint.blocker_code, null),
+        operatorAction: pick(endpoint.operator_action, "")
+      },
+      credentials: {
+        label: pick(credentials.label, ""),
+        configured: credentials.configured === true,
+        missingFields: Array.isArray(credentials.missing_fields) ? credentials.missing_fields : [],
+        source: pick(credentials.source, "NOT_CONFIGURED"),
+        precedence: pick(credentials.precedence, "ENV_PRESENT_OVERRIDES_LOCAL_SECRET"),
+        rawSecretValuesIncluded: credentials.raw_secret_values_included === true,
+        secretsValuesExposed: credentials.secrets_values_exposed === true
+      },
+      runtime: {
+        label: pick(runtime.label, ""),
+        state: pick(runtime.state, "UNKNOWN"),
+        processState: pick(runtime.process_state, "UNKNOWN"),
+        activeSessionId: pick(runtime.active_session_id, null),
+        paperStartRefusalReason: pick(runtime.paper_start_refusal_reason, null),
+        paperStopAllowed: runtime.paper_stop_allowed === true,
+        safeStopStatus: pick(runtime.safe_stop_status, "UNKNOWN")
+      },
+      brokerTruth: {
+        status: pick(brokerTruth.status, "UNKNOWN"),
+        label: pick(brokerTruth.label, "Broker truth unknown"),
+        detail: pick(brokerTruth.detail, ""),
+        brokerConfirmed: brokerTruth.broker_confirmed === true,
+        brokerReadOccurred: brokerTruth.broker_read_occurred === true,
+        brokerReadAttempted: brokerTruth.broker_read_attempted === true,
+        brokerMutationOccurred: brokerTruth.broker_mutation_occurred === true,
+        orderSubmissionOccurred: brokerTruth.order_submission_occurred === true,
+        cancelOccurred: brokerTruth.cancel_occurred === true,
+        liquidationOccurred: brokerTruth.liquidation_occurred === true
+      },
+      safetyLocks: {
+        live: {
+          label: pick(safetyLocks.live && safetyLocks.live.label, "Live locked"),
+          locked: !safetyLocks.live || safetyLocks.live.locked !== false,
+          enabled: safetyLocks.live && safetyLocks.live.enabled === true
+        },
+        realMoney: {
+          label: pick(safetyLocks.real_money && safetyLocks.real_money.label, "Real money blocked"),
+          blocked: !safetyLocks.real_money || safetyLocks.real_money.blocked !== false,
+          enabled: safetyLocks.real_money && safetyLocks.real_money.enabled === true
+        },
+        manualTrading: {
+          label: pick(safetyLocks.manual_trading && safetyLocks.manual_trading.label, "Manual trading unavailable"),
+          available: safetyLocks.manual_trading && safetyLocks.manual_trading.available === true
+        },
+        forceTrade: {
+          label: pick(safetyLocks.force_trade && safetyLocks.force_trade.label, "Force trade unavailable"),
+          available: safetyLocks.force_trade && safetyLocks.force_trade.available === true
+        },
+        brokerMutation: {
+          label: pick(safetyLocks.broker_mutation && safetyLocks.broker_mutation.label, "No broker mutation"),
+          occurred: safetyLocks.broker_mutation && safetyLocks.broker_mutation.occurred === true
+        }
+      },
+      advanced: {
+        finalLaunchReadiness: pick(advanced.final_launch_readiness, "UNKNOWN"),
+        reasonCodes: Array.isArray(advanced.reason_codes) ? advanced.reason_codes : [],
+        checks: Array.isArray(advanced.checks) ? advanced.checks : [],
+        paperEndpointAuthority: advanced.paper_endpoint_authority || {},
+        paperEndpointDisplay: pick(advanced.paper_endpoint_display, ""),
+        paperEndpointFamily: pick(advanced.paper_endpoint_family, "unknown"),
+        paperEndpointHost: pick(advanced.paper_endpoint_host, ""),
+        paperEndpointBlockerCode: pick(advanced.paper_endpoint_blocker_code, null),
+        alpacaEndpointConfigured: advanced.alpaca_endpoint_configured === true,
+        alpacaEndpointSource: pick(advanced.alpaca_endpoint_source, "UNKNOWN"),
+        alpacaPaperEndpointValid: advanced.alpaca_paper_endpoint_valid === true,
+        alpacaLiveEndpointBlocked: advanced.alpaca_live_endpoint_blocked !== false,
+        paperStartAllowed: advanced.paper_start_allowed === true,
+        brokerMutationOccurred: advanced.broker_mutation_occurred === true,
+        tradingMutationOccurred: advanced.trading_mutation_occurred === true,
+        liveEnabled: advanced.live_enabled === true,
+        realMoneyEnabled: advanced.real_money_enabled === true,
+        secretsValuesExposed: advanced.secrets_values_exposed === true,
+        backendDegradedReasons: Array.isArray(advanced.backend_degraded_reasons) ? advanced.backend_degraded_reasons : [],
+        paperStartAuthorityDetail: pick(advanced.paper_start_authority_detail, null)
+      }
+    };
+  }
+
   function normalizeBackendData(payload) {
     const next = clone(mockData);
     const status = payload.status || {};
@@ -4599,6 +4813,7 @@
         alpacaLiveEndpointBlocked: launchReadiness.alpaca_live_endpoint_blocked !== false,
         paperEndpointAuthority: launchReadiness.paper_endpoint_authority || {},
         paperStartAllowed: launchReadiness.paper_start_allowed === true,
+        runPaperOperatorState: normalizeRunPaperOperatorState(launchReadiness.run_paper_operator_state),
         safeStopStatus: pick(launchReadiness.safe_stop_status, "UNKNOWN"),
         portfolioReadAvailability: pick(launchReadiness.portfolio_read_availability, "UNKNOWN"),
         backendDegradedReasons: Array.isArray(launchReadiness.backend_degraded_reasons) ? launchReadiness.backend_degraded_reasons : []
