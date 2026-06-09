@@ -325,16 +325,16 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "data-paper-duration-amount" in text
     assert "data-paper-duration-unit" in text
     assert "data-paper-confirm-no-manual-trades" in text
-    assert "1 day" in text
-    assert "86400" in text
-    assert "Longer multi-day runs require separate approval/readiness." in text
+    assert "5 days" in text
+    assert "432000" in text
+    assert "Long-running PAPER stays PAPER-only" in text
     assert "Ready. No PAPER run currently attached." in text
     assert "Last historical refusal" in text
-    assert "Selected duration exceeds the current runner authority max" in text
-    assert "Custom minutes / hours" in text
+    assert "Selected duration exceeds the current governed PAPER lease max" in text
+    assert "Custom minutes / hours / days" in text
     assert "604800" not in text
     assert "/operator/intent/paper/start" in text
-    assert "Start Bounded PAPER Run" in text
+    assert "Start Governed PAPER Run" in text
     assert "Portfolio Snapshot" in text
     assert "Current Assets / Positions Preview" in text
     assert "AI Quant Advisor" in text

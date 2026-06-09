@@ -16,7 +16,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import APIRouter, FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -2083,7 +2083,7 @@ class OperatorSnapshotProvider:
                 facts.append(f"Paper start allowed: {str(runtime.get('paper_start_allowed') is True or readiness.get('paper_start_allowed') is True).lower()}.")
             max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds")
             if max_duration:
-                facts.append(f"Max duration: {max_duration} seconds / {int(max_duration) // 86400 if int(max_duration) >= 86400 else 'less than 1'} day.")
+                facts.append(f"Max duration: {max_duration} seconds / {self._duration_days_label(max_duration)}.")
             if readiness.get("reason_codes"):
                 unknowns.append(f"Run blockers/warnings: {', '.join(str(item) for item in readiness.get('reason_codes') or [])}.")
             else:
@@ -2396,11 +2396,7 @@ class OperatorSnapshotProvider:
                 ("paper" in lowered_question or "smoke run" in lowered_question)
                 and any(term in lowered_question for term in ("ready", "assessment", "can i", "run", "start"))
             )
-            if (
-                paper_readiness_question
-                and truth["launch"] == "READY_FOR_BOUNDED_PAPER"
-                and truth["paper_start_allowed"] is True
-            ):
+            if paper_readiness_question and self._ai_paper_runnable_truth(truth):
                 for term in (
                     "not ready",
                     "not cleared",
@@ -2433,13 +2429,13 @@ class OperatorSnapshotProvider:
                 f"- Provider/model call: {display_provider} / {model}",
                 f"- Launch readiness: {truth['launch']}",
                 f"- Supervisor: {truth['supervisor']}; no active PAPER run attached.",
-                f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}; max duration: {truth['max_duration']} seconds / 1 day.",
+                f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}; max duration: {truth['max_duration']} seconds / {self._duration_days_label(truth['max_duration'])}.",
                 f"- Live {truth['live']}; real money {truth['real_money']}.",
             ]
             if truth["historical_duplicate"]:
                 answer.append("- Historical duplicate refusal exists as audit context only; it is not current start authority.")
-            if truth["launch"] == "READY_FOR_BOUNDED_PAPER" and truth["paper_start_allowed"] is True:
-                answer.append("Next step: Shan may use the Start PAPER button for a 10-20 minute bounded smoke run. AI cannot start it.")
+            if self._ai_paper_runnable_truth(truth):
+                answer.append("Next step: Shan may use the Start PAPER button for a governed PAPER run. AI cannot start it.")
             else:
                 reason = str((truth["blocking_codes"] or ["UNKNOWN_BLOCKER"])[0])
                 answer.append(f"Next step: resolve current blocker {reason}.")
@@ -2565,11 +2561,19 @@ class OperatorSnapshotProvider:
         readiness = context.get("launch_readiness") or {}
         runtime = context.get("runtime") or {}
         return (
-            readiness.get("final_launch_readiness") == "READY_FOR_BOUNDED_PAPER"
+            self._ai_paper_runnable_readiness(readiness, runtime)
             and (readiness.get("paper_start_allowed") is True or runtime.get("paper_start_allowed") is True)
             and str(runtime.get("supervisor_state") or "").upper() == "IDLE"
             and bool(runtime.get("current_runtime_attached")) is False
         )
+
+    def _ai_paper_runnable_readiness(self, readiness: Mapping[str, Any], runtime: Mapping[str, Any] | None = None) -> bool:
+        launch = str(readiness.get("final_launch_readiness") or "")
+        paper_start_allowed = readiness.get("paper_start_allowed") is True or (runtime or {}).get("paper_start_allowed") is True
+        return paper_start_allowed and launch in {"READY_FOR_BOUNDED_PAPER", "DEGRADED_BUT_RUNNABLE"}
+
+    def _ai_paper_runnable_truth(self, truth: Mapping[str, Any]) -> bool:
+        return truth.get("paper_start_allowed") is True and str(truth.get("launch") or "") in {"READY_FOR_BOUNDED_PAPER", "DEGRADED_BUT_RUNNABLE"}
 
     def _ai_historical_duplicate_refusal(self, context: dict[str, Any]) -> bool:
         runtime = context.get("runtime") or {}
@@ -2578,11 +2582,11 @@ class OperatorSnapshotProvider:
     def _ai_runtime_truth(self, context: dict[str, Any]) -> dict[str, Any]:
         readiness = context.get("launch_readiness") or {}
         runtime = context.get("runtime") or {}
-        max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds") or 86400
+        max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds") or 432000
         try:
             max_duration_int = int(max_duration)
         except (TypeError, ValueError):
-            max_duration_int = 86400
+            max_duration_int = 432000
         blocking_codes = list(readiness.get("reason_codes") or []) if readiness.get("final_launch_readiness") == "BLOCKED" else []
         return {
             "launch": readiness.get("final_launch_readiness") or "UNKNOWN",
@@ -2607,18 +2611,32 @@ class OperatorSnapshotProvider:
             return "Fix audit/session storage readiness before any PAPER start."
         return f"Review launch readiness reason code {reason_code} in the operator UI."
 
+    def _duration_days_label(self, seconds: Any) -> str:
+        try:
+            value = int(seconds)
+        except (TypeError, ValueError):
+            return "unknown duration"
+        if value < 86400:
+            return "less than 1 day"
+        days = value / 86400
+        if days.is_integer():
+            days_text = str(int(days))
+        else:
+            days_text = f"{days:.2f}".rstrip("0").rstrip(".")
+        return f"{days_text} day{'s' if days != 1 else ''}"
+
     def _ai_paper_readiness_answer(self, question: str, context: dict[str, Any]) -> str:
         truth = self._ai_runtime_truth(context)
-        if truth["launch"] == "READY_FOR_BOUNDED_PAPER" and truth["paper_start_allowed"] is True:
+        if self._ai_paper_runnable_truth(truth):
             return "\n".join(
                 [
-                    "Yes - bounded PAPER is ready and start is allowed.",
+                    "Yes - governed PAPER is ready and start is allowed.",
                     f"- Launch readiness: {truth['launch']}",
                     f"- Supervisor: {truth['supervisor']}; no active PAPER run attached.",
                     f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}",
-                    f"- Max duration: {truth['max_duration']} seconds / 1 day",
+                    f"- Max duration: {truth['max_duration']} seconds / {self._duration_days_label(truth['max_duration'])}",
                     f"- Live {truth['live']}; real money {truth['real_money']}.",
-                    "Next step: Shan must click Start PAPER on the Run PAPER page. Recommended first run: 10-20 minutes only.",
+                    "Next step: Shan must click Start PAPER on the Run PAPER page. Use a short proof first; long PAPER leases are available only through the same governed controls.",
                 ]
             )
         reason = str((truth["blocking_codes"] or ["UNKNOWN_BLOCKER"])[0])
@@ -2701,8 +2719,8 @@ class OperatorSnapshotProvider:
         if mode == "PORTFOLIO_REVIEW":
             return {"label": "Review Portfolio Home positions, exposure, open orders, and unavailable broker truth.", "page": "positions", "control_id": "positions_preview_table"}
         if mode == "RUN_PLANNER":
-            if readiness.get("final_launch_readiness") == "READY_FOR_BOUNDED_PAPER" and readiness.get("paper_start_allowed") is True:
-                return {"label": "Recommended first run: 10-20 minutes. I cannot start it; Shan must click Start PAPER.", "page": "command", "control_id": "paper_start"}
+            if self._ai_paper_runnable_readiness(readiness):
+                return {"label": "Start through the governed Run PAPER control. I cannot start it; Shan must click Start PAPER.", "page": "command", "control_id": "paper_start"}
             reason = str((readiness.get("reason_codes") or ["UNKNOWN_BLOCKER"])[0])
             return {"label": f"Do not start PAPER until {reason} is resolved.", "page": "command", "control_id": "paper_start"}
         if mode == "CODEX_PACKET_ADVISOR":

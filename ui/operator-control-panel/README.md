@@ -11,7 +11,7 @@ Scope:
   and supervisor state and labels the source as `OPERATOR_BACKEND`.
 - No broker mutation calls. Portfolio pages may request read-only PAPER broker
   account/positions/orders truth through governed `/operator/portfolio`.
-- No runtime mutation calls except future server-authorized bounded PAPER
+- No runtime mutation calls except server-authorized governed PAPER
   start/stop intents through `/operator/intent/paper/*`.
 - No DB/log reads from the UI. Credential forms send secrets only to the local
   backend secret store and never store raw values in the browser.
@@ -121,16 +121,15 @@ Operator activation:
 - Saved credentials go only to `.operator_secrets/provider_credentials.json`,
   which is gitignored. GET responses show configured status and masked
   fingerprints only.
-- Launch Readiness answers whether bounded PAPER can run now, with explicit
+- Launch Readiness answers whether governed PAPER can run now, with explicit
   blockers for missing credentials, non-paper endpoints, active runtime,
   storage, safe stop, and portfolio read availability.
 - Portfolio Home is the first screen and uses broker-confirmed PAPER data when credentials are
   available; otherwise it displays unavailable/degraded truth and does not
   invent positions.
-- The bounded PAPER setup flow calls only `/operator/intent/paper/start` with
+- The governed PAPER setup flow calls only `/operator/intent/paper/start` with
   PAPER-only/live-locked/real-money-blocked confirmations. Run PAPER accepts
-  bounded minutes/hours from 60 seconds through 1 day. Longer multi-day runs
-  require separate approval/readiness.
+  lease-bound minutes/hours/days from 60 seconds through 5 days.
 
 Reality audit / historical test control:
 
@@ -139,7 +138,7 @@ Reality audit / historical test control:
 - The global AI drawer includes a freeform question box and calls
   `/operator/ai/ask`. Provider/model failures are explicitly labeled as
   deterministic fallback, not a real model answer.
-- Run PAPER includes the visible bounded PAPER launch form and disabled
+- Run PAPER includes the visible governed PAPER launch form and disabled
   reason when launch readiness blocks it.
 - 4-Month Test provides the Alpaca historical test control. Until a
   governed strategy replay/backtest harness exists, it returns honest unavailable

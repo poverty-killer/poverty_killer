@@ -68,6 +68,35 @@ def test_alpaca_paper_save_valid_shaped_values_succeeds_with_schema_diagnostics(
     assert "PKFAKEALPACAKEY" not in str(saved)
 
 
+def test_alpaca_news_save_falls_back_when_atomic_replace_is_locked(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+
+    def fail_atomic_replace(_src, _dst):
+        raise PermissionError("simulated OneDrive file lock")
+
+    monkeypatch.setattr("app.operator_credentials.store.os.replace", fail_atomic_replace)
+
+    saved = store.save_provider(
+        "alpaca_news",
+        {
+            "APCA_API_KEY_ID": "PKFAKEALPACAKEY123",
+            "APCA_API_SECRET_KEY": "fake-alpaca-secret-value-123",
+            "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+        },
+    )
+    summary = store.provider_summary("alpaca_news")
+    reloaded = LocalCredentialStore(store.path).provider_summary("alpaca_news")
+    public_text = str(saved) + str(summary) + str(reloaded)
+
+    assert saved["status"] == "SAVED"
+    assert saved["write_strategy"] == "DIRECT_TRUNCATE_AFTER_ATOMIC_REPLACE_FAILED"
+    assert summary["configured"] is True
+    assert reloaded["configured"] is True
+    assert summary["secrets_values_exposed"] is False
+    assert "fake-alpaca-secret-value" not in public_text
+    assert "PKFAKEALPACAKEY" not in public_text
+
+
 def test_alpaca_paper_missing_api_key_refuses_with_exact_reason(tmp_path):
     store = _store(tmp_path)
 

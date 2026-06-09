@@ -8,6 +8,7 @@ from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupe
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
+from app.operator_activation.paper_baseline import BASELINE_POLICY_PROTECTED
 from app.operator_credentials.store import LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
 
@@ -26,6 +27,39 @@ PAPER_ENV = {
 }
 
 
+def _paper_preflight_snapshot() -> dict[str, object]:
+    return {
+        "endpoint_family": "paper",
+        "account": {
+            "id": "test-account-123456",
+            "status": "ACTIVE",
+            "equity": "50000",
+            "buying_power": "75000",
+            "currency": "USD",
+            "trading_blocked": False,
+            "account_blocked": False,
+            "transfers_blocked": False,
+            "pattern_day_trader": False,
+        },
+        "open_order_count": 0,
+        "open_orders": [],
+        "position_count": 1,
+        "positions": [{"symbol": "AAPL", "asset_class": "us_equity", "qty": "1", "side": "long"}],
+    }
+
+
+def _accept_ready_baseline(provider: OperatorSnapshotProvider) -> None:
+    accepted = provider.paper_baseline_accept(
+        {
+            "preflight_snapshot": _paper_preflight_snapshot(),
+            "policy": BASELINE_POLICY_PROTECTED,
+            "accepted_by_operator": "Shan/local operator",
+        }
+    )
+    assert accepted["accepted"] is True
+    assert accepted["broker_mutation_occurred"] is False
+
+
 def _ready_app(tmp_path):
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
@@ -34,6 +68,7 @@ def _ready_app(tmp_path):
         provider_env={},
         credential_store=store,
     )
+    _accept_ready_baseline(provider)
     return create_operator_app(provider=provider)
 
 
@@ -323,13 +358,13 @@ def test_ai_ask_ready_paper_run_answers_yes_without_fake_blocker(tmp_path):
     answer = payload["answer"]
 
     assert payload["mode"] == "RUN_PLANNER"
-    assert answer.startswith("Yes - bounded PAPER is ready and start is allowed.")
-    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
+    assert answer.startswith("Yes - governed PAPER is ready and start is allowed.")
+    assert "Launch readiness: DEGRADED_BUT_RUNNABLE" in answer
     assert "Supervisor: IDLE" in answer
     assert "Paper start allowed: true" in answer
     assert "Live locked; real money blocked" in answer
-    assert "Max duration: 86400 seconds / 1 day" in answer
-    assert "Recommended first run: 10-20 minutes only." in answer
+    assert "Max duration: 432000 seconds / 5 days" in answer
+    assert "Use a short proof first; long PAPER leases are available only through the same governed controls." in answer
     assert "Shan must click Start PAPER" in answer
     assert "Current backend truth:" not in answer
     assert "Provider readiness loaded" not in answer
@@ -357,6 +392,7 @@ def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_pat
         provider_env={},
         credential_store=store,
     )
+    _accept_ready_baseline(provider)
 
     def fail_if_external_called(url, headers, body, timeout_seconds):
         raise AssertionError("RUN_PLANNER readiness truth must not call an external provider")
@@ -396,8 +432,8 @@ def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_pat
     assert payload["route_decision"]["reason_code"] == "RUN_PLANNER_LOCAL_RUNTIME_TRUTH"
     assert payload["model_call_attempted"] is False
     assert payload["model_call_occurred"] is False
-    assert answer.startswith("Yes - bounded PAPER is ready and start is allowed.")
-    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
+    assert answer.startswith("Yes - governed PAPER is ready and start is allowed.")
+    assert "Launch readiness: DEGRADED_BUT_RUNNABLE" in answer
     assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
     assert "READY_IDLE_NO_ACTIVE_RUNTIME" in " ".join(payload["known_facts"])
     assert "Use Run PAPER only after readiness blockers are cleared" not in answer
@@ -426,7 +462,7 @@ def test_ai_ask_alive_is_concise_health_answer_when_ready_idle(tmp_path):
     assert payload["model_call_occurred"] is False
     assert answer.startswith("Yes - backend connected and our bot is idle-ready.")
     assert "Runtime: IDLE / no active PAPER run" in answer
-    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
+    assert "Launch readiness: DEGRADED_BUT_RUNNABLE" in answer
     assert "Current backend truth:" not in answer
     assert "Provider readiness loaded" not in answer
     assert "Redacted JSON" not in answer
@@ -1001,6 +1037,7 @@ def test_ai_ask_quant_smoke_run_live_contradiction_is_replaced_with_backend_trut
         provider_env={},
         credential_store=store,
     )
+    _accept_ready_baseline(provider)
     provider.ai_gateway = AIProviderGateway(
         AIChiefConfig.from_env(provider.provider_env),
         credential_env=provider.provider_env,
@@ -1039,7 +1076,7 @@ def test_ai_ask_quant_smoke_run_live_contradiction_is_replaced_with_backend_trut
     assert "answer: not ready" not in answer
     assert "blind robot" not in answer
     assert "wording was replaced with grounded backend truth" in answer
-    assert "launch readiness: ready_for_bounded_paper" in answer
+    assert "launch readiness: degraded_but_runnable" in answer
     assert "paper start allowed: true" in answer
     assert "ai cannot start it" in answer
     assert payload["answer_source"] == "API_LIGHT_MODEL"

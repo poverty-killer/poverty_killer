@@ -77,7 +77,7 @@ if (-not (Test-Path -LiteralPath $PythonPath)) {
     Fail-Closed "WINDOWS_VENV_PYTHON_NOT_FOUND"
 }
 
-if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 86400) {
+if ($DurationSeconds -lt 1 -or $DurationSeconds -gt 432000) {
     Fail-Closed "INVALID_DURATION_SECONDS"
 }
 

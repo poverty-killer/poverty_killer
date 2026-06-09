@@ -48,9 +48,9 @@ def test_home_paper_launch_control_requires_all_safety_confirmations():
     assert "BTC/USD\", \"ETH/USD\", \"SOL/USD" in text
     assert "data-paper-duration-amount" in text
     assert "data-paper-duration-unit" in text
-    assert "1 day" in text
-    assert "86400" in text
-    assert "Longer multi-day runs require separate approval/readiness." in text
+    assert "5 days" in text
+    assert "432000" in text
+    assert "Long-running PAPER stays PAPER-only" in text
     assert "604800" not in text
     assert "data-paper-confirm-paper" in text
     assert "data-paper-confirm-live-locked" in text

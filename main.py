@@ -1459,8 +1459,8 @@ def parse_arguments():
         help="Optional bounded runtime duration before graceful self-shutdown.",
     )
     args = parser.parse_args()
-    if args.duration_seconds is not None and not (1 <= args.duration_seconds <= 86400):
-        parser.error("--duration-seconds must be between 1 and 86400")
+    if args.duration_seconds is not None and not (1 <= args.duration_seconds <= 432000):
+        parser.error("--duration-seconds must be between 1 and 432000")
     return args
 
 

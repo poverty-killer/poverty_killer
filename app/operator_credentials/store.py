@@ -476,10 +476,7 @@ class LocalCredentialStore:
                 "values": clean,
             }
             payload = {"version": STORE_VERSION, "providers": providers}
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-            os.replace(tmp_path, self.path)
+            write_strategy = self._write_store_payload(payload)
         except OSError as exc:
             return {
                 **base_result,
@@ -495,8 +492,33 @@ class LocalCredentialStore:
             "status": "SAVED",
             "saved": True,
             "configured": True,
+            "write_strategy": write_strategy,
             "summary": self.provider_summary(provider),
         }
+
+    def _write_store_payload(self, payload: Mapping[str, Any]) -> str:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(payload, indent=2, sort_keys=True)
+        tmp_path = self.path.with_name(f"{self.path.name}.tmp.{os.getpid()}.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}")
+        try:
+            tmp_path.write_text(text, encoding="utf-8")
+            os.replace(tmp_path, self.path)
+            return "ATOMIC_REPLACE"
+        except OSError:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            with self.path.open("w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.write("\n")
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:
+                    pass
+            return "DIRECT_TRUNCATE_AFTER_ATOMIC_REPLACE_FAILED"
 
     def delete_provider(self, provider_id: str) -> dict[str, Any]:
         provider = normalize_provider_id(provider_id)

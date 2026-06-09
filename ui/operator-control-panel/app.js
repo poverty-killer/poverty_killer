@@ -963,9 +963,9 @@
     const startDisabled = disabledReason ? "disabled" : "";
     const watchlist = (sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"]).join(",");
     const minDuration = Number(sup.minPaperDurationSeconds || sup.min_paper_duration_seconds || 60);
-    const configuredMaxDuration = Number(sup.maxPaperDurationSeconds || sup.max_paper_duration_seconds || 86400);
-    const runnerMaxDuration = Number(sup.runnerMaxPaperDurationSeconds || sup.runner_max_paper_duration_seconds || 86400);
-    const maxDuration = Math.min(configuredMaxDuration || 86400, runnerMaxDuration || 86400, 86400);
+    const configuredMaxDuration = Number(sup.maxPaperDurationSeconds || sup.max_paper_duration_seconds || 432000);
+    const runnerMaxDuration = Number(sup.runnerMaxPaperDurationSeconds || sup.runner_max_paper_duration_seconds || 432000);
+    const maxDuration = Math.min(configuredMaxDuration || 432000, runnerMaxDuration || 432000, 432000);
     const durationOptions = [
       [180, "3 minutes"],
       [300, "5 minutes"],
@@ -973,7 +973,9 @@
       [1800, "30 minutes"],
       [3600, "1 hour"],
       [14400, "4 hours"],
-      [86400, "1 day"]
+      [86400, "1 day"],
+      [259200, "72 hours"],
+      [432000, "5 days"]
     ].filter(([seconds]) => seconds >= minDuration && seconds <= maxDuration);
     const defaultDuration = durationOptions.some(([seconds]) => seconds === 300)
       ? 300
@@ -1000,7 +1002,7 @@
           <h3>Run PAPER Command Center</h3>
           ${badge(overall.label || overall.code || "UNKNOWN", severityColor(overall.severity || overall.code))}
         </div>
-        <p class="muted">PAPER Launch Control. Starts the existing governed PAPER runner only. Current execution-authority max: ${escapeHtml(formatDuration(maxDuration))}. Longer multi-day runs require separate approval/readiness.</p>
+        <p class="muted">PAPER Launch Control. Starts the existing governed PAPER runner only. Current execution-authority max lease: ${escapeHtml(formatDuration(maxDuration))}. Long-running PAPER stays PAPER-only, lease-bound, supervised, and restart-auditable.</p>
         <div class="run-paper-status-banner ${escapeHtml(severityColor(overall.severity || overall.code))}" data-run-paper-top-status>
           <div>
             <div class="run-paper-status-title">${escapeHtml(overall.label || overall.code || "Readiness unknown")}</div>
@@ -1030,16 +1032,17 @@
               <label>Run length
                 <select data-paper-duration data-paper-duration-max="${escapeHtml(maxDuration)}">
                   ${durationOptions.map(([seconds, label]) => `<option value="${seconds}" ${seconds === defaultDuration ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
-                  <option value="custom">Custom minutes / hours</option>
+                  <option value="custom">Custom minutes / hours / days</option>
                 </select>
               </label>
               <label>Custom amount
-                <input data-paper-duration-amount type="number" min="1" max="24" value="5" inputmode="numeric">
+                <input data-paper-duration-amount type="number" min="1" max="5" value="5" inputmode="numeric">
               </label>
               <label>Custom unit
                 <select data-paper-duration-unit>
                   <option value="minutes" selected>minutes</option>
                   <option value="hours">hours</option>
+                  <option value="days">days</option>
                 </select>
               </label>
             </div>
@@ -1057,7 +1060,7 @@
         </div>
         <div class="button-row">
           <button class="intent-button paper primary-action" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" data-run-paper-start-control ${startDisabled}>
-            Start Bounded PAPER Run
+            Start Governed PAPER Run
           </button>
           <button class="intent-button live" disabled>No manual trades / force trade unavailable</button>
         </div>
@@ -1313,7 +1316,7 @@
     const actionCounts = data.actionCenter.counts || {};
     const launch = data.launchReadiness || {};
     return `
-      ${header("Run PAPER", "Start or review a bounded PAPER run. Portfolio Home stays focused on what you own.", s.safetyVerdict)}
+      ${header("Run PAPER", "Start or review a governed PAPER run. Portfolio Home stays focused on what you own.", s.safetyVerdict)}
       <div class="grid">
         ${renderPaperLaunchControl("command")}
         ${metric("Bot Status", s.botStatus, "green")}
@@ -1715,7 +1718,7 @@
           ["Endpoint source", badge(launch.paperEndpointSource || "UNKNOWN", launch.paperEndpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" ? "cyan" : "gray")],
           ["Paper start", badge(launch.paperStartAllowed ? "allowed" : "blocked", launch.paperStartAllowed ? "green" : "red")],
           ["Runtime attachment", escapeHtml(sup.runtimeAttachmentDetail || "No PAPER run currently attached.")],
-          ["Max duration", escapeHtml(formatDuration(sup.maxPaperDurationSeconds || 86400))],
+          ["Max duration", escapeHtml(formatDuration(sup.maxPaperDurationSeconds || 432000))],
           ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
           ["Backend checks", badge((launch.backendDegradedReasons || []).length ? `${launch.backendDegradedReasons.length} degraded` : "no degraded checks", (launch.backendDegradedReasons || []).length ? "yellow" : "green")]
         ])}
@@ -1740,7 +1743,7 @@
           ["Runtime attachment", escapeHtml(sup.runtimeAttachmentDetail || "No PAPER run currently attached.")],
           ["PID", escapeHtml(sup.pid || "none")],
           ["Duration", escapeHtml(duration)],
-          ["Max duration", escapeHtml(formatDuration(sup.maxPaperDurationSeconds || 86400))],
+          ["Max duration", escapeHtml(formatDuration(sup.maxPaperDurationSeconds || 432000))],
           ["Wrapper stdout", escapeHtml(sup.wrapperStdoutPath || sup.stdoutPath || "not available")],
           ["Wrapper stderr", escapeHtml(sup.wrapperStderrPath || sup.stderrPath || "not available")],
           ["Child stdout", escapeHtml(sup.childStdoutPath || "not available")],
@@ -1750,7 +1753,7 @@
         <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
             <button class="intent-button paper" data-intent="paper-start" data-paper-form="activity" ${paperLaunchDisabledReason() ? "disabled" : ""}>
-              Start bounded PAPER - ${paperLaunchDisabledReason() ? escapeHtml(paperLaunchDisabledReason()) : "server-authorized intent"}
+              Start governed PAPER - ${paperLaunchDisabledReason() ? escapeHtml(paperLaunchDisabledReason()) : "server-authorized intent"}
             </button>
             <button class="intent-button paper" data-intent="paper-stop" ${sup.paperStopAllowed ? "" : "disabled"}>
               Stop PAPER - ${sup.paperStopAllowed ? "graceful supervisor request" : escapeHtml(sup.paperStopRefusalReason || "disabled")}
@@ -2291,7 +2294,7 @@
       ["ai_overlay", "ai_wide", "Wide advisor", "button", "WIRED", "read_only", "", null, "toggle_ai_dock_width"],
       ["command", "paper_watchlist", "Watchlist", "input", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_duration", "Run length", "select+number", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
-      ["command", "paper_start", "Start Bounded PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
+      ["command", "paper_start", "Start Governed PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
       ["command", "paper_baseline_accept", "Accept PAPER baseline", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_operator_state_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/paper-baseline/accept"],
       ["command", "home_ai_question", "Home AI Quant Advisor question", "input", "WIRED", "read_only", "", null, "local_page_context"],
       ["command", "home_ai_answer_modes", "Home AI answer modes", "button group", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; local fallback labeled", "POST", "/operator/ai/ask"],
@@ -4789,8 +4792,8 @@
     next.supervisor.paperStartRefusalReason = pick(supervisor.paper_start_refusal_reason || runtime.paper_start_refusal_reason, null);
     next.supervisor.paperStopRefusalReason = pick(supervisor.paper_stop_refusal_reason || runtime.paper_stop_refusal_reason, null);
     next.supervisor.minPaperDurationSeconds = pick(supervisor.min_paper_duration_seconds || runtime.min_paper_duration_seconds, 60);
-    next.supervisor.maxPaperDurationSeconds = pick(supervisor.max_paper_duration_seconds || runtime.max_paper_duration_seconds, 86400);
-    next.supervisor.runnerMaxPaperDurationSeconds = pick(supervisor.runner_max_paper_duration_seconds || runtime.runner_max_paper_duration_seconds, 86400);
+    next.supervisor.maxPaperDurationSeconds = pick(supervisor.max_paper_duration_seconds || runtime.max_paper_duration_seconds, 432000);
+    next.supervisor.runnerMaxPaperDurationSeconds = pick(supervisor.runner_max_paper_duration_seconds || runtime.runner_max_paper_duration_seconds, 432000);
     next.supervisor.durationAuthority = pick(supervisor.duration_authority || runtime.duration_authority, "scripts/run_bounded_paper.ps1");
     next.supervisor.runtimeAttachmentDetail = pick(status.runtime_attachment_detail || runtime.runtime_attachment_detail, readyIdleNoRuntime ? "Ready. No PAPER run currently attached." : "No active PAPER run currently attached.");
     next.supervisor.lastHistoricalRefusal = latestHistoricalRefusal;
@@ -5397,7 +5400,7 @@
     const watchlistRaw = ((card && card.querySelector("[data-paper-watchlist]")) || {}).value || "BTC/USD,ETH/USD,SOL/USD";
     const durationRaw = ((card && card.querySelector("[data-paper-duration]")) || {}).value || "300";
     const durationSelect = card && card.querySelector("[data-paper-duration]");
-    const maxDurationSeconds = Number((durationSelect && durationSelect.dataset && durationSelect.dataset.paperDurationMax) || data.supervisor.maxPaperDurationSeconds || 86400);
+    const maxDurationSeconds = Number((durationSelect && durationSelect.dataset && durationSelect.dataset.paperDurationMax) || data.supervisor.maxPaperDurationSeconds || 432000);
     const customAmountRaw = ((card && card.querySelector("[data-paper-duration-amount]")) || {}).value || "5";
     const customUnit = ((card && card.querySelector("[data-paper-duration-unit]")) || {}).value || "minutes";
     const profileAlpha = ((card && card.querySelector("[data-paper-profile-alpha]")) || {}).checked !== false;
@@ -5538,11 +5541,11 @@
           return;
         }
         if (form.durationSeconds > form.maxDurationSeconds) {
-          window.alert(`Selected duration exceeds the current runner authority max of ${formatDuration(form.maxDurationSeconds)}. Longer multi-day runs require separate approval/readiness.`);
+          window.alert(`Selected duration exceeds the current governed PAPER lease max of ${formatDuration(form.maxDurationSeconds)}.`);
           return;
         }
         const confirmed = window.confirm(
-          `Request bounded PAPER start?\n\nProfile: ${form.profile}\nWatchlist: ${form.watchlist.join(", ")}\nDuration: ${formatDuration(form.durationSeconds)} (${form.durationSeconds} seconds)\n\nNo live trading or manual order will be sent by the UI.`
+          `Request governed PAPER start?\n\nProfile: ${form.profile}\nWatchlist: ${form.watchlist.join(", ")}\nDuration: ${formatDuration(form.durationSeconds)} (${form.durationSeconds} seconds)\n\nNo live trading or manual order will be sent by the UI.`
         );
         if (!confirmed) return;
         const result = await postIntent("/operator/intent/paper/start", {

@@ -15,7 +15,7 @@ def test_operator_runtime_config_defaults_are_safe(tmp_path):
     assert cfg.allowed_profile == "PAPER_EXPLORATION_ALPHA"
     assert cfg.allowed_watchlist == ("BTC/USD", "ETH/USD", "SOL/USD")
     assert cfg.min_paper_duration_seconds == 60
-    assert cfg.max_paper_duration_seconds == 86400
+    assert cfg.max_paper_duration_seconds == 432000
     assert cfg.operator_session_store_path == tmp_path / "state" / "operator" / "sessions.jsonl"
     assert cfg.world_awareness_cache_path == tmp_path / "state" / "world_awareness" / "operator_events.jsonl"
 
@@ -29,7 +29,7 @@ def test_operator_runtime_config_env_overrides_without_secret_values(tmp_path):
         "PK_OPERATOR_STATE_DIR": "operator_state",
         "PK_ALLOWED_WATCHLIST": "BTC/USD,SOL/USD",
         "PK_ALLOWED_DURATIONS": "300,1200",
-        "PK_MAX_PAPER_DURATION_SECONDS": "86400",
+        "PK_MAX_PAPER_DURATION_SECONDS": "432000",
         "PK_LIVE_ENABLED": "true",
         "PK_REAL_MONEY_ENABLED": "true",
         "APCA_API_KEY_ID": "secret-key-id",
@@ -46,7 +46,7 @@ def test_operator_runtime_config_env_overrides_without_secret_values(tmp_path):
     assert cfg.operator_state_dir == tmp_path / "operator_state"
     assert cfg.allowed_watchlist == ("BTC/USD", "SOL/USD")
     assert cfg.allowed_durations == (300, 1200)
-    assert cfg.max_paper_duration_seconds == 86400
+    assert cfg.max_paper_duration_seconds == 432000
     assert cfg.alpaca_credentials_present is True
     assert summary["alpaca_credentials_present"] is True
     assert "secret-key" not in str(summary)
@@ -59,12 +59,12 @@ def test_operator_runtime_config_env_overrides_without_secret_values(tmp_path):
 def test_operator_runtime_config_caps_duration_to_runner_authority(tmp_path):
     cfg = OperatorRuntimeConfig.from_env(
         {
-            "PK_ALLOWED_DURATIONS": "300,86400,604800",
+            "PK_ALLOWED_DURATIONS": "300,86400,432000,604800",
             "PK_MAX_PAPER_DURATION_SECONDS": "604800",
         },
         repo_root=tmp_path,
     )
 
-    assert cfg.max_paper_duration_seconds == 86400
-    assert cfg.allowed_durations == (300, 86400)
-    assert cfg.safe_summary()["runner_max_paper_duration_seconds"] == 86400
+    assert cfg.max_paper_duration_seconds == 432000
+    assert cfg.allowed_durations == (300, 86400, 432000)
+    assert cfg.safe_summary()["runner_max_paper_duration_seconds"] == 432000
