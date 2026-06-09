@@ -4,6 +4,7 @@ from urllib.error import HTTPError
 
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.execution.broker_read_policy import BROKER_READ_PROFILE_ENV, PAPER_TCA_EXTENDED_READS
 from app.operator_credentials.store import LocalCredentialStore
 from app.operator_portfolio.snapshot import build_portfolio_snapshot
 
@@ -108,7 +109,10 @@ def test_broker_confirmed_positions_are_labeled_and_read_only():
     assert payload["summary"]["position_count"] == 1
     assert payload["positions"][0]["source"] == "BROKER_CONFIRMED"
     assert payload["positions"][0]["broker_confirmed"] is True
-    assert payload["positions"][0]["latest_fill_price"] == "50000"
+    assert payload["positions"][0]["latest_fill_price"] is None
+    assert payload["summary"]["activities_status"] == "SKIPPED_NOT_AUTHORIZED"
+    assert payload["summary"]["activities_skip_reason"] == "BROKER_READ_NOT_AUTHORIZED"
+    assert payload["summary"]["account_activity_read_authorized"] is False
     assert payload["open_orders"][0]["read_only"] is True
     assert payload["open_orders"][0]["can_cancel"] is False
     assert payload["summary"]["broker_local_reconciliation_status"] == "BROKER_CONFIRMED_NO_LOCAL_TRUTH_PROMOTED"
@@ -116,6 +120,25 @@ def test_broker_confirmed_positions_are_labeled_and_read_only():
     assert payload["broker_mutation_occurred"] is False
     assert payload["cancel_occurred"] is False
     assert payload["liquidation_occurred"] is False
+
+
+def test_extended_profile_can_attach_activity_fill_context_when_explicitly_authorized():
+    client = FakeReadOnlyClient(_broker_payloads())
+    payload = build_portfolio_snapshot(
+        {
+            "APCA_API_KEY_ID": "id",
+            "APCA_API_SECRET_KEY": "secret",
+            "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+            BROKER_READ_PROFILE_ENV: PAPER_TCA_EXTENDED_READS,
+        },
+        client=client,
+        now="2026-05-29T00:00:00+00:00",
+    )
+
+    assert payload["positions"][0]["latest_fill_price"] == "50000"
+    assert payload["summary"]["activities_status"] == "AVAILABLE"
+    assert payload["summary"]["account_activity_read_authorized"] is True
+    assert ("GET", "/v2/account/activities/FILL?direction=desc&page_size=100") in client.calls
 
 
 def test_empty_broker_portfolio_is_honest():

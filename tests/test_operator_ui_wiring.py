@@ -211,6 +211,14 @@ def test_ai_evidence_labels_ready_idle_as_state_not_blocker():
     assert "value === \"READY_IDLE_NO_ACTIVE_RUNTIME\"" in text
 
 
+def test_fills_summary_labels_strict_smoke_fee_hydration_skip():
+    text = _app_text()
+
+    assert "Fee/activity hydration not authorized for this smoke run." in text
+    assert "fee_hydration_skipped" in text
+    assert "fee_hydration_skip_reason" in text
+
+
 def test_portfolio_home_has_commercial_cockpit_lane_and_primary_actions():
     text = _app_text()
     css = STYLES_CSS.read_text(encoding="utf-8")

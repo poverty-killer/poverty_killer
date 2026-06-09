@@ -26,6 +26,13 @@ from app.execution.broker_gateway import (
     BrokerOrderSubmitRequest,
     NormalizedBrokerStatus,
 )
+from app.execution.broker_read_policy import (
+    BROKER_READ_NOT_AUTHORIZED,
+    BrokerReadPermissionProfile,
+    broker_read_family_for_get_path,
+    broker_read_profile_from_env,
+    coerce_broker_read_profile,
+)
 
 
 ALPACA_PAPER_CREDENTIAL_KEYS = ("APCA_API_BASE_URL", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
@@ -289,10 +296,16 @@ class AlpacaPaperBrokerAdapter:
         *,
         transport: AlpacaTransport | None = None,
         timeout: float = 10.0,
+        read_profile: BrokerReadPermissionProfile | Mapping[str, Any] | str | None = None,
     ) -> None:
         self._credentials = credentials
         self._transport = transport or UrllibAlpacaTransport()
         self._timeout = timeout
+        self._read_profile = (
+            coerce_broker_read_profile(read_profile)
+            if read_profile is not None
+            else broker_read_profile_from_env(os.environ)
+        )
         self._request_counts = {"GET": 0, "POST": 0}
         self._validate_credentials()
 
@@ -303,8 +316,14 @@ class AlpacaPaperBrokerAdapter:
         transport: AlpacaTransport | None = None,
         timeout: float = 10.0,
         credential_path: Path | None = None,
+        read_profile: BrokerReadPermissionProfile | Mapping[str, Any] | str | None = None,
     ) -> "AlpacaPaperBrokerAdapter":
-        return cls(load_alpaca_paper_credentials(credential_path), transport=transport, timeout=timeout)
+        return cls(
+            load_alpaca_paper_credentials(credential_path),
+            transport=transport,
+            timeout=timeout,
+            read_profile=read_profile,
+        )
 
     @property
     def identity(self) -> BrokerAdapterIdentity:
@@ -323,6 +342,10 @@ class AlpacaPaperBrokerAdapter:
     @property
     def request_counts(self) -> dict[str, int]:
         return dict(self._request_counts)
+
+    @property
+    def broker_read_permission_profile(self) -> BrokerReadPermissionProfile:
+        return self._read_profile
 
     def get_account(self) -> BrokerGatewayResponse:
         return self._request("GET", "/v2/account")
@@ -468,6 +491,14 @@ class AlpacaPaperBrokerAdapter:
                 raise BrokerGatewayError("unsupported_get_path")
             if path == "/v2/orders" and (query or {}).get("status") != "open":
                 raise BrokerGatewayError("orders_get_must_be_open_status")
+            family = broker_read_family_for_get_path(path)
+            activity_type = (query or {}).get("activity_types")
+            if not self._read_profile.allows(family, activity_type):
+                reason = self._read_profile.denial_reason(family, activity_type)
+                raise BrokerGatewayError(
+                    reason,
+                    message=f"{BROKER_READ_NOT_AUTHORIZED}:{self._read_profile.name}:{family}",
+                )
             return
         if method == "POST":
             if path != "/v2/orders":

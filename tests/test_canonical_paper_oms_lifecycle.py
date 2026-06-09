@@ -14,6 +14,7 @@ from app.execution.alpaca_paper_adapter import (
     AlpacaPaperBrokerAdapter,
     AlpacaPaperCredentials,
 )
+from app.execution.broker_read_policy import PAPER_TCA_EXTENDED_READS
 from app.execution.engine import ExecutionEngine
 from app.execution.oms_lifecycle import OmsOrderState, OmsReasonCode
 from app.execution.order_router import OrderRouter
@@ -115,7 +116,7 @@ def _adapter_with_ack(status_payload: dict | None = None, *, delete_status: int 
             ("DELETE", "/v2/orders/broker-1"): (delete_status, {}),
         }
     )
-    return AlpacaPaperBrokerAdapter(_creds(), transport=transport), transport
+    return AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS), transport
 
 
 def _persist_mapping(
@@ -391,7 +392,7 @@ def test_shutdown_final_reconciliation_explains_broker_open_order_truth(tmp_path
             ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
         }
     )
-    adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport)
+    adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS)
     router = OrderRouter(
         primary_exchange="alpaca",
         paper_mode=True,
@@ -438,7 +439,7 @@ def test_shutdown_reconciliation_terminalizes_filled_local_open_without_broker_o
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
     _persist_mapping(state_store, client_order_id="filled-client", broker_order_id="broker-filled")
@@ -492,7 +493,7 @@ def test_shutdown_hydrates_existing_terminal_filled_mapping_without_local_fill(t
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
 
@@ -528,7 +529,7 @@ def test_shutdown_reconciliation_terminalizes_canceled_local_open_without_broker
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
     _persist_mapping(state_store, client_order_id="canceled-client", broker_order_id="broker-canceled")
@@ -567,7 +568,7 @@ def test_shutdown_reconciliation_conflicts_unexplained_local_open(tmp_path):
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
     _persist_mapping(state_store, client_order_id="unknown-client", broker_order_id="broker-unknown")
@@ -618,7 +619,7 @@ def test_missing_broker_fill_details_reports_unavailable_without_fake_fill(tmp_p
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
 
@@ -664,7 +665,7 @@ def test_order_status_fill_without_fee_hydrates_partial_broker_ledger_without_fa
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
 
@@ -727,7 +728,7 @@ def test_account_activity_hydrates_fee_and_realized_netedge_tca(tmp_path):
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
     order = _order().model_copy(
@@ -788,7 +789,7 @@ def test_repeated_fill_hydration_is_idempotent(tmp_path):
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
 
@@ -828,7 +829,7 @@ def test_canceled_order_with_filled_qty_records_partial_fill_then_cancel(tmp_pat
         primary_exchange="alpaca",
         paper_mode=True,
         execution_broker="alpaca_paper",
-        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport),
+        broker_gateway_adapter=AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS),
         state_store=state_store,
     )
 
@@ -912,7 +913,7 @@ def test_startup_reconciles_persisted_ack_mapping_with_broker_truth_without_muta
             ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
         }
     )
-    adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport)
+    adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS)
 
     router = OrderRouter(
         primary_exchange="alpaca",

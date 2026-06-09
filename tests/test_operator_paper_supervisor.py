@@ -5,11 +5,22 @@ import tempfile
 from pathlib import Path
 
 from app.api.operator_paper_supervisor import (
+    BOUNDED_RUNTIME_COMPLETED,
+    DURATION_BOUND_EXCEEDED,
     OperatorPaperSupervisor,
     PaperSupervisorConfig,
     ProcessStartSpec,
+    classify_bounded_runtime_monitor_state,
 )
 from app.api.operator_session_store import OperatorSessionStore
+from app.execution.broker_read_policy import (
+    ACCOUNT_ACTIVITY_READS_ALLOWED_ENV,
+    BROKER_READ_ALLOWLIST_ENV,
+    BROKER_READ_DENY_ACCOUNT_ACTIVITIES_ENV,
+    BROKER_READ_PROFILE_ENV,
+    FEE_HYDRATION_ALLOWED_ENV,
+    PAPER_SMOKE_STRICT_READS,
+)
 from app.operator_activation.paper_baseline import (
     BASELINE_POLICY_PROTECTED,
     PAPER_BASELINE_ENV_PATH,
@@ -130,6 +141,13 @@ def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
     assert "APCA_API_SECRET_KEY" not in " ".join(command)
     assert result["session"]["wrapper_stdout_path"] == result["session"]["stdout_path"]
     assert result["session"]["runtime_profile"] == "LOCAL_PAPER"
+    env = runner.started_specs[0].env
+    assert env[BROKER_READ_PROFILE_ENV] == PAPER_SMOKE_STRICT_READS
+    assert env[BROKER_READ_ALLOWLIST_ENV] == "account,orders,positions"
+    assert env[BROKER_READ_DENY_ACCOUNT_ACTIVITIES_ENV] == "1"
+    assert env[FEE_HYDRATION_ALLOWED_ENV] == "0"
+    assert env[ACCOUNT_ACTIVITY_READS_ALLOWED_ENV] == "0"
+    assert result["broker_read_permission_profile"]["profile"] == PAPER_SMOKE_STRICT_READS
 
 
 def test_supervisor_passes_protected_baseline_context_to_bounded_run_spec():
@@ -151,7 +169,38 @@ def test_supervisor_passes_protected_baseline_context_to_bounded_run_spec():
     assert env[PAPER_BASELINE_ENV_SNAPSHOT_HASH] == accepted["snapshot_hash"]
     assert env[PAPER_BASELINE_ENV_POLICY] == BASELINE_POLICY_PROTECTED
     assert env[PAPER_BASELINE_ENV_PROTECTED_SYMBOLS] == "BTCUSD,ETHUSD,SOLUSD"
+    assert env[BROKER_READ_PROFILE_ENV] == PAPER_SMOKE_STRICT_READS
+    assert env[ACCOUNT_ACTIVITY_READS_ALLOWED_ENV] == "0"
+    assert env[FEE_HYDRATION_ALLOWED_ENV] == "0"
     assert result["broker_call_occurred"] is False
+
+
+def test_monitor_prefers_idle_completion_before_duration_overrun():
+    decision = classify_bounded_runtime_monitor_state(
+        supervisor_state="IDLE",
+        active_session_id=None,
+        elapsed_seconds=660,
+        duration_seconds=600,
+        grace_seconds=30,
+    )
+
+    assert decision.reason_code == BOUNDED_RUNTIME_COMPLETED
+    assert decision.safe_stop_required is False
+    assert decision.runtime_active is False
+
+
+def test_monitor_still_flags_active_duration_overrun():
+    decision = classify_bounded_runtime_monitor_state(
+        supervisor_state="RUNNING",
+        active_session_id="paper_123",
+        elapsed_seconds=660,
+        duration_seconds=600,
+        grace_seconds=30,
+    )
+
+    assert decision.reason_code == DURATION_BOUND_EXCEEDED
+    assert decision.safe_stop_required is True
+    assert decision.runtime_active is True
 
 
 def test_supervisor_fails_closed_when_required_baseline_artifact_missing():

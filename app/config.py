@@ -397,6 +397,13 @@ class Config(BaseSettings):
             "Contains no credentials and is used by central same-symbol baseline guards."
         ),
     )
+    broker_read_permission_profile: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Broker read allowlist proof for runtime reconciliation and TCA hydration. "
+            "Contains no credentials and denies unknown read families by default."
+        ),
+    )
 
     # Active market classes — user-controlled declaration of which markets are live.
     # Symbols in symbol_universe whose asset class is NOT in this list are explicitly

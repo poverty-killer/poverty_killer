@@ -75,6 +75,7 @@ from app.data.polling_client import PollingClient
 from app.data.websocket_client import KrakenWebSocketClient
 from app.execution.alpaca_paper_adapter import AlpacaPaperBrokerAdapter
 from app.execution.broker_gateway import BrokerCredentialStatus, BrokerEnvironment, BrokerGatewayError
+from app.execution.broker_read_policy import broker_read_profile_from_env
 from app.execution.engine import ExecutionEngine
 from app.execution.masking_layer import MaskingLayer
 from app.execution.order_router import OrderRouter
@@ -483,6 +484,7 @@ class SovereignHeartbeat:
             reservation_lifecycle_enabled=self.reservation_lifecycle_enabled,
             execution_broker=self._execution_broker,
             broker_gateway_adapter=self._broker_gateway_adapter,
+            broker_read_profile=config.broker_read_permission_profile,
         )
 
         self.masking_layer = MaskingLayer(
@@ -1485,6 +1487,8 @@ def main() -> int:
         )
         return 1
     config.paper_baseline_runtime_context = paper_baseline_context.to_dict()
+    broker_read_profile = broker_read_profile_from_env(os.environ)
+    config.broker_read_permission_profile = broker_read_profile.to_dict()
 
     logger.info("=" * 60)
     logger.info("POVERTY KILLER - SOVEREIGN TRADING ENGINE")
@@ -1506,6 +1510,13 @@ def main() -> int:
             paper_baseline_context.protected_symbols_count,
             paper_baseline_context.same_symbol_baseline_guard_active,
         )
+    logger.info(
+        "Broker read profile loaded: profile=%s allowed=%s account_activities=%s fee_hydration=%s",
+        broker_read_profile.name,
+        ",".join(sorted(broker_read_profile.allowed_families)),
+        broker_read_profile.account_activity_reads_allowed,
+        broker_read_profile.fee_hydration_allowed,
+    )
     logger.info("=" * 60)
 
     heartbeat = SovereignHeartbeat(

@@ -20,6 +20,7 @@ from typing import Any, Protocol
 
 from app.api.operator_runtime_config import OperatorRuntimeConfig, RUNNER_MAX_PAPER_DURATION_SECONDS
 from app.api.operator_session_store import OperatorSessionStore
+from app.execution.broker_read_policy import broker_read_profile_from_env
 from app.operator_activation.paper_baseline import (
     PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED,
     PAPER_BASELINE_ENV_PATH,
@@ -37,6 +38,9 @@ DEFAULT_WATCHLIST = ("BTC/USD", "ETH/USD", "SOL/USD")
 DEFAULT_ALLOWED_DURATIONS = frozenset({180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400})
 DEFAULT_MIN_PAPER_DURATION_SECONDS = 60
 DEFAULT_MAX_PAPER_DURATION_SECONDS = RUNNER_MAX_PAPER_DURATION_SECONDS
+BOUNDED_RUNTIME_COMPLETED = "BOUNDED_RUNTIME_COMPLETED"
+DURATION_BOUND_EXCEEDED = "DURATION_BOUND_EXCEEDED"
+BOUNDED_RUNTIME_ACTIVE = "BOUNDED_RUNTIME_ACTIVE"
 
 
 def utc_now_iso() -> str:
@@ -55,6 +59,60 @@ class ProcessStartSpec:
     stderr_path: str
     command_summary: str
     env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BoundedRuntimeMonitorDecision:
+    reason_code: str
+    safe_stop_required: bool
+    runtime_active: bool
+    elapsed_seconds: int
+    duration_seconds: int
+    grace_seconds: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def classify_bounded_runtime_monitor_state(
+    *,
+    supervisor_state: str,
+    active_session_id: str | None,
+    elapsed_seconds: int,
+    duration_seconds: int,
+    grace_seconds: int = 30,
+) -> BoundedRuntimeMonitorDecision:
+    normalized_state = str(supervisor_state or "").strip().upper()
+    elapsed = max(0, int(elapsed_seconds or 0))
+    duration = max(0, int(duration_seconds or 0))
+    grace = max(0, int(grace_seconds or 0))
+    runtime_active = bool(active_session_id) or normalized_state in {"RUNNING", "STARTING", "STOP_REQUESTED"}
+    if normalized_state == "IDLE" and not active_session_id:
+        return BoundedRuntimeMonitorDecision(
+            reason_code=BOUNDED_RUNTIME_COMPLETED,
+            safe_stop_required=False,
+            runtime_active=False,
+            elapsed_seconds=elapsed,
+            duration_seconds=duration,
+            grace_seconds=grace,
+        )
+    if runtime_active and elapsed > duration + grace:
+        return BoundedRuntimeMonitorDecision(
+            reason_code=DURATION_BOUND_EXCEEDED,
+            safe_stop_required=True,
+            runtime_active=True,
+            elapsed_seconds=elapsed,
+            duration_seconds=duration,
+            grace_seconds=grace,
+        )
+    return BoundedRuntimeMonitorDecision(
+        reason_code=BOUNDED_RUNTIME_ACTIVE if runtime_active else normalized_state or "UNKNOWN_RUNTIME_STATE",
+        safe_stop_required=False,
+        runtime_active=runtime_active,
+        elapsed_seconds=elapsed,
+        duration_seconds=duration,
+        grace_seconds=grace,
+    )
 
 
 class PaperProcessHandle(Protocol):
@@ -267,6 +325,7 @@ class OperatorPaperSupervisor:
         paper_key_refusal = self._paper_key_refusal()
         endpoint_authority = self._paper_endpoint_authority()
         paper_start_refusal = self._paper_start_prerequisite_refusal()
+        broker_read_profile = self._broker_read_profile().to_dict()
         return {
             "supervisor_version": SUPERVISOR_VERSION,
             "state": "RUNNING" if is_active else ("STALE_ACTIVE_SESSION" if stale_after_restart else "IDLE"),
@@ -290,6 +349,7 @@ class OperatorPaperSupervisor:
             "paper_endpoint_refusal_reason": endpoint_authority["reason_code"],
             "paper_endpoint_operator_action": endpoint_authority["operator_action"],
             "paper_endpoint_authority": endpoint_authority,
+            "broker_read_permission_profile": broker_read_profile,
             "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
             "allowed_profile": self.config.allowed_profile,
             "allowed_watchlist": list(self.config.allowed_watchlist),
@@ -521,6 +581,9 @@ class OperatorPaperSupervisor:
             return baseline_context.baseline_context_error or PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED
         return None
 
+    def _broker_read_profile(self):
+        return broker_read_profile_from_env(self.config.process_env)
+
     def _baseline_store_path(self) -> Path:
         configured = str(self.config.process_env.get(PAPER_BASELINE_ENV_PATH) or "").strip()
         if configured and str(self.config.process_env.get(PAPER_BASELINE_ENV_REQUIRED) or "").strip():
@@ -563,6 +626,7 @@ class OperatorPaperSupervisor:
         baseline_context = self._paper_baseline_runtime_context()
         if baseline_context.baseline_loaded:
             process_env.update(baseline_context.to_env())
+        process_env.update(self._broker_read_profile().to_env())
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         stdout_path = log_dir / f"operator_paper_{stamp}_{session_id}.out.log"
         stderr_path = log_dir / f"operator_paper_{stamp}_{session_id}.err.log"
@@ -681,6 +745,7 @@ class OperatorPaperSupervisor:
             "broker_call_occurred": False,
             "live_endpoint_touched": False,
             "real_money_touched": False,
+            "broker_read_permission_profile": self._broker_read_profile().to_dict(),
             "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
         }
 

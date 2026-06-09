@@ -18,6 +18,14 @@ from app.operator_credentials.store import (
     ALPACA_PAPER_ENDPOINT,
     alpaca_endpoint_authority,
 )
+from app.execution.broker_read_policy import (
+    BROKER_READ_NOT_AUTHORIZED,
+    READ_ACCOUNT,
+    READ_ACCOUNT_ACTIVITIES,
+    READ_ORDERS,
+    READ_POSITIONS,
+    broker_read_profile_from_env,
+)
 
 
 PORTFOLIO_SOURCE = "OPERATOR_PORTFOLIO_READ_ONLY"
@@ -93,6 +101,8 @@ def _portfolio_unavailable_status(reason: str) -> str:
         return "AUTH_FAILED"
     if reason == "BROKER_READ_FAILED":
         return "BROKER_READ_FAILED"
+    if reason == "BROKER_READ_NOT_AUTHORIZED":
+        return "BACKEND_DEGRADED"
     if reason in {
         "LIVE_ENDPOINT_BLOCKED",
         "ALPACA_DATA_ENDPOINT_NOT_TRADING",
@@ -339,6 +349,18 @@ def build_portfolio_snapshot(
 
     base_url = _base_url(env)
     broker_client = client or AlpacaPaperReadOnlyClient(base_url=base_url)
+    read_profile = broker_read_profile_from_env(env)
+    if not (
+        read_profile.allows(READ_ACCOUNT)
+        and read_profile.allows(READ_ORDERS)
+        and read_profile.allows(READ_POSITIONS)
+    ):
+        return _empty_unavailable(
+            BROKER_READ_NOT_AUTHORIZED,
+            detail=read_profile.name,
+            broker_read_attempted=False,
+            endpoint_authority=endpoint_truth,
+        )
     freshness = now or _utc_now()
     try:
         account = broker_client.get_json("/v2/account", headers)
@@ -354,12 +376,17 @@ def build_portfolio_snapshot(
 
     activities: Any = []
     activities_status = "UNAVAILABLE"
-    try:
-        activities_path = "/v2/account/activities/FILL?" + urllib.parse.urlencode({"direction": "desc", "page_size": "100"})
-        activities = broker_client.get_json(activities_path, headers)
-        activities_status = "AVAILABLE"
-    except Exception:
-        activities = []
+    activities_skip_reason = None
+    if read_profile.allows(READ_ACCOUNT_ACTIVITIES, "FILL"):
+        try:
+            activities_path = "/v2/account/activities/FILL?" + urllib.parse.urlencode({"direction": "desc", "page_size": "100"})
+            activities = broker_client.get_json(activities_path, headers)
+            activities_status = "AVAILABLE"
+        except Exception:
+            activities = []
+    else:
+        activities_status = "SKIPPED_NOT_AUTHORIZED"
+        activities_skip_reason = BROKER_READ_NOT_AUTHORIZED
 
     positions_list = positions if isinstance(positions, list) else []
     orders_list = orders if isinstance(orders, list) else []
@@ -407,6 +434,9 @@ def build_portfolio_snapshot(
             "stale_or_conflicted_position_count": stale_conflicted,
             "broker_local_reconciliation_status": "BROKER_CONFIRMED_NO_LOCAL_TRUTH_PROMOTED",
             "activities_status": activities_status,
+            "activities_skip_reason": activities_skip_reason,
+            "broker_read_profile": read_profile.name,
+            "account_activity_read_authorized": read_profile.account_activity_reads_allowed,
             "account_status": account_map.get("status"),
             "account_id": _redacted_suffix(account_map.get("id") or account_map.get("account_id")),
             "currency": account_map.get("currency"),

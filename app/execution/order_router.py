@@ -56,6 +56,16 @@ from app.execution.broker_gateway import (
     BrokerOrderSubmitRequest as _GatewayOrderSubmitRequest,
     NormalizedBrokerStatus as _GatewayStatus,
 )
+from app.execution.broker_read_policy import (
+    BROKER_READ_NOT_AUTHORIZED,
+    BrokerReadPermissionProfile,
+    READ_ACCOUNT_ACTIVITIES,
+    READ_FEE_HYDRATION,
+    READ_FILL_ACTIVITY_HYDRATION,
+    broker_read_allowed,
+    broker_read_profile_from_env,
+    coerce_broker_read_profile,
+)
 from app.execution.oms_lifecycle import (
     OmsOrderState,
     OmsReasonCode,
@@ -170,6 +180,7 @@ class OrderRouter:
         reservation_lifecycle_enabled: bool = False,
         execution_broker: str = INTERNAL_PAPER_EXECUTION_BROKER,
         broker_gateway_adapter: Optional[Any] = None,
+        broker_read_profile: Optional[Any] = None,
     ):
         self.primary_exchange = primary_exchange
         self.secondary_exchange = secondary_exchange
@@ -189,6 +200,16 @@ class OrderRouter:
         self._reservation_lifecycle_enabled = bool(reservation_lifecycle_enabled)
         self.execution_broker = str(execution_broker or INTERNAL_PAPER_EXECUTION_BROKER).strip().lower()
         self._broker_gateway_adapter = broker_gateway_adapter
+        adapter_profile = getattr(broker_gateway_adapter, "broker_read_permission_profile", None)
+        self._broker_read_profile: BrokerReadPermissionProfile = (
+            coerce_broker_read_profile(broker_read_profile)
+            if broker_read_profile is not None
+            else (
+                coerce_broker_read_profile(adapter_profile)
+                if adapter_profile is not None
+                else broker_read_profile_from_env()
+            )
+        )
         self._external_paper_broker_requested = bool(
             self.paper_mode and self.execution_broker != INTERNAL_PAPER_EXECUTION_BROKER
         )
@@ -202,6 +223,8 @@ class OrderRouter:
         self._broker_fee_hydration_results: List[Dict[str, Any]] = []
         self._broker_fee_activity_cache: Optional[List[Dict[str, Any]]] = None
         self._broker_fee_activity_fetch_error: Optional[str] = None
+        self._broker_fee_hydration_skipped: bool = False
+        self._broker_fee_hydration_skip_reason: Optional[str] = None
         self._cancel_denials_by_order_id: Dict[str, str] = {}
         self._oms_lifecycle_counts: Dict[str, int] = {
             "submitted": 0,
@@ -1232,6 +1255,10 @@ class OrderRouter:
             "broker_fee_activity_records_seen_count": 0,
             "broker_fee_activity_records_matched_count": 0,
             "broker_fee_activity_duplicate_ignored_count": 0,
+            "fee_hydration_skipped": False,
+            "fee_hydration_skip_reason": None,
+            "account_activity_read_authorized": self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES),
+            "broker_read_profile": self._broker_read_profile.name,
             "tca_complete_count": 0,
             "tca_estimated_count": 0,
             "tca_fee_pending_count": 0,
@@ -3481,6 +3508,28 @@ class OrderRouter:
                 int(shutdown_reconciliation.get("broker_fee_activity_duplicate_ignored_count", 0) or 0),
                 int(broker_fee_summary.get("broker_fee_activity_duplicate_ignored_count", 0) or 0),
             ),
+            "fee_hydration_skipped": bool(
+                shutdown_reconciliation.get("fee_hydration_skipped")
+                or broker_fee_summary.get("fee_hydration_skipped")
+            ),
+            "fee_hydration_skip_reason": (
+                shutdown_reconciliation.get("fee_hydration_skip_reason")
+                or broker_fee_summary.get("fee_hydration_skip_reason")
+            ),
+            "fee_hydration_status": (
+                shutdown_reconciliation.get("fee_hydration_status")
+                or broker_fee_summary.get("fee_hydration_status")
+            ),
+            "account_activity_read_authorized": bool(
+                shutdown_reconciliation.get(
+                    "account_activity_read_authorized",
+                    broker_fee_summary.get("account_activity_read_authorized"),
+                )
+            ),
+            "broker_read_profile": (
+                shutdown_reconciliation.get("broker_read_profile")
+                or broker_fee_summary.get("broker_read_profile")
+            ),
             "tca_complete_count": max(
                 int(shutdown_reconciliation.get("tca_complete_count", 0) or 0),
                 int(broker_fee_summary.get("tca_complete_count", 0) or 0),
@@ -3689,10 +3738,25 @@ class OrderRouter:
                 return payload.get(key)
         return None
 
+    def _broker_read_allowed(self, family: str, activity_type: Any | None = None) -> bool:
+        return broker_read_allowed(family, activity_type, profile=self._broker_read_profile)
+
+    def _fee_activity_read_authorized(self) -> bool:
+        return self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES, "CFEE,FEE") and self._broker_read_allowed(
+            READ_FEE_HYDRATION,
+            "CFEE,FEE",
+        )
+
     def _broker_fill_activities(self) -> List[Dict[str, Any]]:
         if self._broker_fill_activity_cache is not None:
             return list(self._broker_fill_activity_cache)
         self._broker_fill_activity_cache = []
+        if not (
+            self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES, "FILL")
+            and self._broker_read_allowed(READ_FILL_ACTIVITY_HYDRATION, "FILL")
+        ):
+            self._broker_fill_activity_fetch_error = BROKER_READ_NOT_AUTHORIZED
+            return []
         adapter = self._broker_gateway_adapter
         getter = getattr(adapter, "get_account_activities", None)
         if not callable(getter):
@@ -3719,6 +3783,9 @@ class OrderRouter:
         if self._broker_fee_activity_cache is not None:
             return list(self._broker_fee_activity_cache)
         self._broker_fee_activity_cache = []
+        if not self._fee_activity_read_authorized():
+            self._broker_fee_activity_fetch_error = BROKER_READ_NOT_AUTHORIZED
+            return []
         adapter = self._broker_gateway_adapter
         getter = getattr(adapter, "get_fee_activities", None)
         try:
@@ -3970,6 +4037,21 @@ class OrderRouter:
         ]
         if not missing_fee_rows:
             return
+        if not self._fee_activity_read_authorized():
+            self._broker_fee_hydration_skipped = True
+            self._broker_fee_hydration_skip_reason = BROKER_READ_NOT_AUTHORIZED
+            logger.info(
+                "[OMS_DIAG] BROKER_FEE_HYDRATION_SKIPPED fields=%s",
+                {
+                    "source_event": source_event,
+                    "status": "SKIPPED_NOT_AUTHORIZED",
+                    "reason_code": BROKER_READ_NOT_AUTHORIZED,
+                    "broker_read_profile": self._broker_read_profile.name,
+                    "account_activity_read_authorized": False,
+                    "fee_hydration_allowed": False,
+                },
+            )
+            return
         normalized_activities: List[Dict[str, Any]] = []
         seen_activity_keys: set[str] = set()
         for activity in self._broker_fee_activities():
@@ -4210,6 +4292,15 @@ class OrderRouter:
                 }
             ),
             "broker_fee_activity_duplicate_ignored_count": len(duplicate_results),
+            "fee_hydration_skipped": bool(self._broker_fee_hydration_skipped),
+            "fee_hydration_skip_reason": self._broker_fee_hydration_skip_reason,
+            "fee_hydration_status": (
+                "SKIPPED_NOT_AUTHORIZED"
+                if self._broker_fee_hydration_skipped
+                else ("AUTHORIZED" if self._fee_activity_read_authorized() else "NOT_AUTHORIZED")
+            ),
+            "account_activity_read_authorized": self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES),
+            "broker_read_profile": self._broker_read_profile.name,
             "tca_complete_count": int(tca_complete_count),
             "tca_estimated_count": int(tca_estimated_count),
             "tca_fee_pending_count": int(tca_fee_pending_count),

@@ -552,6 +552,11 @@
       "broker_fee_hydration_conflict_count": 0,
       "broker_fee_activity_records_seen_count": 0,
       "broker_fee_activity_records_matched_count": 0,
+      "fee_hydration_skipped": false,
+      "fee_hydration_skip_reason": "BROKER_READ_NOT_AUTHORIZED | null",
+      "fee_hydration_status": "SKIPPED_NOT_AUTHORIZED | AUTHORIZED | NOT_AUTHORIZED | UNKNOWN_NO_ACTIVE_RUNTIME",
+      "account_activity_read_authorized": false,
+      "broker_read_profile": "PAPER_SMOKE_STRICT_READS | PAPER_TCA_EXTENDED_READS | UNKNOWN_NO_ACTIVE_RUNTIME",
       "fee_status": "FEE_PENDING_BROKER_ACTIVITY | FEE_ACTIVITY_MATCHED | FEE_ACTIVITY_UNMATCHED | FEE_ACTIVITY_CONFLICT | FEE_UNAVAILABLE",
       "fee_source": "BROKER_CFEE | BROKER_FEE | UNAVAILABLE | ESTIMATED_POLICY",
       "fake_fills_allowed": false

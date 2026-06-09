@@ -11,6 +11,12 @@ from app.execution.alpaca_paper_adapter import (
     AlpacaPaperCredentials,
 )
 from app.execution.broker_gateway import BrokerGatewayResponse
+from app.execution.broker_read_policy import (
+    BROKER_READ_NOT_AUTHORIZED,
+    PAPER_SMOKE_STRICT_READS,
+    PAPER_TCA_EXTENDED_READS,
+    broker_read_profile_for_name,
+)
 from app.execution.order_router import OrderRouter
 from app.state.state_store import StateStore
 
@@ -35,6 +41,7 @@ class FeeActivityAdapter:
             live_blocked=True,
         )
         self.activity_type_requests: list[str] = []
+        self.broker_read_permission_profile = broker_read_profile_for_name(PAPER_TCA_EXTENDED_READS)
 
     def get_account_activities(self, *, activity_types: str = "FILL", page_size: int = 100, **_kwargs):
         self.request_counts["GET"] += 1
@@ -122,6 +129,7 @@ def _router(tmp_path, activities: list[dict]) -> tuple[OrderRouter, StateStore, 
         execution_broker="alpaca_paper",
         broker_gateway_adapter=adapter,
         state_store=store,
+        broker_read_profile=PAPER_TCA_EXTENDED_READS,
     )
     return router, store, adapter
 
@@ -135,6 +143,7 @@ def test_alpaca_fee_activity_query_uses_read_only_cfee_fee_endpoint():
             secret_key="paper-secret",
         ),
         transport=transport,
+        read_profile=PAPER_TCA_EXTENDED_READS,
     )
 
     response = adapter.get_fee_activities(after="2026-05-25T00:00:00Z", until="2026-05-26T00:00:00Z")
@@ -189,6 +198,46 @@ def test_cfee_activity_exact_order_match_updates_broker_fee_and_tca(tmp_path):
     assert summary["broker_fee_hydration_conflict_count"] == 0
     assert summary["tca_complete_count"] == 1
     assert adapter.activity_type_requests == ["CFEE,FEE"]
+
+
+def test_strict_smoke_skips_deferred_fee_hydration_without_account_activity_read(tmp_path):
+    store = _store(tmp_path)
+    adapter = FeeActivityAdapter(
+        [
+            {
+                "id": "fee-activity-1",
+                "activity_type": "CFEE",
+                "order_id": "broker-1",
+                "symbol": "BTCUSD",
+                "net_amount": "-0.12",
+                "currency": "USD",
+                "transaction_time": T0,
+            }
+        ]
+    )
+    router = OrderRouter(
+        primary_exchange="alpaca",
+        paper_mode=True,
+        execution_broker="alpaca_paper",
+        broker_gateway_adapter=adapter,
+        state_store=store,
+        broker_read_profile=PAPER_SMOKE_STRICT_READS,
+    )
+    _partial_fill(store)
+
+    router._hydrate_deferred_broker_fees(source_event="strict_smoke_shutdown")
+
+    summary = router._broker_fee_hydration_summary()
+    row = store.list_broker_fill_ledger()[0]
+    assert adapter.activity_type_requests == []
+    assert summary["fee_hydration_skipped"] is True
+    assert summary["fee_hydration_skip_reason"] == BROKER_READ_NOT_AUTHORIZED
+    assert summary["fee_hydration_status"] == "SKIPPED_NOT_AUTHORIZED"
+    assert summary["account_activity_read_authorized"] is False
+    assert summary["broker_fee_hydration_attempted_count"] == 0
+    assert summary["broker_fee_activity_records_seen_count"] == 0
+    assert row["fee"] is None
+    assert row["fee_currency"] is None
 
 
 def test_fee_activity_missing_currency_keeps_tca_unknown_without_fake_fee(tmp_path):
