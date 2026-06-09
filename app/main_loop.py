@@ -95,7 +95,10 @@ from app.risk.pre_trade_guardrails import (
     PreTradeGuardrailRequest,
     evaluate_pre_trade_guardrails,
 )
-from app.operator_activation.paper_baseline import evaluate_protected_baseline_trade
+from app.operator_activation.paper_baseline import (
+    PAPER_BASELINE_SYMBOL_PROTECTED,
+    evaluate_protected_baseline_trade,
+)
 from app.market.capability_registry import build_default_capability_registry
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
@@ -889,6 +892,13 @@ def _protected_baseline_from_metadata(metadata: Dict[str, Any]) -> Optional[Dict
     return None
 
 
+def _protected_baseline_from_config(config: Any) -> Optional[Dict[str, Any]]:
+    value = getattr(config, "paper_baseline_runtime_context", None)
+    if isinstance(value, dict) and value.get("baseline_loaded") is True:
+        return dict(value)
+    return None
+
+
 def _protected_baseline_guardrail_verdict(
     *,
     symbol: str,
@@ -900,7 +910,7 @@ def _protected_baseline_guardrail_verdict(
     quantity: Decimal,
     baseline_decision: Dict[str, Any],
 ) -> Dict[str, Any]:
-    reason = str(baseline_decision.get("reason_code") or "BASELINE_PROTECTED_SAME_SYMBOL_BLOCKED")
+    reason = str(baseline_decision.get("reason_code") or PAPER_BASELINE_SYMBOL_PROTECTED)
     detail = str(
         baseline_decision.get("detail")
         or "Existing-position symbols are protected; same-symbol trading is blocked until run lot tracking is available."
@@ -931,6 +941,7 @@ def _protected_baseline_guardrail_verdict(
                 "details": {
                     "policy": "ADOPT_EXISTING_POSITIONS_PROTECTED",
                     "baseline_symbol": symbol,
+                    "normalized_symbol": baseline_decision.get("normalized_symbol"),
                     "lot_tracking_available": False,
                     "broker_mutation_occurred": False,
                 },
@@ -976,8 +987,9 @@ def _build_pre_trade_guardrail_verdict(
         protective_context["sell_intent_classification"] = sell_intent_classification
     metadata["execution_action"] = execution_action
     metadata["broker_intent"] = execution_action is not None
-    accepted_baseline = _protected_baseline_from_metadata(metadata)
+    accepted_baseline = _protected_baseline_from_metadata(metadata) or _protected_baseline_from_config(config)
     if accepted_baseline is not None and side in {"buy", "sell"}:
+        metadata.setdefault("paper_baseline_runtime_context", accepted_baseline)
         baseline_decision = evaluate_protected_baseline_trade(
             symbol=symbol,
             side=side,

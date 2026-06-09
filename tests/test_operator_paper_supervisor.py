@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -9,6 +10,17 @@ from app.api.operator_paper_supervisor import (
     ProcessStartSpec,
 )
 from app.api.operator_session_store import OperatorSessionStore
+from app.operator_activation.paper_baseline import (
+    BASELINE_POLICY_PROTECTED,
+    PAPER_BASELINE_ENV_PATH,
+    PAPER_BASELINE_ENV_POLICY,
+    PAPER_BASELINE_ENV_PROTECTED_SYMBOLS,
+    PAPER_BASELINE_ENV_REQUIRED,
+    PAPER_BASELINE_ENV_SNAPSHOT_HASH,
+    PAPER_BASELINE_ENV_SNAPSHOT_ID,
+    PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED,
+    accept_existing_position_baseline,
+)
 
 
 class FakeProcess:
@@ -61,6 +73,36 @@ def _paper_env() -> dict[str, str]:
     }
 
 
+def _baseline_snapshot() -> dict:
+    return {
+        "endpoint_family": "paper",
+        "account": {
+            "id": "acct-123456",
+            "status": "ACTIVE",
+            "equity": "50000",
+            "buying_power": "70000",
+            "trading_blocked": False,
+            "account_blocked": False,
+        },
+        "open_order_count": 0,
+        "open_orders": [],
+        "position_count": 3,
+        "positions": [
+            {"symbol": "BTCUSD", "asset_class": "crypto", "qty": "0.5", "side": "long"},
+            {"symbol": "ETHUSD", "asset_class": "crypto", "qty": "2", "side": "long"},
+            {"symbol": "SOLUSD", "asset_class": "crypto", "qty": "10", "side": "long"},
+        ],
+    }
+
+
+def _write_accepted_baseline(repo_root: Path) -> dict:
+    accepted = accept_existing_position_baseline(_baseline_snapshot(), accepted_by="Shan/local operator")
+    path = repo_root / "state" / "operator" / "paper_baseline.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(accepted), encoding="utf-8")
+    return accepted
+
+
 def _supervisor_config(runner: FakeRunner, **overrides) -> PaperSupervisorConfig:
     return PaperSupervisorConfig(repo_root=runner.repo_root, process_env=_paper_env(), **overrides)
 
@@ -88,6 +130,61 @@ def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
     assert "APCA_API_SECRET_KEY" not in " ".join(command)
     assert result["session"]["wrapper_stdout_path"] == result["session"]["stdout_path"]
     assert result["session"]["runtime_profile"] == "LOCAL_PAPER"
+
+
+def test_supervisor_passes_protected_baseline_context_to_bounded_run_spec():
+    runner = FakeRunner()
+    accepted = _write_accepted_baseline(runner.repo_root)
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+
+    snapshot = supervisor.status_snapshot()
+    result = supervisor.start_paper(_valid_request())
+
+    assert snapshot["paper_baseline_runtime_context"]["baseline_loaded"] is True
+    assert snapshot["paper_baseline_runtime_context"]["same_symbol_baseline_guard_active"] is True
+    assert result["allowed"] is True
+    assert result["paper_baseline_runtime_context"]["baseline_snapshot_id"] == accepted["baseline_snapshot_id"]
+    env = runner.started_specs[0].env
+    assert env[PAPER_BASELINE_ENV_REQUIRED] == "1"
+    assert env[PAPER_BASELINE_ENV_PATH].replace("\\", "/").endswith("state/operator/paper_baseline.json")
+    assert env[PAPER_BASELINE_ENV_SNAPSHOT_ID] == accepted["baseline_snapshot_id"]
+    assert env[PAPER_BASELINE_ENV_SNAPSHOT_HASH] == accepted["snapshot_hash"]
+    assert env[PAPER_BASELINE_ENV_POLICY] == BASELINE_POLICY_PROTECTED
+    assert env[PAPER_BASELINE_ENV_PROTECTED_SYMBOLS] == "BTCUSD,ETHUSD,SOLUSD"
+    assert result["broker_call_occurred"] is False
+
+
+def test_supervisor_fails_closed_when_required_baseline_artifact_missing():
+    runner = FakeRunner()
+    missing_path = runner.repo_root / "state" / "operator" / "paper_baseline.json"
+    env = dict(_paper_env())
+    env[PAPER_BASELINE_ENV_REQUIRED] = "1"
+    env[PAPER_BASELINE_ENV_PATH] = str(missing_path)
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=env),
+        runner=runner,
+    )
+
+    snapshot = supervisor.status_snapshot()
+    result = supervisor.start_paper(_valid_request())
+
+    assert snapshot["paper_baseline_runtime_context"]["baseline_loaded"] is False
+    assert result["allowed"] is False
+    assert result["reason_code"] == PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED
+    assert runner.started_specs == []
+
+
+def test_watchlist_overlap_can_start_only_when_baseline_guard_context_is_active():
+    runner = FakeRunner()
+    _write_accepted_baseline(runner.repo_root)
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+
+    result = supervisor.start_paper(_valid_request())
+
+    assert result["allowed"] is True
+    assert result["paper_baseline_runtime_context"]["protected_symbols_normalized"] == ["BTCUSD", "ETHUSD", "SOLUSD"]
+    assert result["paper_baseline_runtime_context"]["same_symbol_baseline_guard_active"] is True
+    assert runner.started_specs[0].env[PAPER_BASELINE_ENV_PROTECTED_SYMBOLS] == "BTCUSD,ETHUSD,SOLUSD"
 
 
 def test_supervisor_allows_missing_base_url_by_safe_paper_default():

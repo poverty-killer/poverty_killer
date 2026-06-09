@@ -20,6 +20,18 @@ BASELINE_POLICY_CLEAN_ONLY = "CLEAN_ONLY"
 BASELINE_POLICY_PROTECTED = "ADOPT_EXISTING_POSITIONS_PROTECTED"
 BASELINE_POLICY_MANAGE_EXISTING = "ADOPT_AND_MANAGE_EXISTING_POSITIONS"
 BASELINE_SCHEMA_VERSION = "paper-existing-position-baseline-v1"
+PAPER_BASELINE_ENV_REQUIRED = "PK_PAPER_BASELINE_REQUIRED"
+PAPER_BASELINE_ENV_PATH = "PK_PAPER_BASELINE_PATH"
+PAPER_BASELINE_ENV_SNAPSHOT_ID = "PK_PAPER_BASELINE_SNAPSHOT_ID"
+PAPER_BASELINE_ENV_SNAPSHOT_HASH = "PK_PAPER_BASELINE_SNAPSHOT_HASH"
+PAPER_BASELINE_ENV_POLICY = "PK_PAPER_BASELINE_POLICY"
+PAPER_BASELINE_ENV_PROTECTED_SYMBOLS = "PK_PAPER_BASELINE_PROTECTED_SYMBOLS"
+PAPER_BASELINE_ENV_SAME_SYMBOL_POLICY = "PK_PAPER_BASELINE_SAME_SYMBOL_POLICY"
+PAPER_BASELINE_ENV_RUN_LOT_TRACKING = "PK_PAPER_BASELINE_RUN_LOT_TRACKING_AVAILABLE"
+
+SAME_SYMBOL_POLICY_BLOCK = "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING"
+PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED = "PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED"
+PAPER_BASELINE_SYMBOL_PROTECTED = "PAPER_BASELINE_SYMBOL_PROTECTED"
 
 PREFLIGHT_BLOCKED_BASELINE_ADOPTION_REQUIRED = "PREFLIGHT_BLOCKED_BASELINE_ADOPTION_REQUIRED"
 PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS = "PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS"
@@ -189,6 +201,194 @@ def _baseline_positions_value(positions: list[dict[str, Any]]) -> str | None:
 def _snapshot_hash(payload: Mapping[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class PaperBaselineRuntimeContext:
+    baseline_required: bool
+    baseline_loaded: bool
+    baseline_snapshot_id: str | None = None
+    snapshot_hash: str | None = None
+    policy: str | None = None
+    protected_symbols_normalized: tuple[str, ...] = ()
+    protected_positions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    accepted_at: str | None = None
+    source_path: str | None = None
+    same_symbol_trading_policy: str = SAME_SYMBOL_POLICY_BLOCK
+    run_lot_tracking_available: bool = False
+    baseline_context_error: str | None = None
+
+    @property
+    def protected_symbols_count(self) -> int:
+        return len(self.protected_symbols_normalized)
+
+    @property
+    def same_symbol_baseline_guard_active(self) -> bool:
+        return (
+            self.baseline_loaded
+            and self.policy == BASELINE_POLICY_PROTECTED
+            and self.protected_symbols_count > 0
+            and not self.run_lot_tracking_available
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": "OPERATOR_PAPER_BASELINE_RUNTIME_CONTEXT",
+            "baseline_required": self.baseline_required,
+            "baseline_loaded": self.baseline_loaded,
+            "baseline_snapshot_id": self.baseline_snapshot_id,
+            "snapshot_hash": self.snapshot_hash,
+            "policy": self.policy,
+            "protected_symbols_normalized": list(self.protected_symbols_normalized),
+            "protected_symbols_count": self.protected_symbols_count,
+            "protected_positions": dict(self.protected_positions),
+            "accepted_at": self.accepted_at,
+            "source_path": self.source_path,
+            "same_symbol_trading_policy": self.same_symbol_trading_policy,
+            "run_lot_tracking_available": self.run_lot_tracking_available,
+            "same_symbol_baseline_guard_active": self.same_symbol_baseline_guard_active,
+            "baseline_context_error": self.baseline_context_error,
+            "alpaca_network_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
+    def to_env(self) -> dict[str, str]:
+        if not self.baseline_loaded:
+            return {}
+        return {
+            PAPER_BASELINE_ENV_REQUIRED: "1",
+            PAPER_BASELINE_ENV_PATH: str(self.source_path or ""),
+            PAPER_BASELINE_ENV_SNAPSHOT_ID: str(self.baseline_snapshot_id or ""),
+            PAPER_BASELINE_ENV_SNAPSHOT_HASH: str(self.snapshot_hash or ""),
+            PAPER_BASELINE_ENV_POLICY: str(self.policy or BASELINE_POLICY_PROTECTED),
+            PAPER_BASELINE_ENV_PROTECTED_SYMBOLS: ",".join(self.protected_symbols_normalized),
+            PAPER_BASELINE_ENV_SAME_SYMBOL_POLICY: self.same_symbol_trading_policy,
+            PAPER_BASELINE_ENV_RUN_LOT_TRACKING: "1" if self.run_lot_tracking_available else "0",
+        }
+
+
+def _runtime_context_error(reason: str, *, required: bool = True, source_path: Path | str | None = None) -> PaperBaselineRuntimeContext:
+    return PaperBaselineRuntimeContext(
+        baseline_required=required,
+        baseline_loaded=False,
+        source_path=str(source_path) if source_path else None,
+        baseline_context_error=reason,
+    )
+
+
+def build_paper_baseline_runtime_context(
+    accepted_baseline: Mapping[str, Any] | None,
+    *,
+    source_path: Path | str | None = None,
+    required: bool = True,
+    expected_snapshot_id: str | None = None,
+    expected_snapshot_hash: str | None = None,
+    expected_policy: str = BASELINE_POLICY_PROTECTED,
+) -> PaperBaselineRuntimeContext:
+    if not isinstance(accepted_baseline, Mapping) or accepted_baseline.get("accepted") is not True:
+        return _runtime_context_error(PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED, required=required, source_path=source_path)
+
+    accepted_snapshot = _accepted_snapshot(accepted_baseline)
+    if accepted_snapshot is None:
+        return _runtime_context_error("PAPER_BASELINE_SNAPSHOT_MISSING", required=required, source_path=source_path)
+
+    policy = str(accepted_baseline.get("policy") or (accepted_snapshot.get("proof") or {}).get("policy") or "")
+    if policy != expected_policy:
+        return _runtime_context_error("PAPER_BASELINE_POLICY_MISMATCH", required=required, source_path=source_path)
+
+    open_order_count = int(((accepted_snapshot.get("orders") or {}).get("open_order_count") or 0))
+    if open_order_count != 0:
+        return _runtime_context_error("PAPER_BASELINE_OPEN_ORDERS_PRESENT", required=required, source_path=source_path)
+
+    proof = accepted_snapshot.get("proof") if isinstance(accepted_snapshot.get("proof"), Mapping) else {}
+    baseline_snapshot_id = str(accepted_baseline.get("baseline_snapshot_id") or proof.get("baseline_snapshot_id") or "")
+    snapshot_hash = str(accepted_baseline.get("snapshot_hash") or proof.get("snapshot_hash") or "")
+    if not baseline_snapshot_id or not snapshot_hash:
+        return _runtime_context_error("PAPER_BASELINE_PROOF_MISSING", required=required, source_path=source_path)
+    if expected_snapshot_id and baseline_snapshot_id != expected_snapshot_id:
+        return _runtime_context_error("PAPER_BASELINE_SNAPSHOT_ID_MISMATCH", required=required, source_path=source_path)
+    if expected_snapshot_hash and snapshot_hash != expected_snapshot_hash:
+        return _runtime_context_error("PAPER_BASELINE_SNAPSHOT_HASH_MISMATCH", required=required, source_path=source_path)
+
+    positions = _as_list(accepted_snapshot.get("positions"))
+    protected_positions: dict[str, dict[str, Any]] = {}
+    for position in positions:
+        normalized = normalize_baseline_symbol(position.get("symbol"))
+        if not normalized:
+            continue
+        protected_positions[normalized] = {
+            "symbol": str(position.get("symbol") or normalized).upper(),
+            "normalized_symbol": normalized,
+            "qty": _clean_decimal_text(position.get("qty") or position.get("quantity")),
+            "side": position.get("side"),
+            "asset_class": position.get("asset_class"),
+            "baseline_position": True,
+        }
+    protected_symbols = tuple(sorted(protected_positions))
+    if not protected_symbols:
+        return _runtime_context_error("PAPER_BASELINE_PROTECTED_SYMBOLS_MISSING", required=required, source_path=source_path)
+
+    return PaperBaselineRuntimeContext(
+        baseline_required=required,
+        baseline_loaded=True,
+        baseline_snapshot_id=baseline_snapshot_id,
+        snapshot_hash=snapshot_hash,
+        policy=policy,
+        protected_symbols_normalized=protected_symbols,
+        protected_positions=protected_positions,
+        accepted_at=str(accepted_baseline.get("accepted_at") or proof.get("accepted_at") or ""),
+        source_path=str(source_path) if source_path else None,
+        same_symbol_trading_policy=SAME_SYMBOL_POLICY_BLOCK,
+        run_lot_tracking_available=False,
+        baseline_context_error=None,
+    )
+
+
+def load_paper_baseline_runtime_context_from_path(
+    path: Path | str,
+    *,
+    required: bool = True,
+    expected_snapshot_id: str | None = None,
+    expected_snapshot_hash: str | None = None,
+    expected_policy: str = BASELINE_POLICY_PROTECTED,
+) -> PaperBaselineRuntimeContext:
+    baseline_path = Path(path)
+    if not baseline_path.exists():
+        return _runtime_context_error(PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED, required=required, source_path=baseline_path)
+    try:
+        with baseline_path.open("r", encoding="utf-8") as handle:
+            accepted = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return _runtime_context_error("PAPER_BASELINE_CONTEXT_UNREADABLE", required=required, source_path=baseline_path)
+    return build_paper_baseline_runtime_context(
+        accepted,
+        source_path=baseline_path,
+        required=required,
+        expected_snapshot_id=expected_snapshot_id,
+        expected_snapshot_hash=expected_snapshot_hash,
+        expected_policy=expected_policy,
+    )
+
+
+def load_paper_baseline_runtime_context_from_env(env: Mapping[str, str]) -> PaperBaselineRuntimeContext:
+    required = _truthy(env.get(PAPER_BASELINE_ENV_REQUIRED))
+    path = str(env.get(PAPER_BASELINE_ENV_PATH) or "").strip()
+    if not required and not path:
+        return PaperBaselineRuntimeContext(baseline_required=False, baseline_loaded=False)
+    if not path:
+        return _runtime_context_error(PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED, required=True)
+    return load_paper_baseline_runtime_context_from_path(
+        path,
+        required=required or True,
+        expected_snapshot_id=str(env.get(PAPER_BASELINE_ENV_SNAPSHOT_ID) or "").strip() or None,
+        expected_snapshot_hash=str(env.get(PAPER_BASELINE_ENV_SNAPSHOT_HASH) or "").strip() or None,
+        expected_policy=str(env.get(PAPER_BASELINE_ENV_POLICY) or BASELINE_POLICY_PROTECTED),
+    )
 
 
 def build_safe_preflight_snapshot(snapshot: Mapping[str, Any], *, accepted_by: str = "Shan/local operator", accepted_at: str | None = None, policy: str = BASELINE_POLICY_PROTECTED) -> dict[str, Any]:
@@ -443,21 +643,37 @@ def evaluate_protected_baseline_trade(
     lot_tracking_available: bool = False,
 ) -> dict[str, Any]:
     accepted_snapshot = _accepted_snapshot(accepted_baseline)
-    if accepted_snapshot is None:
+    runtime_symbols: set[str] = set()
+    runtime_loaded = isinstance(accepted_baseline, Mapping) and accepted_baseline.get("baseline_loaded") is True
+    if runtime_loaded:
+        runtime_symbols = {
+            normalize_baseline_symbol(symbol)
+            for symbol in accepted_baseline.get("protected_symbols_normalized", ())
+            if normalize_baseline_symbol(symbol)
+        }
+    if accepted_snapshot is None and not runtime_loaded:
         return {"allowed": True, "reason_code": "NO_ACCEPTED_BASELINE", "broker_mutation_occurred": False}
-    policy = str((accepted_baseline or {}).get("policy") or ((accepted_snapshot.get("proof") or {}).get("policy")) or BASELINE_POLICY_PROTECTED)
+    policy = str(
+        (accepted_baseline or {}).get("policy")
+        or (((accepted_snapshot or {}).get("proof") or {}).get("policy"))
+        or BASELINE_POLICY_PROTECTED
+    )
     if policy != BASELINE_POLICY_PROTECTED:
         return {"allowed": policy == BASELINE_POLICY_MANAGE_EXISTING, "reason_code": policy, "broker_mutation_occurred": False}
     normalized = normalize_baseline_symbol(symbol)
-    baseline_positions = _as_list(accepted_snapshot.get("positions"))
-    baseline_symbols = {normalize_baseline_symbol(position.get("symbol")) for position in baseline_positions}
+    baseline_positions = _as_list((accepted_snapshot or {}).get("positions"))
+    baseline_symbols = runtime_symbols or {normalize_baseline_symbol(position.get("symbol")) for position in baseline_positions}
     if normalized not in baseline_symbols:
         return {"allowed": True, "reason_code": "SYMBOL_NOT_IN_PROTECTED_BASELINE", "broker_mutation_occurred": False}
     if not lot_tracking_available:
         return {
             "allowed": False,
-            "reason_code": "BASELINE_PROTECTED_SAME_SYMBOL_BLOCKED",
-            "detail": "Existing-position symbols are protected; new same-symbol trades are blocked until run lot tracking is available.",
+            "reason_code": PAPER_BASELINE_SYMBOL_PROTECTED,
+            "detail": (
+                f"{symbol} is blocked because {normalized} is in the accepted protected PAPER baseline. "
+                "Same-symbol baseline trading is blocked until run lot tracking is available."
+            ),
+            "normalized_symbol": normalized,
             "broker_mutation_occurred": False,
         }
     if str(side or "").lower() == "sell":
@@ -466,8 +682,9 @@ def evaluate_protected_baseline_trade(
         if requested > run_acquired:
             return {
                 "allowed": False,
-                "reason_code": "BASELINE_PROTECTED_SELL_BLOCKED",
+                "reason_code": "PAPER_BASELINE_SELL_EXCEEDS_RUN_ACQUIRED_QTY",
                 "detail": "Sell would reduce protected baseline quantity or exceed run-acquired quantity.",
+                "normalized_symbol": normalized,
                 "broker_mutation_occurred": False,
             }
     return {"allowed": True, "reason_code": "RUN_LOT_TRACKED_BASELINE_SYMBOL_ALLOWED", "broker_mutation_occurred": False}

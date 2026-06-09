@@ -114,6 +114,21 @@ Require-NonEmptyEnv "POVERTY_KILLER_EXECUTION_BROKER"
 Require-NonEmptyEnv "POVERTY_KILLER_MARKET_DATA_PROVIDERS"
 Require-NonEmptyEnv "POVERTY_KILLER_CRYPTO_MARKET_DATA_PROVIDERS"
 
+if ($env:PK_PAPER_BASELINE_REQUIRED -eq "1") {
+    Require-NonEmptyEnv "PK_PAPER_BASELINE_PATH"
+    Require-NonEmptyEnv "PK_PAPER_BASELINE_SNAPSHOT_ID"
+    Require-NonEmptyEnv "PK_PAPER_BASELINE_SNAPSHOT_HASH"
+    Require-NonEmptyEnv "PK_PAPER_BASELINE_POLICY"
+    Require-NonEmptyEnv "PK_PAPER_BASELINE_PROTECTED_SYMBOLS"
+    if ($env:PK_PAPER_BASELINE_POLICY -ne "ADOPT_EXISTING_POSITIONS_PROTECTED") {
+        Fail-Closed "PAPER_BASELINE_POLICY_MISMATCH"
+    }
+    if (-not (Test-Path -LiteralPath $env:PK_PAPER_BASELINE_PATH)) {
+        Fail-Closed "PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED"
+    }
+    Write-Host "Protected PAPER baseline context present: $($env:PK_PAPER_BASELINE_SNAPSHOT_ID)"
+}
+
 $preflightCode = @'
 import json
 import os

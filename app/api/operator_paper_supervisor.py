@@ -20,6 +20,14 @@ from typing import Any, Protocol
 
 from app.api.operator_runtime_config import OperatorRuntimeConfig, RUNNER_MAX_PAPER_DURATION_SECONDS
 from app.api.operator_session_store import OperatorSessionStore
+from app.operator_activation.paper_baseline import (
+    PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED,
+    PAPER_BASELINE_ENV_PATH,
+    PAPER_BASELINE_ENV_REQUIRED,
+    PaperBaselineRuntimeContext,
+    PaperBaselineStore,
+    build_paper_baseline_runtime_context,
+)
 from app.operator_credentials.store import ALPACA_ENDPOINT_SOURCE_ENV_KEY, alpaca_endpoint_authority
 
 
@@ -282,6 +290,7 @@ class OperatorPaperSupervisor:
             "paper_endpoint_refusal_reason": endpoint_authority["reason_code"],
             "paper_endpoint_operator_action": endpoint_authority["operator_action"],
             "paper_endpoint_authority": endpoint_authority,
+            "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
             "allowed_profile": self.config.allowed_profile,
             "allowed_watchlist": list(self.config.allowed_watchlist),
             "allowed_durations": sorted(self.config.allowed_durations),
@@ -505,7 +514,29 @@ class OperatorPaperSupervisor:
         if key_refusal:
             return key_refusal
         endpoint_authority = self._paper_endpoint_authority()
-        return endpoint_authority["reason_code"]
+        if endpoint_authority["reason_code"]:
+            return endpoint_authority["reason_code"]
+        baseline_context = self._paper_baseline_runtime_context()
+        if baseline_context.baseline_required and not baseline_context.baseline_loaded:
+            return baseline_context.baseline_context_error or PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED
+        return None
+
+    def _baseline_store_path(self) -> Path:
+        configured = str(self.config.process_env.get(PAPER_BASELINE_ENV_PATH) or "").strip()
+        if configured and str(self.config.process_env.get(PAPER_BASELINE_ENV_REQUIRED) or "").strip():
+            return Path(configured)
+        return self.config.repo_root / "state" / "operator" / "paper_baseline.json"
+
+    def _paper_baseline_runtime_context(self) -> PaperBaselineRuntimeContext:
+        path = self._baseline_store_path()
+        required = str(self.config.process_env.get(PAPER_BASELINE_ENV_REQUIRED) or "").strip().lower() in {"1", "true", "yes", "on"}
+        store = PaperBaselineStore(path)
+        current = store.current()
+        if current.get("accepted") is True:
+            return build_paper_baseline_runtime_context(current, source_path=path, required=True)
+        if required:
+            return build_paper_baseline_runtime_context(current, source_path=path, required=True)
+        return PaperBaselineRuntimeContext(baseline_required=False, baseline_loaded=False, source_path=str(path))
 
     def _normalize_watchlist(self, raw: Any) -> tuple[str, ...]:
         if raw is None:
@@ -529,6 +560,9 @@ class OperatorPaperSupervisor:
             process_env["APCA_API_BASE_URL"] = str(endpoint_authority["alpaca_endpoint_display"])
             if endpoint_authority["alpaca_endpoint_configured"] is False:
                 process_env[ALPACA_ENDPOINT_SOURCE_ENV_KEY] = "SAFE_DEFAULT_PAPER_ENDPOINT"
+        baseline_context = self._paper_baseline_runtime_context()
+        if baseline_context.baseline_loaded:
+            process_env.update(baseline_context.to_env())
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         stdout_path = log_dir / f"operator_paper_{stamp}_{session_id}.out.log"
         stderr_path = log_dir / f"operator_paper_{stamp}_{session_id}.err.log"
@@ -647,6 +681,7 @@ class OperatorPaperSupervisor:
             "broker_call_occurred": False,
             "live_endpoint_touched": False,
             "real_money_touched": False,
+            "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
         }
 
     def _new_session_id(self) -> str:

@@ -423,6 +423,11 @@ def _build_run_paper_operator_state(
         paper_start_allowed=paper_start_allowed and not blockers,
         paper_baseline_state=paper_baseline_state,
     )
+    baseline_runtime_context = (
+        supervisor.get("paper_baseline_runtime_context")
+        if isinstance(supervisor.get("paper_baseline_runtime_context"), dict)
+        else {}
+    )
     return {
         "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
         "schema_version": "run-paper-command-center-v1",
@@ -466,6 +471,7 @@ def _build_run_paper_operator_state(
         },
         "paper_credential_setup": credential_setup,
         "paper_baseline": paper_baseline_state or credential_setup["baseline_adoption"],
+        "paper_baseline_runtime_context": baseline_runtime_context,
         "runtime": {
             "label": "No active PAPER run" if runtime_state == "IDLE" else runtime_state,
             "state": runtime_state,
@@ -504,6 +510,11 @@ def _build_run_paper_operator_state(
             "launch_readiness_start_allowed": paper_start_allowed and not blockers,
             "paper_credential_setup": credential_setup,
             "paper_baseline": paper_baseline_state or credential_setup["baseline_adoption"],
+            "paper_baseline_runtime_context": baseline_runtime_context,
+            "baseline_context_required": baseline_runtime_context.get("baseline_required") is True,
+            "baseline_context_will_be_loaded": baseline_runtime_context.get("baseline_loaded") is True,
+            "protected_same_symbol_guard_active": baseline_runtime_context.get("same_symbol_baseline_guard_active") is True,
+            "protected_symbols_count": int(baseline_runtime_context.get("protected_symbols_count") or 0),
             "broker_mutation_occurred": False,
             "trading_mutation_occurred": False,
             "live_enabled": False,
@@ -735,6 +746,11 @@ def build_launch_readiness(
         "paper_start_allowed": launch_paper_start_allowed,
         "run_paper_operator_state": run_paper_operator_state,
         "paper_credential_setup": run_paper_operator_state["paper_credential_setup"],
+        "paper_baseline_runtime_context": run_paper_operator_state.get("paper_baseline_runtime_context") or {},
+        "baseline_context_required": (run_paper_operator_state.get("paper_baseline_runtime_context") or {}).get("baseline_required") is True,
+        "baseline_context_will_be_loaded": (run_paper_operator_state.get("paper_baseline_runtime_context") or {}).get("baseline_loaded") is True,
+        "protected_same_symbol_guard_active": (run_paper_operator_state.get("paper_baseline_runtime_context") or {}).get("same_symbol_baseline_guard_active") is True,
+        "protected_symbols_count": int((run_paper_operator_state.get("paper_baseline_runtime_context") or {}).get("protected_symbols_count") or 0),
         "safe_stop_status": safe_stop_status,
         "portfolio_read_availability": "BROKER_READ_READY" if alpaca_configured else "UNAVAILABLE_MISSING_CREDENTIALS",
         "backend_degraded_reasons": list(health.get("degraded_reasons") or []),

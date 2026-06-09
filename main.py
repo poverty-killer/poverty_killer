@@ -89,6 +89,7 @@ from app.main_loop import create_main_loop
 from app.models import Candle, EventEnvelope
 from app.models.enums import EventType, ExchangeType
 from app.monitoring.logger import setup_logger
+from app.operator_activation.paper_baseline import load_paper_baseline_runtime_context_from_env
 from app.risk.exposure_manager import ExposureManager
 from app.risk.guard import HybridRiskGuard
 from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
@@ -1476,6 +1477,15 @@ def main() -> int:
 
     setup_logger(config, level=args.log_level)
 
+    paper_baseline_context = load_paper_baseline_runtime_context_from_env(os.environ)
+    if paper_baseline_context.baseline_required and not paper_baseline_context.baseline_loaded:
+        logger.critical(
+            "PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED fields=%s",
+            paper_baseline_context.to_dict(),
+        )
+        return 1
+    config.paper_baseline_runtime_context = paper_baseline_context.to_dict()
+
     logger.info("=" * 60)
     logger.info("POVERTY KILLER - SOVEREIGN TRADING ENGINE")
     logger.info("=" * 60)
@@ -1489,6 +1499,13 @@ def main() -> int:
         logger.info("Paper mode forced via command line")
     if args.shadow_read_only:
         logger.info("Shadow read-only mode forced via command line")
+    if paper_baseline_context.baseline_required:
+        logger.info(
+            "PAPER baseline runtime context loaded: snapshot=%s protected_symbols=%s guard_active=%s",
+            paper_baseline_context.baseline_snapshot_id,
+            paper_baseline_context.protected_symbols_count,
+            paper_baseline_context.same_symbol_baseline_guard_active,
+        )
     logger.info("=" * 60)
 
     heartbeat = SovereignHeartbeat(

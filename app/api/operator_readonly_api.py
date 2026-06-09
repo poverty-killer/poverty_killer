@@ -296,7 +296,12 @@ class OperatorSnapshotProvider:
         portfolio_client: ReadOnlyBrokerClient | None = None,
         historical_tests: HistoricalTestService | None = None,
     ) -> None:
-        self.runtime_config = runtime_config or OperatorRuntimeConfig.from_env()
+        if runtime_config is not None:
+            self.runtime_config = runtime_config
+        elif supervisor is not None:
+            self.runtime_config = OperatorRuntimeConfig.from_env(provider_env or {}, repo_root=supervisor.config.repo_root)
+        else:
+            self.runtime_config = OperatorRuntimeConfig.from_env()
         self.process_start_time = _utc_now()
         self.loaded_git_commit_short = _safe_git_output(self.runtime_config.repo_root, ["rev-parse", "--short", "HEAD"])
         self.loaded_git_branch = _safe_git_output(self.runtime_config.repo_root, ["branch", "--show-current"])

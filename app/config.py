@@ -5,7 +5,7 @@ All risk governance parameters are centralized and validated at startup.
 HARDENED: Asset-class specific leverage, SigmaRiskConfig for regime-based scaling
 """
 
-from typing import List, Optional, Dict, Literal
+from typing import Any, List, Optional, Dict, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from pydantic_settings import BaseSettings
 import json
@@ -389,6 +389,13 @@ class Config(BaseSettings):
     runtime_watchlist: List[str] = Field(
         default=[],
         description="Explicit runtime watchlist. Empty watchlist fails closed before feed startup.",
+    )
+    paper_baseline_runtime_context: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Safe PAPER runtime baseline proof injected at startup. "
+            "Contains no credentials and is used by central same-symbol baseline guards."
+        ),
     )
 
     # Active market classes — user-controlled declaration of which markets are live.
