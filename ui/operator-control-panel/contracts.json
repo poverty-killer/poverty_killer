@@ -920,6 +920,31 @@
       "broker_mutation_occurred": false,
       "trading_mutation_occurred": false
     },
+    "/operator/paper-baseline": {
+      "source": "OPERATOR_PAPER_BASELINE",
+      "schema_version": "paper-baseline-view-v1",
+      "status": "NOT_ACCEPTED | PREFLIGHT_BLOCKED_BASELINE_ADOPTION_REQUIRED | PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS | PAPER_BASELINE_DRIFT_REQUIRES_REFRESH | PREFLIGHT_BLOCKED_OPEN_ORDERS",
+      "policy": "ADOPT_EXISTING_POSITIONS_PROTECTED",
+      "accepted": false,
+      "local_acceptance_only": true,
+      "alpaca_network_call_occurred": false,
+      "broker_mutation_occurred": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/paper-baseline/accept": {
+      "method": "POST",
+      "mutates": "local operator baseline state only",
+      "requires_preflight_snapshot": true,
+      "broker_call_occurred": false,
+      "paper_start_occurred": false,
+      "order_submission_occurred": false,
+      "cancel_occurred": false,
+      "replace_occurred": false,
+      "liquidation_occurred": false,
+      "live_enabled": false,
+      "real_money_enabled": false,
+      "secrets_values_exposed": false
+    },
     "/operator/launch-readiness": {
       "source": "OPERATOR_LAUNCH_READINESS",
       "final_launch_readiness": "READY_FOR_BOUNDED_PAPER | BLOCKED | DEGRADED_BUT_RUNNABLE | UNKNOWN",
@@ -1000,9 +1025,9 @@
           "preflight_gate": {
             "read_only_preflight_authorized": false,
             "read_only_preflight_available": false,
-            "account_check_status": "blocked | ready_to_run_after_approval | not_run",
-            "open_orders_check_status": "blocked | ready_to_run_after_approval | not_run",
-            "positions_check_status": "blocked | ready_to_run_after_approval | not_run",
+            "account_check_status": "blocked | ready_to_run_after_approval | accepted_existing_positions | not_run",
+            "open_orders_check_status": "blocked | ready_to_run_after_approval | accepted_existing_positions | not_run",
+            "positions_check_status": "blocked | ready_to_run_after_approval | accepted_existing_positions | not_run",
             "alpaca_network_call_occurred": false,
             "broker_mutation_occurred": false,
             "order_submission_occurred": false,
@@ -1010,6 +1035,7 @@
             "replace_occurred": false,
             "liquidation_occurred": false
           },
+          "baseline_adoption": "local protected existing-position baseline view, no broker mutation",
           "safety": {
             "paper_start_allowed": false,
             "live_enabled": false,
@@ -1017,6 +1043,16 @@
             "broker_mutation_occurred": false,
             "secrets_values_exposed": false
           }
+        },
+        "paper_baseline": {
+          "source": "OPERATOR_PAPER_BASELINE",
+          "status": "NOT_ACCEPTED | PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS",
+          "accepted": false,
+          "policy": "ADOPT_EXISTING_POSITIONS_PROTECTED",
+          "same_symbol_trading_policy": "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING",
+          "broker_mutation_occurred": false,
+          "alpaca_network_call_occurred": false,
+          "secrets_values_exposed": false
         },
         "runtime": {
           "state": "IDLE | RUNNING | STALE_ACTIVE_SESSION | UNKNOWN",

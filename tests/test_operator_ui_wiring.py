@@ -285,6 +285,13 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "requires explicit approval before Alpaca is called" in text
     assert "account, open orders, and positions" in text
     assert "will not place, cancel, replace, liquidate, enable live, enable real money, or start PAPER" in text
+    assert "Baseline adoption required - existing PAPER positions detected." in text
+    assert "Reset is not required" in text
+    assert "Position-aware PAPER baseline accepted." in text
+    assert "Accept current positions as PAPER baseline" in text
+    assert "No liquidation / close / cancel controls" in text
+    assert "/operator/paper-baseline/accept" in text
+    assert "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING" in text
     assert "Next safe action:" in text
     assert "Advanced endpoint and start proof" in text
     assert "Raw blocker code is kept here" in text
@@ -336,6 +343,10 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert "secrets_values_exposed" in text
     assert "rawSecretValuesIncluded" in text
     assert "paperCredentialSetup" in text
+    assert "paperBaseline" in text
+    assert "data-paper-baseline-panel" in text
+    assert "data-paper-baseline-advanced" in text
+    assert ".paper-baseline-panel" in css
     assert "readOnlyPreflightAuthorized" in text
     assert "alpacaNetworkCallOccurred" in text
     assert "accountRequestOccurred" in text

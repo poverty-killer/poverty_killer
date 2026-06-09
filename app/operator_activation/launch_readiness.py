@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.operator_credentials.store import DEFAULT_RELATIVE_STORE_PATH, alpaca_endpoint_authority
+from app.operator_activation.paper_baseline import (
+    BASELINE_POLICY_PROTECTED,
+    PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS,
+    build_baseline_adoption_state,
+)
 
 
 def _find_provider(provider_readiness: dict[str, Any], provider_id: str) -> dict[str, Any]:
@@ -129,6 +134,10 @@ def _plain_check_detail(check: dict[str, Any]) -> str:
         return str(check.get("detail") or "Only the Alpaca PAPER trading endpoint is accepted.")
     if check_id == "paper_read_only_preflight_gate":
         return "Read-only Alpaca PAPER preflight has not run and requires explicit Shan approval before Alpaca is called."
+    if check_id == "paper_existing_position_baseline":
+        return "Existing PAPER positions require protected baseline adoption before PAPER can start."
+    if check_id == "paper_baseline_position_aware_policy":
+        return "Position-aware PAPER baseline is accepted; this is short-smoke readiness, not 72-hour readiness."
     if check_id == "no_active_runtime":
         return "A PAPER runtime is already active or cannot be proven stopped."
     if check_id == "audit_session_storage":
@@ -219,6 +228,8 @@ def _next_safe_action(
         return "Open Keys & Providers and save Alpaca PAPER key ID and secret to the local credential vault; do not paste secrets into chat or commit them."
     if any(str(check.get("check_id") or "") == "paper_read_only_preflight_gate" for check in blockers):
         return "Do not start PAPER; request explicit Shan approval for read-only Alpaca account, open-orders, and positions preflight first."
+    if any(str(check.get("check_id") or "") == "paper_existing_position_baseline" for check in blockers):
+        return "Accept current PAPER positions as the protected starting baseline before a short position-aware PAPER smoke packet."
     if blockers:
         first = blockers[0]
         title = str(first.get("title") or first.get("check_id") or "the current blocker")
@@ -262,6 +273,7 @@ def _build_paper_credential_setup(
     endpoint_authority: dict[str, Any],
     endpoint_ok: bool,
     paper_start_allowed: bool,
+    paper_baseline_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     field_rows = _credential_field_setup_rows(alpaca)
     missing = [str(row.get("name")) for row in field_rows if row.get("present") is not True]
@@ -276,6 +288,17 @@ def _build_paper_credential_setup(
         if preflight_status == "blocked"
         else "Read-only preflight is ready to request after explicit Shan approval; no Alpaca call has occurred in this view."
     )
+    baseline_state = paper_baseline_state or {}
+    baseline_ready = baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
+    if baseline_ready:
+        preflight_status = "accepted_existing_positions"
+        preflight_detail = "Read-only PAPER preflight is represented by an accepted protected existing-position baseline."
+        setup_status = {
+            "code": "PREFLIGHT_READY",
+            "label": "Position-aware PAPER baseline accepted",
+            "severity": "warning",
+            "detail": "Credential presence and protected existing-position baseline are confirmed; this is short-smoke readiness, not 72-hour readiness.",
+        }
     return {
         "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
         "schema_version": "paper-credential-setup-v1",
@@ -308,16 +331,16 @@ def _build_paper_credential_setup(
             ),
         },
         "preflight_gate": {
-            "read_only_preflight_authorized": False,
-            "read_only_preflight_available": preflight_status == "ready_to_run_after_approval",
+            "read_only_preflight_authorized": baseline_ready,
+            "read_only_preflight_available": baseline_ready or preflight_status == "ready_to_run_after_approval",
             "account_check_status": preflight_status,
             "open_orders_check_status": preflight_status,
             "positions_check_status": preflight_status,
-            "last_preflight_at": None,
-            "last_preflight_result": None,
-            "status_label": "Read-only PAPER preflight not run",
+            "last_preflight_at": baseline_state.get("accepted_at") if baseline_ready else None,
+            "last_preflight_result": baseline_state.get("status") if baseline_ready else None,
+            "status_label": "Position-aware PAPER baseline accepted" if baseline_ready else "Read-only PAPER preflight not run",
             "detail": preflight_detail,
-            "explicit_approval_required": True,
+            "explicit_approval_required": not baseline_ready,
             "future_checks": ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
             "alpaca_network_call_occurred": False,
             "account_request_occurred": False,
@@ -329,10 +352,23 @@ def _build_paper_credential_setup(
             "replace_occurred": False,
             "liquidation_occurred": False,
         },
+        "baseline_adoption": baseline_state or {
+            "source": "OPERATOR_PAPER_BASELINE",
+            "status": "NOT_ACCEPTED",
+            "accepted": False,
+            "policy": BASELINE_POLICY_PROTECTED,
+            "broker_mutation_occurred": False,
+            "alpaca_network_call_occurred": False,
+            "secrets_values_exposed": False,
+        },
         "next_safe_action": (
             "Open Keys & Providers and save Alpaca PAPER credentials locally; never paste secrets into chat or tracked files."
             if not alpaca_configured
-            else "Request explicit Shan approval for read-only Alpaca PAPER preflight before any account, open-orders, or positions request."
+            else (
+                str(baseline_state.get("next_safe_action"))
+                if baseline_ready and baseline_state.get("next_safe_action")
+                else "Request explicit Shan approval for read-only Alpaca PAPER preflight before any account, open-orders, or positions request."
+            )
         ),
         "safety": {
             "paper_start_allowed": paper_start_allowed,
@@ -361,6 +397,7 @@ def _build_run_paper_operator_state(
     runtime: dict[str, Any],
     credentials: dict[str, Any],
     health: dict[str, Any],
+    paper_baseline_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blocker_codes = [str(check.get("check_id") or "unknown") for check in blockers]
     warning_codes = [str(check.get("check_id") or "unknown") for check in warnings]
@@ -384,6 +421,7 @@ def _build_run_paper_operator_state(
         endpoint_authority=endpoint_authority,
         endpoint_ok=endpoint_ok,
         paper_start_allowed=paper_start_allowed and not blockers,
+        paper_baseline_state=paper_baseline_state,
     )
     return {
         "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
@@ -427,6 +465,7 @@ def _build_run_paper_operator_state(
             "secrets_values_exposed": False,
         },
         "paper_credential_setup": credential_setup,
+        "paper_baseline": paper_baseline_state or credential_setup["baseline_adoption"],
         "runtime": {
             "label": "No active PAPER run" if runtime_state == "IDLE" else runtime_state,
             "state": runtime_state,
@@ -464,6 +503,7 @@ def _build_run_paper_operator_state(
             "paper_start_allowed": paper_start_allowed,
             "launch_readiness_start_allowed": paper_start_allowed and not blockers,
             "paper_credential_setup": credential_setup,
+            "paper_baseline": paper_baseline_state or credential_setup["baseline_adoption"],
             "broker_mutation_occurred": False,
             "trading_mutation_occurred": False,
             "live_enabled": False,
@@ -485,6 +525,7 @@ def build_launch_readiness(
     supervisor: dict[str, Any],
     ai_status: dict[str, Any],
     effective_env: dict[str, str],
+    paper_baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     alpaca = _find_provider(provider_readiness, "alpaca_paper")
@@ -606,22 +647,43 @@ def build_launch_readiness(
         )
     )
 
+    paper_baseline_state = build_baseline_adoption_state(accepted_baseline=paper_baseline)
+    baseline_ready = paper_baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
     preflight_gate_open = alpaca_configured and endpoint_ok
-    checks.append(
-        _check(
-            "paper_read_only_preflight_gate",
-            "Read-only PAPER preflight",
-            "BLOCKED",
-            (
-                "Read-only Alpaca PAPER account, open-orders, and positions preflight has not run. "
-                "It requires explicit Shan approval before Alpaca is called."
-            ) if preflight_gate_open else (
-                "Read-only Alpaca PAPER preflight is blocked until credentials and the PAPER trading endpoint are present."
-            ),
-            blocker=preflight_gate_open,
-            warning=not preflight_gate_open,
+    if baseline_ready:
+        checks.append(
+            _check(
+                "paper_existing_position_baseline",
+                "Existing-position PAPER baseline",
+                "PASS",
+                "Protected existing-position baseline accepted; existing inventory remains visible and protected.",
+            )
         )
-    )
+        checks.append(
+            _check(
+                "paper_baseline_position_aware_policy",
+                "Position-aware baseline policy",
+                "DEGRADED",
+                "Short PAPER smoke readiness only. Existing-position symbols are protected until run lot tracking is available.",
+                warning=True,
+            )
+        )
+    else:
+        checks.append(
+            _check(
+                "paper_read_only_preflight_gate",
+                "Read-only PAPER preflight",
+                "BLOCKED",
+                (
+                    "Read-only Alpaca PAPER account, open-orders, and positions preflight has not run. "
+                    "It requires explicit Shan approval before Alpaca is called."
+                ) if preflight_gate_open else (
+                    "Read-only Alpaca PAPER preflight is blocked until credentials and the PAPER trading endpoint are present."
+                ),
+                blocker=preflight_gate_open,
+                warning=not preflight_gate_open,
+            )
+        )
 
     blockers = [check for check in checks if check["blocker"]]
     warnings = [check for check in checks if check["warning"]]
@@ -647,6 +709,7 @@ def build_launch_readiness(
         runtime=runtime,
         credentials=credentials,
         health=health,
+        paper_baseline_state=paper_baseline_state,
     )
     return {
         "source": "OPERATOR_LAUNCH_READINESS",

@@ -40,6 +40,11 @@ from app.ai_chief_operator.quant_persona import (
     quant_persona_summary,
 )
 from app.operator_activation.launch_readiness import build_launch_readiness
+from app.operator_activation.paper_baseline import (
+    BASELINE_POLICY_PROTECTED,
+    PaperBaselineStore,
+    build_baseline_adoption_state,
+)
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_credentials.store import (
@@ -168,6 +173,17 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
                 "broker_mutation_occurred": False,
                 "secrets_values_exposed": False,
             },
+            "paper_baseline": {
+                "schema_version": "paper-baseline-view-v1",
+                "canonical_authority": "OPERATOR_PAPER_BASELINE",
+                "default_policy": BASELINE_POLICY_PROTECTED,
+                "endpoint": "/operator/paper-baseline",
+                "accept_endpoint": "/operator/paper-baseline/accept",
+                "local_acceptance_only": True,
+                "alpaca_network_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "secrets_values_exposed": False,
+            },
         }
     },
     "endpoints": {
@@ -220,6 +236,8 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/positions": "read_only_paper_positions",
         "/operator/orders/open": "read_only_open_orders",
         "/operator/positions/intelligence": "read_only_position_intelligence",
+        "/operator/paper-baseline": "read_only_local_paper_baseline_adoption_state",
+        "/operator/paper-baseline/accept": "local_operator_baseline_acceptance_no_broker_call",
         "/operator/launch-readiness": "read_only_bounded_paper_launch_readiness",
         "/operator/research": "advisory_research_registry",
         "/operator/research/hypotheses": "advisory_research_hypothesis_queue_only",
@@ -289,6 +307,7 @@ class OperatorSnapshotProvider:
         self.provider_env = self.credential_store.effective_env(self.process_env)
         self.provider_env.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         self.portfolio_client = portfolio_client
+        self.paper_baseline_store = PaperBaselineStore(self.runtime_config.operator_state_dir / "paper_baseline.json")
         supervisor_config = PaperSupervisorConfig.from_runtime_config(self.runtime_config)
         supervisor_config.process_env = self._paper_process_env(self.provider_env)
         self.supervisor = supervisor or OperatorPaperSupervisor(config=supervisor_config)
@@ -563,6 +582,7 @@ class OperatorSnapshotProvider:
             "runtime_profile": self.runtime_config.runtime_profile,
             "hosted_mode": self.runtime_config.hosted_mode,
             "session_store": session_store,
+            "paper_baseline_store": self.paper_baseline_store.status(),
             "world_awareness_cache": cache_status,
             "operator_state_dir": path_status(self.runtime_config.operator_state_dir),
             "log_dir": path_status(self.runtime_config.log_dir),
@@ -1042,9 +1062,52 @@ class OperatorSnapshotProvider:
             "trading_mutation_occurred": False,
         }
 
+    def paper_baseline(self) -> dict[str, Any]:
+        accepted = self.paper_baseline_store.current()
+        state = build_baseline_adoption_state(accepted_baseline=accepted if accepted.get("accepted") is True else None)
+        state.update(
+            {
+                "store": self.paper_baseline_store.status(),
+                "accept_endpoint": "/operator/paper-baseline/accept",
+                "acceptance_requires_preflight_snapshot": True,
+                "local_acceptance_only": True,
+                "paper_start_occurred": False,
+                "order_submission_occurred": False,
+                "cancel_occurred": False,
+                "replace_occurred": False,
+                "liquidation_occurred": False,
+                "close_position_occurred": False,
+                "live_enabled": False,
+                "real_money_enabled": False,
+            }
+        )
+        return state
+
+    def paper_baseline_accept(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        snapshot = body.get("preflight_snapshot") if isinstance(body.get("preflight_snapshot"), dict) else body
+        accepted_by = str(body.get("accepted_by_operator") or "Shan/local operator")
+        policy = str(body.get("policy") or BASELINE_POLICY_PROTECTED)
+        result = self.paper_baseline_store.accept(snapshot, accepted_by=accepted_by, policy=policy)
+        result.update(
+            {
+                "local_acceptance_only": True,
+                "paper_start_occurred": False,
+                "order_submission_occurred": False,
+                "cancel_occurred": False,
+                "replace_occurred": False,
+                "liquidation_occurred": False,
+                "close_position_occurred": False,
+                "live_enabled": False,
+                "real_money_enabled": False,
+            }
+        )
+        return result
+
     def launch_readiness(self) -> dict[str, Any]:
         effective_env = self._refresh_provider_env()
         supervisor = self.supervisor.status_snapshot()
+        baseline = self.paper_baseline_store.current()
         return build_launch_readiness(
             provider_readiness=self.providers(),
             credentials=self.credentials_providers(),
@@ -1054,6 +1117,7 @@ class OperatorSnapshotProvider:
             supervisor=supervisor,
             ai_status=self.ai_status(),
             effective_env=effective_env,
+            paper_baseline=baseline if baseline.get("accepted") is True else None,
         )
 
     def research(self) -> dict[str, Any]:
@@ -2964,6 +3028,14 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.get("/positions/intelligence")
     def positions_intelligence() -> dict[str, Any]:
         return provider.positions_intelligence()
+
+    @router.get("/paper-baseline")
+    def paper_baseline() -> dict[str, Any]:
+        return provider.paper_baseline()
+
+    @router.post("/paper-baseline/accept")
+    def paper_baseline_accept(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.paper_baseline_accept(payload)
 
     @router.get("/launch-readiness")
     def launch_readiness() -> dict[str, Any]:

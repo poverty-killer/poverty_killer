@@ -746,6 +746,26 @@ body.ai-docked-open.ai-docked-wide .shell {
   background: rgba(15, 23, 42, 0.38);
 }
 
+.paper-baseline-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(20, 184, 166, 0.28);
+  border-radius: 8px;
+  background: rgba(12, 20, 24, 0.62);
+}
+
+.paper-baseline-panel.required {
+  border-color: rgba(234, 179, 8, 0.42);
+  background: rgba(36, 30, 12, 0.46);
+}
+
+.paper-baseline-panel.accepted {
+  border-color: rgba(34, 197, 94, 0.38);
+  background: rgba(10, 28, 20, 0.5);
+}
+
 .run-paper-proof-tile {
   display: grid;
   align-content: start;

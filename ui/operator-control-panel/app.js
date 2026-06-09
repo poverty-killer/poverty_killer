@@ -764,6 +764,12 @@
     const op = runPaperState();
     const canRun = op.canRunPaper || {};
     const overall = op.overallStatus || {};
+    const baseline = op.paperBaseline || data.paperBaseline || {};
+    const portfolio = data.portfolio || {};
+    const positionCount = Number((portfolio.summary && portfolio.summary.positionCount) || (portfolio.positions || []).length || baseline.positionCount || 0);
+    if (baseline.accepted !== true && positionCount > 0) {
+      return "Disabled: Existing positions require baseline adoption.";
+    }
     if (op.source && canRun.allowed !== true) {
       const reason = canRun.reason || overall.detail || "backend start authority is blocked";
       return `Disabled: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
@@ -800,13 +806,14 @@
       `open orders: ${preflight.openOrdersCheckStatus || "not_run"}`,
       `positions: ${preflight.positionsCheckStatus || "not_run"}`
     ].join("; ");
+    const credentialNoticeClass = ["MISSING", "PARTIAL", "ERROR"].includes(overall.code) ? "error" : "";
     return `
       <section class="credential-preflight-panel" data-paper-credential-setup>
         <div class="split">
           <h4>Credential Setup + Read-Only Preflight Gate</h4>
           ${badge(overall.label || "Credential setup unknown", severityColor(overall.severity || overall.code || "blocked"))}
         </div>
-        <div class="notice ${overall.code === "PRESENT_NOT_PREFLIGHTED" ? "" : "error"}" data-paper-credential-top-message>${escapeHtml(overall.detail || "PAPER credential setup status unavailable.")}</div>
+        <div class="notice ${credentialNoticeClass}" data-paper-credential-top-message>${escapeHtml(overall.detail || "PAPER credential setup status unavailable.")}</div>
         <div class="run-paper-proof-grid compact-proof-grid">
           ${credentialCards || renderRunPaperProofTile("APCA credentials", "not loaded", "Backend did not return credential field rows.", "yellow")}
           ${renderRunPaperProofTile("Values hidden", setup.valuesHidden !== false ? "hidden" : "unsafe", "Presence only is shown; raw values are never printed in this UI.", setup.valuesHidden !== false ? "green" : "red")}
@@ -832,6 +839,80 @@
             ["broker_mutation_occurred", badge(preflight.brokerMutationOccurred === true ? "true" : "false", preflight.brokerMutationOccurred === true ? "red" : "green")],
             ["paper_start_allowed", badge(safety.paperStartAllowed === true ? "true" : "false", safety.paperStartAllowed === true ? "green" : "red")],
             ["secrets_values_exposed", badge(safety.secretsValuesExposed === true ? "true" : "false", safety.secretsValuesExposed === true ? "red" : "green")]
+          ])}
+        </details>
+      </section>
+    `;
+  }
+
+  function renderPaperBaselinePanel(baseline, portfolio) {
+    const summary = portfolio.summary || {};
+    const positions = Array.isArray(portfolio.positions) ? portfolio.positions : [];
+    const portfolioOrders = Array.isArray(portfolio.openOrders) ? portfolio.openOrders : [];
+    const positionCount = baseline.accepted ? baseline.positionCount : Number(summary.positionCount || positions.length || baseline.positionCount || 0);
+    const openOrderCount = baseline.accepted ? baseline.openOrderCount : Number(summary.openOrderCount || portfolioOrders.length || baseline.openOrderCount || 0);
+    const symbols = baseline.accepted && baseline.positionSymbols && baseline.positionSymbols.length
+      ? baseline.positionSymbols
+      : positions.map((position) => position.symbol).filter(Boolean);
+    const symbolText = symbols.length ? symbols.join(", ") : "none";
+    const accepted = baseline.accepted === true;
+    const hasExistingPositions = positionCount > 0;
+    const statusTitle = accepted
+      ? "Position-aware PAPER baseline accepted."
+      : (hasExistingPositions ? "Baseline adoption required - existing PAPER positions detected." : "No existing PAPER baseline accepted.");
+    const explanation = accepted
+      ? "This PAPER run starts from an accepted nonzero baseline. Existing positions are tracked separately from new run activity."
+      : (hasExistingPositions
+          ? "Reset is not required. To run PAPER from this account, accept these positions as the starting baseline."
+          : "A clean account can proceed only after the normal read-only preflight proves account, orders, and positions truth.");
+    const policyDetail = accepted || hasExistingPositions
+      ? "Default policy: protected baseline. Existing positions count against risk/exposure; existing baseline quantities will not be sold by default; same-symbol trading is blocked until run lot tracking is available."
+      : "Baseline policy will be selected after read-only preflight truth exists.";
+    const startDetail = accepted
+      ? "Ready for a short position-aware PAPER smoke only if all backend gates pass. Not 72-hour ready yet."
+      : (hasExistingPositions ? "Start remains disabled until baseline is accepted and all other gates pass." : "Start remains governed by backend launch readiness.");
+    const acceptDisabled = (!backendConnected() || accepted || !hasExistingPositions || openOrderCount !== 0) ? "disabled" : "";
+    const acceptReason = accepted
+      ? "Baseline already accepted."
+      : (!hasExistingPositions
+          ? "No existing positions require adoption."
+          : (openOrderCount !== 0 ? "Open orders must be zero before baseline adoption." : "Local-only acceptance is available; it does not call Alpaca or mutate broker state."));
+    return `
+      <section class="paper-baseline-panel ${accepted ? "accepted" : (hasExistingPositions ? "required" : "")}" data-paper-baseline-panel>
+        <div class="split">
+          <h4>${escapeHtml(statusTitle)}</h4>
+          ${badge(accepted ? "accepted" : (hasExistingPositions ? "adoption required" : "not run"), accepted ? "green" : (hasExistingPositions ? "yellow" : "gray"))}
+        </div>
+        <p class="muted">${escapeHtml(explanation)}</p>
+        <div class="run-paper-proof-grid compact-proof-grid">
+          ${renderRunPaperProofTile("Existing positions", `${positionCount}`, `Symbols: ${symbolText}.`, hasExistingPositions ? "yellow" : "green")}
+          ${renderRunPaperProofTile("Open orders", `${openOrderCount}`, openOrderCount === 0 ? "Zero open orders confirmed by current view." : "Open orders block baseline adoption; no cancel control is exposed.", openOrderCount === 0 ? "green" : "red")}
+          ${renderRunPaperProofTile("Account", summary.accountStatus || "UNKNOWN", `Endpoint ${baseline.endpointFamily || "paper"}; buying power ${summary.buyingPower || "unavailable"}; equity ${summary.totalEquity || "unavailable"}.`, (summary.accountBlocked || summary.tradingBlocked) ? "red" : "green")}
+          ${renderRunPaperProofTile("Policy", baseline.policy || "ADOPT_EXISTING_POSITIONS_PROTECTED", policyDetail, "cyan")}
+          ${renderRunPaperProofTile("P&L attribution", "nonzero baseline labeled", "Total account P&L includes baseline carry. Bot incremental P&L requires run fill attribution.", "cyan")}
+          ${renderRunPaperProofTile("Start readiness", accepted ? "position-aware smoke path" : "blocked pending baseline", startDetail, accepted ? "yellow" : "red")}
+        </div>
+        ${accepted ? `<div class="notice" data-paper-baseline-accepted-text>Position-aware PAPER baseline accepted. Snapshot ${escapeHtml(baseline.baselineSnapshotId || "unknown")} at ${escapeHtml(baseline.acceptedAt || "unknown")}.</div>` : ""}
+        ${hasExistingPositions && !accepted ? `<div class="notice" data-paper-baseline-required-text>Existing positions require baseline adoption. Reset is not required.</div>` : ""}
+        <div class="button-row">
+          <button class="intent-button paper" data-intent="paper-baseline-accept" ${acceptDisabled}>Accept current positions as PAPER baseline</button>
+          <button class="intent-button live" disabled>No liquidation / close / cancel controls</button>
+        </div>
+        <div class="notice ${acceptDisabled && !accepted ? "error" : ""}" data-paper-baseline-action-state>${escapeHtml(acceptReason)}</div>
+        <details class="ai-context-details" data-paper-baseline-advanced>
+          <summary>Advanced baseline proof</summary>
+          ${kv([
+            ["baseline_status", tokenText(baseline.status || "NOT_ACCEPTED")],
+            ["baseline_snapshot_id", tokenText(baseline.baselineSnapshotId || "none")],
+            ["snapshot_hash", tokenText(baseline.snapshotHash || "none")],
+            ["accepted_at", escapeHtml(baseline.acceptedAt || "not accepted")],
+            ["same_symbol_trading_policy", tokenText(baseline.sameSymbolTradingPolicy || "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING")],
+            ["baseline_account_equity", escapeHtml((baseline.pnlAttribution && baseline.pnlAttribution.baselineAccountEquity) || "unavailable")],
+            ["baseline_positions_value", escapeHtml((baseline.pnlAttribution && baseline.pnlAttribution.baselinePositionsValue) || "unavailable")],
+            ["run_incremental_equity_pnl_label", escapeHtml((baseline.pnlAttribution && baseline.pnlAttribution.runIncrementalEquityPnlLabel) || "pending")],
+            ["broker_mutation_occurred", badge(baseline.brokerMutationOccurred === true ? "true" : "false", baseline.brokerMutationOccurred === true ? "red" : "green")],
+            ["alpaca_network_call_occurred", badge(baseline.alpacaNetworkCallOccurred === true ? "true" : "false", baseline.alpacaNetworkCallOccurred === true ? "red" : "green")],
+            ["secrets_values_exposed", badge(baseline.secretsValuesExposed === true ? "true" : "false", baseline.secretsValuesExposed === true ? "red" : "green")]
           ])}
         </details>
       </section>
@@ -928,6 +1009,7 @@
           ${badge(canRun.allowed === true ? "Start allowed" : "Start blocked", canRun.allowed === true ? "green" : "red")}
         </div>
         ${renderPaperCredentialSetup(credentialSetup)}
+        ${renderPaperBaselinePanel(op.paperBaseline || data.paperBaseline || {}, data.portfolio || {})}
         <div class="run-paper-proof-grid">
           ${renderRunPaperProofTile("Alpaca PAPER endpoint", endpoint.label || launch.paperEndpointDisplay || "Endpoint unavailable", `${endpointSourceLabel}; family ${endpoint.family || launch.paperEndpointFamily || "unknown"}; host ${endpoint.host || launch.paperEndpointHost || "unavailable"}.`, endpoint.valid === true || launch.paperEndpointOnly ? "green" : "red")}
           ${renderRunPaperProofTile("Credentials", credentials.label || (launch.alpacaPaperCredentialsConfigured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing"), credentialDetail, credentials.configured === true || launch.alpacaPaperCredentialsConfigured ? "green" : "red")}
@@ -2210,6 +2292,7 @@
       ["command", "paper_watchlist", "Watchlist", "input", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_duration", "Run length", "select+number", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["command", "paper_start", "Start Bounded PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
+      ["command", "paper_baseline_accept", "Accept PAPER baseline", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_operator_state_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/paper-baseline/accept"],
       ["command", "home_ai_question", "Home AI Quant Advisor question", "input", "WIRED", "read_only", "", null, "local_page_context"],
       ["command", "home_ai_answer_modes", "Home AI answer modes", "button group", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; local fallback labeled", "POST", "/operator/ai/ask"],
       ["command", "home_ai_clear", "Clear home AI question", "button", "WIRED", "read_only", "", null, "local_clear"],
@@ -4270,7 +4353,14 @@
         largestPosition: pick(summary.largest_position, null),
         highestRiskPosition: pick(summary.highest_risk_position, null),
         staleOrConflictedPositionCount: pick(summary.stale_or_conflicted_position_count, 0),
-        brokerLocalReconciliationStatus: pick(summary.broker_local_reconciliation_status, "UNKNOWN")
+        brokerLocalReconciliationStatus: pick(summary.broker_local_reconciliation_status, "UNKNOWN"),
+        accountStatus: pick(summary.account_status, null),
+        accountId: pick(summary.account_id, null),
+        currency: pick(summary.currency, null),
+        tradingBlocked: summary.trading_blocked === true,
+        accountBlocked: summary.account_blocked === true,
+        transfersBlocked: summary.transfers_blocked === true,
+        patternDayTrader: summary.pattern_day_trader === true
       },
       positions: Array.isArray(portfolio.positions) ? portfolio.positions.map((position) => ({
         symbol: pick(position.symbol, "unknown"),
@@ -4418,6 +4508,7 @@
         replaceOccurred: preflight.replace_occurred === true,
         liquidationOccurred: preflight.liquidation_occurred === true
       },
+      baselineAdoption: normalizePaperBaseline(payload.baseline_adoption || {}),
       nextSafeAction: pick(payload.next_safe_action, "Open Keys & Providers and save Alpaca PAPER credentials locally; never paste secrets into chat or tracked files."),
       safety: {
         paperStartAllowed: safety.paper_start_allowed === true,
@@ -4427,6 +4518,47 @@
         secretsValuesExposed: safety.secrets_values_exposed === true,
         rawSecretValuesIncluded: safety.raw_secret_values_included === true
       }
+    };
+  }
+
+  function normalizePaperBaseline(payload) {
+    const baseline = payload || {};
+    const pnl = baseline.pnl_attribution || {};
+    return {
+      source: pick(baseline.source, "OPERATOR_PAPER_BASELINE"),
+      schemaVersion: pick(baseline.schema_version, "paper-baseline-view-v1"),
+      status: pick(baseline.status, "NOT_ACCEPTED"),
+      decision: pick(baseline.decision, "READ_ONLY_PREFLIGHT_REQUIRED"),
+      accepted: baseline.accepted === true,
+      policy: pick(baseline.policy, "ADOPT_EXISTING_POSITIONS_PROTECTED"),
+      positionCount: pick(baseline.position_count, 0),
+      positionSymbols: Array.isArray(baseline.position_symbols) ? baseline.position_symbols : [],
+      openOrderCount: pick(baseline.open_order_count, 0),
+      endpointFamily: pick(baseline.endpoint_family, "paper"),
+      liveLocked: baseline.live_locked !== false,
+      realMoneyBlocked: baseline.real_money_blocked !== false,
+      startReady: baseline.start_ready === true,
+      reason: pick(baseline.reason, ""),
+      nextSafeAction: pick(baseline.next_safe_action, ""),
+      baselineSnapshotId: pick(baseline.baseline_snapshot_id, null),
+      snapshotHash: pick(baseline.snapshot_hash, null),
+      acceptedAt: pick(baseline.accepted_at, null),
+      protectedSymbols: Array.isArray(baseline.protected_symbols) ? baseline.protected_symbols : [],
+      sameSymbolTradingPolicy: pick(baseline.same_symbol_trading_policy, "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING"),
+      pnlAttribution: {
+        baselineAccountEquity: pick(pnl.baseline_account_equity, null),
+        baselinePositionsValue: pick(pnl.baseline_positions_value, null),
+        runIncrementalEquityPnl: pick(pnl.run_incremental_equity_pnl, null),
+        runIncrementalEquityPnlLabel: pick(pnl.run_incremental_equity_pnl_label, ""),
+        baselineCarryPnlLabel: pick(pnl.baseline_carry_pnl_label, ""),
+        runTradePnlLabel: pick(pnl.run_trade_pnl_label, ""),
+        cleanBaselineClaimed: pnl.clean_baseline_claimed === true
+      },
+      brokerMutationOccurred: baseline.broker_mutation_occurred === true,
+      tradingMutationOccurred: baseline.trading_mutation_occurred === true,
+      alpacaNetworkCallOccurred: baseline.alpaca_network_call_occurred === true,
+      secretsValuesExposed: baseline.secrets_values_exposed === true,
+      store: baseline.store || {}
     };
   }
 
@@ -4481,6 +4613,7 @@
         secretsValuesExposed: credentials.secrets_values_exposed === true
       },
       paperCredentialSetup: normalizePaperCredentialSetup(payload.paper_credential_setup || {}),
+      paperBaseline: normalizePaperBaseline(payload.paper_baseline || (payload.paper_credential_setup && payload.paper_credential_setup.baseline_adoption) || {}),
       runtime: {
         label: pick(runtime.label, ""),
         state: pick(runtime.state, "UNKNOWN"),
@@ -4583,6 +4716,7 @@
     const providerReadiness = payload.providerReadiness || {};
     const credentialsProviders = payload.credentialsProviders || {};
     const portfolio = payload.portfolio || {};
+    const paperBaseline = payload.paperBaseline || {};
     const launchReadiness = payload.launchReadiness || {};
     const research = payload.research || {};
     const evidenceGraph = payload.evidenceGraph || {};
@@ -4926,6 +5060,9 @@
       next.positions = next.portfolio.positions;
       next.orders = next.portfolio.openOrders;
     }
+    if (paperBaseline.source) {
+      next.paperBaseline = normalizePaperBaseline(paperBaseline);
+    }
     if (launchReadiness.source) {
       next.launchReadiness = {
         source: launchReadiness.source,
@@ -4958,6 +5095,11 @@
         portfolioReadAvailability: pick(launchReadiness.portfolio_read_availability, "UNKNOWN"),
         backendDegradedReasons: Array.isArray(launchReadiness.backend_degraded_reasons) ? launchReadiness.backend_degraded_reasons : []
       };
+      next.paperBaseline = normalizePaperBaseline(
+        launchReadiness.run_paper_operator_state && launchReadiness.run_paper_operator_state.paper_baseline
+          ? launchReadiness.run_paper_operator_state.paper_baseline
+          : (paperBaseline.source ? paperBaseline : next.paperBaseline)
+      );
     }
     if (research.source) {
       next.research.hypotheses = Array.isArray(research.hypotheses) ? research.hypotheses.map((item) => ({
@@ -5171,6 +5313,7 @@
       ["providerReadiness", "/operator/providers/readiness"],
       ["credentialsProviders", "/operator/credentials/providers"],
       ["portfolio", "/operator/portfolio"],
+      ["paperBaseline", "/operator/paper-baseline"],
       ["launchReadiness", "/operator/launch-readiness"],
       ["research", "/operator/research"],
       ["evidenceGraph", "/operator/research/evidence-graph"],
@@ -5272,6 +5415,55 @@
     };
   }
 
+  function paperBaselineAcceptancePayload() {
+    const portfolio = data.portfolio || {};
+    const summary = portfolio.summary || {};
+    const positions = Array.isArray(portfolio.positions) ? portfolio.positions : [];
+    const openOrders = Array.isArray(portfolio.openOrders) ? portfolio.openOrders : [];
+    return {
+      policy: "ADOPT_EXISTING_POSITIONS_PROTECTED",
+      accepted_by_operator: "Shan/local operator",
+      preflight_snapshot: {
+        endpoint_family: "paper",
+        account: {
+          account_id: summary.accountId || null,
+          status: summary.accountStatus || "UNKNOWN",
+          equity: summary.totalEquity || null,
+          buying_power: summary.buyingPower || null,
+          currency: summary.currency || null,
+          trading_blocked: summary.tradingBlocked === true,
+          account_blocked: summary.accountBlocked === true,
+          transfers_blocked: summary.transfersBlocked === true,
+          pattern_day_trader: summary.patternDayTrader === true
+        },
+        open_order_count: summary.openOrderCount || openOrders.length || 0,
+        open_orders: openOrders.map((order) => ({
+          order_id: order.orderId || null,
+          symbol: order.symbol,
+          side: order.side,
+          qty: order.qty,
+          type: order.type,
+          status: order.status,
+          submitted_at: order.submittedAt
+        })),
+        position_count: summary.positionCount || positions.length || 0,
+        positions: positions.map((position) => ({
+          symbol: position.symbol,
+          asset_class: position.assetClass,
+          quantity: position.quantity,
+          side: position.side,
+          average_entry_price: position.averageEntryPrice,
+          cost_basis: position.costBasis,
+          market_value: position.marketValue,
+          current_market_price: position.currentMarketPrice,
+          unrealized_pnl: position.unrealizedPnl,
+          unrealized_pnl_percent: position.unrealizedPnlPercent,
+          baseline_position: true
+        }))
+      }
+    };
+  }
+
   function historicalFormValues() {
     const form = document.querySelector("[data-historical-form]");
     const value = (selector, fallback) => ((form && form.querySelector(selector)) || {}).value || fallback;
@@ -5312,6 +5504,26 @@
     if (!backendConnected()) return;
     try {
       let message = "none";
+      if (intent === "paper-baseline-accept") {
+        const payload = paperBaselineAcceptancePayload();
+        const snapshot = payload.preflight_snapshot || {};
+        const count = Number(snapshot.position_count || 0);
+        const openOrders = Number(snapshot.open_order_count || 0);
+        if (count <= 0) {
+          window.alert("No existing positions are loaded for baseline adoption.");
+          return;
+        }
+        if (openOrders !== 0) {
+          window.alert("Open orders must be zero before baseline adoption. No cancel request will be sent.");
+          return;
+        }
+        const confirmed = window.confirm(
+          `Accept protected PAPER baseline?\n\nPositions: ${count}\nOpen orders: ${openOrders}\nPolicy: ${payload.policy}\n\nThis is a local operator-state write only. It will not call Alpaca, start PAPER, place, cancel, replace, close, or liquidate orders.`
+        );
+        if (!confirmed) return;
+        const result = await postIntent("/operator/paper-baseline/accept", payload);
+        message = `${result.status || "UNKNOWN"}: ${result.baseline_snapshot_id || result.reason_code || "paper_baseline"}`;
+      }
       if (intent === "paper-start") {
         const form = paperRunFormValues(sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "command");
         if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked || !form.confirmNoManualTrades) {

@@ -84,6 +84,10 @@ def test_operator_contracts_distinguish_truth_authorities(tmp_path):
     assert "GET /v2/account" in setup_contract["read_only_preflight_checks"]
     assert setup_contract["alpaca_network_call_occurred"] is False
     assert setup_contract["secrets_values_exposed"] is False
+    baseline_contract = payload["view_models"]["run_paper_operator_state"]["paper_baseline"]
+    assert baseline_contract["canonical_authority"] == "OPERATOR_PAPER_BASELINE"
+    assert baseline_contract["local_acceptance_only"] is True
+    assert baseline_contract["broker_mutation_occurred"] is False
     assert payload["truth_labels"]["broker_confirmed"].startswith("Canonical")
     assert payload["truth_labels"]["unknown"].startswith("Truth unavailable")
 
@@ -103,6 +107,8 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/operator/positions" in paths
     assert "/operator/orders/open" in paths
     assert "/operator/positions/intelligence" in paths
+    assert "/operator/paper-baseline" in paths
+    assert "/operator/paper-baseline/accept" in paths
     assert "/operator/launch-readiness" in paths
     assert "/operator/research" in paths
     assert "/operator/research/evidence-graph" in paths
@@ -360,6 +366,7 @@ def test_operator_endpoint_smoke_matrix_is_safe(tmp_path):
         "/operator/positions",
         "/operator/orders/open",
         "/operator/positions/intelligence",
+        "/operator/paper-baseline",
         "/operator/research",
         "/operator/research/evidence-graph",
         "/operator/ai/status",

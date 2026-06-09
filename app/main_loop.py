@@ -95,6 +95,7 @@ from app.risk.pre_trade_guardrails import (
     PreTradeGuardrailRequest,
     evaluate_pre_trade_guardrails,
 )
+from app.operator_activation.paper_baseline import evaluate_protected_baseline_trade
 from app.market.capability_registry import build_default_capability_registry
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
@@ -880,6 +881,64 @@ def _metadata_sequence(value: Any) -> Tuple[Dict[str, Any], ...]:
         return ()
 
 
+def _protected_baseline_from_metadata(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for key in ("accepted_paper_baseline", "paper_baseline", "baseline_adoption"):
+        value = metadata.get(key)
+        if isinstance(value, dict) and (value.get("accepted") is True or isinstance(value.get("baseline_snapshot"), dict)):
+            return dict(value)
+    return None
+
+
+def _protected_baseline_guardrail_verdict(
+    *,
+    symbol: str,
+    side: str,
+    order_type: str,
+    time_in_force: Optional[str],
+    requested_notional: Optional[Decimal],
+    internal_max_notional: Optional[Decimal],
+    quantity: Decimal,
+    baseline_decision: Dict[str, Any],
+) -> Dict[str, Any]:
+    reason = str(baseline_decision.get("reason_code") or "BASELINE_PROTECTED_SAME_SYMBOL_BLOCKED")
+    detail = str(
+        baseline_decision.get("detail")
+        or "Existing-position symbols are protected; same-symbol trading is blocked until run lot tracking is available."
+    )
+    return {
+        "verdict": "BLOCK",
+        "route_permitted": False,
+        "mutation_permitted": False,
+        "reason_codes": (reason, "PAPER_BASELINE_PROTECTED"),
+        "symbol": symbol,
+        "side": side,
+        "action": None,
+        "order_type": str(order_type).lower(),
+        "time_in_force": time_in_force,
+        "quantity": str(quantity),
+        "requested_notional": _decimal_or_none_string(requested_notional),
+        "internal_max_notional": _decimal_or_none_string(internal_max_notional),
+        "broker_min_notional": None,
+        "capability_identity": {},
+        "broker_intent": False,
+        "sell_intent_classification": "BASELINE_PROTECTED" if side == "sell" else None,
+        "module_evidence": [
+            {
+                "module": "paper_baseline_protection",
+                "status": "CONTRIBUTED_BLOCK",
+                "reason_code": reason,
+                "summary": detail,
+                "details": {
+                    "policy": "ADOPT_EXISTING_POSITIONS_PROTECTED",
+                    "baseline_symbol": symbol,
+                    "lot_tracking_available": False,
+                    "broker_mutation_occurred": False,
+                },
+            }
+        ],
+    }
+
+
 def _build_pre_trade_guardrail_verdict(
     *,
     config: Any,
@@ -917,6 +976,29 @@ def _build_pre_trade_guardrail_verdict(
         protective_context["sell_intent_classification"] = sell_intent_classification
     metadata["execution_action"] = execution_action
     metadata["broker_intent"] = execution_action is not None
+    accepted_baseline = _protected_baseline_from_metadata(metadata)
+    if accepted_baseline is not None and side in {"buy", "sell"}:
+        baseline_decision = evaluate_protected_baseline_trade(
+            symbol=symbol,
+            side=side,
+            requested_qty=quantity,
+            accepted_baseline=accepted_baseline,
+            run_acquired_qty=metadata.get("run_acquired_qty"),
+            lot_tracking_available=metadata.get("paper_baseline_lot_tracking_available") is True,
+        )
+        if baseline_decision.get("allowed") is not True:
+            metadata["broker_intent"] = False
+            metadata["paper_baseline_protected_block"] = baseline_decision.get("reason_code")
+            return _protected_baseline_guardrail_verdict(
+                symbol=symbol,
+                side=side,
+                order_type=order_type or ("limit" if is_attack else "market"),
+                time_in_force=None,
+                requested_notional=requested_notional,
+                internal_max_notional=internal_max_notional,
+                quantity=quantity,
+                baseline_decision=baseline_decision,
+            )
     if side == "sell" and execution_action is None:
         return _no_broker_intent_guardrail_verdict(
             symbol=symbol,

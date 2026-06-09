@@ -64,6 +64,14 @@ def _decimal_text(value: Any) -> str | None:
     return format(parsed.normalize(), "f")
 
 
+def _redacted_suffix(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    suffix = text[-6:] if len(text) > 6 else text
+    return f"redacted_suffix:{suffix}"
+
+
 def _pct(numerator: Decimal | None, denominator: Decimal | None) -> str | None:
     if numerator is None or denominator is None or denominator == 0:
         return None
@@ -135,6 +143,13 @@ def _empty_unavailable(
             "highest_risk_position": None,
             "stale_or_conflicted_position_count": 0,
             "broker_local_reconciliation_status": "UNAVAILABLE",
+            "account_status": None,
+            "account_id": None,
+            "currency": None,
+            "trading_blocked": None,
+            "account_blocked": None,
+            "transfers_blocked": None,
+            "pattern_day_trader": None,
         },
         "positions": [],
         "open_orders": [],
@@ -392,6 +407,13 @@ def build_portfolio_snapshot(
             "stale_or_conflicted_position_count": stale_conflicted,
             "broker_local_reconciliation_status": "BROKER_CONFIRMED_NO_LOCAL_TRUTH_PROMOTED",
             "activities_status": activities_status,
+            "account_status": account_map.get("status"),
+            "account_id": _redacted_suffix(account_map.get("id") or account_map.get("account_id")),
+            "currency": account_map.get("currency"),
+            "trading_blocked": bool(account_map.get("trading_blocked")),
+            "account_blocked": bool(account_map.get("account_blocked")),
+            "transfers_blocked": bool(account_map.get("transfers_blocked")),
+            "pattern_day_trader": bool(account_map.get("pattern_day_trader")),
         },
         "positions": position_rows,
         "open_orders": open_orders,
