@@ -617,19 +617,22 @@
   function dataSourceColor() {
     if (data.meta.dataSource === "OPERATOR_BACKEND") return "green";
     if (data.meta.dataSource === "PARTIAL_BACKEND") return "yellow";
+    if (data.meta.dataSource === "BACKEND_UNAVAILABLE") return "red";
     return "yellow";
   }
 
   function sourceLabel() {
     if (data.meta.dataSource === "OPERATOR_BACKEND") return "Backend: OK";
     if (data.meta.dataSource === "PARTIAL_BACKEND") return `Backend: Degraded - ${backendDegradedCount()} check${backendDegradedCount() === 1 ? "" : "s"}`;
-    return "Backend: Sample data";
+    if (data.meta.dataSource === "BACKEND_UNAVAILABLE") return "Backend: Unavailable";
+    return "Backend: Not connected";
   }
 
   function sourceSubtext() {
     if (data.meta.dataSource === "OPERATOR_BACKEND") return "operator panel / backend OK";
     if (data.meta.dataSource === "PARTIAL_BACKEND") return `operator panel / ${backendDegradedCount()} degraded check${backendDegradedCount() === 1 ? "" : "s"}`;
-    return "operator panel / sample data fallback";
+    if (data.meta.dataSource === "BACKEND_UNAVAILABLE") return "operator panel / backend unavailable";
+    return "operator panel / backend not connected";
   }
 
   function formatDuration(seconds) {
@@ -663,6 +666,596 @@
 
   function backendConnected() {
     return data.meta.dataSource === "OPERATOR_BACKEND" || data.meta.dataSource === "PARTIAL_BACKEND";
+  }
+
+  function isMockAuthoritySource(source) {
+    const value = String(source || "").toUpperCase();
+    return value === "MOCK_DATA" || value === "STATIC_MOCK" || value.includes("MOCK_");
+  }
+
+  function hasMockRunPaperReason(codes) {
+    return (Array.isArray(codes) ? codes : []).some((code) => String(code || "").toUpperCase().includes("MOCK_DATA"));
+  }
+
+  function runPaperStateHasMockAuthority(state) {
+    const op = state || {};
+    const canRun = op.canRunPaper || {};
+    const advanced = op.advanced || {};
+    return isMockAuthoritySource(op.source)
+      || isMockAuthoritySource((op.endpoint || {}).source)
+      || isMockAuthoritySource((op.credentials || {}).source)
+      || isMockAuthoritySource((op.paperBaseline || {}).source)
+      || isMockAuthoritySource((op.paperCredentialSetup || {}).source)
+      || hasMockRunPaperReason(canRun.reasonCodes)
+      || hasMockRunPaperReason(advanced.reasonCodes);
+  }
+
+  function uniqueCodes(codes) {
+    return (codes || []).filter((code, index, arr) => code && arr.indexOf(code) === index);
+  }
+
+  function runPaperSourceMismatchCodes(state, op) {
+    const codes = [];
+    const launch = (state && state.launchReadiness) || {};
+    const portfolio = (state && state.portfolio) || {};
+    const credentials = (state && state.credentials) || {};
+    const providers = Array.isArray(credentials.providers) ? credentials.providers : [];
+    const alpaca = providers.find((item) => item.providerId === "alpaca_paper") || {};
+    const sup = (state && state.supervisor) || {};
+    const view = op || {};
+    if (!launch.source || isMockAuthoritySource(launch.source) || isMockAuthoritySource(view.source)) {
+      codes.push("READINESS_SOURCE_MISMATCH");
+    }
+    if ((credentials.source && !isMockAuthoritySource(credentials.source)) || alpaca.configured === true) {
+      const source = (view.credentials || {}).source;
+      if (!source || isMockAuthoritySource(source) || view.credentials && view.credentials.configured !== alpaca.configured) {
+        codes.push("CREDENTIAL_SOURCE_MISMATCH");
+      }
+    }
+    if (portfolio.status === "BROKER_CONFIRMED" || portfolio.brokerReadOccurred === true) {
+      const brokerTruth = view.brokerTruth || {};
+      if (!brokerTruth.brokerConfirmed || isMockAuthoritySource(brokerTruth.status) || isMockAuthoritySource(brokerTruth.label)) {
+        codes.push("PORTFOLIO_SOURCE_MISMATCH");
+      }
+    }
+    if (sup.state || sup.processState || sup.sessionId) {
+      const runtime = view.runtime || {};
+      const supActive = Boolean(sup.sessionId && sup.sessionId !== "none")
+        || ["RUNNING", "STARTING", "STOP_REQUESTED"].includes(String(sup.processState || sup.state || "").toUpperCase());
+      const runtimeState = String(runtime.state || runtime.processState || "").toUpperCase();
+      if (supActive && (!runtimeState || runtimeState.includes("MOCK") || runtime.activeSessionId !== sup.sessionId && sup.sessionId && sup.sessionId !== "none")) {
+        codes.push("SUPERVISOR_SOURCE_MISMATCH");
+      }
+    }
+    return uniqueCodes(codes);
+  }
+
+  function paperBaselineFromState(state, op) {
+    const standalone = (state && state.paperBaseline) || {};
+    const nested = (op && op.paperBaseline) || {};
+    const connected = state && state.meta
+      ? (state.meta.dataSource === "OPERATOR_BACKEND" || state.meta.dataSource === "PARTIAL_BACKEND")
+      : backendConnected();
+    if (connected) {
+      if (standalone.source && !isMockAuthoritySource(standalone.source)) return standalone;
+      if (nested.source && !isMockAuthoritySource(nested.source)) return nested;
+      if (standalone.accepted === true) return standalone;
+      if (nested.accepted === true) return nested;
+      return standalone.source ? standalone : nested;
+    }
+    return nested.source ? nested : standalone;
+  }
+
+  function alpacaPaperCredentialTruth(state) {
+    const credentials = (state && state.credentials) || {};
+    const providers = Array.isArray(credentials.providers) ? credentials.providers : [];
+    const provider = providers.find((item) => item.providerId === "alpaca_paper")
+      || providers.find((item) => item.providerId === "alpaca_news")
+      || {};
+    const fields = Array.isArray(provider.fields) ? provider.fields : [];
+    const byName = new Map(fields.map((field) => [field.name, field]));
+    const required = ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"];
+    const rows = required.map((name) => {
+      const field = byName.get(name) || {};
+      const present = field.configured === true || (provider.configured === true && fields.length === 0);
+      return {
+        name,
+        present,
+        displayValue: present ? "present" : "missing",
+        source: field.source || provider.source || credentials.source || "OPERATOR_LOCAL_CREDENTIAL_STORE",
+        rawValueExposed: false
+      };
+    });
+    const missingFields = rows.filter((row) => row.present !== true).map((row) => row.name);
+    return {
+      configured: missingFields.length === 0,
+      missingFields,
+      source: provider.source || credentials.source || "OPERATOR_LOCAL_CREDENTIAL_STORE",
+      precedence: credentials.precedence || "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+      rows
+    };
+  }
+
+  function endpointTruthFromState(state) {
+    const launch = (state && state.launchReadiness) || {};
+    const status = (state && state.status) || {};
+    const statusEndpoint = String(status.endpoint || "");
+    const display = launch.paperEndpointDisplay
+      || (statusEndpoint.includes("paper-api.alpaca.markets") ? statusEndpoint : "https://paper-api.alpaca.markets");
+    const family = launch.paperEndpointFamily
+      || (display.includes("paper-api.alpaca.markets") ? "paper" : "unknown");
+    const host = launch.paperEndpointHost
+      || (display.includes("paper-api.alpaca.markets") ? "paper-api.alpaca.markets" : "");
+    const source = launch.paperEndpointSource && !isMockAuthoritySource(launch.paperEndpointSource)
+      ? launch.paperEndpointSource
+      : (statusEndpoint.includes("paper-api.alpaca.markets") ? "OPERATOR_STATUS" : "BACKEND_LAUNCH_READINESS_UNAVAILABLE");
+    const valid = family === "paper" && display.includes("paper-api.alpaca.markets");
+    return {
+      label: valid ? `Alpaca PAPER endpoint confirmed: ${display}` : "PAPER endpoint authority unavailable",
+      display,
+      family,
+      host,
+      source,
+      configured: launch.alpacaEndpointConfigured === true,
+      valid,
+      status: launch.paperEndpointStatus || (valid ? "PAPER_ENDPOINT_CONFIRMED" : "UNKNOWN"),
+      blockerCode: launch.paperEndpointBlockerCode || null,
+      operatorAction: launch.paperEndpointOperatorAction || (valid ? "No endpoint action required." : "Reload backend launch readiness before starting PAPER.")
+    };
+  }
+
+  function brokerTruthFromState(state) {
+    const portfolio = (state && state.portfolio) || {};
+    const brokerConfirmed = portfolio.status === "BROKER_CONFIRMED" || (portfolio.summary && Number(portfolio.summary.positionCount || 0) >= 0 && portfolio.brokerReadOccurred === true);
+    return {
+      status: brokerConfirmed ? "BROKER_CONFIRMED" : "BROKER_TRUTH_NOT_LOADED_IN_THIS_CARD",
+      label: brokerConfirmed ? "Broker-confirmed PAPER portfolio loaded" : "Broker truth not loaded in Run PAPER card",
+      detail: brokerConfirmed
+        ? `${portfolio.message || "Portfolio Snapshot is broker-confirmed."} Positions: ${(portfolio.summary && portfolio.summary.positionCount) || 0}; open orders: ${(portfolio.summary && portfolio.summary.openOrderCount) || 0}.`
+        : "Portfolio Snapshot remains the broker-confirmed truth area; no positions are invented here.",
+      brokerConfirmed,
+      brokerReadOccurred: portfolio.brokerReadOccurred === true,
+      brokerReadAttempted: portfolio.brokerReadAttempted === true,
+      brokerMutationOccurred: portfolio.brokerMutationOccurred === true,
+      orderSubmissionOccurred: false,
+      cancelOccurred: false,
+      liquidationOccurred: false
+    };
+  }
+
+  function buildCredentialSetupFromBackendState(state) {
+    const truth = alpacaPaperCredentialTruth(state);
+    const endpoint = endpointTruthFromState(state);
+    const baseline = paperBaselineFromState(state, {});
+    const baselineAccepted = baseline.accepted === true;
+    return {
+      source: "OPERATOR_BACKEND_CREDENTIALS",
+      schemaVersion: "paper-credential-setup-v1",
+      overallStatus: {
+        code: truth.configured ? "PRESENT" : "MISSING",
+        label: truth.configured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing",
+        severity: truth.configured ? "ready" : "blocked",
+        detail: truth.configured
+          ? "Credential presence is confirmed by the operator backend; raw values are hidden."
+          : "Credential presence is not confirmed by the operator backend."
+      },
+      requiredCredentials: truth.rows,
+      missingFields: truth.missingFields,
+      valuesHidden: true,
+      endpoint: {
+        display: endpoint.display,
+        family: endpoint.family,
+        host: endpoint.host,
+        source: endpoint.source,
+        configured: endpoint.configured,
+        paperEndpointValid: endpoint.valid,
+        liveEndpointBlocked: true,
+        blockerCode: endpoint.blockerCode
+      },
+      approvedSecretPath: {
+        label: "Keys & Providers -> Alpaca PAPER Broker/Data -> Save local credentials",
+        storageType: "operator_secret_file",
+        relativePath: ".operator_secrets/provider_credentials.json",
+        credentialPrecedence: truth.precedence,
+        gitignored: true,
+        safeInstruction: "Use Keys & Providers when OPERATOR_BACKEND is connected; values stay local and hidden.",
+        forbiddenInstruction: "Do not paste credentials into chat, do not commit .env files, and do not put raw secrets in tracked files."
+      },
+      preflightGate: {
+        readOnlyPreflightAuthorized: false,
+        readOnlyPreflightAvailable: truth.configured,
+        accountCheckStatus: baselineAccepted ? "accepted_existing_positions" : "backend_launch_readiness_unavailable",
+        openOrdersCheckStatus: baselineAccepted ? "accepted_existing_positions" : "backend_launch_readiness_unavailable",
+        positionsCheckStatus: baselineAccepted ? "accepted_existing_positions" : "backend_launch_readiness_unavailable",
+        lastPreflightAt: baseline.acceptedAt || null,
+        lastPreflightResult: baseline.status || null,
+        statusLabel: baselineAccepted ? "Accepted protected baseline" : "Backend launch readiness unavailable",
+        detail: baselineAccepted
+          ? "Accepted protected baseline is loaded from backend state. Raw credentials are not exposed."
+          : "Backend credential truth is loaded, but launch readiness must return before PAPER start can be requested.",
+        explicitApprovalRequired: true,
+        futureChecks: ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
+        alpacaNetworkCallOccurred: false,
+        accountRequestOccurred: false,
+        openOrdersRequestOccurred: false,
+        positionsRequestOccurred: false,
+        brokerMutationOccurred: false,
+        orderSubmissionOccurred: false,
+        cancelOccurred: false,
+        replaceOccurred: false,
+        liquidationOccurred: false
+      },
+      nextSafeAction: truth.configured
+        ? "Reload backend launch readiness; do not use offline sample authority for PAPER start decisions."
+        : "Open Keys & Providers and save Alpaca PAPER credentials locally; never paste secrets into chat or tracked files.",
+      safety: {
+        paperStartAllowed: false,
+        liveEnabled: false,
+        realMoneyEnabled: false,
+        brokerMutationOccurred: false,
+        secretsValuesExposed: false,
+        rawSecretValuesIncluded: false
+      }
+    };
+  }
+
+  function credentialSetupWithProviderTruth(setup, state) {
+    const base = setup && setup.source && !isMockAuthoritySource(setup.source)
+      ? setup
+      : buildCredentialSetupFromBackendState(state);
+    const truth = alpacaPaperCredentialTruth(state);
+    return {
+      ...base,
+      requiredCredentials: truth.rows,
+      missingFields: truth.missingFields,
+      valuesHidden: true,
+      safety: {
+        ...(base.safety || {}),
+        secretsValuesExposed: false,
+        rawSecretValuesIncluded: false
+      }
+    };
+  }
+
+  function buildBackendConnectedRunPaperState(state, reason) {
+    const launch = (state && state.launchReadiness) || {};
+    const sup = (state && state.supervisor) || {};
+    const baseline = paperBaselineFromState(state, {});
+    const credentialTruth = alpacaPaperCredentialTruth(state);
+    const endpoint = endpointTruthFromState(state);
+    const activeRuntime = Boolean(sup.sessionId && sup.sessionId !== "none")
+      || ["RUNNING", "STARTING", "STOP_REQUESTED"].includes(String(sup.processState || sup.state || "").toUpperCase());
+    const reasonCode = activeRuntime ? "SUPERVISOR_PROCESS_RUNNING_OR_RECENT" : "BACKEND_LAUNCH_READINESS_UNAVAILABLE";
+    const mismatchCodes = runPaperSourceMismatchCodes(state, launch.runPaperOperatorState || {});
+    const reasonCodes = uniqueCodes([reasonCode].concat(mismatchCodes));
+    const detail = activeRuntime
+      ? "PAPER supervisor process is attached; duplicate start is blocked."
+      : `Backend status is connected, but launch readiness did not return current start authority: ${reason || "unknown endpoint failure"}.`;
+    const overallLabel = activeRuntime ? "PAPER supervisor running" : "Run PAPER authority unavailable";
+    const credentialSetup = buildCredentialSetupFromBackendState(state);
+    return {
+      source: "OPERATOR_BACKEND_DEGRADED_RUN_PAPER_VIEW",
+      schemaVersion: "run-paper-command-center-v1",
+      overallStatus: {
+        code: "BLOCKED",
+        label: overallLabel,
+        severity: activeRuntime ? "yellow" : "red",
+        detail
+      },
+      canRunPaper: {
+        allowed: false,
+        label: "Start blocked",
+        reason: detail,
+        reasonCodes,
+        warningCodes: launch.backendDegradedReasons || [],
+        usesExistingGovernedStartIntent: "/operator/intent/paper/start",
+        requiresOperatorConfirmations: true
+      },
+      nextSafeAction: activeRuntime
+        ? "Monitor the attached PAPER supervisor. Do not start a second run."
+        : "Reload backend launch readiness and fix the endpoint failure before pressing Start.",
+      endpoint,
+      credentials: {
+        label: credentialTruth.configured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing",
+        configured: credentialTruth.configured,
+        missingFields: credentialTruth.missingFields,
+        source: credentialTruth.source,
+        precedence: credentialTruth.precedence,
+        rawSecretValuesIncluded: false,
+        secretsValuesExposed: false
+      },
+      paperCredentialSetup: credentialSetup,
+      paperBaseline: baseline,
+      runtime: {
+        label: activeRuntime ? "PAPER supervisor process is attached" : "No active PAPER run",
+        state: sup.state || sup.processState || "UNKNOWN",
+        processState: sup.processState || "UNKNOWN",
+        activeSessionId: sup.sessionId && sup.sessionId !== "none" ? sup.sessionId : null,
+        paperStartRefusalReason: sup.paperStartRefusalReason || (activeRuntime ? "SUPERVISOR_PROCESS_RUNNING_OR_RECENT" : reasonCode),
+        paperStopAllowed: sup.paperStopAllowed === true,
+        safeStopStatus: launch.safeStopStatus || "UNKNOWN"
+      },
+      brokerTruth: brokerTruthFromState(state),
+      safetyLocks: {
+        live: { label: "Live locked", locked: true, enabled: false },
+        realMoney: { label: "Real money blocked", blocked: true, enabled: false },
+        manualTrading: { label: "Manual trading unavailable", available: false },
+        forceTrade: { label: "Force trade unavailable", available: false },
+        brokerMutation: { label: "No broker mutation from this readiness view", occurred: false }
+      },
+      advanced: {
+        finalLaunchReadiness: "BLOCKED",
+        reasonCodes: uniqueCodes(reasonCodes.concat(launch.backendDegradedReasons || [])),
+        checks: launch.checks || [],
+        paperEndpointDisplay: endpoint.display,
+        paperEndpointFamily: endpoint.family,
+        paperEndpointHost: endpoint.host,
+        paperEndpointBlockerCode: endpoint.blockerCode,
+        alpacaEndpointConfigured: endpoint.configured,
+        alpacaEndpointSource: endpoint.source,
+        alpacaPaperEndpointValid: endpoint.valid,
+        alpacaLiveEndpointBlocked: true,
+        paperStartAllowed: false,
+        launchReadinessStartAllowed: false,
+        brokerMutationOccurred: false,
+        tradingMutationOccurred: false,
+        liveEnabled: false,
+        realMoneyEnabled: false,
+        secretsValuesExposed: false,
+        backendDegradedReasons: uniqueCodes((launch.backendDegradedReasons || []).concat(mismatchCodes))
+      }
+    };
+  }
+
+  function buildBackendUnavailableRunPaperState(reason) {
+    const detail = `Operator backend is unavailable: ${reason || "status endpoint did not respond"}. Start authority, credentials, baseline, and broker truth cannot be proven.`;
+    return {
+      source: "BACKEND_UNAVAILABLE_RUN_PAPER_VIEW",
+      schemaVersion: "run-paper-command-center-v1",
+      overallStatus: {
+        code: "BLOCKED",
+        label: "Operator backend unavailable",
+        severity: "red",
+        detail
+      },
+      canRunPaper: {
+        allowed: false,
+        label: "Start blocked",
+        reason: detail,
+        reasonCodes: ["BACKEND_UNAVAILABLE"],
+        warningCodes: [],
+        usesExistingGovernedStartIntent: "/operator/intent/paper/start",
+        requiresOperatorConfirmations: true
+      },
+      nextSafeAction: "Start or restart the operator backend, then reload this page before using Run PAPER controls.",
+      endpoint: {
+        label: "PAPER endpoint not proven without backend",
+        display: "unavailable",
+        family: "unknown",
+        host: "",
+        source: "BACKEND_UNAVAILABLE",
+        configured: false,
+        valid: false,
+        status: "BACKEND_UNAVAILABLE",
+        blockerCode: "BACKEND_UNAVAILABLE",
+        operatorAction: "Start the operator backend before reading endpoint authority."
+      },
+      credentials: {
+        label: "Credential truth unavailable without backend",
+        configured: false,
+        missingFields: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
+        source: "BACKEND_UNAVAILABLE",
+        precedence: "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+        rawSecretValuesIncluded: false,
+        secretsValuesExposed: false
+      },
+      paperCredentialSetup: {
+        source: "BACKEND_UNAVAILABLE",
+        schemaVersion: "paper-credential-setup-v1",
+        overallStatus: {
+          code: "UNKNOWN",
+          label: "Credential truth unavailable",
+          severity: "blocked",
+          detail: "Operator backend is unavailable; raw values remain hidden and credential presence is not guessed."
+        },
+        requiredCredentials: [
+          { name: "APCA_API_KEY_ID", present: false, displayValue: "unknown", source: "BACKEND_UNAVAILABLE", rawValueExposed: false },
+          { name: "APCA_API_SECRET_KEY", present: false, displayValue: "unknown", source: "BACKEND_UNAVAILABLE", rawValueExposed: false }
+        ],
+        missingFields: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
+        valuesHidden: true,
+        endpoint: {
+          display: "unavailable",
+          family: "unknown",
+          host: "",
+          source: "BACKEND_UNAVAILABLE",
+          configured: false,
+          paperEndpointValid: false,
+          liveEndpointBlocked: true,
+          blockerCode: "BACKEND_UNAVAILABLE"
+        },
+        approvedSecretPath: {
+          label: "Keys & Providers -> Alpaca PAPER Broker/Data -> Save local credentials",
+          storageType: "operator_secret_file",
+          relativePath: ".operator_secrets/provider_credentials.json",
+          credentialPrecedence: "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+          gitignored: true,
+          safeInstruction: "Start the operator backend before editing credential presence.",
+          forbiddenInstruction: "Do not paste credentials into chat, do not commit .env files, and do not put raw secrets in tracked files."
+        },
+        preflightGate: {
+          readOnlyPreflightAuthorized: false,
+          readOnlyPreflightAvailable: false,
+          accountCheckStatus: "backend_unavailable",
+          openOrdersCheckStatus: "backend_unavailable",
+          positionsCheckStatus: "backend_unavailable",
+          lastPreflightAt: null,
+          lastPreflightResult: null,
+          statusLabel: "Backend unavailable",
+          detail: "Read-only preflight truth cannot be shown until the operator backend is connected.",
+          explicitApprovalRequired: true,
+          futureChecks: ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
+          alpacaNetworkCallOccurred: false,
+          accountRequestOccurred: false,
+          openOrdersRequestOccurred: false,
+          positionsRequestOccurred: false,
+          brokerMutationOccurred: false,
+          orderSubmissionOccurred: false,
+          cancelOccurred: false,
+          replaceOccurred: false,
+          liquidationOccurred: false
+        },
+        nextSafeAction: "Start or restart the operator backend, then reload the operator UI.",
+        safety: {
+          paperStartAllowed: false,
+          liveEnabled: false,
+          realMoneyEnabled: false,
+          brokerMutationOccurred: false,
+          secretsValuesExposed: false,
+          rawSecretValuesIncluded: false
+        }
+      },
+      paperBaseline: {
+        source: "BACKEND_UNAVAILABLE",
+        schemaVersion: "paper-baseline-view-v1",
+        status: "UNKNOWN",
+        decision: "BACKEND_UNAVAILABLE",
+        accepted: false,
+        policy: "ADOPT_EXISTING_POSITIONS_PROTECTED",
+        positionCount: 0,
+        positionSymbols: [],
+        openOrderCount: 0,
+        endpointFamily: "unknown",
+        liveLocked: true,
+        realMoneyBlocked: true,
+        startReady: false,
+        reason: "Baseline truth is unavailable until backend state is loaded.",
+        nextSafeAction: "Start or restart the operator backend, then reload baseline truth.",
+        baselineSnapshotId: null,
+        snapshotHash: null,
+        acceptedAt: null,
+        protectedSymbols: [],
+        sameSymbolTradingPolicy: "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING",
+        brokerMutationOccurred: false,
+        tradingMutationOccurred: false,
+        alpacaNetworkCallOccurred: false,
+        secretsValuesExposed: false
+      },
+      runtime: {
+        label: "Backend unavailable",
+        state: "UNKNOWN",
+        processState: "UNKNOWN",
+        activeSessionId: null,
+        paperStartRefusalReason: "BACKEND_UNAVAILABLE",
+        paperStopAllowed: false,
+        safeStopStatus: "UNKNOWN"
+      },
+      brokerTruth: {
+        status: "BACKEND_UNAVAILABLE",
+        label: "Broker truth unavailable",
+        detail: "No broker portfolio truth is shown without the operator backend.",
+        brokerConfirmed: false,
+        brokerReadOccurred: false,
+        brokerReadAttempted: false,
+        brokerMutationOccurred: false,
+        orderSubmissionOccurred: false,
+        cancelOccurred: false,
+        liquidationOccurred: false
+      },
+      safetyLocks: {
+        live: { label: "Live locked", locked: true, enabled: false },
+        realMoney: { label: "Real money blocked", blocked: true, enabled: false },
+        manualTrading: { label: "Manual trading unavailable", available: false },
+        forceTrade: { label: "Force trade unavailable", available: false },
+        brokerMutation: { label: "No broker mutation", occurred: false }
+      },
+      advanced: {
+        finalLaunchReadiness: "BLOCKED",
+        reasonCodes: ["BACKEND_UNAVAILABLE"],
+        checks: [],
+        paperEndpointDisplay: "unavailable",
+        paperEndpointFamily: "unknown",
+        paperEndpointHost: "",
+        paperEndpointBlockerCode: "BACKEND_UNAVAILABLE",
+        alpacaEndpointConfigured: false,
+        alpacaEndpointSource: "BACKEND_UNAVAILABLE",
+        alpacaPaperEndpointValid: false,
+        alpacaLiveEndpointBlocked: true,
+        paperStartAllowed: false,
+        launchReadinessStartAllowed: false,
+        brokerMutationOccurred: false,
+        tradingMutationOccurred: false,
+        liveEnabled: false,
+        realMoneyEnabled: false,
+        secretsValuesExposed: false,
+        backendDegradedReasons: [detail]
+      }
+    };
+  }
+
+  function reconcileBackendConnectedAuthority(state, endpointFailures) {
+    const failures = endpointFailures || {};
+    const launch = state.launchReadiness || {};
+    const op = launch.runPaperOperatorState || {};
+    const launchFailure = failures.launchReadiness || "backend launch readiness payload missing";
+    const launchMissing = !launch.source || isMockAuthoritySource(launch.source);
+    if (launchMissing || !op.source || runPaperStateHasMockAuthority(op)) {
+      const mismatchCodes = runPaperSourceMismatchCodes(state, op);
+      const reasonCodes = uniqueCodes(["BACKEND_LAUNCH_READINESS_UNAVAILABLE"].concat(mismatchCodes));
+      state.launchReadiness = {
+        source: "OPERATOR_BACKEND_DEGRADED",
+        finalLaunchReadiness: "BLOCKED",
+        checks: [
+          {
+            checkId: "backend_launch_readiness",
+            title: "Backend launch readiness",
+            status: "BLOCKED",
+            detail: launchMissing ? launchFailure : "Backend Run PAPER view model was stale or sample-sourced.",
+            blocker: true,
+            warning: false
+          }
+        ],
+        reasonCodes,
+        alpacaPaperCredentialsConfigured: alpacaPaperCredentialTruth(state).configured,
+        paperEndpointOnly: endpointTruthFromState(state).valid,
+        paperEndpointStatus: endpointTruthFromState(state).status,
+        paperEndpointSource: endpointTruthFromState(state).source,
+        paperEndpointOperatorAction: endpointTruthFromState(state).operatorAction,
+        paperEndpointDisplay: endpointTruthFromState(state).display,
+        paperEndpointFamily: endpointTruthFromState(state).family,
+        paperEndpointHost: endpointTruthFromState(state).host,
+        paperEndpointBlockerCode: endpointTruthFromState(state).blockerCode,
+        alpacaEndpointConfigured: endpointTruthFromState(state).configured,
+        alpacaPaperEndpointValid: endpointTruthFromState(state).valid,
+        alpacaLiveEndpointBlocked: true,
+        paperStartAllowed: false,
+        runPaperOperatorState: buildBackendConnectedRunPaperState(state, launchFailure),
+        safeStopStatus: launch.safeStopStatus || "UNKNOWN",
+        portfolioReadAvailability: launch.portfolioReadAvailability || "UNKNOWN",
+        backendDegradedReasons: uniqueCodes((launch.backendDegradedReasons || []).concat([launchFailure]).concat(mismatchCodes))
+      };
+      return;
+    }
+    const baseline = paperBaselineFromState(state, op);
+    if (baseline && !isMockAuthoritySource(baseline.source)) {
+      op.paperBaseline = baseline;
+    }
+    op.paperCredentialSetup = credentialSetupWithProviderTruth(op.paperCredentialSetup, state);
+    const truth = alpacaPaperCredentialTruth(state);
+    op.credentials = {
+      label: truth.configured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing",
+      configured: truth.configured,
+      missingFields: truth.missingFields,
+      source: truth.source,
+      precedence: truth.precedence,
+      rawSecretValuesIncluded: false,
+      secretsValuesExposed: false
+    };
+    if (!op.brokerTruth || isMockAuthoritySource(op.brokerTruth.status)) {
+      op.brokerTruth = brokerTruthFromState(state);
+    }
+    state.launchReadiness.runPaperOperatorState = op;
+    state.paperBaseline = baseline;
   }
 
   function screenTitle(id) {
@@ -738,7 +1331,7 @@
   function legacyPaperLaunchDisabledReason() {
     const launch = data.launchReadiness || {};
     const sup = data.supervisor || {};
-    if (!backendConnected()) return "Disabled: backend unavailable; mock/sample mode cannot start PAPER.";
+    if (!backendConnected()) return "Disabled: operator backend unavailable; start authority cannot be proven.";
     if ((launch.finalLaunchReadiness || "").includes("BLOCKED")) {
       const reason = (launch.reasonCodes || [])[0] || "launch readiness blocked";
       const check = (launch.checks || []).find((item) => item.checkId === reason || item.blocker === true);
@@ -751,7 +1344,14 @@
   }
 
   function runPaperState() {
-    return (data.launchReadiness && data.launchReadiness.runPaperOperatorState) || {};
+    const op = (data.launchReadiness && data.launchReadiness.runPaperOperatorState) || {};
+    if (!backendConnected() && runPaperStateHasMockAuthority(op)) {
+      return buildBackendUnavailableRunPaperState(data.meta.backendStatus || "operator backend status endpoint did not respond");
+    }
+    if (backendConnected() && (!op.source || runPaperStateHasMockAuthority(op))) {
+      return buildBackendConnectedRunPaperState(data, "backend Run PAPER authority payload was missing or stale");
+    }
+    return op;
   }
 
   function severityColor(value) {
@@ -764,7 +1364,7 @@
     const op = runPaperState();
     const canRun = op.canRunPaper || {};
     const overall = op.overallStatus || {};
-    const baseline = op.paperBaseline || data.paperBaseline || {};
+    const baseline = paperBaselineFromState(data, op);
     const portfolio = data.portfolio || {};
     const positionCount = Number((portfolio.summary && portfolio.summary.positionCount) || (portfolio.positions || []).length || baseline.positionCount || 0);
     if (baseline.accepted !== true && positionCount > 0) {
@@ -922,6 +1522,9 @@
   function runPaperAdvancedRows(op, launch) {
     const advanced = op.advanced || {};
     return [
+      ["data_source", tokenText(data.meta.dataSource || "UNKNOWN")],
+      ["run_paper_state_source", tokenText(op.source || "UNKNOWN")],
+      ["canonical_source_order", tokenText("launch-readiness > latest-run > status > portfolio > credentials > paper-baseline > fail-closed")],
       ["final_launch_readiness", tokenText(advanced.finalLaunchReadiness || launch.finalLaunchReadiness || "UNKNOWN")],
       ["reason_codes", tokenText((advanced.reasonCodes || launch.reasonCodes || []).join(", ") || "none")],
       ["paper_endpoint_display", escapeHtml(advanced.paperEndpointDisplay || launch.paperEndpointDisplay || "unavailable")],
@@ -956,6 +1559,7 @@
     const endpoint = op.endpoint || {};
     const credentials = op.credentials || {};
     const credentialSetup = op.paperCredentialSetup || {};
+    const baseline = paperBaselineFromState(data, op);
     const runtime = op.runtime || {};
     const brokerTruth = op.brokerTruth || {};
     const safetyLocks = op.safetyLocks || {};
@@ -983,7 +1587,7 @@
     const runtimeAttachment = sup.sessionId && sup.sessionId !== "none"
       ? `PAPER run attached: ${sup.sessionId}`
       : (sup.paperStartAllowed === true ? "Ready. No PAPER run currently attached." : `No PAPER run currently attached; ${sup.paperStartRefusalReason || "start blocked"}.`);
-    const endpointSourceLabel = endpoint.configured === true ? "Operator configured" : "Safe default";
+    const endpointSourceLabel = endpoint.source || launch.paperEndpointSource || "UNKNOWN";
     const blockerText = canRun.allowed === true
       ? "No blocking readiness checks reported by backend start authority."
       : (canRun.reason || overall.detail || "Backend start authority is blocked.");
@@ -1011,14 +1615,16 @@
           ${badge(canRun.allowed === true ? "Start allowed" : "Start blocked", canRun.allowed === true ? "green" : "red")}
         </div>
         ${renderPaperCredentialSetup(credentialSetup)}
-        ${renderPaperBaselinePanel(op.paperBaseline || data.paperBaseline || {}, data.portfolio || {})}
+        ${renderPaperBaselinePanel(baseline, data.portfolio || {})}
         <div class="run-paper-proof-grid">
-          ${renderRunPaperProofTile("Alpaca PAPER endpoint", endpoint.label || launch.paperEndpointDisplay || "Endpoint unavailable", `${endpointSourceLabel}; family ${endpoint.family || launch.paperEndpointFamily || "unknown"}; host ${endpoint.host || launch.paperEndpointHost || "unavailable"}.`, endpoint.valid === true || launch.paperEndpointOnly ? "green" : "red")}
+          ${renderRunPaperProofTile("Backend source", data.meta.dataSource || "UNKNOWN", `${backendDegradedCount()} degraded endpoint checks; Run PAPER source ${op.source || "UNKNOWN"}.`, data.meta.dataSource === "OPERATOR_BACKEND" ? "green" : (data.meta.dataSource === "PARTIAL_BACKEND" ? "yellow" : "red"))}
+          ${renderRunPaperProofTile("Alpaca PAPER endpoint", endpoint.label || launch.paperEndpointDisplay || "Endpoint unavailable", `Source ${endpointSourceLabel}; family ${endpoint.family || launch.paperEndpointFamily || "unknown"}; host ${endpoint.host || launch.paperEndpointHost || "unavailable"}.`, endpoint.valid === true || launch.paperEndpointOnly ? "green" : "red")}
           ${renderRunPaperProofTile("Credentials", credentials.label || (launch.alpacaPaperCredentialsConfigured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing"), credentialDetail, credentials.configured === true || launch.alpacaPaperCredentialsConfigured ? "green" : "red")}
           ${renderRunPaperProofTile("Runtime", runtime.label || runtimeAttachment, `Supervisor ${runtime.state || sup.state || "UNKNOWN"}; safe stop ${runtime.safeStopStatus || launch.safeStopStatus || "UNKNOWN"}.`, (runtime.state || sup.state) === "RUNNING" ? "yellow" : "green")}
-          ${renderRunPaperProofTile("Broker / portfolio truth", brokerTruth.label || "Broker truth not loaded in this card", brokerTruth.detail || "Portfolio Snapshot remains the broker-confirmed truth area; no positions are invented here.", brokerTruth.status === "BROKER_READ_READY_NOT_IN_THIS_VIEW" ? "yellow" : "red")}
+          ${renderRunPaperProofTile("Broker / portfolio truth", brokerTruth.label || "Broker truth not loaded in this card", brokerTruth.detail || "Portfolio Snapshot remains the broker-confirmed truth area; no positions are invented here.", brokerTruth.brokerConfirmed === true ? "green" : (brokerTruth.status === "BROKER_READ_READY_NOT_IN_THIS_VIEW" ? "yellow" : "red"))}
           ${renderRunPaperProofTile("Safety locks", "Live locked / real money blocked", safetyDetail, "red")}
           ${renderRunPaperProofTile("Start readiness", canRun.allowed === true ? "Start allowed" : "Start blocked", blockerText, canRun.allowed === true ? "green" : "red")}
+          ${renderRunPaperProofTile("Max lease seconds", `${maxDuration}`, `Configured ${configuredMaxDuration}; runner ${runnerMaxDuration}; allowed durations include 72 hours and 5 days when max permits.`, maxDuration >= 432000 ? "green" : "yellow")}
         </div>
         <div class="notice ${canRun.allowed === true ? "" : "error"}" data-run-paper-blocker-text>${escapeHtml(blockerText)}</div>
         <div class="notice" data-run-paper-next-action>Next safe action: ${escapeHtml(op.nextSafeAction || "Review launch readiness and do not run PAPER without approval.")}</div>
@@ -1085,6 +1691,11 @@
     const credentials = op.credentials || {};
     const readiness = data.providerReadiness || {};
     const providerCounts = readiness.counts || {};
+    const endpointDisplay = endpoint.display || launch.paperEndpointDisplay || "unavailable";
+    const endpointFamily = endpoint.family || launch.paperEndpointFamily || "unknown";
+    const endpointSource = endpoint.source || launch.paperEndpointSource || "UNKNOWN";
+    const endpointReady = endpoint.valid === true || launch.paperEndpointOnly === true;
+    const credentialsConfigured = credentials.configured === true || launch.alpacaPaperCredentialsConfigured === true;
     const blockerChecks = (launch.checks || []).filter((check) => {
       const status = String(check.status || "").toUpperCase();
       return check.blocker === true || status.includes("BLOCK") || status.includes("MISSING") || status.includes("DEGRADED") || status.includes("FAIL");
@@ -1094,12 +1705,12 @@
         ["Can I run PAPER right now?", badge(overall.label || launch.finalLaunchReadiness || "UNKNOWN", severityColor(overall.severity || launch.finalLaunchReadiness || "UNKNOWN"))],
         ["Why / why not", escapeHtml(canRun.allowed === true ? "Backend start authority is available after confirmations." : (canRun.reason || overall.detail || "Start authority is blocked."))],
         ["Next safe action", escapeHtml(op.nextSafeAction || "Review the blocked readiness detail before requesting Start.")],
-        ["Alpaca PAPER credentials", badge(credentials.label || (launch.alpacaPaperCredentialsConfigured ? "configured" : "missing"), launch.alpacaPaperCredentialsConfigured ? "green" : "red")],
-        ["Alpaca PAPER endpoint", badge(endpoint.label || launch.paperEndpointStatus || "UNKNOWN", launch.paperEndpointOnly ? "green" : "red")],
-        ["Endpoint display", escapeHtml(launch.paperEndpointDisplay || "unavailable")],
-        ["Endpoint family", badge(launch.paperEndpointFamily || "unknown", launch.paperEndpointOnly ? "green" : "red")],
-        ["Endpoint host", escapeHtml(launch.paperEndpointHost || "unavailable")],
-        ["Endpoint source", badge(launch.paperEndpointSource || "UNKNOWN", launch.paperEndpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" ? "cyan" : "gray")],
+        ["Alpaca PAPER credentials", badge(credentials.label || (credentialsConfigured ? "configured" : "missing"), credentialsConfigured ? "green" : "red")],
+        ["Alpaca PAPER endpoint", badge(endpoint.label || launch.paperEndpointStatus || "UNKNOWN", endpointReady ? "green" : "red")],
+        ["Endpoint display", escapeHtml(endpointDisplay)],
+        ["Endpoint family", badge(endpointFamily, endpointReady ? "green" : "red")],
+        ["Endpoint host", escapeHtml(endpoint.host || launch.paperEndpointHost || "unavailable")],
+        ["Endpoint source", badge(endpointSource, endpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" || endpointSource === "OPERATOR_STATUS" ? "cyan" : "gray")],
         ["Endpoint configured", badge(launch.alpacaEndpointConfigured ? "yes" : "safe default", launch.alpacaEndpointConfigured ? "gray" : "cyan")],
         ["Live endpoint blocked", badge(launch.alpacaLiveEndpointBlocked ? "yes" : "no", launch.alpacaLiveEndpointBlocked ? "red" : "yellow")],
         ["Provider status", escapeHtml(`${readiness.readyOrConfiguredCount || 0} ready/configured, ${readiness.missingCredentialsCount || providerCounts.MISSING_CREDENTIALS || 0} missing`)],
@@ -5275,6 +5886,7 @@
       }
     ];
 
+    reconcileBackendConnectedAuthority(next, endpointFailures);
     mergeCredentialTruthIntoProviderReadiness(next);
     return next;
   }
@@ -5286,9 +5898,59 @@
     } catch (error) {
       logBackendFetchFailure("/operator/status", error);
       const fallback = clone(mockData);
-      fallback.meta.dataSource = "MOCK_DATA";
+      fallback.meta.dataSource = "BACKEND_UNAVAILABLE";
       fallback.meta.backendStatus = `backend unavailable: ${describeFetchFailure("/operator/status", error)}`;
       fallback.meta.fetchFailures = [describeFetchFailure("/operator/status", error)];
+      fallback.launchReadiness = {
+        source: "BACKEND_UNAVAILABLE",
+        finalLaunchReadiness: "BLOCKED",
+        checks: [],
+        reasonCodes: ["BACKEND_UNAVAILABLE"],
+        alpacaPaperCredentialsConfigured: false,
+        paperEndpointOnly: false,
+        paperEndpointStatus: "BACKEND_UNAVAILABLE",
+        paperEndpointSource: "BACKEND_UNAVAILABLE",
+        paperEndpointOperatorAction: "Start the operator backend before using Run PAPER controls.",
+        paperEndpointDisplay: "unavailable",
+        paperEndpointFamily: "unknown",
+        paperEndpointHost: "",
+        paperEndpointBlockerCode: "BACKEND_UNAVAILABLE",
+        alpacaEndpointConfigured: false,
+        alpacaPaperEndpointValid: false,
+        alpacaLiveEndpointBlocked: true,
+        paperStartAllowed: false,
+        runPaperOperatorState: buildBackendUnavailableRunPaperState(fallback.meta.backendStatus),
+        safeStopStatus: "UNKNOWN",
+        portfolioReadAvailability: "BACKEND_UNAVAILABLE",
+        backendDegradedReasons: fallback.meta.fetchFailures
+      };
+      fallback.paperBaseline = fallback.launchReadiness.runPaperOperatorState.paperBaseline;
+      fallback.portfolio = {
+        source: "BACKEND_UNAVAILABLE",
+        dataSource: "BACKEND_UNAVAILABLE",
+        status: "BACKEND_UNAVAILABLE",
+        unavailableReason: "OPERATOR_BACKEND_UNAVAILABLE",
+        detail: fallback.meta.backendStatus,
+        message: "Operator backend unavailable; broker-confirmed portfolio truth is not loaded.",
+        empty: true,
+        dataFreshnessTs: null,
+        brokerReadAttempted: false,
+        brokerReadOccurred: false,
+        brokerMutationOccurred: false,
+        summary: {
+          totalEquity: null,
+          cash: null,
+          buyingPower: null,
+          totalMarketValue: null,
+          positionCount: 0,
+          openOrderCount: 0
+        },
+        positions: [],
+        openOrders: [],
+        positionIntelligence: []
+      };
+      fallback.positions = [];
+      fallback.orders = [];
       return fallback;
     }
 

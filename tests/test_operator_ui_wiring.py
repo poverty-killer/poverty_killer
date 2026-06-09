@@ -373,6 +373,41 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert ".credential-preflight-field" in css
 
 
+def test_backend_connected_run_paper_never_keeps_mock_authority():
+    text = _app_text()
+
+    assert "function reconcileBackendConnectedAuthority" in text
+    assert "function runPaperStateHasMockAuthority" in text
+    assert "function runPaperSourceMismatchCodes" in text
+    assert "OPERATOR_BACKEND_DEGRADED_RUN_PAPER_VIEW" in text
+    assert "BACKEND_LAUNCH_READINESS_UNAVAILABLE" in text
+    assert "READINESS_SOURCE_MISMATCH" in text
+    assert "CREDENTIAL_SOURCE_MISMATCH" in text
+    assert "PORTFOLIO_SOURCE_MISMATCH" in text
+    assert "SUPERVISOR_SOURCE_MISMATCH" in text
+    assert "reconcileBackendConnectedAuthority(next, endpointFailures)" in text
+    assert text.index("reconcileBackendConnectedAuthority(next, endpointFailures)") < text.index("mergeCredentialTruthIntoProviderReadiness(next)")
+    assert "paperBaselineFromState(data, op)" in text
+    assert "renderPaperBaselinePanel(baseline, data.portfolio || {})" in text
+    assert "buildCredentialSetupFromBackendState" in text
+    assert "credentialSetupWithProviderTruth" in text
+    assert "OPERATOR_BACKEND_CREDENTIALS" in text
+    assert "OPERATOR_LOCAL_CREDENTIAL_STORE" in text
+    assert "Backend source" in text
+    assert "canonical_source_order" in text
+    assert "Max lease seconds" in text
+    assert "BACKEND_UNAVAILABLE_RUN_PAPER_VIEW" in text
+    assert 'fallback.meta.dataSource = "BACKEND_UNAVAILABLE"' in text
+    assert 'fallback.meta.dataSource = "MOCK_DATA"' not in text
+    assert "Operator backend unavailable; broker-confirmed portfolio truth is not loaded." in text
+    assert "Disabled: operator backend unavailable; start authority cannot be proven." in text
+    assert "Mock data cannot start PAPER" not in text
+    assert "Mock PAPER credentials missing" not in text
+    assert "Sample data" not in text
+    assert "sample data fallback" not in text
+    assert "mock/sample mode cannot start PAPER" not in text
+
+
 def test_historical_test_control_is_visible_and_honest():
     text = _app_text()
 
