@@ -219,6 +219,45 @@ def test_credential_endpoints_return_only_fingerprints_and_delete_safely(tmp_pat
     assert providers["secrets_values_exposed"] is False
 
 
+def test_credentials_provider_summary_declares_gitignored_local_store_without_values(tmp_path):
+    store = _store(tmp_path)
+
+    summary = store.providers_summary({})
+    text = str(summary)
+
+    assert str(summary["store_path"]).replace("\\", "/").endswith(".operator_secrets/provider_credentials.json")
+    assert summary["precedence"] == "ENV_PRESENT_OVERRIDES_LOCAL_SECRET"
+    assert summary["secrets_values_exposed"] is False
+    assert summary["raw_secret_values_included"] is False
+    assert "APCA_API_KEY_ID" in text
+    assert "APCA_API_SECRET_KEY" in text
+    assert "paste secrets into chat" not in text
+
+
+def test_alpaca_readonly_validation_is_presence_and_endpoint_only_no_network(tmp_path):
+    store = _store(tmp_path)
+    store.save_provider(
+        "alpaca_paper",
+        {
+            "APCA_API_KEY_ID": "placeholder-paper-key",
+            "APCA_API_SECRET_KEY": "placeholder-paper-secret",
+        },
+    )
+
+    result = store.validate_readonly("alpaca_paper", {})
+    text = str(result)
+
+    assert result["status"] == "READY"
+    assert result["read_only_validation"] is True
+    assert result["broker_call_occurred"] is False
+    assert result["external_mutation_occurred"] is False
+    assert result["trading_mutation_occurred"] is False
+    assert result["paper_endpoint_authority"]["paper_endpoint_only"] is True
+    assert result["paper_endpoint_authority"]["alpaca_live_endpoint_blocked"] is True
+    assert "placeholder-paper-key" not in text
+    assert "placeholder-paper-secret" not in text
+
+
 def test_provider_readiness_reads_local_secret_presence(tmp_path):
     store = _store(tmp_path)
     store.save_provider(

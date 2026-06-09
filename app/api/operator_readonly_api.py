@@ -157,6 +157,17 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
             "live_enabled": False,
             "real_money_enabled": False,
             "secrets_values_exposed": False,
+            "paper_credential_setup": {
+                "schema_version": "paper-credential-setup-v1",
+                "canonical_credential_authority": "OPERATOR_LOCAL_CREDENTIAL_STORE_AND_PROCESS_ENV",
+                "approved_secret_path": DEFAULT_RELATIVE_STORE_PATH,
+                "credential_precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+                "read_only_preflight_authorized": False,
+                "read_only_preflight_checks": ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
+                "alpaca_network_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "secrets_values_exposed": False,
+            },
         }
     },
     "endpoints": {

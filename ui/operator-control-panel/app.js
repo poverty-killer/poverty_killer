@@ -781,6 +781,63 @@
     `;
   }
 
+  function renderPaperCredentialSetup(setup) {
+    const overall = setup.overallStatus || {};
+    const endpoint = setup.endpoint || {};
+    const secretPath = setup.approvedSecretPath || {};
+    const preflight = setup.preflightGate || {};
+    const safety = setup.safety || {};
+    const rows = Array.isArray(setup.requiredCredentials) ? setup.requiredCredentials : [];
+    const credentialCards = rows.map((row) => `
+      <div class="run-paper-proof-tile credential-preflight-field" data-paper-credential-field="${escapeHtml(row.name || "unknown")}">
+        <div class="proof-label">${escapeHtml(row.name || "Credential field")}</div>
+        <div class="proof-value">${badge(row.present === true ? "present" : "missing", row.present === true ? "green" : "red")}</div>
+        <div class="proof-detail">Value hidden; source ${escapeHtml(row.source || "NOT_CONFIGURED")}.</div>
+      </div>
+    `).join("");
+    const preflightDetail = [
+      `Account: ${preflight.accountCheckStatus || "not_run"}`,
+      `open orders: ${preflight.openOrdersCheckStatus || "not_run"}`,
+      `positions: ${preflight.positionsCheckStatus || "not_run"}`
+    ].join("; ");
+    return `
+      <section class="credential-preflight-panel" data-paper-credential-setup>
+        <div class="split">
+          <h4>Credential Setup + Read-Only Preflight Gate</h4>
+          ${badge(overall.label || "Credential setup unknown", severityColor(overall.severity || overall.code || "blocked"))}
+        </div>
+        <div class="notice ${overall.code === "PRESENT_NOT_PREFLIGHTED" ? "" : "error"}" data-paper-credential-top-message>${escapeHtml(overall.detail || "PAPER credential setup status unavailable.")}</div>
+        <div class="run-paper-proof-grid compact-proof-grid">
+          ${credentialCards || renderRunPaperProofTile("APCA credentials", "not loaded", "Backend did not return credential field rows.", "yellow")}
+          ${renderRunPaperProofTile("Values hidden", setup.valuesHidden !== false ? "hidden" : "unsafe", "Presence only is shown; raw values are never printed in this UI.", setup.valuesHidden !== false ? "green" : "red")}
+          ${renderRunPaperProofTile("Approved local path", secretPath.relativePath || ".operator_secrets/provider_credentials.json", secretPath.safeInstruction || "Use Keys & Providers to save local credentials.", "cyan")}
+          ${renderRunPaperProofTile("Do not commit", "tracked files forbidden", secretPath.forbiddenInstruction || "Do not paste credentials into chat or commit raw secrets.", "red")}
+          ${renderRunPaperProofTile("Credential endpoint", endpoint.display || "https://paper-api.alpaca.markets", `Family ${endpoint.family || "paper"}; source ${endpoint.source || "safe_default"}; live endpoint blocked ${endpoint.liveEndpointBlocked !== false ? "true" : "false"}.`, endpoint.paperEndpointValid !== false ? "green" : "red")}
+          ${renderRunPaperProofTile("Read-only preflight", preflight.statusLabel || "Read-only PAPER preflight not run", `${preflight.detail || "Requires explicit Shan approval before Alpaca is called."} ${preflightDetail}.`, preflight.readOnlyPreflightAvailable === true ? "yellow" : "red")}
+        </div>
+        <div class="notice" data-paper-credential-next-action>Credential next safe action: ${escapeHtml(setup.nextSafeAction || "Open Keys & Providers and save Alpaca PAPER credentials locally.")}</div>
+        <div class="notice mono" data-paper-preflight-boundary>Read-only preflight requires explicit approval before Alpaca is called; it will check account, open orders, and positions only. It will not place, cancel, replace, liquidate, enable live, enable real money, or start PAPER.</div>
+        <details class="ai-context-details" data-paper-credential-advanced>
+          <summary>Advanced credential and preflight proof</summary>
+          ${kv([
+            ["setup_schema_version", tokenText(setup.schemaVersion || "paper-credential-setup-v1")],
+            ["approved_secret_path", escapeHtml(secretPath.relativePath || ".operator_secrets/provider_credentials.json")],
+            ["credential_precedence", tokenText(secretPath.credentialPrecedence || "ENV_PRESENT_OVERRIDES_LOCAL_SECRET")],
+            ["read_only_preflight_authorized", badge(preflight.readOnlyPreflightAuthorized === true ? "true" : "false", preflight.readOnlyPreflightAuthorized === true ? "yellow" : "green")],
+            ["read_only_preflight_available", badge(preflight.readOnlyPreflightAvailable === true ? "true" : "false", preflight.readOnlyPreflightAvailable === true ? "yellow" : "red")],
+            ["account_request_occurred", badge(preflight.accountRequestOccurred === true ? "true" : "false", preflight.accountRequestOccurred === true ? "red" : "green")],
+            ["open_orders_request_occurred", badge(preflight.openOrdersRequestOccurred === true ? "true" : "false", preflight.openOrdersRequestOccurred === true ? "red" : "green")],
+            ["positions_request_occurred", badge(preflight.positionsRequestOccurred === true ? "true" : "false", preflight.positionsRequestOccurred === true ? "red" : "green")],
+            ["alpaca_network_call_occurred", badge(preflight.alpacaNetworkCallOccurred === true ? "true" : "false", preflight.alpacaNetworkCallOccurred === true ? "red" : "green")],
+            ["broker_mutation_occurred", badge(preflight.brokerMutationOccurred === true ? "true" : "false", preflight.brokerMutationOccurred === true ? "red" : "green")],
+            ["paper_start_allowed", badge(safety.paperStartAllowed === true ? "true" : "false", safety.paperStartAllowed === true ? "green" : "red")],
+            ["secrets_values_exposed", badge(safety.secretsValuesExposed === true ? "true" : "false", safety.secretsValuesExposed === true ? "red" : "green")]
+          ])}
+        </details>
+      </section>
+    `;
+  }
+
   function runPaperAdvancedRows(op, launch) {
     const advanced = op.advanced || {};
     return [
@@ -795,6 +852,7 @@
       ["alpaca_paper_endpoint_valid", badge(advanced.alpacaPaperEndpointValid === true ? "true" : "false", advanced.alpacaPaperEndpointValid === true ? "green" : "red")],
       ["alpaca_live_endpoint_blocked", badge(advanced.alpacaLiveEndpointBlocked !== false ? "true" : "false", advanced.alpacaLiveEndpointBlocked !== false ? "red" : "yellow")],
       ["paper_start_allowed", badge(advanced.paperStartAllowed === true ? "true" : "false", advanced.paperStartAllowed === true ? "green" : "red")],
+      ["launch_readiness_start_allowed", badge(advanced.launchReadinessStartAllowed === true ? "true" : "false", advanced.launchReadinessStartAllowed === true ? "green" : "red")],
       ["broker_mutation_occurred", badge(advanced.brokerMutationOccurred === true ? "true" : "false", advanced.brokerMutationOccurred === true ? "red" : "green")],
       ["trading_mutation_occurred", badge(advanced.tradingMutationOccurred === true ? "true" : "false", advanced.tradingMutationOccurred === true ? "red" : "green")],
       ["live_enabled", badge(advanced.liveEnabled === true ? "true" : "false", advanced.liveEnabled === true ? "red" : "green")],
@@ -816,6 +874,7 @@
     const canRun = op.canRunPaper || {};
     const endpoint = op.endpoint || {};
     const credentials = op.credentials || {};
+    const credentialSetup = op.paperCredentialSetup || {};
     const runtime = op.runtime || {};
     const brokerTruth = op.brokerTruth || {};
     const safetyLocks = op.safetyLocks || {};
@@ -868,6 +927,7 @@
           </div>
           ${badge(canRun.allowed === true ? "Start allowed" : "Start blocked", canRun.allowed === true ? "green" : "red")}
         </div>
+        ${renderPaperCredentialSetup(credentialSetup)}
         <div class="run-paper-proof-grid">
           ${renderRunPaperProofTile("Alpaca PAPER endpoint", endpoint.label || launch.paperEndpointDisplay || "Endpoint unavailable", `${endpointSourceLabel}; family ${endpoint.family || launch.paperEndpointFamily || "unknown"}; host ${endpoint.host || launch.paperEndpointHost || "unavailable"}.`, endpoint.valid === true || launch.paperEndpointOnly ? "green" : "red")}
           ${renderRunPaperProofTile("Credentials", credentials.label || (launch.alpacaPaperCredentialsConfigured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing"), credentialDetail, credentials.configured === true || launch.alpacaPaperCredentialsConfigured ? "green" : "red")}
@@ -4292,6 +4352,84 @@
     };
   }
 
+  function normalizePaperCredentialSetup(setup) {
+    const payload = setup || {};
+    const overall = payload.overall_status || {};
+    const endpoint = payload.endpoint || {};
+    const secretPath = payload.approved_secret_path || {};
+    const preflight = payload.preflight_gate || {};
+    const safety = payload.safety || {};
+    return {
+      source: pick(payload.source, ""),
+      schemaVersion: pick(payload.schema_version, "paper-credential-setup-v1"),
+      overallStatus: {
+        code: pick(overall.code, "MISSING"),
+        label: pick(overall.label, "PAPER credentials missing"),
+        severity: pick(overall.severity, "blocked"),
+        detail: pick(overall.detail, "PAPER credentials missing - add Alpaca PAPER credentials through the approved local secret path.")
+      },
+      requiredCredentials: Array.isArray(payload.required_credentials) ? payload.required_credentials.map((row) => ({
+        name: pick(row.name, "unknown"),
+        present: row.present === true,
+        displayValue: pick(row.display_value, row.present === true ? "present" : "missing"),
+        source: pick(row.source, "NOT_CONFIGURED"),
+        rawValueExposed: row.raw_value_exposed === true
+      })) : [],
+      missingFields: Array.isArray(payload.missing_fields) ? payload.missing_fields : [],
+      valuesHidden: payload.values_hidden !== false,
+      endpoint: {
+        display: pick(endpoint.display, "https://paper-api.alpaca.markets"),
+        family: pick(endpoint.family, "paper"),
+        host: pick(endpoint.host, "paper-api.alpaca.markets"),
+        source: pick(endpoint.source, "safe_default"),
+        configured: endpoint.configured === true,
+        paperEndpointValid: endpoint.paper_endpoint_valid !== false,
+        liveEndpointBlocked: endpoint.live_endpoint_blocked !== false,
+        blockerCode: pick(endpoint.blocker_code, null)
+      },
+      approvedSecretPath: {
+        label: pick(secretPath.label, "Keys & Providers -> Alpaca PAPER Broker/Data -> Save local credentials"),
+        storageType: pick(secretPath.storage_type, "operator_secret_file"),
+        relativePath: pick(secretPath.relative_path, ".operator_secrets/provider_credentials.json"),
+        credentialPrecedence: pick(secretPath.credential_precedence, "ENV_PRESENT_OVERRIDES_LOCAL_SECRET"),
+        gitignored: secretPath.gitignored !== false,
+        safeInstruction: pick(secretPath.safe_instruction, "Open Keys & Providers, enter APCA_API_KEY_ID and APCA_API_SECRET_KEY for Alpaca PAPER Broker/Data, then save local credentials. Values stay local and hidden."),
+        forbiddenInstruction: pick(secretPath.forbidden_instruction, "Do not paste credentials into chat, do not commit .env files, and do not put raw secrets in tracked files.")
+      },
+      preflightGate: {
+        readOnlyPreflightAuthorized: preflight.read_only_preflight_authorized === true,
+        readOnlyPreflightAvailable: preflight.read_only_preflight_available === true,
+        accountCheckStatus: pick(preflight.account_check_status, "blocked"),
+        openOrdersCheckStatus: pick(preflight.open_orders_check_status, "blocked"),
+        positionsCheckStatus: pick(preflight.positions_check_status, "blocked"),
+        lastPreflightAt: pick(preflight.last_preflight_at, null),
+        lastPreflightResult: pick(preflight.last_preflight_result, null),
+        statusLabel: pick(preflight.status_label, "Read-only PAPER preflight not run"),
+        detail: pick(preflight.detail, "Read-only preflight requires explicit approval before Alpaca is called."),
+        explicitApprovalRequired: preflight.explicit_approval_required !== false,
+        futureChecks: Array.isArray(preflight.future_checks) ? preflight.future_checks : [],
+        alpacaNetworkCallOccurred: preflight.alpaca_network_call_occurred === true,
+        accountRequestOccurred: preflight.account_request_occurred === true,
+        openOrdersRequestOccurred: preflight.open_orders_request_occurred === true,
+        positionsRequestOccurred: preflight.positions_request_occurred === true,
+        brokerMutationOccurred: preflight.broker_mutation_occurred === true,
+        orderSubmissionOccurred: preflight.order_submission_occurred === true,
+        cancelOccurred: preflight.cancel_occurred === true,
+        replaceOccurred: preflight.replace_occurred === true,
+        liquidationOccurred: preflight.liquidation_occurred === true
+      },
+      nextSafeAction: pick(payload.next_safe_action, "Open Keys & Providers and save Alpaca PAPER credentials locally; never paste secrets into chat or tracked files."),
+      safety: {
+        paperStartAllowed: safety.paper_start_allowed === true,
+        liveEnabled: safety.live_enabled === true,
+        realMoneyEnabled: safety.real_money_enabled === true,
+        brokerMutationOccurred: safety.broker_mutation_occurred === true,
+        secretsValuesExposed: safety.secrets_values_exposed === true,
+        rawSecretValuesIncluded: safety.raw_secret_values_included === true
+      }
+    };
+  }
+
   function normalizeRunPaperOperatorState(state) {
     const payload = state || {};
     const overall = payload.overall_status || {};
@@ -4342,6 +4480,7 @@
         rawSecretValuesIncluded: credentials.raw_secret_values_included === true,
         secretsValuesExposed: credentials.secrets_values_exposed === true
       },
+      paperCredentialSetup: normalizePaperCredentialSetup(payload.paper_credential_setup || {}),
       runtime: {
         label: pick(runtime.label, ""),
         state: pick(runtime.state, "UNKNOWN"),
@@ -4401,6 +4540,7 @@
         alpacaPaperEndpointValid: advanced.alpaca_paper_endpoint_valid === true,
         alpacaLiveEndpointBlocked: advanced.alpaca_live_endpoint_blocked !== false,
         paperStartAllowed: advanced.paper_start_allowed === true,
+        launchReadinessStartAllowed: advanced.launch_readiness_start_allowed === true,
         brokerMutationOccurred: advanced.broker_mutation_occurred === true,
         tradingMutationOccurred: advanced.trading_mutation_occurred === true,
         liveEnabled: advanced.live_enabled === true,

@@ -138,4 +138,9 @@ def test_operator_home_contract_is_recorded():
     assert '"paper_start_endpoint": "/operator/intent/paper/start"' in text
     assert '"fake_broker_truth_allowed": false' in text
     assert '"run_paper_operator_state": "single derived read-only command-center view model"' in text
+    assert '"paper_credential_setup"' in text
+    assert '"paper-credential-setup-v1"' in text
+    assert '".operator_secrets/provider_credentials.json"' in text
+    assert '"read_only_preflight_authorized": false' in text
+    assert '"alpaca_network_call_occurred": false' in text
     assert '"raw_codes_in_advanced_details": true' in text

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.operator_credentials.store import alpaca_endpoint_authority
+from app.operator_credentials.store import DEFAULT_RELATIVE_STORE_PATH, alpaca_endpoint_authority
 
 
 def _find_provider(provider_readiness: dict[str, Any], provider_id: str) -> dict[str, Any]:
@@ -47,6 +47,70 @@ def _missing_required_fields(provider: dict[str, Any]) -> list[str]:
     return missing or ([] if provider.get("configured") is True else required)
 
 
+def _credential_field_setup_rows(provider: dict[str, Any]) -> list[dict[str, Any]]:
+    required = [str(name) for name in provider.get("required_env_vars") or ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"]]
+    rows = provider.get("env_status") if isinstance(provider.get("env_status"), list) else []
+    by_name = {
+        str(row.get("name")): row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    }
+    return [
+        {
+            "name": name,
+            "present": by_name.get(name, {}).get("configured") is True,
+            "display_value": "present" if by_name.get(name, {}).get("configured") is True else "missing",
+            "source": str(by_name.get(name, {}).get("source") or "NOT_CONFIGURED"),
+            "raw_value_exposed": False,
+        }
+        for name in required
+    ]
+
+
+def _paper_credential_setup_status(
+    *,
+    field_rows: list[dict[str, Any]],
+    endpoint_ok: bool,
+    endpoint_authority: dict[str, Any],
+) -> dict[str, str]:
+    present_count = sum(1 for row in field_rows if row.get("present") is True)
+    required_count = len(field_rows)
+    if not endpoint_ok:
+        return {
+            "code": "ERROR",
+            "label": "PAPER endpoint blocked",
+            "severity": "blocked",
+            "detail": str(endpoint_authority.get("safe_detail") or "A valid Alpaca PAPER endpoint is required."),
+        }
+    if present_count == 0:
+        return {
+            "code": "MISSING",
+            "label": "PAPER credentials missing",
+            "severity": "blocked",
+            "detail": "PAPER credentials missing - add Alpaca PAPER credentials through the approved local secret path.",
+        }
+    if present_count < required_count:
+        missing = [str(row.get("name")) for row in field_rows if row.get("present") is not True]
+        return {
+            "code": "PARTIAL",
+            "label": "PAPER credentials incomplete",
+            "severity": "blocked",
+            "detail": f"Missing required PAPER credential field: {', '.join(missing)}.",
+        }
+    return {
+        "code": "PRESENT_NOT_PREFLIGHTED",
+        "label": "PAPER credentials present; preflight not run",
+        "severity": "warning",
+        "detail": "Credential presence is confirmed locally, but read-only Alpaca PAPER preflight has not run.",
+    }
+
+
+def _preflight_gate_status(*, alpaca_configured: bool, endpoint_ok: bool) -> str:
+    if not alpaca_configured or not endpoint_ok:
+        return "blocked"
+    return "ready_to_run_after_approval"
+
+
 def _first_blocker_detail(checks: list[dict[str, Any]]) -> str | None:
     for check in checks:
         if check.get("blocker") is True:
@@ -57,9 +121,14 @@ def _first_blocker_detail(checks: list[dict[str, Any]]) -> str | None:
 def _plain_check_detail(check: dict[str, Any]) -> str:
     check_id = str(check.get("check_id") or "")
     if check_id == "alpaca_paper_credentials":
+        detail = str(check.get("detail") or "")
+        if detail.startswith("Missing required Alpaca PAPER credential field"):
+            return detail
         return "Alpaca PAPER key ID and secret are missing."
     if check_id == "paper_endpoint_only":
         return str(check.get("detail") or "Only the Alpaca PAPER trading endpoint is accepted.")
+    if check_id == "paper_read_only_preflight_gate":
+        return "Read-only Alpaca PAPER preflight has not run and requires explicit Shan approval before Alpaca is called."
     if check_id == "no_active_runtime":
         return "A PAPER runtime is already active or cannot be proven stopped."
     if check_id == "audit_session_storage":
@@ -147,7 +216,9 @@ def _next_safe_action(
     if not endpoint_ok:
         return "Fix the Alpaca endpoint in Keys & Providers; only https://paper-api.alpaca.markets is accepted."
     if not alpaca_configured:
-        return "Add Alpaca PAPER key ID and secret in Keys & Providers; raw values stay hidden."
+        return "Open Keys & Providers and save Alpaca PAPER key ID and secret to the local credential vault; do not paste secrets into chat or commit them."
+    if any(str(check.get("check_id") or "") == "paper_read_only_preflight_gate" for check in blockers):
+        return "Do not start PAPER; request explicit Shan approval for read-only Alpaca account, open-orders, and positions preflight first."
     if blockers:
         first = blockers[0]
         title = str(first.get("title") or first.get("check_id") or "the current blocker")
@@ -184,6 +255,96 @@ def _broker_truth_summary(*, alpaca_configured: bool, endpoint_ok: bool, endpoin
     }
 
 
+def _build_paper_credential_setup(
+    *,
+    alpaca: dict[str, Any],
+    alpaca_configured: bool,
+    endpoint_authority: dict[str, Any],
+    endpoint_ok: bool,
+    paper_start_allowed: bool,
+) -> dict[str, Any]:
+    field_rows = _credential_field_setup_rows(alpaca)
+    missing = [str(row.get("name")) for row in field_rows if row.get("present") is not True]
+    setup_status = _paper_credential_setup_status(
+        field_rows=field_rows,
+        endpoint_ok=endpoint_ok,
+        endpoint_authority=endpoint_authority,
+    )
+    preflight_status = _preflight_gate_status(alpaca_configured=alpaca_configured, endpoint_ok=endpoint_ok)
+    preflight_detail = (
+        "Read-only preflight is blocked until Alpaca PAPER credentials and a PAPER trading endpoint are present."
+        if preflight_status == "blocked"
+        else "Read-only preflight is ready to request after explicit Shan approval; no Alpaca call has occurred in this view."
+    )
+    return {
+        "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
+        "schema_version": "paper-credential-setup-v1",
+        "overall_status": setup_status,
+        "required_credentials": field_rows,
+        "missing_fields": missing,
+        "values_hidden": True,
+        "endpoint": {
+            "display": endpoint_authority.get("alpaca_endpoint_display"),
+            "family": endpoint_authority.get("alpaca_trading_endpoint_family"),
+            "host": endpoint_authority.get("alpaca_trading_endpoint_host"),
+            "source": "safe_default" if endpoint_authority.get("endpoint_source") == "SAFE_DEFAULT_PAPER_ENDPOINT" else "configured",
+            "configured": endpoint_authority.get("alpaca_endpoint_configured") is True,
+            "paper_endpoint_valid": endpoint_ok,
+            "live_endpoint_blocked": endpoint_authority.get("alpaca_live_endpoint_blocked") is True,
+            "blocker_code": endpoint_authority.get("alpaca_endpoint_blocker_code"),
+        },
+        "approved_secret_path": {
+            "label": "Keys & Providers -> Alpaca PAPER Broker/Data -> Save local credentials",
+            "storage_type": "operator_secret_file",
+            "relative_path": DEFAULT_RELATIVE_STORE_PATH,
+            "credential_precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+            "gitignored": True,
+            "safe_instruction": (
+                "Open Keys & Providers, enter APCA_API_KEY_ID and APCA_API_SECRET_KEY for Alpaca PAPER Broker/Data, "
+                "then save local credentials. Values stay local and hidden."
+            ),
+            "forbidden_instruction": (
+                "Do not paste credentials into chat, do not commit .env files, and do not put raw secrets in tracked files."
+            ),
+        },
+        "preflight_gate": {
+            "read_only_preflight_authorized": False,
+            "read_only_preflight_available": preflight_status == "ready_to_run_after_approval",
+            "account_check_status": preflight_status,
+            "open_orders_check_status": preflight_status,
+            "positions_check_status": preflight_status,
+            "last_preflight_at": None,
+            "last_preflight_result": None,
+            "status_label": "Read-only PAPER preflight not run",
+            "detail": preflight_detail,
+            "explicit_approval_required": True,
+            "future_checks": ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
+            "alpaca_network_call_occurred": False,
+            "account_request_occurred": False,
+            "open_orders_request_occurred": False,
+            "positions_request_occurred": False,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+        },
+        "next_safe_action": (
+            "Open Keys & Providers and save Alpaca PAPER credentials locally; never paste secrets into chat or tracked files."
+            if not alpaca_configured
+            else "Request explicit Shan approval for read-only Alpaca PAPER preflight before any account, open-orders, or positions request."
+        ),
+        "safety": {
+            "paper_start_allowed": paper_start_allowed,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "broker_mutation_occurred": False,
+            "secrets_values_exposed": False,
+            "raw_secret_values_included": False,
+        },
+    }
+
+
 def _build_run_paper_operator_state(
     *,
     checks: list[dict[str, Any]],
@@ -217,6 +378,13 @@ def _build_run_paper_operator_state(
     )
     endpoint_source = str(endpoint_authority.get("endpoint_source") or "UNKNOWN")
     runtime_state = str(supervisor.get("state") or runtime.get("process_state") or "UNKNOWN")
+    credential_setup = _build_paper_credential_setup(
+        alpaca=alpaca,
+        alpaca_configured=alpaca_configured,
+        endpoint_authority=endpoint_authority,
+        endpoint_ok=endpoint_ok,
+        paper_start_allowed=paper_start_allowed and not blockers,
+    )
     return {
         "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
         "schema_version": "run-paper-command-center-v1",
@@ -258,6 +426,7 @@ def _build_run_paper_operator_state(
             "raw_secret_values_included": False,
             "secrets_values_exposed": False,
         },
+        "paper_credential_setup": credential_setup,
         "runtime": {
             "label": "No active PAPER run" if runtime_state == "IDLE" else runtime_state,
             "state": runtime_state,
@@ -293,6 +462,8 @@ def _build_run_paper_operator_state(
             "alpaca_paper_endpoint_valid": endpoint_authority.get("alpaca_paper_endpoint_valid") is True,
             "alpaca_live_endpoint_blocked": endpoint_authority.get("alpaca_live_endpoint_blocked") is True,
             "paper_start_allowed": paper_start_allowed,
+            "launch_readiness_start_allowed": paper_start_allowed and not blockers,
+            "paper_credential_setup": credential_setup,
             "broker_mutation_occurred": False,
             "trading_mutation_occurred": False,
             "live_enabled": False,
@@ -318,12 +489,17 @@ def build_launch_readiness(
     checks: list[dict[str, Any]] = []
     alpaca = _find_provider(provider_readiness, "alpaca_paper")
     alpaca_configured = bool(alpaca.get("configured"))
+    alpaca_missing_fields = _missing_required_fields(alpaca)
+    if len(alpaca_missing_fields) == 1:
+        alpaca_detail = f"Missing required Alpaca PAPER credential field: {alpaca_missing_fields[0]}."
+    else:
+        alpaca_detail = "Alpaca PAPER key ID and secret are missing."
     checks.append(
         _check(
             "alpaca_paper_credentials",
             "Alpaca PAPER credentials",
             "PASS" if alpaca_configured else "BLOCKED",
-            "configured through env/local secret store" if alpaca_configured else "APCA_API_KEY_ID and APCA_API_SECRET_KEY are missing",
+            "configured through env/local secret store" if alpaca_configured else alpaca_detail,
             blocker=not alpaca_configured,
         )
     )
@@ -430,6 +606,23 @@ def build_launch_readiness(
         )
     )
 
+    preflight_gate_open = alpaca_configured and endpoint_ok
+    checks.append(
+        _check(
+            "paper_read_only_preflight_gate",
+            "Read-only PAPER preflight",
+            "BLOCKED",
+            (
+                "Read-only Alpaca PAPER account, open-orders, and positions preflight has not run. "
+                "It requires explicit Shan approval before Alpaca is called."
+            ) if preflight_gate_open else (
+                "Read-only Alpaca PAPER preflight is blocked until credentials and the PAPER trading endpoint are present."
+            ),
+            blocker=preflight_gate_open,
+            warning=not preflight_gate_open,
+        )
+    )
+
     blockers = [check for check in checks if check["blocker"]]
     warnings = [check for check in checks if check["warning"]]
     if blockers:
@@ -438,6 +631,7 @@ def build_launch_readiness(
         final = "DEGRADED_BUT_RUNNABLE"
     else:
         final = "READY_FOR_BOUNDED_PAPER"
+    launch_paper_start_allowed = paper_start_allowed and not blockers
     run_paper_operator_state = _build_run_paper_operator_state(
         checks=checks,
         blockers=blockers,
@@ -447,7 +641,7 @@ def build_launch_readiness(
         alpaca_configured=alpaca_configured,
         endpoint_authority=endpoint_authority,
         endpoint_ok=endpoint_ok,
-        paper_start_allowed=paper_start_allowed,
+        paper_start_allowed=launch_paper_start_allowed,
         safe_stop_status=safe_stop_status,
         supervisor=supervisor,
         runtime=runtime,
@@ -475,8 +669,9 @@ def build_launch_readiness(
         "alpaca_live_endpoint_blocked": endpoint_authority["alpaca_live_endpoint_blocked"],
         "live_blocked": True,
         "real_money_blocked": True,
-        "paper_start_allowed": paper_start_allowed,
+        "paper_start_allowed": launch_paper_start_allowed,
         "run_paper_operator_state": run_paper_operator_state,
+        "paper_credential_setup": run_paper_operator_state["paper_credential_setup"],
         "safe_stop_status": safe_stop_status,
         "portfolio_read_availability": "BROKER_READ_READY" if alpaca_configured else "UNAVAILABLE_MISSING_CREDENTIALS",
         "backend_degraded_reasons": list(health.get("degraded_reasons") or []),

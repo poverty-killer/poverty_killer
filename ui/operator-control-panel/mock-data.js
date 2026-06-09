@@ -135,6 +135,72 @@
           rawSecretValuesIncluded: false,
           secretsValuesExposed: false
         },
+        paperCredentialSetup: {
+          source: "MOCK_DATA",
+          schemaVersion: "paper-credential-setup-v1",
+          overallStatus: {
+            code: "MISSING",
+            label: "Mock PAPER credentials missing",
+            severity: "blocked",
+            detail: "PAPER credentials missing - connect OPERATOR_BACKEND for current local credential truth."
+          },
+          requiredCredentials: [
+            { name: "APCA_API_KEY_ID", present: false, displayValue: "missing", source: "MOCK_DATA", rawValueExposed: false },
+            { name: "APCA_API_SECRET_KEY", present: false, displayValue: "missing", source: "MOCK_DATA", rawValueExposed: false }
+          ],
+          missingFields: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
+          valuesHidden: true,
+          endpoint: {
+            display: "https://paper-api.alpaca.markets",
+            family: "paper",
+            host: "paper-api.alpaca.markets",
+            source: "safe_default",
+            configured: false,
+            paperEndpointValid: true,
+            liveEndpointBlocked: true,
+            blockerCode: null
+          },
+          approvedSecretPath: {
+            label: "Keys & Providers -> Alpaca PAPER Broker/Data -> Save local credentials",
+            storageType: "operator_secret_file",
+            relativePath: ".operator_secrets/provider_credentials.json",
+            credentialPrecedence: "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+            gitignored: true,
+            safeInstruction: "Use Keys & Providers when OPERATOR_BACKEND is connected; values stay local and hidden.",
+            forbiddenInstruction: "Do not paste credentials into chat, do not commit .env files, and do not put raw secrets in tracked files."
+          },
+          preflightGate: {
+            readOnlyPreflightAuthorized: false,
+            readOnlyPreflightAvailable: false,
+            accountCheckStatus: "blocked",
+            openOrdersCheckStatus: "blocked",
+            positionsCheckStatus: "blocked",
+            lastPreflightAt: null,
+            lastPreflightResult: null,
+            statusLabel: "Read-only PAPER preflight not run",
+            detail: "Mock/sample mode cannot call Alpaca or prove account, open-orders, or positions truth.",
+            explicitApprovalRequired: true,
+            futureChecks: ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
+            alpacaNetworkCallOccurred: false,
+            accountRequestOccurred: false,
+            openOrdersRequestOccurred: false,
+            positionsRequestOccurred: false,
+            brokerMutationOccurred: false,
+            orderSubmissionOccurred: false,
+            cancelOccurred: false,
+            replaceOccurred: false,
+            liquidationOccurred: false
+          },
+          nextSafeAction: "Connect OPERATOR_BACKEND, then use Keys & Providers to save Alpaca PAPER credentials locally.",
+          safety: {
+            paperStartAllowed: false,
+            liveEnabled: false,
+            realMoneyEnabled: false,
+            brokerMutationOccurred: false,
+            secretsValuesExposed: false,
+            rawSecretValuesIncluded: false
+          }
+        },
         runtime: {
           label: "Mock runtime only",
           state: "MOCK_ONLY",

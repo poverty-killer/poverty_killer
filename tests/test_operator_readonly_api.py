@@ -77,6 +77,13 @@ def test_operator_contracts_distinguish_truth_authorities(tmp_path):
     assert payload["view_models"]["run_paper_operator_state"]["canonical_authority"] == "OPERATOR_LAUNCH_READINESS"
     assert payload["view_models"]["run_paper_operator_state"]["raw_codes_in_advanced_details"] is True
     assert payload["view_models"]["run_paper_operator_state"]["broker_mutation_occurred"] is False
+    setup_contract = payload["view_models"]["run_paper_operator_state"]["paper_credential_setup"]
+    assert setup_contract["schema_version"] == "paper-credential-setup-v1"
+    assert setup_contract["approved_secret_path"] == ".operator_secrets/provider_credentials.json"
+    assert setup_contract["read_only_preflight_authorized"] is False
+    assert "GET /v2/account" in setup_contract["read_only_preflight_checks"]
+    assert setup_contract["alpaca_network_call_occurred"] is False
+    assert setup_contract["secrets_values_exposed"] is False
     assert payload["truth_labels"]["broker_confirmed"].startswith("Canonical")
     assert payload["truth_labels"]["unknown"].startswith("Truth unavailable")
 
@@ -212,7 +219,8 @@ def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
     assert runtime["current_runtime_attached"] is False
     assert runtime["historical_refusal_reason"] == "DUPLICATE_ACTIVE_RUN"
     assert runtime["paper_start_allowed"] is True
-    assert launch["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
+    assert launch["final_launch_readiness"] == "BLOCKED"
+    assert "paper_read_only_preflight_gate" in launch["reason_codes"]
 
 
 def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoint_truth(tmp_path):
@@ -247,7 +255,10 @@ def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoin
     assert runtime["paper_endpoint_only"] is True
     assert runtime["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
     assert runtime["paper_start_allowed"] is True
-    assert launch["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
+    assert launch["final_launch_readiness"] == "BLOCKED"
+    assert launch["paper_start_allowed"] is False
+    assert launch["paper_credential_setup"]["preflight_gate"]["read_only_preflight_authorized"] is False
+    assert launch["paper_credential_setup"]["preflight_gate"]["alpaca_network_call_occurred"] is False
     assert launch["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
     assert diagnostics["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
     assert diagnostics["paper_endpoint_source"] == "SAFE_DEFAULT_PAPER_ENDPOINT"

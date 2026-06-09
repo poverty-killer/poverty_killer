@@ -732,6 +732,20 @@ body.ai-docked-open.ai-docked-wide .shell {
   min-width: 0;
 }
 
+.compact-proof-grid {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.credential-preflight-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
 .run-paper-proof-tile {
   display: grid;
   align-content: start;
@@ -742,6 +756,10 @@ body.ai-docked-open.ai-docked-wide .shell {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #0d1118;
+}
+
+.credential-preflight-field {
+  min-height: 98px;
 }
 
 .proof-label {

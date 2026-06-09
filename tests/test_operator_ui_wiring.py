@@ -260,6 +260,7 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "Run PAPER Command Center" in text
     assert "runPaperOperatorState" in text
     assert "normalizeRunPaperOperatorState" in text
+    assert "normalizePaperCredentialSetup" in text
     assert "data-run-paper-command-center" in text
     assert "data-run-paper-top-status" in text
     assert "data-run-paper-start-control" in text
@@ -268,6 +269,22 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "run-paper-proof-grid" in text
     assert "Start readiness" in text
     assert "Broker / portfolio truth" in text
+    assert "Credential Setup + Read-Only Preflight Gate" in text
+    assert "data-paper-credential-setup" in text
+    assert "data-paper-credential-field" in text
+    assert "data-paper-credential-top-message" in text
+    assert "data-paper-credential-next-action" in text
+    assert "data-paper-preflight-boundary" in text
+    assert "data-paper-credential-advanced" in text
+    assert "APCA_API_KEY_ID" in text
+    assert "APCA_API_SECRET_KEY" in text
+    assert ".operator_secrets/provider_credentials.json" in text
+    assert "Values hidden" in text
+    assert "Do not commit" in text
+    assert "Read-only PAPER preflight not run" in text
+    assert "requires explicit approval before Alpaca is called" in text
+    assert "account, open orders, and positions" in text
+    assert "will not place, cancel, replace, liquidate, enable live, enable real money, or start PAPER" in text
     assert "Next safe action:" in text
     assert "Advanced endpoint and start proof" in text
     assert "Raw blocker code is kept here" in text
@@ -318,6 +335,13 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert "paper_endpoint_blocker_code" in text
     assert "secrets_values_exposed" in text
     assert "rawSecretValuesIncluded" in text
+    assert "paperCredentialSetup" in text
+    assert "readOnlyPreflightAuthorized" in text
+    assert "alpacaNetworkCallOccurred" in text
+    assert "accountRequestOccurred" in text
+    assert "openOrdersRequestOccurred" in text
+    assert "positionsRequestOccurred" in text
+    assert "replaceOccurred" in text
     assert "broker_mutation_occurred" in text
     assert "trading_mutation_occurred" in text
     assert "orderSubmissionOccurred" in text
@@ -326,6 +350,8 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert ".run-paper-status-banner" in css
     assert ".run-paper-proof-grid" in css
     assert ".run-paper-proof-tile" in css
+    assert ".credential-preflight-panel" in css
+    assert ".credential-preflight-field" in css
 
 
 def test_historical_test_control_is_visible_and_honest():

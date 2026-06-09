@@ -970,6 +970,54 @@
           "raw_secret_values_included": false,
           "secrets_values_exposed": false
         },
+        "paper_credential_setup": {
+          "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
+          "schema_version": "paper-credential-setup-v1",
+          "overall_status": "MISSING | PARTIAL | PRESENT_NOT_PREFLIGHTED | PREFLIGHT_READY | ERROR",
+          "required_credentials": [
+            {
+              "name": "APCA_API_KEY_ID",
+              "present": false,
+              "display_value": "present | missing",
+              "raw_value_exposed": false
+            },
+            {
+              "name": "APCA_API_SECRET_KEY",
+              "present": false,
+              "display_value": "present | missing",
+              "raw_value_exposed": false
+            }
+          ],
+          "approved_secret_path": {
+            "label": "Keys & Providers -> Alpaca PAPER Broker/Data -> Save local credentials",
+            "storage_type": "operator_secret_file",
+            "relative_path": ".operator_secrets/provider_credentials.json",
+            "credential_precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+            "gitignored": true,
+            "safe_instruction": "plain-English local setup instruction",
+            "forbidden_instruction": "do not paste secrets into chat, do not commit .env/tracked secrets"
+          },
+          "preflight_gate": {
+            "read_only_preflight_authorized": false,
+            "read_only_preflight_available": false,
+            "account_check_status": "blocked | ready_to_run_after_approval | not_run",
+            "open_orders_check_status": "blocked | ready_to_run_after_approval | not_run",
+            "positions_check_status": "blocked | ready_to_run_after_approval | not_run",
+            "alpaca_network_call_occurred": false,
+            "broker_mutation_occurred": false,
+            "order_submission_occurred": false,
+            "cancel_occurred": false,
+            "replace_occurred": false,
+            "liquidation_occurred": false
+          },
+          "safety": {
+            "paper_start_allowed": false,
+            "live_enabled": false,
+            "real_money_enabled": false,
+            "broker_mutation_occurred": false,
+            "secrets_values_exposed": false
+          }
+        },
         "runtime": {
           "state": "IDLE | RUNNING | STALE_ACTIVE_SESSION | UNKNOWN",
           "safe_stop_status": "NO_ACTIVE_RUNTIME | SAFE_STOP_AVAILABLE | SAFE_STOP_UNAVAILABLE"
@@ -987,6 +1035,7 @@
         },
         "advanced": "raw proof fields and reason codes, collapsed by default in UI"
       },
+      "paper_credential_setup": "same derived setup/preflight gate object exposed top-level for API clients",
       "live_blocked": true,
       "real_money_blocked": true,
       "uses_existing_governed_start_intent": true,
