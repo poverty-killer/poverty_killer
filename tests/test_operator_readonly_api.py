@@ -17,6 +17,32 @@ PAPER_ENV = {
 }
 
 
+class FakeReadOnlyClient:
+    def __init__(self):
+        self.calls = []
+
+    def get_json(self, path, headers):
+        self.calls.append(("GET", path))
+        if path.startswith("/v2/account"):
+            return {
+                "status": "ACTIVE",
+                "equity": "10000",
+                "portfolio_value": "10000",
+                "cash": "7500",
+                "buying_power": "15000",
+                "currency": "USD",
+                "trading_blocked": False,
+                "account_blocked": False,
+                "transfers_blocked": False,
+                "pattern_day_trader": False,
+            }
+        if path.startswith("/v2/positions"):
+            return []
+        if path.startswith("/v2/orders"):
+            return []
+        raise AssertionError(f"unexpected read-only path: {path}")
+
+
 def _endpoint(app, path: str, method: str = "GET"):
     for route in app.routes:
         if route.path == path and method in (route.methods or set()):
@@ -74,7 +100,8 @@ def test_operator_contracts_distinguish_truth_authorities(tmp_path):
     assert payload["control_policy"]["ui_is_trading_engine"] is False
     assert payload["control_policy"]["manual_trading_available"] is False
     assert payload["control_policy"]["live_operation_available"] is False
-    assert payload["view_models"]["run_paper_operator_state"]["canonical_authority"] == "OPERATOR_LAUNCH_READINESS"
+    assert payload["view_models"]["run_paper_operator_state"]["canonical_authority"] == "OPERATOR_PAPER_CONTROL_STATE"
+    assert payload["view_models"]["run_paper_operator_state"]["endpoint"] == "/operator/paper-control-state"
     assert payload["view_models"]["run_paper_operator_state"]["raw_codes_in_advanced_details"] is True
     assert payload["view_models"]["run_paper_operator_state"]["broker_mutation_occurred"] is False
     setup_contract = payload["view_models"]["run_paper_operator_state"]["paper_credential_setup"]
@@ -107,6 +134,7 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/operator/positions" in paths
     assert "/operator/orders/open" in paths
     assert "/operator/positions/intelligence" in paths
+    assert "/operator/paper-control-state" in paths
     assert "/operator/paper-baseline" in paths
     assert "/operator/paper-baseline/accept" in paths
     assert "/operator/launch-readiness" in paths
@@ -134,7 +162,7 @@ def test_operator_intents_are_refused_without_mutation(tmp_path):
 
     assert paper["reason_code"] == "AUTONOMOUS_PAPER_APPROVAL_REQUIRED"
     assert live["reason_code"] == "LIVE_NOT_APPROVED"
-    assert emergency["reason_code"] == "EMERGENCY_STOP_INTENT_NOT_IMPLEMENTED"
+    assert emergency["reason_code"] == "EMERGENCY_STOP_NOT_EXPOSED_IN_OPERATOR_UI"
 
 
 def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
@@ -165,6 +193,76 @@ def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
     assert runtime_payload["process_state"] == "RUNNING"
     assert runtime_payload["paper_start_allowed"] is False
     assert runtime_payload["paper_stop_allowed"] is True
+
+
+def test_paper_control_state_is_canonical_safe_run_paper_payload(tmp_path):
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
+        runner=runner,
+    )
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            supervisor=supervisor,
+            provider_env=dict(PAPER_ENV),
+            portfolio_client=FakeReadOnlyClient(),
+        )
+    )
+
+    payload = _endpoint(app, "/operator/paper-control-state")()
+
+    assert payload["source"] == "OPERATOR_PAPER_CONTROL_STATE"
+    assert payload["data_source"] == "OPERATOR_BACKEND"
+    assert payload["paper_only"] is True
+    assert payload["live_locked"] is True
+    assert payload["real_money_blocked"] is True
+    assert payload["endpoint_family"] == "paper"
+    assert payload["endpoint_host"] == "paper-api.alpaca.markets"
+    assert payload["credential_status"] == "CONFIGURED"
+    assert payload["portfolio_truth_status"] in {"BROKER_CONFIRMED", "BROKER_CONFIRMED_EMPTY"}
+    assert payload["positions_count"] == 0
+    assert payload["open_orders_count"] == 0
+    assert payload["paper_start_allowed"] is False
+    assert payload["dominant_blocker"] == "paper_read_only_preflight_gate"
+    assert "paper_read_only_preflight_gate" in payload["reason_codes"]
+    assert payload["max_lease_seconds"] == 432000
+    assert 432000 in payload["allowed_durations"]
+    assert payload["broker_mutation_occurred"] is False
+    assert payload["secrets_values_exposed"] is False
+
+
+def test_paper_control_state_dominant_blocker_is_active_supervisor_when_running():
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
+        runner=runner,
+    )
+    started = supervisor.start_paper(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "approve_autonomous_paper": True,
+        }
+    )
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            supervisor=supervisor,
+            provider_env=dict(PAPER_ENV),
+            portfolio_client=FakeReadOnlyClient(),
+        )
+    )
+
+    payload = _endpoint(app, "/operator/paper-control-state")()
+
+    assert started["allowed"] is True
+    assert payload["supervisor_state"] == "RUNNING"
+    assert payload["active_run_id"] == started["session_id"]
+    assert payload["paper_start_allowed"] is False
+    assert payload["paper_stop_allowed"] is True
+    assert payload["dominant_blocker"] == "SUPERVISOR_PROCESS_RUNNING_OR_RECENT"
+    assert "SUPERVISOR_PROCESS_RUNNING_OR_RECENT" in payload["reason_codes"]
 
 
 def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):

@@ -149,9 +149,9 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
     },
     "view_models": {
         "run_paper_operator_state": {
-            "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
-            "canonical_authority": "OPERATOR_LAUNCH_READINESS",
-            "endpoint": "/operator/launch-readiness",
+            "source": "OPERATOR_PAPER_CONTROL_STATE_DERIVED_VIEW",
+            "canonical_authority": "OPERATOR_PAPER_CONTROL_STATE",
+            "endpoint": "/operator/paper-control-state",
             "schema_version": "run-paper-command-center-v1",
             "main_answer_plain_english": True,
             "raw_codes_in_advanced_details": True,
@@ -205,6 +205,7 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/world-awareness/providers": "read_only_external_intelligence_provider_health",
         "/operator/world-awareness/events": "read_only_external_intelligence_events",
         "/operator/world-awareness/runtime": "read_only_external_intelligence_provider_runtime",
+        "/operator/paper-control-state": "canonical_run_paper_control_state",
         "/operator/latest-run": "read_only_supervisor_session_summary",
         "/operator/runs": "read_only_run_archive",
         "/operator/runs/{run_id}": "read_only_run_archive_detail",
@@ -255,10 +256,10 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
     "disabled_intents": {
         "/operator/intent/paper/start": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
         "/operator/intent/paper/stop": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
-        "/operator/intent/snapshot/export": "PAPER_INTENT_NOT_IMPLEMENTED",
+        "/operator/intent/snapshot/export": "SNAPSHOT_EXPORT_NOT_EXPOSED_IN_OPERATOR_UI",
         "/operator/intent/live/request-enable": "LIVE_NOT_APPROVED",
         "/operator/intent/live/start": "LIVE_NOT_APPROVED",
-        "/operator/intent/emergency-stop": "EMERGENCY_STOP_INTENT_NOT_IMPLEMENTED",
+        "/operator/intent/emergency-stop": "EMERGENCY_STOP_NOT_EXPOSED_IN_OPERATOR_UI",
     },
     "truth_labels": {
         "broker_confirmed": "Canonical only after broker acknowledgement/reconciliation.",
@@ -1130,6 +1131,152 @@ class OperatorSnapshotProvider:
             paper_baseline=baseline if baseline.get("accepted") is True else None,
         )
 
+    def paper_control_state(self) -> dict[str, Any]:
+        status = self.status()
+        health = self.health()
+        supervisor = self.latest_run()
+        launch = self.launch_readiness()
+        credentials = self.credentials_providers()
+        diagnostics = self.credentials_diagnostics()
+        baseline = self.paper_baseline()
+        portfolio = self.portfolio()
+        active = supervisor.get("active_session") or {}
+        latest = supervisor.get("latest_session") or {}
+        session = active or latest or {}
+        providers = credentials.get("providers") if isinstance(credentials.get("providers"), list) else []
+        alpaca = next(
+            (
+                provider
+                for provider in providers
+                if str(provider.get("provider_id") or "") == "alpaca_paper"
+            ),
+            {},
+        )
+        fields = alpaca.get("fields") if isinstance(alpaca.get("fields"), list) else []
+        missing_fields = [
+            str(field.get("name"))
+            for field in fields
+            if field.get("configured") is not True and str(field.get("name") or "") in {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY"}
+        ]
+        if not fields and alpaca.get("configured") is not True:
+            missing_fields = ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"]
+
+        launch_reasons = [
+            str(code)
+            for code in launch.get("reason_codes") or []
+            if str(code or "").strip()
+        ]
+        active_session_id = active.get("session_id") or supervisor.get("active_session_id")
+        supervisor_state = str(supervisor.get("state") or status.get("bot_status") or "UNKNOWN")
+        supervisor_running = supervisor_state.upper() in {"RUNNING", "STARTING", "STOP_REQUESTED"} or bool(active_session_id)
+        paper_start_allowed = supervisor.get("paper_start_allowed") is True and launch.get("paper_start_allowed") is True
+        if supervisor_running:
+            dominant_blocker = "SUPERVISOR_PROCESS_RUNNING_OR_RECENT"
+        elif paper_start_allowed:
+            dominant_blocker = "READY_FOR_GOVERNED_PAPER"
+        else:
+            dominant_blocker = (
+                str(supervisor.get("paper_start_refusal_reason") or "")
+                or (launch_reasons[0] if launch_reasons else "")
+                or "PAPER_START_BLOCKED"
+            )
+        reason_codes = list(dict.fromkeys(
+            [
+                dominant_blocker,
+                *launch_reasons,
+                str(supervisor.get("paper_start_refusal_reason") or ""),
+            ]
+        ))
+        reason_codes = [code for code in reason_codes if code]
+
+        summary = portfolio.get("summary") if isinstance(portfolio.get("summary"), dict) else {}
+        endpoint_host = diagnostics.get("paper_endpoint_host") or launch.get("paper_endpoint_host") or ""
+        endpoint_display = diagnostics.get("paper_endpoint_display") or launch.get("paper_endpoint_display") or ""
+        endpoint_family = diagnostics.get("paper_endpoint_family") or launch.get("paper_endpoint_family") or "unknown"
+        baseline_runtime_context = supervisor.get("paper_baseline_runtime_context") or launch.get("paper_baseline_runtime_context") or {}
+        artifact_paths = {
+            "stdout_path": session.get("stdout_path"),
+            "stderr_path": session.get("stderr_path"),
+            "wrapper_stdout_path": session.get("wrapper_stdout_path"),
+            "wrapper_stderr_path": session.get("wrapper_stderr_path"),
+            "child_stdout_path": session.get("child_stdout_path"),
+            "child_stderr_path": session.get("child_stderr_path"),
+            "session_store_path": (supervisor.get("session_store") or {}).get("path"),
+        }
+        next_safe_action = (
+            "Monitor the attached PAPER supervisor. Do not start a second run."
+            if supervisor_running
+            else "Start governed PAPER from the Run PAPER cockpit."
+            if paper_start_allowed
+            else str((launch.get("run_paper_operator_state") or {}).get("next_safe_action") or "Resolve the listed blocker before starting PAPER.")
+        )
+
+        return {
+            "source": "OPERATOR_PAPER_CONTROL_STATE",
+            "schema_version": "paper-control-state-v1",
+            "backend_status": health.get("api_status") or "UNKNOWN",
+            "repo_head": self.loaded_git_commit_short,
+            "loaded_commit": self.loaded_git_commit_short,
+            "git_branch": self.loaded_git_branch,
+            "data_source": "OPERATOR_BACKEND",
+            "paper_only": True,
+            "live_locked": True,
+            "real_money_blocked": True,
+            "credential_source": alpaca.get("source") or credentials.get("source") or "NOT_CONFIGURED",
+            "credential_status": "CONFIGURED" if alpaca.get("configured") is True else "MISSING",
+            "alpaca_paper_configured": alpaca.get("configured") is True,
+            "missing_credential_fields": missing_fields,
+            "endpoint_family": endpoint_family,
+            "endpoint_host": endpoint_host,
+            "endpoint_display": endpoint_display,
+            "endpoint_source": diagnostics.get("paper_endpoint_source") or launch.get("paper_endpoint_source") or "UNKNOWN",
+            "endpoint_status": diagnostics.get("paper_endpoint_status") or launch.get("paper_endpoint_status") or "UNKNOWN",
+            "baseline_status": baseline.get("status") or "UNKNOWN",
+            "baseline_accepted": baseline.get("accepted") is True,
+            "baseline_snapshot_id": baseline.get("baseline_snapshot_id"),
+            "baseline_policy": baseline.get("policy"),
+            "baseline_position_count": baseline.get("position_count") or 0,
+            "baseline_runtime_context": baseline_runtime_context,
+            "protected_symbols": baseline_runtime_context.get("protected_symbols_normalized") or baseline.get("protected_symbols") or [],
+            "portfolio_truth_status": portfolio.get("status") or "UNKNOWN",
+            "portfolio_data_source": portfolio.get("data_source") or "UNKNOWN",
+            "account_status": summary.get("account_status"),
+            "cash": summary.get("cash"),
+            "equity": summary.get("total_equity"),
+            "buying_power": summary.get("buying_power"),
+            "positions_count": summary.get("position_count") or len(portfolio.get("positions") or []),
+            "open_orders_count": summary.get("open_order_count") or len(portfolio.get("open_orders") or []),
+            "supervisor_state": supervisor_state,
+            "active_run_id": active_session_id,
+            "active_pid": active.get("pid") or session.get("pid"),
+            "paper_start_allowed": paper_start_allowed,
+            "paper_stop_allowed": supervisor.get("paper_stop_allowed") is True,
+            "dominant_blocker": dominant_blocker,
+            "reason_codes": reason_codes,
+            "max_lease_seconds": supervisor.get("max_paper_duration_seconds") or 432000,
+            "allowed_durations": supervisor.get("allowed_durations") or [],
+            "watchlist": active.get("watchlist") or supervisor.get("allowed_watchlist") or [],
+            "artifact_paths": artifact_paths,
+            "last_heartbeat": status.get("last_heartbeat_ts") or session.get("last_status_check_at"),
+            "next_safe_action": next_safe_action,
+            "launch_readiness": launch,
+            "latest_run": supervisor,
+            "paper_baseline": baseline,
+            "portfolio_summary": summary,
+            "runtime_attachment_detail": status.get("runtime_attachment_detail"),
+            "secrets_values_exposed": False,
+            "raw_secret_values_included": False,
+            "broker_call_occurred": portfolio.get("broker_read_occurred") is True,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+            "close_position_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+        }
+
     def research(self) -> dict[str, Any]:
         return self.research_registry.snapshot()
 
@@ -1278,7 +1425,7 @@ class OperatorSnapshotProvider:
         return self._supervisor_snapshot()
 
     def runs(self) -> dict[str, Any]:
-        return self.run_archive.list_runs()
+        return self.run_archive.list_runs(limit=10)
 
     def run_detail(self, run_id: str) -> dict[str, Any]:
         run = self.run_archive.get_run(run_id)
@@ -2973,6 +3120,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     def world_awareness_runtime_status() -> dict[str, Any]:
         return provider.world_awareness_runtime_status()
 
+    @router.get("/paper-control-state")
+    def paper_control_state() -> dict[str, Any]:
+        return provider.paper_control_state()
+
     @router.get("/latest-run")
     def latest_run() -> dict[str, Any]:
         return provider.latest_run()
@@ -3175,7 +3326,7 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
 
     @router.post("/intent/snapshot/export")
     def snapshot_export_intent() -> dict[str, Any]:
-        return provider.refused_intent("snapshot_export", "PAPER_INTENT_NOT_IMPLEMENTED")
+        return provider.refused_intent("snapshot_export", "SNAPSHOT_EXPORT_NOT_EXPOSED_IN_OPERATOR_UI")
 
     @router.post("/intent/world-awareness/poll")
     def world_awareness_poll_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3191,7 +3342,7 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
 
     @router.post("/intent/emergency-stop")
     def emergency_stop_intent() -> dict[str, Any]:
-        return provider.refused_intent("emergency_stop", "EMERGENCY_STOP_INTENT_NOT_IMPLEMENTED")
+        return provider.refused_intent("emergency_stop", "EMERGENCY_STOP_NOT_EXPOSED_IN_OPERATOR_UI")
 
     return router
 

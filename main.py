@@ -665,6 +665,9 @@ class SovereignHeartbeat:
 
         self._running = False
         self._stopping = False
+        self._shutdown_complete = False
+        self._shutdown_reason_code: str | None = None
+        self._broker_flatten_performed_on_shutdown = False
         self._threads: list[threading.Thread] = []
         self._health_check_interval = 5.0
         self._signal_handlers_registered = False
@@ -828,26 +831,12 @@ class SovereignHeartbeat:
             )
             return
 
-        self._stopping = True
-        self._running = False
-        self._stop_event.set()
-
-        try:
-            self.execution_engine.stop()
-        except Exception as exc:
-            logger.exception(
-                "Failed stopping execution engine during signal shutdown: %s",
-                exc,
-            )
-
-        try:
-            self.order_router.close_all_positions()
-            logger.critical("PORTFOLIO FLATTENED - SAFE TO EXIT")
-        except Exception as exc:
-            logger.exception(
-                "Failed to flatten portfolio during signal shutdown: %s",
-                exc,
-            )
+        reason_code = f"SIGNAL_{int(signum)}_NO_FLATTEN"
+        logger.critical(
+            "NORMAL PAPER SHUTDOWN REQUESTED: reason_code=%s broker_positions_preserved=true",
+            reason_code,
+        )
+        self.stop(reason_code=reason_code)
 
     # ============================================
     # PUBLIC METHODS
@@ -879,13 +868,24 @@ class SovereignHeartbeat:
             "Runtime started: main.py owns lifecycle/feed shell; MainLoop owns live runtime body"
         )
 
-        self._wait_until_stopped()
+        try:
+            self._wait_until_stopped()
+        finally:
+            self.stop(reason_code=self._shutdown_reason_code or "RUNTIME_WAIT_EXIT_NO_FLATTEN")
 
-    def stop(self) -> None:
+    def stop(self, reason_code: str = "OPERATOR_REQUESTED_STOP_NO_FLATTEN") -> None:
         """Stop the runtime."""
+        if self._shutdown_complete:
+            logger.debug(
+                "Sovereign heartbeat shutdown already complete: reason_code=%s",
+                self._shutdown_reason_code,
+            )
+            return
+
         if self._stopping:
             logger.debug("Heartbeat stop already in progress")
 
+        self._shutdown_reason_code = self._shutdown_reason_code or reason_code
         self._stopping = True
 
         if not self._running:
@@ -917,7 +917,11 @@ class SovereignHeartbeat:
             logger.exception("Error closing state store: %s", exc)
 
         self._join_background_threads()
-        logger.info("Sovereign heartbeat stopped")
+        self._shutdown_complete = True
+        logger.info(
+            "Sovereign heartbeat stopped: reason_code=%s broker_positions_preserved=true broker_flatten_called=false",
+            self._shutdown_reason_code,
+        )
 
     def _emit_oms_shutdown_accounting(self) -> None:
         getter = getattr(self.execution_engine, "get_oms_shutdown_accounting", None)
@@ -937,6 +941,7 @@ class SovereignHeartbeat:
                 pass
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received in runtime wait state")
+            self._shutdown_reason_code = "KEYBOARD_INTERRUPT_NO_FLATTEN"
             self._running = False
             self._stop_event.set()
 
@@ -975,8 +980,11 @@ class SovereignHeartbeat:
                     "duration_seconds": duration,
                     "shutdown_mode": "graceful_self_stop",
                     "broker_post": False,
+                    "broker_flatten_called": False,
+                    "reason_code": "BOUNDED_DURATION_EXPIRED_NO_FLATTEN",
                 },
             )
+            self._shutdown_reason_code = "BOUNDED_DURATION_EXPIRED_NO_FLATTEN"
             self._running = False
             self._stop_event.set()
 

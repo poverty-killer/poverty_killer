@@ -6,6 +6,7 @@ never writes logs, never calls brokers, and never invents missing truth.
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -185,6 +186,38 @@ def _resolve_log_path(repo_root: Path, raw: Any) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+def _extract_diag_fields(text: str, event_name: str) -> dict[str, Any] | None:
+    marker = f"[OMS_DIAG] {event_name} fields="
+    latest: dict[str, Any] | None = None
+    for line in text.splitlines():
+        if marker not in line:
+            continue
+        payload = line.split(marker, 1)[1].strip()
+        try:
+            parsed = ast.literal_eval(payload)
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            latest = parsed
+    return latest
+
+
 def _session_sort_key(session: dict[str, Any]) -> str:
     return str(session.get("requested_at") or session.get("started_at") or session.get("ended_at") or "")
 
@@ -201,6 +234,10 @@ class RunLogEvidence:
     fill_hydration_observed: bool = False
     broker_fee_hydration_observed: bool = False
     broker_fee_hydration_conflict_observed: bool = False
+    broker_fee_hydration_skipped: bool = False
+    broker_fee_hydration_skip_reason: str | None = None
+    account_activity_read_authorized: bool | None = None
+    broker_read_profile: str | None = None
     tca_observed: bool = False
     oms_shutdown_accounting_observed: bool = False
     reconciliation_conflict_observed: bool = False
@@ -219,6 +256,10 @@ class RunLogEvidence:
             "fill_hydration_observed": self.fill_hydration_observed,
             "broker_fee_hydration_observed": self.broker_fee_hydration_observed,
             "broker_fee_hydration_conflict_observed": self.broker_fee_hydration_conflict_observed,
+            "broker_fee_hydration_skipped": self.broker_fee_hydration_skipped,
+            "broker_fee_hydration_skip_reason": self.broker_fee_hydration_skip_reason,
+            "account_activity_read_authorized": self.account_activity_read_authorized,
+            "broker_read_profile": self.broker_read_profile,
             "tca_observed": self.tca_observed,
             "oms_shutdown_accounting_observed": self.oms_shutdown_accounting_observed,
             "reconciliation_conflict_observed": self.reconciliation_conflict_observed,
@@ -254,25 +295,64 @@ def scan_run_logs(session: dict[str, Any], *, repo_root: Path) -> RunLogEvidence
         texts.append(text)
 
     joined = "\n".join(texts)
-    evidence.orders_submitted = _count_markers(joined, _ORDER_SUBMITTED)
-    evidence.orders_acknowledged = _count_markers(joined, _ORDER_ACK)
-    evidence.orders_canceled = _count_markers(joined, _ORDER_CANCEL)
-    evidence.fills_observed = _count_markers(joined, _FILL)
-    evidence.fill_hydration_observed = _has_marker(joined, _FILL)
-    evidence.broker_fee_hydration_observed = _has_marker(joined, _FEE)
+    shutdown = _extract_diag_fields(joined, "SHUTDOWN_ACCOUNTING")
+    reconciliation = _extract_diag_fields(joined, "SHUTDOWN_RECONCILIATION")
+    structured = shutdown or reconciliation
+
+    if structured:
+        evidence.orders_submitted = _as_int(
+            structured.get("order_post_acknowledged", structured.get("order_post_attempted", 0))
+        )
+        evidence.orders_acknowledged = _as_int(structured.get("order_post_acknowledged", 0))
+        evidence.orders_canceled = _as_int(
+            structured.get("cancel_acknowledged", structured.get("cancel_attempted", 0))
+        )
+        evidence.fills_observed = _as_int(structured.get("fill_hydration_count", 0))
+        evidence.fill_hydration_observed = (
+            _as_int(structured.get("fill_hydration_attempted_count", 0)) > 0
+            or _as_int(structured.get("fill_hydration_count", 0)) > 0
+        )
+        evidence.broker_fee_hydration_observed = (
+            _as_int(structured.get("broker_fee_hydration_attempted_count", 0)) > 0
+            or _as_int(structured.get("broker_fee_hydration_count", 0)) > 0
+            or _as_int(structured.get("broker_fee_activity_records_seen_count", 0)) > 0
+        )
+        evidence.broker_fee_hydration_skipped = _as_bool(structured.get("fee_hydration_skipped"))
+        skip_reason = structured.get("fee_hydration_skip_reason")
+        evidence.broker_fee_hydration_skip_reason = str(skip_reason) if skip_reason else None
+        account_activity = structured.get("account_activity_read_authorized")
+        evidence.account_activity_read_authorized = _as_bool(account_activity) if account_activity is not None else None
+        read_profile = structured.get("broker_read_profile")
+        evidence.broker_read_profile = str(read_profile) if read_profile else None
+        evidence.tca_observed = (
+            _as_int(structured.get("tca_records_count", 0)) > 0
+            or _as_int(structured.get("tca_complete_count", 0)) > 0
+        )
+        evidence.oms_shutdown_accounting_observed = True
+        evidence.fee_detail_pending_observed = _as_int(structured.get("tca_fee_pending_count", 0)) > 0
+    else:
+        evidence.orders_submitted = _count_markers(joined, _ORDER_SUBMITTED)
+        evidence.orders_acknowledged = _count_markers(joined, _ORDER_ACK)
+        evidence.orders_canceled = _count_markers(joined, _ORDER_CANCEL)
+        evidence.fills_observed = _count_markers(joined, _FILL)
+        evidence.fill_hydration_observed = _has_marker(joined, _FILL)
+        evidence.broker_fee_hydration_observed = _has_marker(joined, _FEE)
+        evidence.tca_observed = _has_marker(joined, _TCA)
+        evidence.oms_shutdown_accounting_observed = _has_marker(joined, _OMS)
+        evidence.fee_detail_pending_observed = (
+            "FEE_PENDING" in joined.upper()
+            or "BROKER_FILL_FEE_DETAIL_UNAVAILABLE" in joined.upper()
+        )
     evidence.broker_fee_hydration_conflict_observed = (
         _field_positive_count(joined, _BROKER_FEE_CONFLICT_FIELDS)
         or _field_true(joined, _BROKER_FEE_CONFLICT_TRUE_FIELDS)
         or _has_exact_marker(joined, _BROKER_FEE_CONFLICT_MARKERS)
     )
-    evidence.tca_observed = _has_marker(joined, _TCA)
-    evidence.oms_shutdown_accounting_observed = _has_marker(joined, _OMS)
     evidence.reconciliation_conflict_observed = (
         _field_positive_count(joined, _RECONCILIATION_CONFLICT_FIELDS)
         or _field_true(joined, _RECONCILIATION_CONFLICT_TRUE_FIELDS)
         or _has_exact_marker(joined, _RECONCILIATION_CONFLICT_MARKERS)
     )
-    evidence.fee_detail_pending_observed = "FEE_PENDING" in joined.upper() or "BROKER_FILL_FEE_DETAIL_UNAVAILABLE" in joined.upper()
     live_true = _field_true(joined, _LIVE_TRUE_FIELDS) or _has_exact_marker(joined, _LIVE_TRUE_MARKERS)
     real_money_true = _field_true(joined, _REAL_MONEY_TRUE_FIELDS) or _has_exact_marker(joined, _REAL_MONEY_TRUE_MARKERS)
     evidence.safety_markers = {
@@ -320,7 +400,11 @@ def _verdict(session: dict[str, Any], evidence: RunLogEvidence) -> tuple[str, li
     if evidence.broker_fee_hydration_conflict_observed:
         reason_codes.append("BROKER_FEE_HYDRATION_CONFLICT")
         conditional = True
-    if evidence.fee_detail_pending_observed or not evidence.broker_fee_hydration_observed:
+    fee_hydration_not_authorized = (
+        evidence.broker_fee_hydration_skipped
+        and evidence.broker_fee_hydration_skip_reason == "BROKER_READ_NOT_AUTHORIZED"
+    )
+    if not fee_hydration_not_authorized and (evidence.fee_detail_pending_observed or not evidence.broker_fee_hydration_observed):
         reason_codes.append("BROKER_FEE_DETAIL_PENDING_OR_UNOBSERVED")
         conditional = True
     if not evidence.tca_observed:
@@ -384,6 +468,10 @@ def build_run_record(
             "fill_hydration_observed": evidence.fill_hydration_observed,
             "broker_fee_hydration_observed": evidence.broker_fee_hydration_observed,
             "broker_fee_hydration_conflict_observed": evidence.broker_fee_hydration_conflict_observed,
+            "broker_fee_hydration_skipped": evidence.broker_fee_hydration_skipped,
+            "broker_fee_hydration_skip_reason": evidence.broker_fee_hydration_skip_reason,
+            "account_activity_read_authorized": evidence.account_activity_read_authorized,
+            "broker_read_profile": evidence.broker_read_profile,
         },
         "tca": {
             "status": "OBSERVED" if evidence.tca_observed else "UNKNOWN",

@@ -70,6 +70,51 @@ def test_run_archive_parses_session_and_log_evidence(tmp_path):
     assert run["final_verdict"] == "PASS"
 
 
+def test_run_archive_prefers_structured_shutdown_accounting_over_free_text_markers(tmp_path):
+    session = _session(
+        tmp_path,
+        "\n".join(
+            [
+                "[OMS_DIAG] SHUTDOWN_RECONCILIATION fields={'performed': True, 'open_orders_count': 0, "
+                "'order_post_attempted': 0, 'order_post_acknowledged': 0, "
+                "'cancel_attempted': 0, 'cancel_acknowledged': 0, "
+                "'fill_hydration_attempted_count': 0, 'fill_hydration_count': 0, "
+                "'broker_filled_orders': 21, 'filled_orders': 21, 'canceled_orders': 94, "
+                "'broker_fee_hydration_attempted_count': 0, 'broker_fee_hydration_count': 0, "
+                "'broker_fee_activity_records_seen_count': 0, "
+                "'fee_hydration_skipped': True, 'fee_hydration_skip_reason': 'BROKER_READ_NOT_AUTHORIZED', "
+                "'account_activity_read_authorized': False, 'broker_read_profile': 'PAPER_SMOKE_STRICT_READS', "
+                "'tca_records_count': 0, 'tca_complete_count': 3, 'tca_fee_pending_count': 8, "
+                "'mutation_performed': False, 'mutation_method_counts': {'GET': 80, 'POST': 0, 'DELETE': 0}}",
+                "[OMS_DIAG] SHUTDOWN_ACCOUNTING fields={'submitted_count': 0, 'acknowledged_count': 0, "
+                "'order_post_attempted': 0, 'order_post_acknowledged': 0, "
+                "'cancel_attempted': 0, 'cancel_acknowledged': 0, "
+                "'fill_hydration_attempted_count': 0, 'fill_hydration_count': 0, "
+                "'broker_filled_orders': 21, 'filled_orders': 21, 'canceled_orders': 94, "
+                "'broker_fee_hydration_attempted_count': 0, 'broker_fee_hydration_count': 0, "
+                "'broker_fee_activity_records_seen_count': 0, "
+                "'fee_hydration_skipped': True, 'fee_hydration_skip_reason': 'BROKER_READ_NOT_AUTHORIZED', "
+                "'account_activity_read_authorized': False, 'broker_read_profile': 'PAPER_SMOKE_STRICT_READS', "
+                "'tca_records_count': 0, 'tca_complete_count': 3, 'tca_fee_pending_count': 8, "
+                "'mutation_performed': False, 'mutation_method_counts': {'GET': 80, 'POST': 0, 'DELETE': 0}}",
+            ]
+        ),
+    )
+
+    run = RunArchive(sessions=[session], repo_root=tmp_path).list_runs()["runs"][0]
+
+    assert run["orders"]["submitted"] == 0
+    assert run["orders"]["acknowledged"] == 0
+    assert run["orders"]["canceled"] == 0
+    assert run["fills"]["observed"] == 0
+    assert run["fills"]["broker_fee_hydration_observed"] is False
+    assert run["fills"]["broker_fee_hydration_skipped"] is True
+    assert run["fills"]["broker_fee_hydration_skip_reason"] == "BROKER_READ_NOT_AUTHORIZED"
+    assert run["tca"]["status"] == "OBSERVED"
+    assert run["oms_shutdown_accounting"]["status"] == "OBSERVED"
+    assert run["final_verdict"] == "PASS"
+
+
 def test_run_archive_does_not_flag_live_policy_and_refusal_text_as_live_marker(tmp_path):
     session = _session(
         tmp_path,

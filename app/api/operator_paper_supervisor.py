@@ -139,9 +139,10 @@ class SubprocessPaperRunner:
     """Default runner used outside tests.
 
     It launches the existing Windows PowerShell bounded PAPER script. Safe stop
-    is only advertised on native Windows because `main.py` treats SIGTERM as a
-    termination path that can flatten positions; this runner avoids generic
-    terminate/kill for operator stop requests.
+    is only advertised on native Windows so the UI uses the explicit governed
+    process-control signal instead of generic terminate/kill. Normal stop is
+    a no-flatten lifecycle path; broker liquidation remains reserved for
+    separate emergency risk code only.
     """
 
     def is_available(self, repo_root: Path) -> tuple[bool, str | None]:
