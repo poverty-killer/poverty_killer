@@ -318,7 +318,6 @@
     "allowed_control_statuses": [
       "WIRED",
       "DISABLED_WITH_REASON",
-      "NOT_IMPLEMENTED_VISIBLE",
       "BROKEN",
       "REMOVED"
     ],
@@ -686,6 +685,27 @@
       "broker_mutation_count": 0,
       "live_refusal_count": 0,
       "last_event": null
+    },
+    "/operator/paper-control-state": {
+      "source": "OPERATOR_PAPER_CONTROL_STATE",
+      "schema_version": "paper-control-state-v1",
+      "data_source": "OPERATOR_BACKEND",
+      "paper_only": true,
+      "live_locked": true,
+      "real_money_blocked": true,
+      "credential_source": "OPERATOR_LOCAL_CREDENTIAL_STORE | PROCESS_ENV_PRESENT | NOT_CONFIGURED",
+      "endpoint_family": "paper | live | data | broker | unknown",
+      "baseline_accepted": false,
+      "portfolio_truth_status": "BROKER_CONFIRMED | UNAVAILABLE | UNKNOWN",
+      "supervisor_state": "IDLE | RUNNING | STALE_ACTIVE_SESSION",
+      "paper_start_allowed": false,
+      "paper_stop_allowed": false,
+      "dominant_blocker": "READY_FOR_GOVERNED_PAPER | SUPERVISOR_PROCESS_RUNNING_OR_RECENT | PAPER_START_BLOCKED",
+      "reason_codes": [],
+      "max_lease_seconds": 432000,
+      "allowed_durations": [180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400, 86400, 259200, 432000],
+      "broker_mutation_occurred": false,
+      "secrets_values_exposed": false
     },
     "/operator/latest-run": {
       "supervisor_version": "operator-paper-supervisor-v1",
@@ -1302,7 +1322,7 @@
         "GRACEFUL_STOP_SIGNAL_FAILED"
       ]
     },
-    "/operator/intent/snapshot/export": "disabled/refused until export authority is implemented",
+    "/operator/intent/snapshot/export": "refused/not exposed in production operator UI",
     "/operator/intent/world-awareness/poll": {
       "status": "server_authorized_read_only_external_feed_poll",
       "required_body": {
@@ -1324,7 +1344,7 @@
     },
     "/operator/intent/live/request-enable": "LIVE_NOT_APPROVED",
     "/operator/intent/live/start": "LIVE_NOT_APPROVED",
-    "/operator/intent/emergency-stop": "disabled/refused until governed emergency authority is implemented"
+    "/operator/intent/emergency-stop": "refused/not exposed in production operator UI"
   },
   "intentRules": {
     "validate_authority_server_side": true,

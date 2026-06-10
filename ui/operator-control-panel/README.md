@@ -5,10 +5,14 @@ operator control panel.
 
 Scope:
 
-- Static UI with governed operator backend fallback support.
-- If `/operator/*` endpoints are unavailable, it uses mock data.
-- If `/operator/*` endpoints are available, it reads status/readiness/contracts
-  and supervisor state and labels the source as `OPERATOR_BACKEND`.
+- Static UI with governed operator backend support.
+- Production Run PAPER authority comes from `/operator/paper-control-state`,
+  then backend readiness/status endpoints. If backend authority is unavailable,
+  the UI fails closed as `BACKEND_UNAVAILABLE` or a precise degraded backend
+  reason code.
+- Mock data is an offline development fixture only and must not render as
+  credential, baseline, endpoint, portfolio, supervisor, or Run PAPER authority
+  once any backend truth is present.
 - No broker mutation calls. Portfolio pages may request read-only PAPER broker
   account/positions/orders truth through governed `/operator/portfolio`.
 - No runtime mutation calls except server-authorized governed PAPER
@@ -18,11 +22,11 @@ Scope:
 - No manual trade controls.
 - No live controls active.
 
-Open `index.html` directly in a browser to inspect the shell.
+Open `index.html` directly in a browser to inspect the offline shell. Use the
+served `/operator-ui/` route for production operation.
 
-The mock data is contract-shaped for the future read-only endpoints listed in
-`contracts.json`. Future controls are represented as disabled server-authorized
-intent concepts only.
+The mock data is contract-shaped for offline UI development only. Production
+controls must be wired to a backend endpoint or removed from the operator path.
 
 Backend base URL:
 
@@ -134,7 +138,7 @@ Operator activation:
 Reality audit / historical test control:
 
 - Diagnostics includes a UI wiring audit so visible controls are classified as
-  wired, disabled with reason, not implemented, or broken.
+  wired, disabled with reason, removed, or broken.
 - The global AI drawer includes a freeform question box and calls
   `/operator/ai/ask`. Provider/model failures are explicitly labeled as
   deterministic fallback, not a real model answer.

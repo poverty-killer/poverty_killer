@@ -395,9 +395,13 @@ def test_backend_connected_run_paper_never_keeps_mock_authority():
     assert "OPERATOR_LOCAL_CREDENTIAL_STORE" in text
     assert "Backend source" in text
     assert "canonical_source_order" in text
+    assert "paper-control-state > launch-readiness" in text
+    assert '["paperControlState", "/operator/paper-control-state"]' in text
+    assert "buildProductionUnavailableState" in text
+    assert "let data = clone(mockData)" not in text
+    assert "const next = clone(mockData)" not in text
     assert "Max lease seconds" in text
     assert "BACKEND_UNAVAILABLE_RUN_PAPER_VIEW" in text
-    assert 'fallback.meta.dataSource = "BACKEND_UNAVAILABLE"' in text
     assert 'fallback.meta.dataSource = "MOCK_DATA"' not in text
     assert "Operator backend unavailable; broker-confirmed portfolio truth is not loaded." in text
     assert "Disabled: operator backend unavailable; start authority cannot be proven." in text
@@ -425,7 +429,8 @@ def test_ui_control_inventory_declares_statuses_and_no_broken_defaults():
     assert "buildUiControlInventory" in text
     assert "UI Wiring Audit" in text
     assert "DISABLED_WITH_REASON" in text
-    assert "NOT_IMPLEMENTED_VISIBLE" in text
+    assert "NOT_IMPLEMENTED_VISIBLE" not in text
+    assert "future server-authorized intent" not in text
     assert "NO_BROKEN_CONTROLS_DECLARED" in text
     assert '["global", "ask_quant_chief"' in text
     assert '["command", "home_ai_answer_modes"' in text

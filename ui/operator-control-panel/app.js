@@ -2,7 +2,7 @@
   "use strict";
 
   const mockData = window.PK_MOCK_DATA;
-  let data = clone(mockData);
+  let data = buildProductionUnavailableState("operator backend has not connected yet");
   const screens = [
     ["positions", "Portfolio Home"],
     ["command", "Run PAPER"],
@@ -925,12 +925,15 @@
     const endpoint = endpointTruthFromState(state);
     const activeRuntime = Boolean(sup.sessionId && sup.sessionId !== "none")
       || ["RUNNING", "STARTING", "STOP_REQUESTED"].includes(String(sup.processState || sup.state || "").toUpperCase());
-    const reasonCode = activeRuntime ? "SUPERVISOR_PROCESS_RUNNING_OR_RECENT" : "BACKEND_LAUNCH_READINESS_UNAVAILABLE";
+    const reasonText = String(reason || "");
+    const reasonCode = activeRuntime
+      ? "SUPERVISOR_PROCESS_RUNNING_OR_RECENT"
+      : (reasonText.includes("paper-control-state") ? "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE" : "BACKEND_LAUNCH_READINESS_UNAVAILABLE");
     const mismatchCodes = runPaperSourceMismatchCodes(state, launch.runPaperOperatorState || {});
     const reasonCodes = uniqueCodes([reasonCode].concat(mismatchCodes));
     const detail = activeRuntime
       ? "PAPER supervisor process is attached; duplicate start is blocked."
-      : `Backend status is connected, but launch readiness did not return current start authority: ${reason || "unknown endpoint failure"}.`;
+      : `Backend status is connected, but canonical PAPER start authority did not return current state: ${reason || "unknown endpoint failure"}.`;
     const overallLabel = activeRuntime ? "PAPER supervisor running" : "Run PAPER authority unavailable";
     const credentialSetup = buildCredentialSetupFromBackendState(state);
     return {
@@ -1193,6 +1196,123 @@
     };
   }
 
+  function buildProductionUnavailableState(reason) {
+    const state = clone(mockData || {});
+    const detail = reason || "operator backend unavailable";
+    state.meta = {
+      ...(state.meta || {}),
+      dataSource: "BACKEND_UNAVAILABLE",
+      buildMode: "production_backend_required",
+      backendStatus: `backend unavailable: ${detail}`,
+      fetchFailures: [detail],
+      runtimeCommit: "UNKNOWN",
+      lastUpdated: new Date().toISOString()
+    };
+    state.status = {
+      ...(state.status || {}),
+      botStatus: "BACKEND_UNAVAILABLE",
+      runtimeMode: "PAPER",
+      activeProfile: "UNKNOWN",
+      broker: "UNKNOWN",
+      endpoint: "BACKEND_UNAVAILABLE",
+      marketData: "BACKEND_UNAVAILABLE",
+      universe: [],
+      liveBlocked: true,
+      realMoneyBlocked: true,
+      dominantBlocker: "BACKEND_UNAVAILABLE",
+      lastDecision: "Operator backend unavailable; no broker-confirmed truth is loaded."
+    };
+    state.supervisor = {
+      ...(state.supervisor || {}),
+      state: "BACKEND_UNAVAILABLE",
+      sessionId: "none",
+      pid: "none",
+      processState: "BACKEND_UNAVAILABLE",
+      watchlist: [],
+      paperStartAllowed: false,
+      paperStopAllowed: false,
+      paperStartRefusalReason: "BACKEND_UNAVAILABLE",
+      paperStopRefusalReason: "BACKEND_UNAVAILABLE",
+      maxPaperDurationSeconds: 432000,
+      runnerMaxPaperDurationSeconds: 432000,
+      runtimeAttachmentDetail: "Operator backend unavailable."
+    };
+    state.launchReadiness = {
+      source: "BACKEND_UNAVAILABLE",
+      finalLaunchReadiness: "BLOCKED",
+      checks: [],
+      reasonCodes: ["BACKEND_UNAVAILABLE"],
+      alpacaPaperCredentialsConfigured: false,
+      paperEndpointOnly: false,
+      paperEndpointStatus: "BACKEND_UNAVAILABLE",
+      paperEndpointSource: "BACKEND_UNAVAILABLE",
+      paperEndpointOperatorAction: "Start the operator backend before using Run PAPER controls.",
+      paperEndpointDisplay: "unavailable",
+      paperEndpointFamily: "unknown",
+      paperEndpointHost: "",
+      paperEndpointBlockerCode: "BACKEND_UNAVAILABLE",
+      alpacaEndpointConfigured: false,
+      alpacaPaperEndpointValid: false,
+      alpacaLiveEndpointBlocked: true,
+      paperStartAllowed: false,
+      runPaperOperatorState: buildBackendUnavailableRunPaperState(detail),
+      safeStopStatus: "UNKNOWN",
+      portfolioReadAvailability: "BACKEND_UNAVAILABLE",
+      backendDegradedReasons: [detail]
+    };
+    state.paperControlState = {
+      source: "BACKEND_UNAVAILABLE",
+      paperStartAllowed: false,
+      paperStopAllowed: false,
+      dominantBlocker: "BACKEND_UNAVAILABLE",
+      reasonCodes: ["BACKEND_UNAVAILABLE"]
+    };
+    state.paperBaseline = state.launchReadiness.runPaperOperatorState.paperBaseline;
+    state.credentials = {
+      source: "BACKEND_UNAVAILABLE",
+      configuredCount: 0,
+      providerCount: 0,
+      precedence: "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+      providers: []
+    };
+    state.providerReadiness = {
+      ...(state.providerReadiness || {}),
+      providers: [],
+      providerCount: 0,
+      counts: {},
+      readyOrConfiguredCount: 0,
+      missingCredentialsCount: 0,
+      notImplementedCount: 0
+    };
+    state.portfolio = {
+      source: "BACKEND_UNAVAILABLE",
+      dataSource: "BACKEND_UNAVAILABLE",
+      status: "BACKEND_UNAVAILABLE",
+      unavailableReason: "OPERATOR_BACKEND_UNAVAILABLE",
+      detail: state.meta.backendStatus,
+      message: "Operator backend unavailable; broker-confirmed portfolio truth is not loaded.",
+      empty: true,
+      dataFreshnessTs: null,
+      brokerReadAttempted: false,
+      brokerReadOccurred: false,
+      brokerMutationOccurred: false,
+      summary: {
+        totalEquity: null,
+        cash: null,
+        buyingPower: null,
+        totalMarketValue: null,
+        positionCount: 0,
+        openOrderCount: 0
+      },
+      positions: [],
+      openOrders: [],
+      positionIntelligence: []
+    };
+    state.positions = [];
+    state.orders = [];
+    return state;
+  }
+
   function reconcileBackendConnectedAuthority(state, endpointFailures) {
     const failures = endpointFailures || {};
     const launch = state.launchReadiness || {};
@@ -1344,6 +1464,9 @@
   }
 
   function runPaperState() {
+    if (data.paperControlState && data.paperControlState.source === "OPERATOR_PAPER_CONTROL_STATE") {
+      return buildRunPaperStateFromControlState(data.paperControlState, data);
+    }
     const op = (data.launchReadiness && data.launchReadiness.runPaperOperatorState) || {};
     if (!backendConnected() && runPaperStateHasMockAuthority(op)) {
       return buildBackendUnavailableRunPaperState(data.meta.backendStatus || "operator backend status endpoint did not respond");
@@ -1367,12 +1490,12 @@
     const baseline = paperBaselineFromState(data, op);
     const portfolio = data.portfolio || {};
     const positionCount = Number((portfolio.summary && portfolio.summary.positionCount) || (portfolio.positions || []).length || baseline.positionCount || 0);
-    if (baseline.accepted !== true && positionCount > 0) {
-      return "Disabled: Existing positions require baseline adoption.";
-    }
     if (op.source && canRun.allowed !== true) {
       const reason = canRun.reason || overall.detail || "backend start authority is blocked";
       return `Disabled: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
+    }
+    if (baseline.accepted !== true && positionCount > 0) {
+      return "Disabled: Existing positions require baseline adoption.";
     }
     return legacyPaperLaunchDisabledReason();
   }
@@ -1496,7 +1619,7 @@
         ${hasExistingPositions && !accepted ? `<div class="notice" data-paper-baseline-required-text>Existing positions require baseline adoption. Reset is not required.</div>` : ""}
         <div class="button-row">
           <button class="intent-button paper" data-intent="paper-baseline-accept" ${acceptDisabled}>Accept current positions as PAPER baseline</button>
-          <button class="intent-button live" disabled>No liquidation / close / cancel controls</button>
+          <span class="badge red">No liquidation / close / cancel controls</span>
         </div>
         <div class="notice ${acceptDisabled && !accepted ? "error" : ""}" data-paper-baseline-action-state>${escapeHtml(acceptReason)}</div>
         <details class="ai-context-details" data-paper-baseline-advanced>
@@ -1524,7 +1647,7 @@
     return [
       ["data_source", tokenText(data.meta.dataSource || "UNKNOWN")],
       ["run_paper_state_source", tokenText(op.source || "UNKNOWN")],
-      ["canonical_source_order", tokenText("launch-readiness > latest-run > status > portfolio > credentials > paper-baseline > fail-closed")],
+      ["canonical_source_order", tokenText("paper-control-state > launch-readiness > latest-run > status > portfolio > credentials > paper-baseline > fail-closed")],
       ["final_launch_readiness", tokenText(advanced.finalLaunchReadiness || launch.finalLaunchReadiness || "UNKNOWN")],
       ["reason_codes", tokenText((advanced.reasonCodes || launch.reasonCodes || []).join(", ") || "none")],
       ["paper_endpoint_display", escapeHtml(advanced.paperEndpointDisplay || launch.paperEndpointDisplay || "unavailable")],
@@ -1668,7 +1791,7 @@
           <button class="intent-button paper primary-action" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" data-run-paper-start-control ${startDisabled}>
             Start Governed PAPER Run
           </button>
-          <button class="intent-button live" disabled>No manual trades / force trade unavailable</button>
+          <span class="badge red">No manual trades / force trade unavailable</span>
         </div>
         <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
         <details class="ai-context-details" data-run-paper-advanced>
@@ -2080,7 +2203,7 @@
           </div>
           <div class="button-row">
             <button class="intent-button paper" data-intent="historical-run" ${backendConnected() ? "" : "disabled"}>Run Historical Test</button>
-            <button class="intent-button live" disabled>Does not start PAPER / does not trade</button>
+            <span class="badge red">Does not start PAPER / does not trade</span>
           </div>
           <div class="notice">If the governed replay/backtest harness is not attached, this returns an honest unavailable status instead of fake P&L.</div>
           <div class="notice mono">Endpoint target: /operator/historical-tests/run. Market data may be read-only in future; broker trading endpoints are forbidden.</div>
@@ -2227,7 +2350,7 @@
             <button class="intent-button paper" type="button" data-screen-shortcut="command">Open Run PAPER</button>
             <button class="intent-button paper" type="button" data-screen-shortcut="providers">Add / Validate Keys</button>
             <button class="intent-button paper" type="button" data-ai-chief-open>Ask Docked Advisor</button>
-            <button class="intent-button live" disabled>Live trading locked</button>
+            <span class="badge red">Live trading locked</span>
           </div>
         </div>
 
@@ -2369,8 +2492,7 @@
             <button class="intent-button paper" data-intent="paper-stop" ${sup.paperStopAllowed ? "" : "disabled"}>
               Stop PAPER - ${sup.paperStopAllowed ? "graceful supervisor request" : escapeHtml(sup.paperStopRefusalReason || "disabled")}
             </button>
-            <button class="intent-button paper" disabled>Export run report - future server-authorized intent</button>
-            <button class="intent-button live" disabled>Live start locked - LIVE_NOT_APPROVED</button>
+            <div class="notice mono">Live start locked: LIVE_NOT_APPROVED</div>
             <div class="notice mono">Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
             <div class="notice mono">Last historical refusal: ${sup.lastHistoricalRefusal ? tokenText(sup.lastHistoricalRefusal) : "none"}</div>
           </div>
@@ -2690,7 +2812,7 @@
                         <div class="button-row">
                           <button class="intent-button paper" data-credential-save="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Save local credentials</button>
                           <button class="intent-button paper" data-credential-validate="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Validate read-only</button>
-                          <button class="intent-button live" data-credential-delete="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Delete local</button>
+                          <button class="intent-button danger" data-credential-delete="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Delete local</button>
                         </div>
                         <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus[providerId] || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed from static mock mode"))}</div>
                       </div>
@@ -2893,8 +3015,7 @@
   function buildUiControlInventory() {
     const disabledPaperReason = paperLaunchDisabledReason();
     const inventory = [
-      ["global", "snapshot_intent_disabled", "Snapshot intent - disabled", "button", "DISABLED_WITH_REASON", "forbidden", "PAPER_INTENT_NOT_IMPLEMENTED", null, null],
-      ["global", "live_locked", "Live locked", "button", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
+      ["global", "live_locked", "Live locked", "status", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
       ["global", "ask_quant_chief", "Ask Quant Chief", "button", "WIRED", "read_only", "", null, "open_ai_drawer"],
       ["ai_overlay", "ai_question_textarea", "Ask a page-aware question", "input", "WIRED", "read_only", "", null, "local_page_context"],
       ["ai_overlay", "ai_answer_mode_deterministic", "Deterministic AI answer", "button", "WIRED", "local_advisory_write", "", "POST", "/operator/ai/ask"],
@@ -2915,8 +3036,7 @@
       ["positions", "open_keys_providers", "Add / Validate Keys", "button", "WIRED", "read_only", "", null, "local_navigation"],
       ["positions", "ask_ai_advisor", "Ask AI Advisor", "button", "WIRED", "read_only", "", null, "open_ai_drawer"],
       ["activity", "paper_stop", "Stop PAPER", "button", data.supervisor.paperStopAllowed ? "WIRED" : "DISABLED_WITH_REASON", "governed_paper_start", data.supervisor.paperStopAllowed ? "" : (data.supervisor.paperStopRefusalReason || "no active PAPER runtime"), "POST", "/operator/intent/paper/stop"],
-      ["activity", "export_run_report", "Export run report - future server-authorized intent", "button", "NOT_IMPLEMENTED_VISIBLE", "read_only", "server-authorized export intent not implemented", null, null],
-      ["activity", "live_start_locked", "Live start locked - LIVE_NOT_APPROVED", "button", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
+      ["activity", "live_start_locked", "Live start locked - LIVE_NOT_APPROVED", "status", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
       ["positions", "positions_preview_table", "Current PAPER Positions", "table", "WIRED", "read_only", "", "GET", "/operator/positions"],
       ["positions", "open_orders_preview_table", "Open Orders", "table", "WIRED", "read_only", "cancel/replace unavailable in operator UI", "GET", "/operator/orders/open"],
       ["positions", "position_intelligence_table", "Position Intelligence", "table", "WIRED", "read_only", "", "GET", "/operator/positions/intelligence"],
@@ -2963,7 +3083,7 @@
       wired: counts.WIRED || 0,
       disabledWithReason: counts.DISABLED_WITH_REASON || 0,
       broken: counts.BROKEN || 0,
-      notImplemented: counts.NOT_IMPLEMENTED_VISIBLE || 0,
+      notImplemented: 0,
       lastAuditResult: (counts.BROKEN || 0) ? "BROKEN_CONTROLS_PRESENT" : "NO_BROKEN_CONTROLS_DECLARED",
       limitations: [
         "Static inventory is maintained in app.js; browser-level click validation is covered by focused tests and manual validation.",
@@ -4157,7 +4277,7 @@
                 <button class="intent-button paper" type="button" data-ai-chief-analyze ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>
                   ${aiOverlayBusy ? "Queueing governed review..." : "Queue governed advisory review"}
                 </button>
-                <button class="intent-button live" type="button" disabled>Broker execution unavailable to AI</button>
+                <span class="badge red">Broker execution unavailable to AI</span>
               </div>
               <div class="notice mono">
                 ${backendConnected()
@@ -5299,8 +5419,257 @@
     };
   }
 
+  function normalizePaperControlState(payload) {
+    const control = payload || {};
+    const artifactPaths = control.artifact_paths || {};
+    const baselineContext = control.baseline_runtime_context || {};
+    return {
+      source: pick(control.source, ""),
+      schemaVersion: pick(control.schema_version, "paper-control-state-v1"),
+      backendStatus: pick(control.backend_status, "UNKNOWN"),
+      repoHead: pick(control.repo_head, "UNKNOWN"),
+      loadedCommit: pick(control.loaded_commit, "UNKNOWN"),
+      dataSource: pick(control.data_source, "UNKNOWN"),
+      paperOnly: control.paper_only === true,
+      liveLocked: control.live_locked !== false,
+      realMoneyBlocked: control.real_money_blocked !== false,
+      credentialSource: pick(control.credential_source, "NOT_CONFIGURED"),
+      credentialStatus: pick(control.credential_status, "UNKNOWN"),
+      alpacaPaperConfigured: control.alpaca_paper_configured === true,
+      missingCredentialFields: Array.isArray(control.missing_credential_fields) ? control.missing_credential_fields : [],
+      endpointFamily: pick(control.endpoint_family, "unknown"),
+      endpointHost: pick(control.endpoint_host, ""),
+      endpointDisplay: pick(control.endpoint_display, ""),
+      endpointSource: pick(control.endpoint_source, "UNKNOWN"),
+      endpointStatus: pick(control.endpoint_status, "UNKNOWN"),
+      baselineStatus: pick(control.baseline_status, "UNKNOWN"),
+      baselineAccepted: control.baseline_accepted === true,
+      baselineSnapshotId: pick(control.baseline_snapshot_id, null),
+      baselinePolicy: pick(control.baseline_policy, null),
+      baselinePositionCount: pick(control.baseline_position_count, 0),
+      baselineRuntimeContext: baselineContext,
+      protectedSymbols: Array.isArray(control.protected_symbols) ? control.protected_symbols : [],
+      portfolioTruthStatus: pick(control.portfolio_truth_status, "UNKNOWN"),
+      portfolioDataSource: pick(control.portfolio_data_source, "UNKNOWN"),
+      accountStatus: pick(control.account_status, null),
+      cash: pick(control.cash, null),
+      equity: pick(control.equity, null),
+      buyingPower: pick(control.buying_power, null),
+      positionsCount: pick(control.positions_count, 0),
+      openOrdersCount: pick(control.open_orders_count, 0),
+      supervisorState: pick(control.supervisor_state, "UNKNOWN"),
+      activeRunId: pick(control.active_run_id, null),
+      activePid: pick(control.active_pid, null),
+      paperStartAllowed: control.paper_start_allowed === true,
+      paperStopAllowed: control.paper_stop_allowed === true,
+      dominantBlocker: pick(control.dominant_blocker, "PAPER_START_BLOCKED"),
+      reasonCodes: Array.isArray(control.reason_codes) ? control.reason_codes : [],
+      maxLeaseSeconds: pick(control.max_lease_seconds, 432000),
+      allowedDurations: Array.isArray(control.allowed_durations) ? control.allowed_durations : [],
+      watchlist: Array.isArray(control.watchlist) ? control.watchlist : [],
+      artifactPaths,
+      lastHeartbeat: pick(control.last_heartbeat, null),
+      nextSafeAction: pick(control.next_safe_action, ""),
+      launchReadiness: control.launch_readiness || {},
+      latestRun: control.latest_run || {},
+      paperBaseline: control.paper_baseline || {},
+      portfolioSummary: control.portfolio_summary || {},
+      runtimeAttachmentDetail: pick(control.runtime_attachment_detail, ""),
+      secretsValuesExposed: control.secrets_values_exposed === true,
+      rawSecretValuesIncluded: control.raw_secret_values_included === true,
+      brokerMutationOccurred: control.broker_mutation_occurred === true,
+      orderSubmissionOccurred: control.order_submission_occurred === true,
+      cancelOccurred: control.cancel_occurred === true,
+      replaceOccurred: control.replace_occurred === true,
+      liquidationOccurred: control.liquidation_occurred === true,
+      closePositionOccurred: control.close_position_occurred === true,
+      liveEnabled: control.live_enabled === true,
+      realMoneyEnabled: control.real_money_enabled === true
+    };
+  }
+
+  function paperBaselineFromControlState(control) {
+    const existing = normalizePaperBaseline(control.paperBaseline || {});
+    if (existing.source && existing.source !== "UNKNOWN") return existing;
+    return {
+      source: "OPERATOR_PAPER_CONTROL_STATE",
+      status: control.baselineStatus || "UNKNOWN",
+      accepted: control.baselineAccepted === true,
+      baselineSnapshotId: control.baselineSnapshotId,
+      snapshotHash: control.baselineRuntimeContext && control.baselineRuntimeContext.snapshot_hash,
+      policy: control.baselinePolicy,
+      acceptedAt: control.baselineRuntimeContext && control.baselineRuntimeContext.accepted_at,
+      acceptedByOperator: "Shan/local operator",
+      positionCount: Number(control.baselinePositionCount || 0),
+      openOrderCount: Number(control.openOrdersCount || 0),
+      protectedSymbols: Array.isArray(control.protectedSymbols) ? control.protectedSymbols : [],
+      sameSymbolTradingPolicy: "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING",
+      pnlAttribution: {
+        baselineAccountEquity: control.equity,
+        baselinePositionsValue: null,
+        runIncrementalEquityPnl: null,
+        runIncrementalEquityPnlLabel: "Bot incremental P&L requires run fill attribution.",
+        baselineCarryPnlLabel: "Total account P&L includes accepted baseline carry.",
+        runTradePnlLabel: "Run trade P&L appears after governed PAPER fills.",
+        cleanBaselineClaimed: false
+      },
+      brokerMutationOccurred: false,
+      tradingMutationOccurred: false,
+      alpacaNetworkCallOccurred: false,
+      secretsValuesExposed: false,
+      store: {}
+    };
+  }
+
+  function buildRunPaperStateFromControlState(control, state) {
+    const c = control || {};
+    const activeRuntime = Boolean(c.activeRunId)
+      || ["RUNNING", "STARTING", "STOP_REQUESTED"].includes(String(c.supervisorState || "").toUpperCase());
+    const allowed = c.paperStartAllowed === true;
+    const reasonCodes = uniqueCodes(c.reasonCodes && c.reasonCodes.length ? c.reasonCodes : [c.dominantBlocker || "PAPER_START_BLOCKED"]);
+    const endpointValid = c.endpointFamily === "paper" && String(c.endpointHost || c.endpointDisplay || "").includes("paper-api.alpaca.markets");
+    const credentialConfigured = c.alpacaPaperConfigured === true || c.credentialStatus === "CONFIGURED";
+    const baseline = paperBaselineFromControlState(c);
+    const label = allowed
+      ? "Ready for governed PAPER"
+      : (activeRuntime ? "PAPER supervisor running" : (c.dominantBlocker || "Start blocked"));
+    const detail = allowed
+      ? "Backend paper-control-state says governed PAPER start is allowed with current safety locks."
+      : (activeRuntime
+        ? "PAPER supervisor process is attached; duplicate start is blocked."
+        : `Current backend blocker: ${c.dominantBlocker || reasonCodes[0] || "PAPER_START_BLOCKED"}.`);
+    return {
+      source: "OPERATOR_PAPER_CONTROL_STATE",
+      schemaVersion: "run-paper-command-center-v1",
+      overallStatus: {
+        code: allowed ? "READY_FOR_GOVERNED_PAPER" : "BLOCKED",
+        label,
+        severity: allowed ? "ready" : (activeRuntime ? "yellow" : "red"),
+        detail
+      },
+      canRunPaper: {
+        allowed,
+        label: allowed ? "Start allowed" : "Start blocked",
+        reason: allowed ? "" : detail,
+        reasonCodes,
+        warningCodes: [],
+        usesExistingGovernedStartIntent: "/operator/intent/paper/start",
+        requiresOperatorConfirmations: true
+      },
+      nextSafeAction: c.nextSafeAction || (allowed ? "Choose duration and confirmations, then request governed PAPER start." : "Resolve the current backend blocker before pressing Start."),
+      endpoint: {
+        label: endpointValid ? `Alpaca PAPER endpoint confirmed: ${c.endpointDisplay || c.endpointHost}` : "PAPER endpoint authority unavailable",
+        display: c.endpointDisplay || c.endpointHost || "unavailable",
+        family: c.endpointFamily || "unknown",
+        host: c.endpointHost || "",
+        source: c.endpointSource || "UNKNOWN",
+        configured: Boolean(c.endpointDisplay || c.endpointHost),
+        valid: endpointValid,
+        status: c.endpointStatus || (endpointValid ? "PAPER_ENDPOINT_CONFIRMED" : "UNKNOWN"),
+        blockerCode: endpointValid ? null : "PAPER_ENDPOINT_NOT_VERIFIED",
+        operatorAction: endpointValid ? "No endpoint action required." : "Verify PAPER endpoint authority before starting."
+      },
+      credentials: {
+        label: credentialConfigured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing",
+        configured: credentialConfigured,
+        missingFields: c.missingCredentialFields || [],
+        source: c.credentialSource || "NOT_CONFIGURED",
+        precedence: "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+        rawSecretValuesIncluded: false,
+        secretsValuesExposed: false
+      },
+      paperCredentialSetup: buildCredentialSetupFromBackendState(state || data),
+      paperBaseline: baseline,
+      runtime: {
+        label: activeRuntime ? "PAPER supervisor process is attached" : "No active PAPER run",
+        state: c.supervisorState || "UNKNOWN",
+        processState: c.supervisorState || "UNKNOWN",
+        activeSessionId: c.activeRunId || null,
+        paperStartRefusalReason: allowed ? null : (c.dominantBlocker || reasonCodes[0]),
+        paperStopAllowed: c.paperStopAllowed === true,
+        safeStopStatus: c.paperStopAllowed === true ? "GOVERNED_STOP_AVAILABLE" : "NO_ACTIVE_RUN"
+      },
+      brokerTruth: {
+        status: c.portfolioTruthStatus || "UNKNOWN",
+        label: c.portfolioTruthStatus === "BROKER_CONFIRMED" ? "Broker-confirmed PAPER portfolio loaded" : "Portfolio truth not broker-confirmed in control state",
+        detail: `${c.positionsCount || 0} positions; ${c.openOrdersCount || 0} open orders; account ${c.accountStatus || "unknown"}.`,
+        brokerConfirmed: c.portfolioTruthStatus === "BROKER_CONFIRMED",
+        brokerReadOccurred: c.portfolioTruthStatus === "BROKER_CONFIRMED",
+        brokerReadAttempted: c.portfolioTruthStatus === "BROKER_CONFIRMED",
+        brokerMutationOccurred: false,
+        orderSubmissionOccurred: false,
+        cancelOccurred: false,
+        liquidationOccurred: false
+      },
+      safetyLocks: {
+        live: { label: "Live locked", locked: c.liveLocked !== false, enabled: c.liveEnabled === true },
+        realMoney: { label: "Real money blocked", blocked: c.realMoneyBlocked !== false, enabled: c.realMoneyEnabled === true },
+        manualTrading: { label: "Manual trading unavailable", available: false },
+        forceTrade: { label: "Force trade unavailable", available: false },
+        brokerMutation: { label: "No broker mutation from control state", occurred: c.brokerMutationOccurred === true }
+      },
+      advanced: {
+        finalLaunchReadiness: allowed ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED",
+        reasonCodes,
+        checks: [],
+        paperEndpointDisplay: c.endpointDisplay || c.endpointHost || "unavailable",
+        paperEndpointFamily: c.endpointFamily || "unknown",
+        paperEndpointHost: c.endpointHost || "",
+        paperEndpointBlockerCode: endpointValid ? null : "PAPER_ENDPOINT_NOT_VERIFIED",
+        alpacaEndpointConfigured: Boolean(c.endpointDisplay || c.endpointHost),
+        alpacaEndpointSource: c.endpointSource || "UNKNOWN",
+        alpacaPaperEndpointValid: endpointValid,
+        alpacaLiveEndpointBlocked: c.liveLocked !== false,
+        paperStartAllowed: allowed,
+        launchReadinessStartAllowed: allowed,
+        brokerMutationOccurred: c.brokerMutationOccurred === true,
+        tradingMutationOccurred: c.orderSubmissionOccurred === true || c.cancelOccurred === true || c.replaceOccurred === true || c.liquidationOccurred === true || c.closePositionOccurred === true,
+        liveEnabled: c.liveEnabled === true,
+        realMoneyEnabled: c.realMoneyEnabled === true,
+        secretsValuesExposed: c.secretsValuesExposed === true,
+        backendDegradedReasons: []
+      }
+    };
+  }
+
+  function applyPaperControlState(state, control) {
+    if (!control || control.source !== "OPERATOR_PAPER_CONTROL_STATE") return;
+    state.paperBaseline = paperBaselineFromControlState(control);
+    state.supervisor.state = control.supervisorState || state.supervisor.state;
+    state.supervisor.sessionId = control.activeRunId || "none";
+    state.supervisor.pid = control.activePid || "none";
+    state.supervisor.processState = control.supervisorState || state.supervisor.processState;
+    state.supervisor.paperStartAllowed = control.paperStartAllowed === true;
+    state.supervisor.paperStopAllowed = control.paperStopAllowed === true;
+    state.supervisor.paperStartRefusalReason = control.paperStartAllowed === true ? null : control.dominantBlocker;
+    state.supervisor.paperStopRefusalReason = control.paperStopAllowed === true ? null : "NO_ACTIVE_RUN";
+    state.supervisor.maxPaperDurationSeconds = control.maxLeaseSeconds || state.supervisor.maxPaperDurationSeconds || 432000;
+    state.supervisor.runnerMaxPaperDurationSeconds = control.maxLeaseSeconds || state.supervisor.runnerMaxPaperDurationSeconds || 432000;
+    state.supervisor.watchlist = control.watchlist || state.supervisor.watchlist || [];
+    state.supervisor.runtimeAttachmentDetail = control.runtimeAttachmentDetail || state.supervisor.runtimeAttachmentDetail;
+    state.supervisor.stdoutPath = control.artifactPaths.stdout_path || state.supervisor.stdoutPath;
+    state.supervisor.stderrPath = control.artifactPaths.stderr_path || state.supervisor.stderrPath;
+    state.supervisor.wrapperStdoutPath = control.artifactPaths.wrapper_stdout_path || state.supervisor.wrapperStdoutPath;
+    state.supervisor.wrapperStderrPath = control.artifactPaths.wrapper_stderr_path || state.supervisor.wrapperStderrPath;
+    state.supervisor.childStdoutPath = control.artifactPaths.child_stdout_path || state.supervisor.childStdoutPath;
+    state.supervisor.childStderrPath = control.artifactPaths.child_stderr_path || state.supervisor.childStderrPath;
+    state.launchReadiness.paperStartAllowed = control.paperStartAllowed === true;
+    state.launchReadiness.reasonCodes = control.reasonCodes || [];
+    state.launchReadiness.runPaperOperatorState = buildRunPaperStateFromControlState(control, state);
+    state.launchReadiness.finalLaunchReadiness = control.paperStartAllowed === true ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED";
+    state.launchReadiness.paperEndpointDisplay = control.endpointDisplay || state.launchReadiness.paperEndpointDisplay;
+    state.launchReadiness.paperEndpointFamily = control.endpointFamily || state.launchReadiness.paperEndpointFamily;
+    state.launchReadiness.paperEndpointHost = control.endpointHost || state.launchReadiness.paperEndpointHost;
+    state.launchReadiness.paperEndpointSource = control.endpointSource || state.launchReadiness.paperEndpointSource;
+    state.launchReadiness.paperEndpointStatus = control.endpointStatus || state.launchReadiness.paperEndpointStatus;
+    state.launchReadiness.alpacaPaperCredentialsConfigured = control.alpacaPaperConfigured === true;
+    state.launchReadiness.alpacaPaperEndpointValid = control.endpointFamily === "paper";
+    state.status.dominantBlocker = control.dominantBlocker || state.status.dominantBlocker;
+    state.status.lastHeartbeat = control.lastHeartbeat || state.status.lastHeartbeat;
+  }
+
   function normalizeBackendData(payload) {
-    const next = clone(mockData);
+    const next = buildProductionUnavailableState("backend connected; loading operator truth");
     const status = payload.status || {};
     const runtime = payload.runtime || {};
     const profile = payload.profile || {};
@@ -5331,6 +5700,7 @@
     const credentialsProviders = payload.credentialsProviders || {};
     const portfolio = payload.portfolio || {};
     const paperBaseline = payload.paperBaseline || {};
+    const paperControlState = payload.paperControlState || {};
     const launchReadiness = payload.launchReadiness || {};
     const research = payload.research || {};
     const evidenceGraph = payload.evidenceGraph || {};
@@ -5886,6 +6256,22 @@
       }
     ];
 
+    if (paperControlState.source) {
+      next.paperControlState = normalizePaperControlState(paperControlState);
+      applyPaperControlState(next, next.paperControlState);
+    } else if (endpointFailures.paperControlState) {
+      next.paperControlState = {
+        source: "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE",
+        paperStartAllowed: false,
+        paperStopAllowed: next.supervisor.paperStopAllowed === true,
+        dominantBlocker: "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE",
+        reasonCodes: ["BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE"]
+      };
+      next.launchReadiness.runPaperOperatorState = buildBackendConnectedRunPaperState(
+        next,
+        `/operator/paper-control-state: ${endpointFailures.paperControlState}`
+      );
+    }
     reconcileBackendConnectedAuthority(next, endpointFailures);
     mergeCredentialTruthIntoProviderReadiness(next);
     return next;
@@ -5897,61 +6283,7 @@
       status = await fetchJson("/operator/status");
     } catch (error) {
       logBackendFetchFailure("/operator/status", error);
-      const fallback = clone(mockData);
-      fallback.meta.dataSource = "BACKEND_UNAVAILABLE";
-      fallback.meta.backendStatus = `backend unavailable: ${describeFetchFailure("/operator/status", error)}`;
-      fallback.meta.fetchFailures = [describeFetchFailure("/operator/status", error)];
-      fallback.launchReadiness = {
-        source: "BACKEND_UNAVAILABLE",
-        finalLaunchReadiness: "BLOCKED",
-        checks: [],
-        reasonCodes: ["BACKEND_UNAVAILABLE"],
-        alpacaPaperCredentialsConfigured: false,
-        paperEndpointOnly: false,
-        paperEndpointStatus: "BACKEND_UNAVAILABLE",
-        paperEndpointSource: "BACKEND_UNAVAILABLE",
-        paperEndpointOperatorAction: "Start the operator backend before using Run PAPER controls.",
-        paperEndpointDisplay: "unavailable",
-        paperEndpointFamily: "unknown",
-        paperEndpointHost: "",
-        paperEndpointBlockerCode: "BACKEND_UNAVAILABLE",
-        alpacaEndpointConfigured: false,
-        alpacaPaperEndpointValid: false,
-        alpacaLiveEndpointBlocked: true,
-        paperStartAllowed: false,
-        runPaperOperatorState: buildBackendUnavailableRunPaperState(fallback.meta.backendStatus),
-        safeStopStatus: "UNKNOWN",
-        portfolioReadAvailability: "BACKEND_UNAVAILABLE",
-        backendDegradedReasons: fallback.meta.fetchFailures
-      };
-      fallback.paperBaseline = fallback.launchReadiness.runPaperOperatorState.paperBaseline;
-      fallback.portfolio = {
-        source: "BACKEND_UNAVAILABLE",
-        dataSource: "BACKEND_UNAVAILABLE",
-        status: "BACKEND_UNAVAILABLE",
-        unavailableReason: "OPERATOR_BACKEND_UNAVAILABLE",
-        detail: fallback.meta.backendStatus,
-        message: "Operator backend unavailable; broker-confirmed portfolio truth is not loaded.",
-        empty: true,
-        dataFreshnessTs: null,
-        brokerReadAttempted: false,
-        brokerReadOccurred: false,
-        brokerMutationOccurred: false,
-        summary: {
-          totalEquity: null,
-          cash: null,
-          buyingPower: null,
-          totalMarketValue: null,
-          positionCount: 0,
-          openOrderCount: 0
-        },
-        positions: [],
-        openOrders: [],
-        positionIntelligence: []
-      };
-      fallback.positions = [];
-      fallback.orders = [];
-      return fallback;
+      return buildProductionUnavailableState(describeFetchFailure("/operator/status", error));
     }
 
     const endpoints = [
@@ -5971,6 +6303,7 @@
       ["audit", "/operator/audit-summary"],
       ["world", "/operator/world-awareness"],
       ["worldRuntime", "/operator/world-awareness/runtime"],
+      ["paperControlState", "/operator/paper-control-state"],
       ["runs", "/operator/runs"],
       ["explain", "/operator/explain/latest"],
       ["actionCenter", "/operator/action-center"],
@@ -6222,7 +6555,7 @@
         message = `${result.status}: ${result.reason_code}`;
       }
       if (intent === "paper-stop") {
-        const confirmed = window.confirm("Request governed PAPER stop? This does not send broker orders or flatten positions from the UI.");
+        const confirmed = window.confirm("Request governed PAPER stop? This sends only the supervisor stop intent and preserves broker positions.");
         if (!confirmed) return;
         const result = await postIntent("/operator/intent/paper/stop", {});
         message = `${result.status}: ${result.reason_code}`;
