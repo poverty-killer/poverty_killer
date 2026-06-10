@@ -6384,7 +6384,6 @@
       ["audit", "/operator/audit-summary"],
       ["world", "/operator/world-awareness"],
       ["worldRuntime", "/operator/world-awareness/runtime"],
-      ["paperControlState", "/operator/paper-control-state"],
       ["runs", "/operator/runs"],
       ["explain", "/operator/explain/latest"],
       ["actionCenter", "/operator/action-center"],
@@ -6408,6 +6407,18 @@
     const payload = { status };
     const failures = [];
     const endpointFailures = {};
+    try {
+      payload.paperControlState = await fetchJson("/operator/paper-control-state");
+    } catch (error) {
+      if (error && error.lifecycleAbort === true) {
+        logBackendFetchAbort("/operator/paper-control-state", error);
+      } else {
+        const failure = describeFetchFailure("/operator/paper-control-state", error);
+        logBackendFetchFailure("/operator/paper-control-state", error);
+        endpointFailures.paperControlState = failure;
+        failures.push(failure);
+      }
+    }
     await Promise.all(endpoints.map(async ([key, path]) => {
       try {
         payload[key] = await fetchJson(path);
