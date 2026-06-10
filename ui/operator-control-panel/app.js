@@ -32,6 +32,7 @@
     { title: "System", summary: "Diagnostics, maps, audit, locks", items: ["diagnostics", "system", "audit", "live"] }
   ];
   const DEFAULT_BACKEND_FETCH_TIMEOUT_MS = 10000;
+  const PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS = 3000;
   const HEAVY_BACKEND_FETCH_TIMEOUT_MS = 30000;
   const HEAVY_BACKEND_ENDPOINTS = new Set([
     "/operator/runs",
@@ -926,16 +927,75 @@
     const activeRuntime = Boolean(sup.sessionId && sup.sessionId !== "none")
       || ["RUNNING", "STARTING", "STOP_REQUESTED"].includes(String(sup.processState || sup.state || "").toUpperCase());
     const reasonText = String(reason || "");
+    const controlStateCode = paperControlStateFailureCode(reasonText);
+    const paperControlStateUnavailable = reasonText.includes("paper-control-state");
+    const credentialSource = String(credentialTruth.source || "");
+    const credentialStatusUnavailable = paperControlStateUnavailable
+      && (!credentialSource || credentialSource === "BACKEND_UNAVAILABLE" || credentialSource === "CREDENTIAL_STATUS_UNAVAILABLE");
     const reasonCode = activeRuntime
       ? "SUPERVISOR_PROCESS_RUNNING_OR_RECENT"
-      : (reasonText.includes("paper-control-state") ? "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE" : "BACKEND_LAUNCH_READINESS_UNAVAILABLE");
+      : (paperControlStateUnavailable ? controlStateCode : "BACKEND_LAUNCH_READINESS_UNAVAILABLE");
     const mismatchCodes = runPaperSourceMismatchCodes(state, launch.runPaperOperatorState || {});
     const reasonCodes = uniqueCodes([reasonCode].concat(mismatchCodes));
     const detail = activeRuntime
       ? "PAPER supervisor process is attached; duplicate start is blocked."
-      : `Backend status is connected, but canonical PAPER start authority did not return current state: ${reason || "unknown endpoint failure"}.`;
+      : (reasonCode === "PAPER_CONTROL_STATE_TIMEOUT"
+        ? "Backend is running, but PAPER control-state endpoint timed out. Fix /operator/paper-control-state before starting PAPER."
+        : (paperControlStateUnavailable
+          ? `Backend is running, but canonical PAPER control-state authority did not return current state: ${reason || "unknown endpoint failure"}.`
+          : `Backend status is connected, but canonical PAPER start authority did not return current state: ${reason || "unknown endpoint failure"}.`));
     const overallLabel = activeRuntime ? "PAPER supervisor running" : "Run PAPER authority unavailable";
-    const credentialSetup = buildCredentialSetupFromBackendState(state);
+    const baselineSource = String(baseline.source || "");
+    const baselineStatusUnavailable = paperControlStateUnavailable
+      && baseline.accepted !== true
+      && (!baselineSource || baselineSource === "BACKEND_UNAVAILABLE" || baselineSource === "CONTROL_STATE_UNAVAILABLE");
+    const displayedBaseline = baselineStatusUnavailable
+      ? {
+          source: "CONTROL_STATE_UNAVAILABLE",
+          schemaVersion: "paper-baseline-view-v1",
+          status: "CONTROL_STATE_UNAVAILABLE",
+          decision: "PAPER_CONTROL_STATE_TIMEOUT",
+          accepted: false,
+          policy: "ADOPT_EXISTING_POSITIONS_PROTECTED",
+          positionCount: 0,
+          positionSymbols: [],
+          openOrderCount: 0,
+          endpointFamily: endpoint.family || "paper",
+          liveLocked: true,
+          realMoneyBlocked: true,
+          startReady: false,
+          reason: "Baseline launch authority is unavailable until /operator/paper-control-state returns.",
+          nextSafeAction: "Backend is running, but PAPER control-state endpoint timed out. Fix /operator/paper-control-state before starting PAPER.",
+          baselineSnapshotId: null,
+          snapshotHash: null,
+          acceptedAt: null,
+          protectedSymbols: [],
+          sameSymbolTradingPolicy: "CONTROL_STATE_UNAVAILABLE",
+          suppressPortfolioFallback: true,
+          brokerMutationOccurred: false,
+          tradingMutationOccurred: false,
+          alpacaNetworkCallOccurred: false,
+          secretsValuesExposed: false
+        }
+      : baseline;
+    const rawCredentialSetup = buildCredentialSetupFromBackendState(state);
+    const credentialSetup = credentialStatusUnavailable
+      ? {
+          ...rawCredentialSetup,
+          source: "CREDENTIAL_STATUS_UNAVAILABLE",
+          overallStatus: {
+            code: "UNKNOWN",
+            label: "Credential status unavailable",
+            severity: "blocked",
+            detail: "Backend is connected, but credential truth is unavailable for this Run PAPER authority check; raw values remain hidden."
+          },
+          requiredCredentials: [
+            { name: "APCA_API_KEY_ID", present: false, displayValue: "unknown", source: "CREDENTIAL_STATUS_UNAVAILABLE", rawValueExposed: false },
+            { name: "APCA_API_SECRET_KEY", present: false, displayValue: "unknown", source: "CREDENTIAL_STATUS_UNAVAILABLE", rawValueExposed: false }
+          ],
+          missingFields: []
+        }
+      : rawCredentialSetup;
     return {
       source: "OPERATOR_BACKEND_DEGRADED_RUN_PAPER_VIEW",
       schemaVersion: "run-paper-command-center-v1",
@@ -956,19 +1016,23 @@
       },
       nextSafeAction: activeRuntime
         ? "Monitor the attached PAPER supervisor. Do not start a second run."
-        : "Reload backend launch readiness and fix the endpoint failure before pressing Start.",
+        : (reasonCode === "PAPER_CONTROL_STATE_TIMEOUT"
+          ? "Backend is running, but PAPER control-state endpoint timed out. Fix /operator/paper-control-state before starting PAPER."
+          : "Reload backend launch readiness and fix the endpoint failure before pressing Start."),
       endpoint,
       credentials: {
-        label: credentialTruth.configured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing",
-        configured: credentialTruth.configured,
-        missingFields: credentialTruth.missingFields,
-        source: credentialTruth.source,
+        label: credentialStatusUnavailable
+          ? "Credential status unavailable"
+          : (credentialTruth.configured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing"),
+        configured: credentialStatusUnavailable ? false : credentialTruth.configured,
+        missingFields: credentialStatusUnavailable ? [] : credentialTruth.missingFields,
+        source: credentialStatusUnavailable ? "CREDENTIAL_STATUS_UNAVAILABLE" : credentialTruth.source,
         precedence: credentialTruth.precedence,
         rawSecretValuesIncluded: false,
         secretsValuesExposed: false
       },
       paperCredentialSetup: credentialSetup,
-      paperBaseline: baseline,
+      paperBaseline: displayedBaseline,
       runtime: {
         label: activeRuntime ? "PAPER supervisor process is attached" : "No active PAPER run",
         state: sup.state || sup.processState || "UNKNOWN",
@@ -1008,6 +1072,13 @@
         backendDegradedReasons: uniqueCodes((launch.backendDegradedReasons || []).concat(mismatchCodes))
       }
     };
+  }
+
+  function paperControlStateFailureCode(reason) {
+    const text = String(reason || "").toLowerCase();
+    if (text.includes("timeout") || text.includes("aborterror")) return "PAPER_CONTROL_STATE_TIMEOUT";
+    if (text.includes("paper-control-state")) return "PAPER_CONTROL_STATE_UNAVAILABLE";
+    return "BACKEND_LAUNCH_READINESS_UNAVAILABLE";
   }
 
   function buildBackendUnavailableRunPaperState(reason) {
@@ -1572,28 +1643,36 @@
     const summary = portfolio.summary || {};
     const positions = Array.isArray(portfolio.positions) ? portfolio.positions : [];
     const portfolioOrders = Array.isArray(portfolio.openOrders) ? portfolio.openOrders : [];
-    const positionCount = baseline.accepted ? baseline.positionCount : Number(summary.positionCount || positions.length || baseline.positionCount || 0);
-    const openOrderCount = baseline.accepted ? baseline.openOrderCount : Number(summary.openOrderCount || portfolioOrders.length || baseline.openOrderCount || 0);
+    const suppressPortfolioFallback = baseline.suppressPortfolioFallback === true || baseline.status === "CONTROL_STATE_UNAVAILABLE";
+    const positionCount = baseline.accepted || suppressPortfolioFallback
+      ? Number(baseline.positionCount || 0)
+      : Number(summary.positionCount || positions.length || baseline.positionCount || 0);
+    const openOrderCount = baseline.accepted || suppressPortfolioFallback
+      ? Number(baseline.openOrderCount || 0)
+      : Number(summary.openOrderCount || portfolioOrders.length || baseline.openOrderCount || 0);
     const symbols = baseline.accepted && baseline.positionSymbols && baseline.positionSymbols.length
       ? baseline.positionSymbols
       : positions.map((position) => position.symbol).filter(Boolean);
     const symbolText = symbols.length ? symbols.join(", ") : "none";
     const accepted = baseline.accepted === true;
     const hasExistingPositions = positionCount > 0;
+    const controlStateUnavailable = suppressPortfolioFallback && baseline.status === "CONTROL_STATE_UNAVAILABLE";
     const statusTitle = accepted
       ? "Position-aware PAPER baseline accepted."
-      : (hasExistingPositions ? "Baseline adoption required - existing PAPER positions detected." : "No existing PAPER baseline accepted.");
+      : (controlStateUnavailable ? "Baseline launch authority unavailable." : (hasExistingPositions ? "Baseline adoption required - existing PAPER positions detected." : "No existing PAPER baseline accepted."));
     const explanation = accepted
       ? "This PAPER run starts from an accepted nonzero baseline. Existing positions are tracked separately from new run activity."
-      : (hasExistingPositions
+      : (controlStateUnavailable
+          ? "Portfolio read may be available separately, but PAPER start authority cannot use baseline state until control-state returns."
+          : (hasExistingPositions
           ? "Reset is not required. To run PAPER from this account, accept these positions as the starting baseline."
-          : "A clean account can proceed only after the normal read-only preflight proves account, orders, and positions truth.");
+          : "A clean account can proceed only after the normal read-only preflight proves account, orders, and positions truth."));
     const policyDetail = accepted || hasExistingPositions
       ? "Default policy: protected baseline. Existing positions count against risk/exposure; existing baseline quantities will not be sold by default; same-symbol trading is blocked until run lot tracking is available."
       : "Baseline policy will be selected after read-only preflight truth exists.";
     const startDetail = accepted
       ? "Ready for a short position-aware PAPER smoke only if all backend gates pass. Not 72-hour ready yet."
-      : (hasExistingPositions ? "Start remains disabled until baseline is accepted and all other gates pass." : "Start remains governed by backend launch readiness.");
+      : (controlStateUnavailable ? "Start remains disabled until canonical PAPER control state returns." : (hasExistingPositions ? "Start remains disabled until baseline is accepted and all other gates pass." : "Start remains governed by backend launch readiness."));
     const acceptDisabled = (!backendConnected() || accepted || !hasExistingPositions || openOrderCount !== 0) ? "disabled" : "";
     const acceptReason = accepted
       ? "Baseline already accepted."
@@ -4990,6 +5069,7 @@
   }
 
   function backendFetchTimeoutMs(path) {
+    if (path === "/operator/paper-control-state") return PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS;
     return HEAVY_BACKEND_ENDPOINTS.has(path) ? HEAVY_BACKEND_FETCH_TIMEOUT_MS : DEFAULT_BACKEND_FETCH_TIMEOUT_MS;
   }
 
@@ -6260,12 +6340,13 @@
       next.paperControlState = normalizePaperControlState(paperControlState);
       applyPaperControlState(next, next.paperControlState);
     } else if (endpointFailures.paperControlState) {
+      const controlFailureCode = paperControlStateFailureCode(endpointFailures.paperControlState);
       next.paperControlState = {
-        source: "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE",
+        source: controlFailureCode,
         paperStartAllowed: false,
         paperStopAllowed: next.supervisor.paperStopAllowed === true,
-        dominantBlocker: "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE",
-        reasonCodes: ["BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE"]
+        dominantBlocker: controlFailureCode,
+        reasonCodes: [controlFailureCode]
       };
       next.launchReadiness.runPaperOperatorState = buildBackendConnectedRunPaperState(
         next,

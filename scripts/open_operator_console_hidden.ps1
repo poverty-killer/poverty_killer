@@ -10,8 +10,16 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $RepoRoot "venv\Scripts\python.exe"
 $UiPath = Join-Path $RepoRoot "ui\operator-control-panel\index.html"
 $BaseUrl = "http://$HostAddress`:$Port"
-$UiVersion = "operator-activation-e2e-truth6-20260602"
 $ExpectedActivationVersion = "operator-activation-e2e-truth6-20260602"
+$UiVersion = $ExpectedActivationVersion
+try {
+    $gitHead = (& git -C $RepoRoot rev-parse --short HEAD 2>$null)
+    if (-not [string]::IsNullOrWhiteSpace($gitHead)) {
+        $UiVersion = [string]$gitHead
+    }
+} catch {
+    $UiVersion = $ExpectedActivationVersion
+}
 $LogBase = $env:LOCALAPPDATA
 if ([string]::IsNullOrWhiteSpace($LogBase)) {
     $LogBase = $env:TEMP

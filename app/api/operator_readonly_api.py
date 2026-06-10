@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import subprocess
+import time
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -313,6 +314,8 @@ class OperatorSnapshotProvider:
         self.provider_env = self.credential_store.effective_env(self.process_env)
         self.provider_env.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         self.portfolio_client = portfolio_client
+        self._latest_portfolio_snapshot: dict[str, Any] | None = None
+        self._latest_portfolio_snapshot_at_monotonic: float | None = None
         self.paper_baseline_store = PaperBaselineStore(self.runtime_config.operator_state_dir / "paper_baseline.json")
         supervisor_config = PaperSupervisorConfig.from_runtime_config(self.runtime_config)
         supervisor_config.process_env = self._paper_process_env(self.provider_env)
@@ -1019,7 +1022,10 @@ class OperatorSnapshotProvider:
         return result
 
     def portfolio(self) -> dict[str, Any]:
-        return build_portfolio_snapshot(self._refresh_provider_env(), client=self.portfolio_client)
+        snapshot = build_portfolio_snapshot(self._refresh_provider_env(), client=self.portfolio_client)
+        self._latest_portfolio_snapshot = snapshot
+        self._latest_portfolio_snapshot_at_monotonic = time.perf_counter()
+        return snapshot
 
     def positions(self) -> dict[str, Any]:
         portfolio = self.portfolio()
@@ -1132,14 +1138,66 @@ class OperatorSnapshotProvider:
         )
 
     def paper_control_state(self) -> dict[str, Any]:
-        status = self.status()
-        health = self.health()
-        supervisor = self.latest_run()
-        launch = self.launch_readiness()
-        credentials = self.credentials_providers()
-        diagnostics = self.credentials_diagnostics()
-        baseline = self.paper_baseline()
-        portfolio = self.portfolio()
+        started_ns = time.perf_counter_ns()
+        subchecks: list[dict[str, Any]] = []
+
+        def elapsed_ms_since(start_ns: int) -> float:
+            return round((time.perf_counter_ns() - start_ns) / 1_000_000, 3)
+
+        def record_subcheck(
+            name: str,
+            start_ns: int,
+            status: str = "OK",
+            *,
+            reason_code: str | None = None,
+            exception: BaseException | None = None,
+        ) -> None:
+            subchecks.append(
+                {
+                    "name": name,
+                    "elapsed_ms": elapsed_ms_since(start_ns),
+                    "status": status,
+                    "reason_code": reason_code,
+                    "exception_class": exception.__class__.__name__ if exception else None,
+                }
+            )
+
+        def run_subcheck(name: str, fn, *, reason_code: str | None = None):
+            subcheck_start = time.perf_counter_ns()
+            try:
+                result = fn()
+            except Exception as exc:
+                record_subcheck(name, subcheck_start, "FAILED", reason_code=reason_code or f"{name.upper()}_FAILED", exception=exc)
+                return None
+            record_subcheck(name, subcheck_start)
+            return result
+
+        def skip_subcheck(name: str, reason_code: str) -> None:
+            skip_started = time.perf_counter_ns()
+            record_subcheck(name, skip_started, "SKIPPED", reason_code=reason_code)
+
+        effective_env = run_subcheck("provider_env_refresh", self._refresh_provider_env, reason_code="PROVIDER_ENV_REFRESH_FAILED") or self.provider_env
+        supervisor = run_subcheck("supervisor_snapshot", self.supervisor.status_snapshot, reason_code="SUPERVISOR_SNAPSHOT_FAILED") or {}
+        credentials = run_subcheck("credential_summary", lambda: self.credential_store.providers_summary(self.process_env), reason_code="CREDENTIAL_SUMMARY_FAILED") or {}
+        endpoint_authority = run_subcheck("endpoint_authority", lambda: alpaca_endpoint_authority(self._paper_process_env(effective_env)), reason_code="ENDPOINT_AUTHORITY_FAILED") or {}
+        baseline = run_subcheck("baseline_state", self.paper_baseline, reason_code="BASELINE_STATE_FAILED") or {}
+        git_identity = {
+            "repo_head": self.loaded_git_commit_short,
+            "loaded_commit": self.loaded_git_commit_short,
+            "git_branch": self.loaded_git_branch,
+        }
+        subcheck_start = time.perf_counter_ns()
+        record_subcheck("git_identity", subcheck_start)
+
+        # These components are intentionally not on the control-state critical
+        # path. They have dedicated endpoints and can involve broker reads,
+        # archive scans, provider calls, or broader health checks.
+        skip_subcheck("launch_readiness", "LAUNCH_READINESS_NOT_ON_FAST_PATH")
+        skip_subcheck("portfolio_snapshot", "PORTFOLIO_SNAPSHOT_NOT_ON_FAST_PATH")
+        skip_subcheck("run_archive_lookup", "RUN_ARCHIVE_NOT_ON_FAST_PATH")
+        skip_subcheck("watchdog_alerts", "WATCHDOG_ALERTS_NOT_ON_FAST_PATH")
+        skip_subcheck("broker_read", "BROKER_READ_NOT_ON_CONTROL_STATE_FAST_PATH")
+
         active = supervisor.get("active_session") or {}
         latest = supervisor.get("latest_session") or {}
         session = active or latest or {}
@@ -1161,39 +1219,76 @@ class OperatorSnapshotProvider:
         if not fields and alpaca.get("configured") is not True:
             missing_fields = ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"]
 
-        launch_reasons = [
-            str(code)
-            for code in launch.get("reason_codes") or []
-            if str(code or "").strip()
-        ]
         active_session_id = active.get("session_id") or supervisor.get("active_session_id")
-        supervisor_state = str(supervisor.get("state") or status.get("bot_status") or "UNKNOWN")
+        supervisor_state = str(supervisor.get("state") or "UNKNOWN")
         supervisor_running = supervisor_state.upper() in {"RUNNING", "STARTING", "STOP_REQUESTED"} or bool(active_session_id)
-        paper_start_allowed = supervisor.get("paper_start_allowed") is True and launch.get("paper_start_allowed") is True
+        required_failures = [
+            str(check.get("reason_code"))
+            for check in subchecks
+            if check.get("status") == "FAILED"
+            and check.get("name") in {"provider_env_refresh", "supervisor_snapshot", "credential_summary", "endpoint_authority", "baseline_state"}
+            and check.get("reason_code")
+        ]
+        endpoint_family = str(endpoint_authority.get("alpaca_trading_endpoint_family") or "unknown")
+        endpoint_host = str(endpoint_authority.get("alpaca_trading_endpoint_host") or "")
+        endpoint_display = str(endpoint_authority.get("alpaca_endpoint_display") or endpoint_host)
+        endpoint_valid = endpoint_authority.get("paper_endpoint_only") is True
+        baseline_accepted = baseline.get("accepted") is True
+        baseline_adoption_required = str(baseline.get("decision") or baseline.get("status") or "") in {
+            "PAPER_BASELINE_ADOPTION_REQUIRED",
+            "PREFLIGHT_BLOCKED_BASELINE_ADOPTION_REQUIRED",
+        }
+        baseline_preflight_required = str(baseline.get("decision") or baseline.get("status") or "") in {
+            "READ_ONLY_PREFLIGHT_REQUIRED",
+            "NOT_ACCEPTED",
+        }
+        baseline_runtime_context = supervisor.get("paper_baseline_runtime_context") or {}
+        credential_configured = alpaca.get("configured") is True
+        supervisor_allows_start = supervisor.get("paper_start_allowed") is True
+        local_start_ready = (
+            supervisor_allows_start
+            and credential_configured
+            and endpoint_valid
+            and baseline_accepted
+            and not supervisor_running
+            and not required_failures
+        )
         if supervisor_running:
             dominant_blocker = "SUPERVISOR_PROCESS_RUNNING_OR_RECENT"
-        elif paper_start_allowed:
+        elif required_failures:
+            dominant_blocker = "PAPER_CONTROL_STATE_DEGRADED"
+        elif not credential_configured:
+            dominant_blocker = "PAPER_CREDENTIALS_MISSING"
+        elif not endpoint_valid:
+            dominant_blocker = str(endpoint_authority.get("reason_code") or "PAPER_ENDPOINT_NOT_VERIFIED")
+        elif baseline_adoption_required:
+            dominant_blocker = "BASELINE_ADOPTION_REQUIRED"
+        elif baseline_preflight_required:
+            dominant_blocker = "paper_read_only_preflight_gate"
+        elif local_start_ready:
             dominant_blocker = "READY_FOR_GOVERNED_PAPER"
         else:
-            dominant_blocker = (
-                str(supervisor.get("paper_start_refusal_reason") or "")
-                or (launch_reasons[0] if launch_reasons else "")
-                or "PAPER_START_BLOCKED"
-            )
-        reason_codes = list(dict.fromkeys(
-            [
-                dominant_blocker,
-                *launch_reasons,
-                str(supervisor.get("paper_start_refusal_reason") or ""),
-            ]
-        ))
+            dominant_blocker = str(supervisor.get("paper_start_refusal_reason") or "PAPER_START_BLOCKED")
+        reason_codes = list(dict.fromkeys([dominant_blocker, *required_failures, str(supervisor.get("paper_start_refusal_reason") or "")]))
         reason_codes = [code for code in reason_codes if code]
 
-        summary = portfolio.get("summary") if isinstance(portfolio.get("summary"), dict) else {}
-        endpoint_host = diagnostics.get("paper_endpoint_host") or launch.get("paper_endpoint_host") or ""
-        endpoint_display = diagnostics.get("paper_endpoint_display") or launch.get("paper_endpoint_display") or ""
-        endpoint_family = diagnostics.get("paper_endpoint_family") or launch.get("paper_endpoint_family") or "unknown"
-        baseline_runtime_context = supervisor.get("paper_baseline_runtime_context") or launch.get("paper_baseline_runtime_context") or {}
+        cached_portfolio = self._latest_portfolio_snapshot if isinstance(self._latest_portfolio_snapshot, dict) else {}
+        cached_summary = cached_portfolio.get("summary") if isinstance(cached_portfolio.get("summary"), dict) else {}
+        cached_age_ms = None
+        if self._latest_portfolio_snapshot_at_monotonic is not None:
+            cached_age_ms = round((time.perf_counter() - self._latest_portfolio_snapshot_at_monotonic) * 1000, 3)
+        portfolio_truth_status = cached_portfolio.get("status") or "PORTFOLIO_READ_AVAILABLE_SEPARATELY"
+        portfolio_data_source = cached_portfolio.get("data_source") or "CONTROL_STATE_FAST_PATH_NO_BROKER_READ"
+        positions_count = (
+            cached_summary.get("position_count")
+            if cached_summary.get("position_count") is not None
+            else baseline.get("position_count") or 0
+        )
+        open_orders_count = (
+            cached_summary.get("open_order_count")
+            if cached_summary.get("open_order_count") is not None
+            else baseline.get("open_order_count") or 0
+        )
         artifact_paths = {
             "stdout_path": session.get("stdout_path"),
             "stderr_path": session.get("stderr_path"),
@@ -1207,49 +1302,51 @@ class OperatorSnapshotProvider:
             "Monitor the attached PAPER supervisor. Do not start a second run."
             if supervisor_running
             else "Start governed PAPER from the Run PAPER cockpit."
-            if paper_start_allowed
-            else str((launch.get("run_paper_operator_state") or {}).get("next_safe_action") or "Resolve the listed blocker before starting PAPER.")
+            if local_start_ready
+            else "Resolve the listed blocker before starting PAPER."
         )
-
+        total_elapsed_ms = elapsed_ms_since(started_ns)
         return {
             "source": "OPERATOR_PAPER_CONTROL_STATE",
             "schema_version": "paper-control-state-v1",
-            "backend_status": health.get("api_status") or "UNKNOWN",
-            "repo_head": self.loaded_git_commit_short,
-            "loaded_commit": self.loaded_git_commit_short,
-            "git_branch": self.loaded_git_branch,
+            "backend_status": "DEGRADED" if required_failures else "OK",
+            **git_identity,
             "data_source": "OPERATOR_BACKEND",
+            "total_elapsed_ms": total_elapsed_ms,
+            "subchecks": subchecks,
+            "response_budget_ms": 3000,
             "paper_only": True,
             "live_locked": True,
             "real_money_blocked": True,
             "credential_source": alpaca.get("source") or credentials.get("source") or "NOT_CONFIGURED",
-            "credential_status": "CONFIGURED" if alpaca.get("configured") is True else "MISSING",
-            "alpaca_paper_configured": alpaca.get("configured") is True,
+            "credential_status": "CONFIGURED" if credential_configured else "MISSING",
+            "alpaca_paper_configured": credential_configured,
             "missing_credential_fields": missing_fields,
             "endpoint_family": endpoint_family,
             "endpoint_host": endpoint_host,
             "endpoint_display": endpoint_display,
-            "endpoint_source": diagnostics.get("paper_endpoint_source") or launch.get("paper_endpoint_source") or "UNKNOWN",
-            "endpoint_status": diagnostics.get("paper_endpoint_status") or launch.get("paper_endpoint_status") or "UNKNOWN",
+            "endpoint_source": endpoint_authority.get("alpaca_endpoint_source") or endpoint_authority.get("endpoint_source") or "UNKNOWN",
+            "endpoint_status": endpoint_authority.get("status") or "UNKNOWN",
             "baseline_status": baseline.get("status") or "UNKNOWN",
-            "baseline_accepted": baseline.get("accepted") is True,
+            "baseline_accepted": baseline_accepted,
             "baseline_snapshot_id": baseline.get("baseline_snapshot_id"),
             "baseline_policy": baseline.get("policy"),
             "baseline_position_count": baseline.get("position_count") or 0,
             "baseline_runtime_context": baseline_runtime_context,
             "protected_symbols": baseline_runtime_context.get("protected_symbols_normalized") or baseline.get("protected_symbols") or [],
-            "portfolio_truth_status": portfolio.get("status") or "UNKNOWN",
-            "portfolio_data_source": portfolio.get("data_source") or "UNKNOWN",
-            "account_status": summary.get("account_status"),
-            "cash": summary.get("cash"),
-            "equity": summary.get("total_equity"),
-            "buying_power": summary.get("buying_power"),
-            "positions_count": summary.get("position_count") or len(portfolio.get("positions") or []),
-            "open_orders_count": summary.get("open_order_count") or len(portfolio.get("open_orders") or []),
+            "portfolio_truth_status": portfolio_truth_status,
+            "portfolio_data_source": portfolio_data_source,
+            "portfolio_snapshot_age_ms": cached_age_ms,
+            "account_status": cached_summary.get("account_status"),
+            "cash": cached_summary.get("cash"),
+            "equity": cached_summary.get("total_equity"),
+            "buying_power": cached_summary.get("buying_power"),
+            "positions_count": positions_count,
+            "open_orders_count": open_orders_count,
             "supervisor_state": supervisor_state,
             "active_run_id": active_session_id,
             "active_pid": active.get("pid") or session.get("pid"),
-            "paper_start_allowed": paper_start_allowed,
+            "paper_start_allowed": local_start_ready,
             "paper_stop_allowed": supervisor.get("paper_stop_allowed") is True,
             "dominant_blocker": dominant_blocker,
             "reason_codes": reason_codes,
@@ -1257,16 +1354,37 @@ class OperatorSnapshotProvider:
             "allowed_durations": supervisor.get("allowed_durations") or [],
             "watchlist": active.get("watchlist") or supervisor.get("allowed_watchlist") or [],
             "artifact_paths": artifact_paths,
-            "last_heartbeat": status.get("last_heartbeat_ts") or session.get("last_status_check_at"),
+            "last_heartbeat": session.get("last_status_check_at"),
             "next_safe_action": next_safe_action,
-            "launch_readiness": launch,
-            "latest_run": supervisor,
+            "launch_readiness": {
+                "source": "NOT_ON_CONTROL_STATE_FAST_PATH",
+                "reason_code": "LAUNCH_READINESS_NOT_ON_FAST_PATH",
+                "paper_start_allowed": None,
+            },
+            "latest_run": {
+                "source": "SUPERVISOR_STATUS_SNAPSHOT",
+                "state": supervisor.get("state"),
+                "active_session_id": supervisor.get("active_session_id"),
+                "paper_start_allowed": supervisor.get("paper_start_allowed"),
+                "paper_stop_allowed": supervisor.get("paper_stop_allowed"),
+                "latest_session": latest,
+            },
             "paper_baseline": baseline,
-            "portfolio_summary": summary,
-            "runtime_attachment_detail": status.get("runtime_attachment_detail"),
+            "portfolio_summary": {
+                "source": portfolio_data_source,
+                "status": portfolio_truth_status,
+                "cache_age_ms": cached_age_ms,
+                "account_status": cached_summary.get("account_status"),
+                "cash": cached_summary.get("cash"),
+                "total_equity": cached_summary.get("total_equity"),
+                "buying_power": cached_summary.get("buying_power"),
+                "position_count": positions_count,
+                "open_order_count": open_orders_count,
+            },
+            "runtime_attachment_detail": "PAPER supervisor process is attached." if supervisor_running else "Ready. No PAPER run currently attached.",
             "secrets_values_exposed": False,
             "raw_secret_values_included": False,
-            "broker_call_occurred": portfolio.get("broker_read_occurred") is True,
+            "broker_call_occurred": False,
             "broker_mutation_occurred": False,
             "order_submission_occurred": False,
             "cancel_occurred": False,

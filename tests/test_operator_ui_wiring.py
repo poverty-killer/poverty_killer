@@ -6,6 +6,7 @@ from pathlib import Path
 APP_JS = Path("ui/operator-control-panel/app.js")
 MOCK_JS = Path("ui/operator-control-panel/mock-data.js")
 STYLES_CSS = Path("ui/operator-control-panel/styles.css")
+LAUNCHER_PS1 = Path("scripts/open_operator_console_hidden.ps1")
 
 
 def _app_text() -> str:
@@ -410,6 +411,33 @@ def test_backend_connected_run_paper_never_keeps_mock_authority():
     assert "Sample data" not in text
     assert "sample data fallback" not in text
     assert "mock/sample mode cannot start PAPER" not in text
+
+
+def test_paper_control_state_timeout_is_precise_fail_closed_authority():
+    text = _app_text()
+
+    assert "PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS = 3000" in text
+    assert 'if (path === "/operator/paper-control-state") return PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS' in text
+    assert "function paperControlStateFailureCode" in text
+    assert "PAPER_CONTROL_STATE_TIMEOUT" in text
+    assert "Backend is running, but PAPER control-state endpoint timed out. Fix /operator/paper-control-state before starting PAPER." in text
+    assert "CONTROL_STATE_UNAVAILABLE" in text
+    assert "suppressPortfolioFallback" in text
+    assert "Credential status unavailable" in text
+    assert "CREDENTIAL_STATUS_UNAVAILABLE" in text
+    assert "Baseline launch authority unavailable." in text
+    assert "Portfolio read may be available separately, but PAPER start authority cannot use baseline state until control-state returns." in text
+    assert "Start remains disabled until canonical PAPER control state returns." in text
+    assert "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE" not in text
+
+
+def test_operator_launcher_cache_busts_ui_with_loaded_commit():
+    text = LAUNCHER_PS1.read_text(encoding="utf-8")
+
+    assert "git -C $RepoRoot rev-parse --short HEAD" in text
+    assert "$UiVersion = [string]$gitHead" in text
+    assert "Opening browser at $BaseUrl/operator-ui/?v=$UiVersion" in text
+    assert '$UiVersion = "operator-activation-e2e-truth6-20260602"' not in text
 
 
 def test_historical_test_control_is_visible_and_honest():

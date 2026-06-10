@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 
 from app.api.operator_readonly_api import API_VERSION, OPERATOR_ACTIVATION_VERSION, OperatorSnapshotProvider, create_operator_app
@@ -219,7 +220,8 @@ def test_paper_control_state_is_canonical_safe_run_paper_payload(tmp_path):
     assert payload["endpoint_family"] == "paper"
     assert payload["endpoint_host"] == "paper-api.alpaca.markets"
     assert payload["credential_status"] == "CONFIGURED"
-    assert payload["portfolio_truth_status"] in {"BROKER_CONFIRMED", "BROKER_CONFIRMED_EMPTY"}
+    assert payload["portfolio_truth_status"] == "PORTFOLIO_READ_AVAILABLE_SEPARATELY"
+    assert payload["portfolio_data_source"] == "CONTROL_STATE_FAST_PATH_NO_BROKER_READ"
     assert payload["positions_count"] == 0
     assert payload["open_orders_count"] == 0
     assert payload["paper_start_allowed"] is False
@@ -227,8 +229,64 @@ def test_paper_control_state_is_canonical_safe_run_paper_payload(tmp_path):
     assert "paper_read_only_preflight_gate" in payload["reason_codes"]
     assert payload["max_lease_seconds"] == 432000
     assert 432000 in payload["allowed_durations"]
+    assert isinstance(payload["total_elapsed_ms"], float)
+    assert payload["total_elapsed_ms"] < 3000
+    subchecks = {row["name"]: row for row in payload["subchecks"]}
+    assert subchecks["provider_env_refresh"]["status"] == "OK"
+    assert subchecks["credential_summary"]["status"] == "OK"
+    assert subchecks["endpoint_authority"]["status"] == "OK"
+    assert subchecks["launch_readiness"]["status"] == "SKIPPED"
+    assert subchecks["launch_readiness"]["reason_code"] == "LAUNCH_READINESS_NOT_ON_FAST_PATH"
+    assert subchecks["portfolio_snapshot"]["status"] == "SKIPPED"
+    assert subchecks["portfolio_snapshot"]["reason_code"] == "PORTFOLIO_SNAPSHOT_NOT_ON_FAST_PATH"
+    assert subchecks["broker_read"]["status"] == "SKIPPED"
+    assert payload["broker_call_occurred"] is False
     assert payload["broker_mutation_occurred"] is False
     assert payload["secrets_values_exposed"] is False
+
+
+def test_paper_control_state_avoids_slow_portfolio_and_launch_paths(tmp_path):
+    class SlowForbiddenProvider(OperatorSnapshotProvider):
+        def portfolio(self):
+            time.sleep(1)
+            raise AssertionError("paper_control_state must not call portfolio")
+
+        def launch_readiness(self):
+            time.sleep(1)
+            raise AssertionError("paper_control_state must not call launch_readiness")
+
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
+        runner=runner,
+    )
+    provider = SlowForbiddenProvider(
+        supervisor=supervisor,
+        provider_env=dict(PAPER_ENV),
+        portfolio_client=FakeReadOnlyClient(),
+    )
+    app = create_operator_app(provider=provider)
+
+    started = time.perf_counter()
+    payload = _endpoint(app, "/operator/paper-control-state")()
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.5
+    assert payload["total_elapsed_ms"] < 500
+    assert payload["portfolio_truth_status"] == "PORTFOLIO_READ_AVAILABLE_SEPARATELY"
+    assert payload["launch_readiness"]["reason_code"] == "LAUNCH_READINESS_NOT_ON_FAST_PATH"
+    assert payload["broker_call_occurred"] is False
+
+
+def test_paper_control_state_has_no_self_http_calls():
+    source = inspect.getsource(OperatorSnapshotProvider.paper_control_state)
+
+    assert "127.0.0.1" not in source
+    assert "localhost" not in source
+    assert "http://" not in source
+    assert "/operator/portfolio" not in source
+    assert "/operator/latest-run" not in source
+    assert "/operator/launch-readiness" not in source
 
 
 def test_paper_control_state_dominant_blocker_is_active_supervisor_when_running():
