@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fastapi import APIRouter, FastAPI
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.ai_chief_operator.config import AIChiefConfig
@@ -134,6 +135,37 @@ def _safe_git_output(repo_root: Path, args: list[str]) -> str:
     if result.returncode != 0:
         return "UNKNOWN_NOT_AVAILABLE"
     return result.stdout.strip() or "UNKNOWN_NOT_AVAILABLE"
+
+
+class NoStoreStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+
+def _with_no_store_headers(response: HTMLResponse) -> HTMLResponse:
+    response.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+def _render_operator_ui_index(ui_dir: Path, version: str) -> str:
+    html = (ui_dir / "index.html").read_text(encoding="utf-8")
+    safe_version = re.sub(r"[^A-Za-z0-9._-]", "", version or "") or "UNKNOWN_NOT_AVAILABLE"
+    for asset in ("styles.css", "mock-data.js", "app.js"):
+        html = re.sub(rf'{re.escape(asset)}\?v=[^"]+', f"{asset}?v={safe_version}", html)
+        html = html.replace(f'{asset}"', f'{asset}?v={safe_version}"')
+    build_script = (
+        f'<script>window.PK_OPERATOR_UI_BUILD_COMMIT = "{safe_version}";'
+        f'window.PK_OPERATOR_UI_ASSET_VERSION = "{safe_version}";</script>'
+    )
+    if "window.PK_OPERATOR_UI_BUILD_COMMIT" not in html:
+        html = html.replace("    <script src=", f"    {build_script}\n    <script src=", 1)
+    return html
 
 
 READ_ONLY_CONTRACTS: dict[str, Any] = {
@@ -447,13 +479,13 @@ class OperatorSnapshotProvider:
         active = supervisor.get("active_session") or {}
         latest = supervisor.get("latest_session") or {}
         session_status = active.get("status")
-        active_profile = active.get("profile") or "UNKNOWN_NO_ACTIVE_RUNTIME"
+        active_profile = active.get("profile") or "PAPER_IDLE"
         watchlist = active.get("watchlist") or []
-        process_state = session_status or "NO_ACTIVE_RUNTIME_ATTACHED"
+        process_state = session_status or "IDLE_NO_ACTIVE_PAPER_RUN"
         paper_start_allowed = supervisor.get("paper_start_allowed") is True
         ready_idle = not watchlist and paper_start_allowed and supervisor.get("state") == "IDLE"
         historical_refusal = self._latest_historical_refusal(supervisor)
-        runtime_attachment_state = "READY_IDLE_NO_ACTIVE_RUNTIME" if ready_idle else process_state
+        runtime_attachment_state = "READY_IDLE_NO_ACTIVE_PAPER_RUN" if ready_idle else process_state
         runtime_attachment_detail = (
             "Ready. No PAPER run currently attached."
             if ready_idle
@@ -472,9 +504,9 @@ class OperatorSnapshotProvider:
             "mode_state": "PAPER_ENABLED",
             "capability_state": "PAPER_ENABLED",
             "active_profile": active_profile,
-            "broker": "alpaca_paper" if watchlist else "UNKNOWN_NO_ACTIVE_RUNTIME",
-            "endpoint": "https://paper-api.alpaca.markets" if watchlist else "UNKNOWN_NO_ACTIVE_RUNTIME",
-            "market_data": "UNKNOWN_NO_ACTIVE_RUNTIME",
+            "broker": "alpaca_paper",
+            "endpoint": "https://paper-api.alpaca.markets",
+            "market_data": "IDLE_NO_ACTIVE_MARKET_DATA_RUNTIME",
             "universe": watchlist,
             "asset_classes": ["crypto"] if watchlist else [],
             "last_heartbeat_ts": None,
@@ -496,41 +528,46 @@ class OperatorSnapshotProvider:
         }
 
     def health(self) -> dict[str, Any]:
+        started_ns = time.perf_counter_ns()
         supervisor = self._supervisor_snapshot()
-        storage = self.storage()
-        config_status = self.runtime_config.status()
-        world_runtime = self.world_awareness_runtime.status_snapshot()
-        degraded_reasons: list[str] = []
-        if storage["session_store"]["status"] != "READY":
-            degraded_reasons.append("SESSION_STORE_DEGRADED")
-        if storage["world_awareness_cache"]["status"] != "READY":
-            degraded_reasons.append("WORLD_AWARENESS_CACHE_DEGRADED")
-        if config_status["warnings"]:
-            degraded_reasons.extend(str(item) for item in config_status["warnings"])
+        elapsed_ms = round((time.perf_counter_ns() - started_ns) / 1_000_000, 3)
+        timestamp_utc = _utc_now()
+        identity = self._backend_process_identity()
         return {
-            "api_status": "DEGRADED" if degraded_reasons else "OK",
+            "ok": True,
+            "api_status": "OK",
             "api_version": API_VERSION,
             "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
-            **self._backend_process_identity(),
+            **identity,
+            "repo_head": self.loaded_git_commit_short,
+            "branch": self.loaded_git_branch,
+            "loaded_commit": self.loaded_git_commit_short,
+            "loaded_branch": self.loaded_git_branch,
+            "pid": os.getpid(),
+            "uptime": self.process_start_time,
+            "paper_only": True,
             "supervisor_status": supervisor["state"],
-            "session_store_status": storage["session_store"]["status"],
-            "world_awareness_cache_status": storage["world_awareness_cache"]["status"],
-            "config_status": config_status["status"],
-            "log_dir_status": storage["log_dir"]["status"],
-            "data_dir_status": storage["data_dir"]["status"],
+            "session_store_status": "NOT_ON_HEALTH_FAST_PATH",
+            "world_awareness_cache_status": "NOT_ON_HEALTH_FAST_PATH",
+            "config_status": "NOT_ON_HEALTH_FAST_PATH",
+            "log_dir_status": "NOT_ON_HEALTH_FAST_PATH",
+            "data_dir_status": "NOT_ON_HEALTH_FAST_PATH",
             "runtime_profile": self.runtime_config.runtime_profile,
             "hosted_mode": self.runtime_config.hosted_mode,
             "live_status": "LIVE_LOCKED",
             "real_money_status": "BLOCKED",
             "broker_call_occurred": False,
             "secrets_values_exposed": False,
-            "degraded_reasons": degraded_reasons,
+            "degraded_reasons": [],
             "world_awareness_runtime": {
-                "manual_poll_only": world_runtime.get("manual_poll_only"),
-                "provider_polling_active": world_runtime.get("provider_polling_active"),
-                "provider_count": world_runtime.get("provider_count"),
+                "manual_poll_only": True,
+                "provider_polling_active": False,
+                "provider_count": 0,
+                "status": "NOT_ON_HEALTH_FAST_PATH",
             },
-            "updated_at": _utc_now(),
+            "timestamp_utc": timestamp_utc,
+            "updated_at": timestamp_utc,
+            "elapsed_ms": elapsed_ms,
         }
 
     def readiness(self) -> dict[str, Any]:
@@ -3466,11 +3503,27 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
 
 
 def create_operator_app(provider: OperatorSnapshotProvider | None = None) -> FastAPI:
+    provider = provider or OperatorSnapshotProvider()
     app = FastAPI(title="Poverty Killer Operator Read-Only API", version=API_VERSION)
     app.include_router(get_operator_router(provider))
     ui_dir = Path(__file__).resolve().parents[2] / "ui" / "operator-control-panel"
     if ui_dir.exists():
-        app.mount("/operator-ui", StaticFiles(directory=str(ui_dir), html=True), name="operator-ui")
+        @app.get("/operator-ui", include_in_schema=False)
+        def operator_ui_index_no_slash() -> HTMLResponse:
+            html = _render_operator_ui_index(ui_dir, provider.loaded_git_commit_short)
+            return _with_no_store_headers(HTMLResponse(html))
+
+        @app.get("/operator-ui/", include_in_schema=False)
+        def operator_ui_index() -> HTMLResponse:
+            html = _render_operator_ui_index(ui_dir, provider.loaded_git_commit_short)
+            return _with_no_store_headers(HTMLResponse(html))
+
+        @app.get("/operator-ui/index.html", include_in_schema=False)
+        def operator_ui_index_html() -> HTMLResponse:
+            html = _render_operator_ui_index(ui_dir, provider.loaded_git_commit_short)
+            return _with_no_store_headers(HTMLResponse(html))
+
+        app.mount("/operator-ui", NoStoreStaticFiles(directory=str(ui_dir), html=True), name="operator-ui")
     return app
 
 

@@ -9,7 +9,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $RepoRoot "venv\Scripts\python.exe"
 $BaseUrl = "http://$HostAddress`:$Port"
-$UiUrl = "$BaseUrl/operator-ui/?v=operator-activation-e2e-truth6-20260602"
+$script:UiUrl = "$BaseUrl/operator-ui/"
+$script:UiVersion = "UNKNOWN_NOT_AVAILABLE"
 $LogBase = $env:LOCALAPPDATA
 if ([string]::IsNullOrWhiteSpace($LogBase)) {
     $LogBase = $env:TEMP
@@ -140,6 +141,18 @@ function Get-GitValue {
     return "UNKNOWN_NOT_AVAILABLE"
 }
 
+function Update-OperatorUiUrl {
+    param([string]$RepoHead)
+    $version = if ($RepoHead -and $RepoHead -ne "UNKNOWN_NOT_AVAILABLE") { $RepoHead } else { Get-GitValue @("rev-parse", "--short", "HEAD") }
+    if ([string]::IsNullOrWhiteSpace($version) -or $version -eq "UNKNOWN_NOT_AVAILABLE") {
+        $version = "GIT_HEAD_READ_FAILED"
+    }
+    $script:UiVersion = $version
+    $timestampMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $script:UiUrl = "$BaseUrl/operator-ui/?v=$version&t=$timestampMs"
+    return $script:UiUrl
+}
+
 function Get-WorkingTreeSummary {
     try {
         $lines = & git -C $RepoRoot status --short 2>$null
@@ -239,8 +252,11 @@ function Get-OperatorBackendProcesses {
 }
 
 function Invoke-OperatorJson {
-    param([string]$Path)
-    $response = Invoke-WebRequest -Uri "$BaseUrl$Path" -UseBasicParsing -TimeoutSec 3
+    param(
+        [string]$Path,
+        [int]$TimeoutSec = 2
+    )
+    $response = Invoke-WebRequest -Uri "$BaseUrl$Path" -UseBasicParsing -TimeoutSec $TimeoutSec
     if ([int]$response.StatusCode -ne 200) {
         throw "HTTP $($response.StatusCode)"
     }
@@ -265,14 +281,15 @@ function First-TextValue {
 function Get-LauncherStatus {
     $repoHead = Get-GitValue @("rev-parse", "--short", "HEAD")
     $repoBranch = Get-GitValue @("branch", "--show-current")
+    $uiUrl = Update-OperatorUiUrl $repoHead
     $workingTreeSummary = Get-WorkingTreeSummary
     $processes = @(Get-OperatorBackendProcesses)
     $portListening = Test-PortListening
     $status = "STOPPED"
     $healthText = "Backend is not listening on $BaseUrl."
-    $loadedCommit = "UNKNOWN_NOT_AVAILABLE"
-    $loadedBranch = "UNKNOWN_NOT_AVAILABLE"
-    $startTime = "UNKNOWN_NOT_AVAILABLE"
+    $loadedCommit = "BACKEND_NOT_RUNNING"
+    $loadedBranch = "BACKEND_NOT_RUNNING"
+    $startTime = "BACKEND_NOT_RUNNING"
     $backendPid = if ($processes.Count) { ($processes | Select-Object -ExpandProperty ProcessId) -join "," } else { "none" }
     $warning = ""
     $freshnessStatus = "Stopped"
@@ -310,12 +327,11 @@ function Get-LauncherStatus {
         $healthState = "Checking"
         $healthDetail = "Reading health and operator status."
         try {
-            $health = Invoke-OperatorJson "/operator/health"
-            $operatorStatus = Invoke-OperatorJson "/operator/status"
-            $loadedCommit = First-TextValue $operatorStatus.git_commit_short $health.git_commit_short
-            $loadedBranch = First-TextValue $operatorStatus.git_branch $health.git_branch
-            $startTime = First-TextValue $operatorStatus.process_start_time $health.process_start_time
-            $backendPid = First-TextValue $operatorStatus.backend_pid $backendPid
+            $health = Invoke-OperatorJson "/operator/health" 1
+            $loadedCommit = First-TextValue $health.loaded_commit $health.git_commit_short "BACKEND_HEALTH_COMMIT_MISSING"
+            $loadedBranch = First-TextValue $health.loaded_branch $health.git_branch "BACKEND_HEALTH_BRANCH_MISSING"
+            $startTime = First-TextValue $health.process_start_time $health.timestamp_utc "BACKEND_HEALTH_START_TIME_MISSING"
+            $backendPid = First-TextValue $health.backend_pid $backendPid
             $healthText = "Health=$($health.api_status); supervisor=$($health.supervisor_status); live=$($health.live_status); real_money=$($health.real_money_status)"
             $healthState = "Connected"
             $healthDetail = "Supervisor $($health.supervisor_status); live locked; real money blocked."
@@ -325,7 +341,20 @@ function Get-LauncherStatus {
                 $healthDetail = "Health payload is not PAPER-only safe."
                 $warning = "Unsafe health payload. Do not use this backend."
             }
-            if ($loadedCommit -eq "UNKNOWN_NOT_AVAILABLE") {
+            try {
+                $operatorStatus = Invoke-OperatorJson "/operator/status" 1
+                $loadedCommit = First-TextValue $operatorStatus.git_commit_short $loadedCommit
+                $loadedBranch = First-TextValue $operatorStatus.git_branch $loadedBranch
+                $startTime = First-TextValue $operatorStatus.process_start_time $startTime
+                $backendPid = First-TextValue $operatorStatus.backend_pid $backendPid
+            } catch {
+                $status = "RUNNING_STATUS_TIMEOUT"
+                $healthState = "Connected"
+                $healthDetail = "Health OK; /operator/status timed out. Backend remains running; status detail is degraded."
+                $warning = "Backend health connected; /operator/status timed out. This is degraded, not failed."
+                Write-LauncherLog "operator_status_timeout=$($_.Exception.GetType().Name):$($_.Exception.Message)"
+            }
+            if ($loadedCommit -eq "UNKNOWN_NOT_AVAILABLE" -or $loadedCommit -like "BACKEND_*") {
                 $freshnessStatus = "Unknown"
                 $freshnessDetail = "Backend commit unavailable from read-only status."
                 $warning = "Backend commit unavailable. Backend may be stale. Restart recommended."
@@ -342,13 +371,17 @@ function Get-LauncherStatus {
             }
             Clear-LauncherTransition
         } catch {
-            $status = "FAILED"
+            $status = "RUNNING_STATUS_TIMEOUT"
             $freshnessStatus = "Unknown"
-            $freshnessDetail = "Health/status check failed."
-            $healthState = "Failed"
-            $healthDetail = "Health/status endpoint failed."
+            $freshnessDetail = "Backend process and port are present, but health/status timed out or was unreachable."
+            $healthState = "Status timeout"
+            $healthDetail = "Backend process is running on port $Port, but health did not return inside launcher timeout."
             $healthText = "Health check failed: $($_.Exception.Message)"
-            $warning = "Backend failed health/status check. Restart recommended."
+            $loadedCommit = "BACKEND_HEALTH_TIMEOUT"
+            $loadedBranch = "BACKEND_HEALTH_TIMEOUT"
+            $startTime = "BACKEND_HEALTH_TIMEOUT"
+            $warning = "Backend status timeout. This is degraded, not generic FAILED; refresh or restart if it persists."
+            Write-LauncherLog "operator_health_timeout=$($_.Exception.GetType().Name):$($_.Exception.Message)"
         }
     } elseif ($portListening) {
         $status = "FAILED"
@@ -357,6 +390,9 @@ function Get-LauncherStatus {
         $healthState = "Failed"
         $healthDetail = "Port occupied by non-operator or unrecognized process."
         $healthText = "Port $Port listening without operator backend match."
+        $loadedCommit = "PORT_NOT_OPERATOR_BACKEND"
+        $loadedBranch = "PORT_NOT_OPERATOR_BACKEND"
+        $startTime = "PORT_NOT_OPERATOR_BACKEND"
         $warning = "Port $Port is occupied by a non-operator process. Start Backend cannot safely proceed."
     }
 
@@ -364,7 +400,7 @@ function Get-LauncherStatus {
         LauncherVersion = $LauncherVersion
         Status = $status
         BaseUrl = $BaseUrl
-        UiUrl = $UiUrl
+        UiUrl = $uiUrl
         HealthUrl = $script:LastHealthUrl
         RepoHead = $repoHead
         RepoBranch = $repoBranch
@@ -512,9 +548,10 @@ function Restart-Backend {
 }
 
 function Open-OperatorUi {
-    Start-Process $UiUrl | Out-Null
+    Update-OperatorUiUrl (Get-GitValue @("rev-parse", "--short", "HEAD")) | Out-Null
+    Start-Process $script:UiUrl | Out-Null
     $script:UiOpenedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    Write-LauncherLog "operator_ui_opened=$UiUrl"
+    Write-LauncherLog "operator_ui_opened=$script:UiUrl"
 }
 
 function Copy-Diagnostics {
@@ -918,6 +955,9 @@ function Refresh-LauncherStatus {
     if ($model.Status -eq "RUNNING") {
         $statusColor = $colorGood
         $statusLabel.ForeColor = $colorGood
+    } elseif ($model.Status -eq "RUNNING_STATUS_TIMEOUT") {
+        $statusColor = $colorWarn
+        $statusLabel.ForeColor = $colorWarn
     } elseif ($model.Status -eq "FAILED") {
         $statusColor = $colorBad
         $statusLabel.ForeColor = $colorBad
@@ -943,7 +983,7 @@ function Refresh-LauncherStatus {
     if ($model.Warning) {
         $warningLabel.Text = $model.Warning
         $warningLabel.ForeColor = $colorWarn
-    } elseif ($model.Status -eq "RUNNING" -and $model.FreshnessStatus -eq "Current") {
+    } elseif ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT") -and $model.FreshnessStatus -eq "Current") {
         $warningLabel.Text = "Backend code current. Local uncommitted files are diagnostics only."
         $warningLabel.ForeColor = $colorGood
     } elseif ($model.Status -eq "STOPPED") {
@@ -976,10 +1016,10 @@ function Refresh-LauncherStatus {
         $diagnosticsPreview.Text = "$($model.FreshnessDetail) Local files are diagnostics only."
     }
 
-    $startButton.Enabled = $model.Status -notin @("RUNNING", "STARTING", "STOPPING")
-    $stopButton.Enabled = $model.Status -eq "RUNNING" -or $model.Status -eq "FAILED"
-    $restartButton.Enabled = $model.Status -eq "RUNNING" -or $model.Status -eq "FAILED"
-    $openButton.Enabled = $model.Status -eq "RUNNING" -and $model.HealthState -eq "Connected" -and -not $model.Warning
+    $startButton.Enabled = $model.Status -notin @("RUNNING", "RUNNING_STATUS_TIMEOUT", "STARTING", "STOPPING")
+    $stopButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "FAILED")
+    $restartButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "FAILED")
+    $openButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT") -and $model.HealthState -eq "Connected"
     $refreshButton.Enabled = $true
     $copyButton.Enabled = $true
     $toggleDiagnosticsButton.Enabled = $true
@@ -993,7 +1033,7 @@ function Refresh-LauncherStatus {
     Set-ButtonTone $toggleDiagnosticsButton "secondary"
     if ($model.Status -eq "STOPPED") {
         Set-ButtonTone $startButton "good"
-    } elseif ($model.Status -eq "RUNNING") {
+    } elseif ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT")) {
         if ($openButton.Enabled) {
             Set-ButtonTone $openButton "primary"
         }
@@ -1010,7 +1050,7 @@ function Wait-ForBackendReady {
     param([int]$Attempts = 18)
     $model = Refresh-LauncherStatus
     for ($attempt = 0; $attempt -lt $Attempts; $attempt += 1) {
-        if ($model.Status -eq "RUNNING" -or $model.Status -eq "FAILED") {
+        if ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "FAILED")) {
             return $model
         }
         Start-Sleep -Milliseconds 500

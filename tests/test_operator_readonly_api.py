@@ -63,9 +63,11 @@ def test_operator_readonly_status_contract_is_safe_default(tmp_path):
 
     assert payload["api_version"] == API_VERSION
     assert payload["data_source"] == "OPERATOR_BACKEND"
-    assert payload["bot_status"] == "NO_ACTIVE_RUNTIME_ATTACHED"
+    assert payload["bot_status"] == "IDLE_NO_ACTIVE_PAPER_RUN"
     assert payload["live_blocked"] is True
     assert payload["real_money_blocked"] is True
+    assert payload["broker"] == "alpaca_paper"
+    assert payload["endpoint"] == "https://paper-api.alpaca.markets"
     assert payload["manual_trading_available"] is False
     assert payload["force_trade_available"] is False
     assert payload["broker_post_count"] == 0
@@ -374,7 +376,7 @@ def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
     assert first["allowed"] is True
     assert duplicate["allowed"] is False
     assert duplicate["reason_code"] == "DUPLICATE_ACTIVE_RUN"
-    assert status["dominant_blocker"] == "READY_IDLE_NO_ACTIVE_RUNTIME"
+    assert status["dominant_blocker"] == "READY_IDLE_NO_ACTIVE_PAPER_RUN"
     assert status["runtime_attachment_detail"] == "Ready. No PAPER run currently attached."
     assert status["last_historical_refusal_reason"] == "DUPLICATE_ACTIVE_RUN"
     assert runtime["process_state"] == "NO_ACTIVE_RUNTIME_ATTACHED"
@@ -444,14 +446,25 @@ def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     diagnostics = _endpoint(app, "/operator/diagnostics")()
 
     assert health["live_status"] == "LIVE_LOCKED"
+    assert health["ok"] is True
     assert health["api_version"] == API_VERSION
     assert health["operator_activation_version"] == OPERATOR_ACTIVATION_VERSION
     assert health["git_commit_short"]
     assert health["git_branch"]
+    assert health["loaded_commit"] == health["git_commit_short"]
+    assert health["loaded_branch"] == health["git_branch"]
+    assert health["repo_head"] == health["git_commit_short"]
+    assert health["branch"] == health["git_branch"]
     assert health["process_start_time"]
     assert isinstance(health["backend_pid"], int)
+    assert isinstance(health["pid"], int)
+    assert health["paper_only"] is True
     assert health["real_money_status"] == "BLOCKED"
     assert health["broker_call_occurred"] is False
+    assert health["elapsed_ms"] < 500
+    assert health["session_store_status"] == "NOT_ON_HEALTH_FAST_PATH"
+    assert health["world_awareness_cache_status"] == "NOT_ON_HEALTH_FAST_PATH"
+    assert health["config_status"] == "NOT_ON_HEALTH_FAST_PATH"
     assert readiness["live_ready"] is False
     assert readiness["live_refusal_reason"] == "LIVE_NOT_APPROVED"
     assert storage["session_store"]["store_type"] == "jsonl_append_only"
@@ -461,6 +474,25 @@ def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     assert diagnostics["operator_activation_version"] == OPERATOR_ACTIVATION_VERSION
     assert diagnostics["operator_config"]["real_money_enabled"] is False
     assert diagnostics["storage"]["secrets_values_exposed"] is False
+
+
+def test_operator_ui_index_is_no_store_and_commit_cache_busted(tmp_path):
+    app = _app(tmp_path)
+
+    health = _endpoint(app, "/operator/health")()
+    response = _endpoint(app, "/operator-ui/")()
+    html = response.body.decode("utf-8")
+    version = health["loaded_commit"]
+
+    assert response.headers["Cache-Control"] == "no-store, max-age=0, must-revalidate"
+    assert response.headers["Pragma"] == "no-cache"
+    assert response.headers["Expires"] == "0"
+    assert f"styles.css?v={version}" in html
+    assert f"mock-data.js?v={version}" in html
+    assert f"app.js?v={version}" in html
+    assert f'window.PK_OPERATOR_UI_BUILD_COMMIT = "{version}"' in html
+    assert "operator-ui-build" not in html
+    assert "operator-activation-e2e-truth6-20260602" not in html
 
 
 def test_operator_provider_and_research_endpoints_are_safe(tmp_path):

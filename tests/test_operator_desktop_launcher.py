@@ -5,7 +5,8 @@ from pathlib import Path
 
 HIDDEN_LAUNCHER = Path("scripts/open_operator_console_hidden.ps1")
 VISIBLE_LAUNCHER = Path("scripts/open_operator_console.ps1")
-OPERATOR_UI_VERSION = "operator-activation-e2e-truth6-20260602"
+OPERATOR_UI_BUILD_PLACEHOLDER = "operator-ui-build"
+STALE_OPERATOR_UI_VERSION = "operator-activation-e2e-truth6-20260602"
 
 
 def _launcher_text() -> str:
@@ -44,7 +45,8 @@ def test_hidden_launcher_requires_operator_health_before_browser_open():
     assert "vault_writable" in text
     assert "last_save_received_field_presence" in text
 
-    assert f'$UiVersion = "{OPERATOR_UI_VERSION}"' in text
+    assert "git -C $RepoRoot rev-parse --short HEAD" in text
+    assert "$UiVersion = [string]$gitHead" in text
     browser_open = 'Start-Process "$BaseUrl/operator-ui/?v=$UiVersion"'
     assert browser_open in text
     browser_index = text.index(browser_open)
@@ -117,6 +119,10 @@ def test_visible_launcher_presents_safe_backend_control_window():
     assert "Restart required after update" not in text
     assert "/operator/health" in text
     assert "/operator/status" in text
+    assert "Update-OperatorUiUrl" in text
+    assert "$BaseUrl/operator-ui/?v=$version&t=$timestampMs" in text
+    assert "operator_ui_opened=$script:UiUrl" in text
+    assert STALE_OPERATOR_UI_VERSION not in text
     assert "/operator/intent/paper/start" not in text
     assert "broker mutation" in text
     assert "live enablement" in text
@@ -144,7 +150,12 @@ def test_visible_launcher_health_timeout_and_import_crash_are_not_silent():
     text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
 
     assert "function Wait-ForBackendReady" in text
-    assert 'Set-LauncherFailure $phase "Backend did not reach healthy RUNNING state' in text
+    assert "RUNNING_STATUS_TIMEOUT" in text
+    assert 'Backend status timeout. This is degraded, not generic FAILED' in text
+    assert '$loadedCommit = "BACKEND_NOT_RUNNING"' in text
+    assert '$loadedCommit = "BACKEND_HEALTH_TIMEOUT"' in text
+    assert '$loadedCommit = "PORT_NOT_OPERATOR_BACKEND"' in text
+    assert '$loadedCommit = "UNKNOWN_NOT_AVAILABLE"' not in text
     assert '$phase = "health_timeout"' in text
     assert '$phase = "import_crash"' in text
     assert "Traceback|ImportError|ModuleNotFoundError|Error loading ASGI app|Exception" in text
@@ -252,7 +263,8 @@ def test_visible_launcher_creates_stable_taskbar_pin_shortcut_identity():
 def test_operator_ui_assets_are_cache_busted_for_desktop_launcher():
     text = Path("ui/operator-control-panel/index.html").read_text(encoding="utf-8")
 
-    assert f"styles.css?v={OPERATOR_UI_VERSION}" in text
-    assert f"mock-data.js?v={OPERATOR_UI_VERSION}" in text
-    assert f"app.js?v={OPERATOR_UI_VERSION}" in text
+    assert f"styles.css?v={OPERATOR_UI_BUILD_PLACEHOLDER}" in text
+    assert f"mock-data.js?v={OPERATOR_UI_BUILD_PLACEHOLDER}" in text
+    assert f"app.js?v={OPERATOR_UI_BUILD_PLACEHOLDER}" in text
+    assert STALE_OPERATOR_UI_VERSION not in text
     assert "operator-credential-hotfix-20260531" not in text

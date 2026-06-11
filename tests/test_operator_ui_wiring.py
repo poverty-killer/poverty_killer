@@ -7,6 +7,7 @@ APP_JS = Path("ui/operator-control-panel/app.js")
 MOCK_JS = Path("ui/operator-control-panel/mock-data.js")
 STYLES_CSS = Path("ui/operator-control-panel/styles.css")
 LAUNCHER_PS1 = Path("scripts/open_operator_console_hidden.ps1")
+VISIBLE_LAUNCHER_PS1 = Path("scripts/open_operator_console.ps1")
 
 
 def _app_text() -> str:
@@ -207,9 +208,10 @@ def test_ai_evidence_labels_ready_idle_as_state_not_blocker():
     text = _app_text()
 
     assert "function aiReadyIdleNoActiveRuntime" in text
-    assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" in text
+    assert "Current state: IDLE_NO_ACTIVE_PAPER_RUN" in text
     assert "Current blocker: ${blocker}" in text
     assert "value === \"READY_IDLE_NO_ACTIVE_RUNTIME\"" in text
+    assert "READY_FOR_GOVERNED_PAPER" in text
 
 
 def test_fills_summary_labels_strict_smoke_fee_hydration_skip():
@@ -434,11 +436,39 @@ def test_paper_control_state_timeout_is_precise_fail_closed_authority():
 
 def test_operator_launcher_cache_busts_ui_with_loaded_commit():
     text = LAUNCHER_PS1.read_text(encoding="utf-8")
+    visible = VISIBLE_LAUNCHER_PS1.read_text(encoding="utf-8")
 
     assert "git -C $RepoRoot rev-parse --short HEAD" in text
     assert "$UiVersion = [string]$gitHead" in text
     assert "Opening browser at $BaseUrl/operator-ui/?v=$UiVersion" in text
     assert '$UiVersion = "operator-activation-e2e-truth6-20260602"' not in text
+    assert "function Update-OperatorUiUrl" in visible
+    assert "$BaseUrl/operator-ui/?v=$version&t=$timestampMs" in visible
+    assert "operator_ui_opened=$script:UiUrl" in visible
+    assert "operator-activation-e2e-truth6-20260602" not in visible
+
+
+def test_operator_ui_tracks_frontend_backend_commit_mismatch():
+    text = _app_text()
+
+    assert "function uiBuildCommit" in text
+    assert "window.PK_OPERATOR_UI_BUILD_COMMIT" in text
+    assert "UI_BACKEND_COMMIT_MISMATCH" in text
+    assert "payload.uiBuildCommit = uiBuildCommit()" in text
+    assert 'next.meta.uiBuildCommit = pick(payload.uiBuildCommit, uiBuildCommit())' in text
+
+
+def test_top_banner_treats_safety_locks_and_idle_as_good_states():
+    text = _app_text()
+
+    assert 'badge("Live locked", "green")' in text
+    assert 'badge("Real-money blocked", "green")' in text
+    assert 'badge("LIVE_LOCKED", "green")' in text
+    assert 'badge("REAL_MONEY_BLOCKED", "green")' in text
+    assert 'next.status.broker = pick(status.broker, "alpaca_paper")' in text
+    assert 'next.status.endpoint = pick(status.endpoint, "https://paper-api.alpaca.markets")' in text
+    assert 'next.status.activeProfile = pick(status.active_profile || profile.active_threshold_profile, "PAPER_IDLE")' in text
+    assert 'IDLE_NO_ACTIVE_PAPER_RUN' in text
 
 
 def test_historical_test_control_is_visible_and_honest():

@@ -669,6 +669,12 @@
     return data.meta.dataSource === "OPERATOR_BACKEND" || data.meta.dataSource === "PARTIAL_BACKEND";
   }
 
+  function uiBuildCommit() {
+    if (window.PK_OPERATOR_UI_BUILD_COMMIT) return String(window.PK_OPERATOR_UI_BUILD_COMMIT);
+    const params = new URLSearchParams(window.location.search || "");
+    return params.get("v") || "UNKNOWN_UI_BUILD_COMMIT";
+  }
+
   function isMockAuthoritySource(source) {
     const value = String(source || "").toUpperCase();
     return value === "MOCK_DATA" || value === "STATIC_MOCK" || value.includes("MOCK_");
@@ -1511,8 +1517,8 @@
       badge(s.activeProfile, "cyan"),
       badge(`Broker: ${s.broker}`, "blue"),
       badge(endpointLabel, endpointLabel === "PAPER endpoint" ? "green" : "yellow"),
-      badge("Live blocked", "red"),
-      badge("Real-money blocked", "red"),
+      badge("Live locked", "green"),
+      badge("Real-money blocked", "green"),
       backendDegradedCount()
         ? `<button class="status-detail-link" type="button" data-screen-shortcut="diagnostics">View details</button>`
         : ""
@@ -1824,7 +1830,7 @@
           ${renderRunPaperProofTile("Credentials", credentials.label || (launch.alpacaPaperCredentialsConfigured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing"), credentialDetail, credentials.configured === true || launch.alpacaPaperCredentialsConfigured ? "green" : "red")}
           ${renderRunPaperProofTile("Runtime", runtime.label || runtimeAttachment, `Supervisor ${runtime.state || sup.state || "UNKNOWN"}; safe stop ${runtime.safeStopStatus || launch.safeStopStatus || "UNKNOWN"}.`, (runtime.state || sup.state) === "RUNNING" ? "yellow" : "green")}
           ${renderRunPaperProofTile("Broker / portfolio truth", brokerTruth.label || "Broker truth not loaded in this card", brokerTruth.detail || "Portfolio Snapshot remains the broker-confirmed truth area; no positions are invented here.", brokerTruth.brokerConfirmed === true ? "green" : (brokerTruth.status === "BROKER_READ_READY_NOT_IN_THIS_VIEW" ? "yellow" : "red"))}
-          ${renderRunPaperProofTile("Safety locks", "Live locked / real money blocked", safetyDetail, "red")}
+          ${renderRunPaperProofTile("Safety locks", "Live locked / real money blocked", safetyDetail, "green")}
           ${renderRunPaperProofTile("Start readiness", canRun.allowed === true ? "Start allowed" : "Start blocked", blockerText, canRun.allowed === true ? "green" : "red")}
           ${renderRunPaperProofTile("Max lease seconds", `${maxDuration}`, `Configured ${configuredMaxDuration}; runner ${runnerMaxDuration}; allowed durations include 72 hours and 5 days when max permits.`, maxDuration >= 432000 ? "green" : "yellow")}
         </div>
@@ -2155,7 +2161,7 @@
           ["Last heartbeat", badge(s.lastHeartbeat, "green")],
           ["Market data", escapeHtml(s.marketData)],
           ["Universe", escapeHtml(s.universe.join(", "))],
-          ["Current runtime state", badge(s.dominantBlocker, s.dominantBlocker === "READY_IDLE_NO_ACTIVE_RUNTIME" ? "green" : "yellow")]
+          ["Current runtime state", badge(s.dominantBlocker, ["IDLE_NO_ACTIVE_PAPER_RUN", "READY_IDLE_NO_ACTIVE_PAPER_RUN"].includes(s.dominantBlocker) ? "green" : "yellow")]
         ])}</div>
         <div class="card span-4"><h3>Broker Boundary</h3>${kv([
           ["POST count", escapeHtml(s.brokerPostCount)],
@@ -3990,7 +3996,9 @@
     const processState = runtime && String(runtime.process_state || runtime.processState || runtime.bot_status || runtime.botStatus || "").toUpperCase();
     return (
       blockers.includes("READY_IDLE_NO_ACTIVE_RUNTIME") ||
-      (aiContextLaunchReadiness(context) === "READY_FOR_BOUNDED_PAPER" && aiContextPaperStartAllowed(context) && supervisorState === "IDLE" && processState !== "RUNNING")
+      blockers.includes("READY_IDLE_NO_ACTIVE_PAPER_RUN") ||
+      blockers.includes("IDLE_NO_ACTIVE_PAPER_RUN") ||
+      (["READY_FOR_GOVERNED_PAPER", "READY_FOR_BOUNDED_PAPER"].includes(aiContextLaunchReadiness(context)) && aiContextPaperStartAllowed(context) && supervisorState === "IDLE" && processState !== "RUNNING")
     );
   }
 
@@ -3998,7 +4006,7 @@
     const blockers = context && Array.isArray(context.blockers) ? context.blockers : [];
     return blockers.find((item) => {
       const value = String(item || "");
-      if (!value || value === "READY_IDLE_NO_ACTIVE_RUNTIME") return false;
+      if (!value || value === "READY_IDLE_NO_ACTIVE_RUNTIME" || value === "READY_IDLE_NO_ACTIVE_PAPER_RUN" || value === "IDLE_NO_ACTIVE_PAPER_RUN") return false;
       if (value.startsWith("WARNING:")) return false;
       if (value.startsWith("LIVE_MISSING:")) return false;
       return value.startsWith("BLOCKER:") || /^[A-Z0-9_]+$/.test(value);
@@ -4007,7 +4015,7 @@
 
   function aiPreferredKnownFact(result) {
     const facts = result && Array.isArray(result.knownFacts) ? result.knownFacts : [];
-    return facts.find((item) => /READY_FOR_BOUNDED_PAPER|Supervisor:|Paper start allowed|Launch readiness/i.test(String(item || ""))) || facts[0] || "";
+    return facts.find((item) => /READY_FOR_GOVERNED_PAPER|READY_FOR_BOUNDED_PAPER|Supervisor:|Paper start allowed|Launch readiness/i.test(String(item || ""))) || facts[0] || "";
   }
 
   function aiAnswerMetaText(result, createdAt) {
@@ -4046,7 +4054,7 @@
     if (result.evidenceLevel) bullets.push(`Evidence level: ${result.evidenceLevel}`);
     const blocker = aiActualBlocker(context);
     if (aiReadyIdleNoActiveRuntime(context)) {
-      bullets.push("Current state: READY_IDLE_NO_ACTIVE_RUNTIME");
+      bullets.push("Current state: IDLE_NO_ACTIVE_PAPER_RUN");
     } else if (blocker) {
       bullets.push(`Current blocker: ${blocker}`);
     }
@@ -4997,7 +5005,7 @@
   function renderRail() {
     const critical = data.alerts.filter((alert) => alert.severity === "SAFETY_CRITICAL").length;
     const pendingAI = data.ai.pendingReviewCount || 0;
-    const readyIdle = data.status.dominantBlocker === "READY_IDLE_NO_ACTIVE_RUNTIME";
+    const readyIdle = ["IDLE_NO_ACTIVE_PAPER_RUN", "READY_IDLE_NO_ACTIVE_PAPER_RUN", "READY_IDLE_NO_ACTIVE_RUNTIME"].includes(data.status.dominantBlocker);
     const currentStateTitle = readyIdle ? "Current Runtime State" : "Dominant Blocker";
     const currentStateColor = readyIdle ? "green" : "yellow";
     const historicalRefusal = data.supervisor.lastHistoricalRefusal || "none";
@@ -5005,8 +5013,8 @@
       <div class="card rail-card"><h3>Current Alerts</h3>
         <div class="stack">
           ${badge(sourceLabel(), dataSourceColor())}
-          ${badge("LIVE_LOCKED", "red")}
-          ${badge("REAL_MONEY_BLOCKED", "red")}
+          ${badge("LIVE_LOCKED", "green")}
+          ${badge("REAL_MONEY_BLOCKED", "green")}
           ${badge(`${data.alerts.length} watchdog`, data.alerts.length ? "yellow" : "gray")}
           ${badge(`${critical} critical`, critical ? "red" : "gray")}
         </div>
@@ -5689,7 +5697,7 @@
         brokerMutation: { label: "No broker mutation from control state", occurred: c.brokerMutationOccurred === true }
       },
       advanced: {
-        finalLaunchReadiness: allowed ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED",
+        finalLaunchReadiness: allowed ? "READY_FOR_GOVERNED_PAPER" : "BLOCKED",
         reasonCodes,
         checks: [],
         paperEndpointDisplay: c.endpointDisplay || c.endpointHost || "unavailable",
@@ -5736,7 +5744,7 @@
     state.launchReadiness.paperStartAllowed = control.paperStartAllowed === true;
     state.launchReadiness.reasonCodes = control.reasonCodes || [];
     state.launchReadiness.runPaperOperatorState = buildRunPaperStateFromControlState(control, state);
-    state.launchReadiness.finalLaunchReadiness = control.paperStartAllowed === true ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED";
+    state.launchReadiness.finalLaunchReadiness = control.paperStartAllowed === true ? "READY_FOR_GOVERNED_PAPER" : "BLOCKED";
     state.launchReadiness.paperEndpointDisplay = control.endpointDisplay || state.launchReadiness.paperEndpointDisplay;
     state.launchReadiness.paperEndpointFamily = control.endpointFamily || state.launchReadiness.paperEndpointFamily;
     state.launchReadiness.paperEndpointHost = control.endpointHost || state.launchReadiness.paperEndpointHost;
@@ -5799,24 +5807,33 @@
     const readyIdleNoRuntime = !hasActiveSession
       && supervisorStartAllowed
       && (
-        status.dominant_blocker === "READY_IDLE_NO_ACTIVE_RUNTIME"
+        status.dominant_blocker === "READY_IDLE_NO_ACTIVE_PAPER_RUN"
+        || status.dominant_blocker === "IDLE_NO_ACTIVE_PAPER_RUN"
+        || status.dominant_blocker === "READY_IDLE_NO_ACTIVE_RUNTIME"
+        || runtime.runtime_attachment_state === "READY_IDLE_NO_ACTIVE_PAPER_RUN"
+        || runtime.runtime_attachment_state === "IDLE_NO_ACTIVE_PAPER_RUN"
         || runtime.runtime_attachment_state === "NO_ACTIVE_RUNTIME_ATTACHED"
+        || launchReadiness.final_launch_readiness === "READY_FOR_GOVERNED_PAPER"
         || launchReadiness.final_launch_readiness === "READY_FOR_BOUNDED_PAPER"
       );
 
     next.meta.dataSource = "OPERATOR_BACKEND";
     next.meta.buildMode = "operator_backend_supervisor_ready";
-    next.meta.runtimeCommit = pick(runtime.runtime_commit, diagnostics.git_commit || "unknown");
+    next.meta.runtimeCommit = pick(
+      status.git_commit_short || health.loaded_commit || health.git_commit_short || runtime.runtime_commit,
+      diagnostics.git_commit || "unknown"
+    );
+    next.meta.uiBuildCommit = pick(payload.uiBuildCommit, uiBuildCommit());
     next.meta.lastUpdated = pick(status.updated_at, new Date().toISOString());
 
     const backendBotStatus = pick(status.bot_status, "NO_ACTIVE_RUNTIME_ATTACHED");
     next.status.botStatus = backendBotStatus === "NO_ACTIVE_RUNTIME_ATTACHED" ? "NO_ACTIVE_PAPER_RUN" : backendBotStatus;
     next.status.runtimeMode = pick(status.runtime_mode, "PAPER");
     next.status.capabilityState = pick(status.capability_state || status.mode_state, "PAPER_ENABLED");
-    next.status.activeProfile = pick(status.active_profile || profile.active_threshold_profile, "UNKNOWN_NO_ACTIVE_RUNTIME");
-    next.status.broker = pick(status.broker, "UNKNOWN_NO_ACTIVE_RUNTIME");
-    next.status.endpoint = pick(status.endpoint, "UNKNOWN_NO_ACTIVE_RUNTIME");
-    next.status.marketData = pick(status.market_data, "UNKNOWN_NO_ACTIVE_RUNTIME");
+    next.status.activeProfile = pick(status.active_profile || profile.active_threshold_profile, "PAPER_IDLE");
+    next.status.broker = pick(status.broker, "alpaca_paper");
+    next.status.endpoint = pick(status.endpoint, "https://paper-api.alpaca.markets");
+    next.status.marketData = pick(status.market_data, "IDLE_NO_ACTIVE_MARKET_DATA_RUNTIME");
     next.status.universe = Array.isArray(status.universe) && status.universe.length ? status.universe : pick(universe.symbols, []);
     next.status.assetClasses = Array.isArray(status.asset_classes) && status.asset_classes.length ? status.asset_classes : pick(universe.asset_classes, []);
     next.status.uptime = hasActiveSession && runtime.duration_seconds !== null && runtime.duration_seconds !== undefined
@@ -5830,8 +5847,8 @@
     next.status.mutationAuthorizedCount = pick(status.mutation_authorized_count, 0);
     next.status.safetyVerdict = pick(status.safety_verdict, "READ_ONLY_BACKEND_IDLE");
     next.status.dominantBlocker = readyIdleNoRuntime
-      ? "READY_IDLE_NO_ACTIVE_RUNTIME"
-      : pick(status.dominant_blocker, "NO_ACTIVE_RUNTIME_ATTACHED");
+      ? "IDLE_NO_ACTIVE_PAPER_RUN"
+      : pick(status.dominant_blocker, "IDLE_NO_ACTIVE_PAPER_RUN");
     next.status.lastDecision = hasActiveSession
       ? "Decision detail unavailable from backend summary"
       : (readyIdleNoRuntime ? "Ready. No PAPER run currently attached." : (latestHistoricalRefusal ? `No active PAPER run. Last historical refusal ${latestHistoricalRefusal}` : "No active PAPER run"));
@@ -5840,7 +5857,7 @@
     next.supervisor.pid = hasActiveSession ? pick(activeSession.pid || runtime.pid, "none") : "none";
     next.supervisor.processState = hasActiveSession ? pick(activeSession.status || runtime.process_state, "UNKNOWN") : "NO_ACTIVE_PAPER_RUN";
     next.supervisor.durationSeconds = hasActiveSession ? pick(activeSession.duration_seconds || runtime.duration_seconds, null) : null;
-    next.supervisor.profile = hasActiveSession ? pick(activeSession.profile || status.active_profile, "UNKNOWN_NO_ACTIVE_RUNTIME") : "UNKNOWN_NO_ACTIVE_RUNTIME";
+    next.supervisor.profile = hasActiveSession ? pick(activeSession.profile || status.active_profile, "PAPER_IDLE") : "PAPER_IDLE";
     next.supervisor.watchlist = hasActiveSession ? pick(activeSession.watchlist || status.universe, []) : [];
     next.supervisor.stdoutPath = hasActiveSession ? pick(activeSession.stdout_path || runtime.stdout_path, "not available") : "not available";
     next.supervisor.stderrPath = hasActiveSession ? pick(activeSession.stderr_path || runtime.stderr_path, "not available") : "not available";
@@ -6123,6 +6140,10 @@
       next.portfolio = normalizePortfolio(portfolio);
       next.positions = next.portfolio.positions;
       next.orders = next.portfolio.openOrders;
+      if (next.portfolio.status === "BROKER_CONFIRMED") {
+        next.status.broker = "alpaca_paper";
+        next.status.endpoint = "https://paper-api.alpaca.markets";
+      }
     }
     if (paperBaseline.source) {
       next.paperBaseline = normalizePaperBaseline(paperBaseline);
@@ -6435,6 +6456,17 @@
         }
       }
     }));
+    payload.uiBuildCommit = uiBuildCommit();
+    const backendCommit = String(
+      (payload.status && payload.status.git_commit_short)
+      || (payload.health && (payload.health.loaded_commit || payload.health.git_commit_short))
+      || ""
+    );
+    if (backendCommit && payload.uiBuildCommit && backendCommit !== "UNKNOWN_NOT_AVAILABLE" && payload.uiBuildCommit !== "UNKNOWN_UI_BUILD_COMMIT" && backendCommit !== payload.uiBuildCommit) {
+      const mismatch = `UI_BACKEND_COMMIT_MISMATCH: ui=${payload.uiBuildCommit} backend=${backendCommit}`;
+      endpointFailures.uiBuildCommit = mismatch;
+      failures.push(mismatch);
+    }
     payload.endpointFailures = endpointFailures;
 
     const normalized = normalizeBackendData(payload);
