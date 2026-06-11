@@ -463,6 +463,15 @@ class OperatorSnapshotProvider:
         self._refresh_provider_env()
         return self.supervisor.status_snapshot()
 
+    def _supervisor_health_state(self) -> str:
+        session = getattr(self.supervisor, "_session", None)
+        status = str(getattr(session, "status", "") or "").strip().upper()
+        if status in {"STARTING", "RUNNING", "STOP_REQUESTED"}:
+            return "RUNNING"
+        if status == "PROCESS_STATE_UNKNOWN_AFTER_RESTART":
+            return "STALE_ACTIVE_SESSION"
+        return "IDLE"
+
     def _alpaca_paper_configured(self) -> bool:
         summary = self.credential_store.provider_summary("alpaca_paper", self.process_env)
         return bool(summary["configured"])
@@ -529,7 +538,7 @@ class OperatorSnapshotProvider:
 
     def health(self) -> dict[str, Any]:
         started_ns = time.perf_counter_ns()
-        supervisor = self._supervisor_snapshot()
+        supervisor_state = self._supervisor_health_state()
         elapsed_ms = round((time.perf_counter_ns() - started_ns) / 1_000_000, 3)
         timestamp_utc = _utc_now()
         identity = self._backend_process_identity()
@@ -546,7 +555,7 @@ class OperatorSnapshotProvider:
             "pid": os.getpid(),
             "uptime": self.process_start_time,
             "paper_only": True,
-            "supervisor_status": supervisor["state"],
+            "supervisor_status": supervisor_state,
             "session_store_status": "NOT_ON_HEALTH_FAST_PATH",
             "world_awareness_cache_status": "NOT_ON_HEALTH_FAST_PATH",
             "config_status": "NOT_ON_HEALTH_FAST_PATH",

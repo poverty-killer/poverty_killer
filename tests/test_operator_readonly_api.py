@@ -495,6 +495,22 @@ def test_operator_ui_index_is_no_store_and_commit_cache_busted(tmp_path):
     assert "operator-activation-e2e-truth6-20260602" not in html
 
 
+def test_operator_health_does_not_call_heavy_supervisor_snapshot(tmp_path):
+    class FastHealthProvider(OperatorSnapshotProvider):
+        def _supervisor_snapshot(self):  # pragma: no cover - should never be called by health
+            raise AssertionError("health must stay on the local-only fast path")
+
+    runtime_config = OperatorRuntimeConfig.from_env({}, repo_root=tmp_path)
+    app = create_operator_app(provider=FastHealthProvider(runtime_config=runtime_config))
+
+    health = _endpoint(app, "/operator/health")()
+
+    assert health["ok"] is True
+    assert health["api_status"] == "OK"
+    assert health["supervisor_status"] == "IDLE"
+    assert health["elapsed_ms"] < 500
+
+
 def test_operator_provider_and_research_endpoints_are_safe(tmp_path):
     app = _app(tmp_path)
 
