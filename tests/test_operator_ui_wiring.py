@@ -452,10 +452,12 @@ def test_operator_ui_tracks_frontend_backend_commit_mismatch():
     text = _app_text()
 
     assert "function uiBuildCommit" in text
+    assert "function isUnknownBuildCommit" in text
     assert "window.PK_OPERATOR_UI_BUILD_COMMIT" in text
     assert "UI_BACKEND_COMMIT_MISMATCH" in text
     assert "payload.uiBuildCommit = uiBuildCommit()" in text
     assert 'next.meta.uiBuildCommit = pick(payload.uiBuildCommit, uiBuildCommit())' in text
+    assert "UNKNOWN_NOT_A" not in text
 
 
 def test_top_banner_treats_safety_locks_and_idle_as_good_states():

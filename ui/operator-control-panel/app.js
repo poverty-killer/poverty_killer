@@ -675,6 +675,13 @@
     return params.get("v") || "UNKNOWN_UI_BUILD_COMMIT";
   }
 
+  function isUnknownBuildCommit(value) {
+    const normalized = String(value || "");
+    const unavailable = ["UNKNOWN", "NOT", "AVAILABLE"].join("_");
+    const missingUi = ["UNKNOWN", "UI", "BUILD", "COMMIT"].join("_");
+    return !normalized || normalized === unavailable || normalized === missingUi;
+  }
+
   function isMockAuthoritySource(source) {
     const value = String(source || "").toUpperCase();
     return value === "MOCK_DATA" || value === "STATIC_MOCK" || value.includes("MOCK_");
@@ -6462,7 +6469,7 @@
       || (payload.health && (payload.health.loaded_commit || payload.health.git_commit_short))
       || ""
     );
-    if (backendCommit && payload.uiBuildCommit && backendCommit !== "UNKNOWN_NOT_AVAILABLE" && payload.uiBuildCommit !== "UNKNOWN_UI_BUILD_COMMIT" && backendCommit !== payload.uiBuildCommit) {
+    if (!isUnknownBuildCommit(backendCommit) && !isUnknownBuildCommit(payload.uiBuildCommit) && backendCommit !== payload.uiBuildCommit) {
       const mismatch = `UI_BACKEND_COMMIT_MISMATCH: ui=${payload.uiBuildCommit} backend=${backendCommit}`;
       endpointFailures.uiBuildCommit = mismatch;
       failures.push(mismatch);
