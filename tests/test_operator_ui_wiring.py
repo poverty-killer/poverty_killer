@@ -93,7 +93,8 @@ def test_commercial_navigation_groups_keep_all_pages_accessible():
         "live",
     ]:
         assert f'"{page_id}"' in text
-    assert "main.innerHTML = screens.map" in text
+    assert "const renderer = renderers[selected] || renderPositions" in text
+    assert "main.innerHTML = screens.map" not in text
     assert "group.items.map" in text
     assert "showScreen(button.dataset.screen)" in text
 
@@ -399,8 +400,12 @@ def test_backend_connected_run_paper_never_keeps_mock_authority():
     assert "Backend source" in text
     assert "canonical_source_order" in text
     assert "paper-control-state > launch-readiness" in text
-    assert 'payload.paperControlState = await fetchJson("/operator/paper-control-state")' in text
-    assert text.index('payload.paperControlState = await fetchJson("/operator/paper-control-state")') < text.index("await Promise.all(endpoints.map")
+    assert "function createRequestScheduler" in text
+    assert 'path: "/operator/paper-control-state", priority: 0, lane: "critical"' in text
+    assert 'path: "/operator/launcher-status", priority: 0, lane: "critical"' in text
+    assert "Promise.allSettled" in text
+    assert "await Promise.all(endpoints.map" not in text
+    assert "REQUEST_LANE_LIMITS" in text
     assert "buildProductionUnavailableState" in text
     assert "let data = clone(mockData)" not in text
     assert "const next = clone(mockData)" not in text
@@ -414,6 +419,23 @@ def test_backend_connected_run_paper_never_keeps_mock_authority():
     assert "Sample data" not in text
     assert "sample data fallback" not in text
     assert "mock/sample mode cannot start PAPER" not in text
+
+
+def test_operator_ui_uses_scheduler_and_active_screen_rendering():
+    text = _app_text()
+
+    assert "function endpointTasksForScreen" in text
+    assert "priority: 0" in text
+    assert "critical: 2" in text
+    assert "normal: 3" in text
+    assert "optional: 2" in text
+    assert "activeLoadAbortController.abort()" in text
+    assert "stale backend response ignored" in text
+    assert "const renderer = renderers[selected] || renderPositions" in text
+    assert 'main.innerHTML = `<section class="screen active" id="screen-${selected}">${renderer()}</section>`' in text
+    assert 'screens.map(([id]) => `<section class="screen"' not in text
+    assert "refreshActiveScreenData(id)" in text
+    assert 'path: "/operator/ai/recommendations", priority: 3, lane: "optional", optional: true' in text
 
 
 def test_paper_control_state_timeout_is_precise_fail_closed_authority():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import asyncio
 import time
 
 from app.api.operator_readonly_api import API_VERSION, OPERATOR_ACTIVATION_VERSION, OperatorSnapshotProvider, create_operator_app
@@ -47,7 +48,13 @@ class FakeReadOnlyClient:
 def _endpoint(app, path: str, method: str = "GET"):
     for route in app.routes:
         if route.path == path and method in (route.methods or set()):
-            return route.endpoint
+            def call(*args, _endpoint=route.endpoint, **kwargs):
+                result = _endpoint(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    return asyncio.run(result)
+                return result
+
+            return call
     raise AssertionError(f"route not found: {method} {path}")
 
 
@@ -130,6 +137,11 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/api/mode/{mode}" not in paths
     assert "/api/flatten" not in paths
     assert "/operator/status" in paths
+    assert "/operator/launcher-status" in paths
+    assert "/operator/version" in paths
+    assert "/operator/runtime-minimal" in paths
+    assert "/operator/perf/recent" in paths
+    assert "/operator/events" in paths
     assert "/operator/readiness/live" in paths
     assert "/operator/providers" in paths
     assert "/operator/credentials/providers" in paths
@@ -511,6 +523,56 @@ def test_operator_health_does_not_call_heavy_supervisor_snapshot(tmp_path):
     assert health["elapsed_ms"] < 500
 
 
+def test_operator_control_lane_endpoints_are_local_only(tmp_path):
+    class FastControlProvider(OperatorSnapshotProvider):
+        def _supervisor_snapshot(self):  # pragma: no cover - control lane must not call this
+            raise AssertionError("control lane must not call heavy supervisor snapshot")
+
+        def portfolio(self):  # pragma: no cover - control lane must not call this
+            raise AssertionError("control lane must not call broker/portfolio snapshot")
+
+        def launch_readiness(self):  # pragma: no cover - control lane must not call this
+            raise AssertionError("control lane must not call launch readiness fan-out")
+
+    runtime_config = OperatorRuntimeConfig.from_env({}, repo_root=tmp_path)
+    app = create_operator_app(provider=FastControlProvider(runtime_config=runtime_config))
+
+    for path in ("/operator/health", "/operator/launcher-status", "/operator/status", "/operator/version", "/operator/runtime-minimal"):
+        started = time.perf_counter()
+        payload = _endpoint(app, path)()
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.5, path
+        assert payload.get("secrets_values_exposed") is not True
+
+    launcher_status = _endpoint(app, "/operator/launcher-status")()
+    assert launcher_status["control_lane"] is True
+    assert launcher_status["paper_only"] is True
+    assert launcher_status["live_locked"] is True
+    assert launcher_status["real_money_blocked"] is True
+    assert launcher_status["broker_call_occurred"] is False
+    assert launcher_status["broker_mutation_occurred"] is False
+
+
+def test_operator_perf_middleware_records_recent_timings(tmp_path):
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    app = create_operator_app(provider=provider)
+
+    in_flight = provider.perf_recorder.begin()
+    provider.perf_recorder.finish(
+        path="/operator/health",
+        method="GET",
+        status_code=200,
+        elapsed_ms=12.5,
+        in_flight_count=in_flight,
+    )
+    perf = _endpoint(app, "/operator/perf/recent")()
+
+    assert perf["source"] == "OPERATOR_PERF_RECORDER"
+    assert perf["event_count"] >= 1
+    assert any(row["path"] == "/operator/health" for row in perf["events"])
+    assert perf["secrets_values_exposed"] is False
+
+
 def test_operator_provider_and_research_endpoints_are_safe(tmp_path):
     app = _app(tmp_path)
 
@@ -560,6 +622,10 @@ def test_operator_endpoint_smoke_matrix_is_safe(tmp_path):
 
     get_paths = [
         "/operator/status",
+        "/operator/launcher-status",
+        "/operator/version",
+        "/operator/runtime-minimal",
+        "/operator/perf/recent",
         "/operator/runtime",
         "/operator/latest-run",
         "/operator/action-center",

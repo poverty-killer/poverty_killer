@@ -8,19 +8,24 @@ engine or direct broker control surface.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 import secrets
 import subprocess
+import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+import anyio.to_thread
 from fastapi import APIRouter, FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.ai_chief_operator.config import AIChiefConfig
@@ -49,6 +54,7 @@ from app.operator_activation.paper_baseline import (
 )
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.api.operator_snapshot_store import OperatorPerfRecorder, OperatorSnapshotStore
 from app.operator_credentials.store import (
     ALPACA_ENDPOINT_SOURCE_ENV_KEY,
     DEFAULT_RELATIVE_STORE_PATH,
@@ -222,6 +228,10 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
     "endpoints": {
         "/operator/status": "read_only_runtime_status",
         "/operator/health": "read_only_operator_health",
+        "/operator/launcher-status": "read_only_fast_launcher_status",
+        "/operator/version": "read_only_backend_ui_version",
+        "/operator/runtime-minimal": "read_only_fast_runtime_minimal",
+        "/operator/perf/recent": "read_only_operator_perf_recent",
         "/operator/readiness": "read_only_operator_readiness",
         "/operator/storage": "read_only_operator_storage_status",
         "/operator/runtime": "read_only_runtime_session_summary",
@@ -337,8 +347,12 @@ class OperatorSnapshotProvider:
         else:
             self.runtime_config = OperatorRuntimeConfig.from_env()
         self.process_start_time = _utc_now()
+        self.process_start_monotonic = time.monotonic()
         self.loaded_git_commit_short = _safe_git_output(self.runtime_config.repo_root, ["rev-parse", "--short", "HEAD"])
         self.loaded_git_branch = _safe_git_output(self.runtime_config.repo_root, ["branch", "--show-current"])
+        self.snapshot_store = OperatorSnapshotStore()
+        self.perf_recorder = OperatorPerfRecorder()
+        self._paper_control_state_lock = threading.Lock()
         self.process_env = provider_env if provider_env is not None else dict(os.environ)
         self.credential_store = credential_store or LocalCredentialStore(
             default_credential_store_path(self.runtime_config.repo_root)
@@ -472,6 +486,58 @@ class OperatorSnapshotProvider:
             return "STALE_ACTIVE_SESSION"
         return "IDLE"
 
+    def _local_supervisor_summary(self) -> dict[str, Any]:
+        session = getattr(self.supervisor, "_session", None)
+        session_dict = session.as_dict() if session else None
+        raw_status = str(getattr(session, "status", "") or "").strip().upper()
+        is_active = raw_status in {"STARTING", "RUNNING", "STOP_REQUESTED"}
+        stale_after_restart = raw_status == "PROCESS_STATE_UNKNOWN_AFTER_RESTART"
+        state = "RUNNING" if is_active else ("STALE_ACTIVE_SESSION" if stale_after_restart else "IDLE")
+        paper_key_refusal = self.supervisor._paper_key_refusal()
+        endpoint_authority = self.supervisor._paper_endpoint_authority()
+        return {
+            "supervisor_version": getattr(self.supervisor, "__class__", type("Unknown", (), {})).__name__,
+            "state": state,
+            "active_session": session_dict if is_active else None,
+            "latest_session": session_dict,
+            "active_session_id": getattr(session, "session_id", None) if is_active and session else None,
+            "paper_start_allowed": state == "IDLE",
+            "paper_stop_allowed": is_active,
+            "paper_start_refusal_reason": (
+                "DUPLICATE_ACTIVE_RUN" if is_active else (
+                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART" if stale_after_restart else None
+                )
+            ),
+            "paper_stop_refusal_reason": None if is_active else "NO_ACTIVE_RUN",
+            "paper_credentials_configured": paper_key_refusal is None,
+            "paper_credential_refusal_reason": paper_key_refusal,
+            "paper_credential_source": "PROCESS_ENV_PRESENT" if paper_key_refusal is None else "MISSING_OR_INVALID",
+            "paper_endpoint_only": endpoint_authority["paper_endpoint_only"],
+            "paper_endpoint_status": endpoint_authority["status"],
+            "paper_endpoint_source": endpoint_authority["endpoint_source"],
+            "paper_endpoint_refusal_reason": endpoint_authority["reason_code"],
+            "paper_endpoint_operator_action": endpoint_authority["operator_action"],
+            "paper_endpoint_authority": endpoint_authority,
+            "broker_read_permission_profile": self.supervisor._broker_read_profile().to_dict(),
+            "paper_baseline_runtime_context": {
+                "source": "NOT_ON_STATUS_FAST_PATH",
+                "baseline_required": None,
+                "baseline_loaded": None,
+                "same_symbol_baseline_guard_active": None,
+            },
+            "allowed_profile": self.supervisor.config.allowed_profile,
+            "allowed_watchlist": list(self.supervisor.config.allowed_watchlist),
+            "allowed_durations": sorted(self.supervisor.config.allowed_durations),
+            "min_paper_duration_seconds": self.supervisor.config.min_paper_duration_seconds,
+            "max_paper_duration_seconds": self.supervisor.config.max_paper_duration_seconds,
+            "runner_max_paper_duration_seconds": self.supervisor.config.max_paper_duration_seconds,
+            "duration_authority": "scripts/run_bounded_paper.ps1",
+            "session_store": {"status": "NOT_ON_FAST_LOCAL_STATUS_PATH"},
+            "local_only": True,
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+        }
+
     def _alpaca_paper_configured(self) -> bool:
         summary = self.credential_store.provider_summary("alpaca_paper", self.process_env)
         return bool(summary["configured"])
@@ -484,7 +550,7 @@ class OperatorSnapshotProvider:
         return provider_id, model_name
 
     def status(self) -> dict[str, Any]:
-        supervisor = self._supervisor_snapshot()
+        supervisor = self._local_supervisor_summary()
         active = supervisor.get("active_session") or {}
         latest = supervisor.get("latest_session") or {}
         session_status = active.get("status")
@@ -578,6 +644,82 @@ class OperatorSnapshotProvider:
             "updated_at": timestamp_utc,
             "elapsed_ms": elapsed_ms,
         }
+
+    def launcher_status(self) -> dict[str, Any]:
+        started_ns = time.perf_counter_ns()
+        supervisor = self._local_supervisor_summary()
+        identity = self._backend_process_identity()
+        degraded_reasons: list[str] = []
+        if self.loaded_git_commit_short == "UNKNOWN_NOT_AVAILABLE":
+            degraded_reasons.append("GIT_HEAD_READ_FAILED")
+        if self.loaded_git_branch == "UNKNOWN_NOT_AVAILABLE":
+            degraded_reasons.append("GIT_BRANCH_READ_FAILED")
+        elapsed_ms = round((time.perf_counter_ns() - started_ns) / 1_000_000, 3)
+        return {
+            "ok": not degraded_reasons,
+            "api_status": "OK" if not degraded_reasons else "DEGRADED",
+            **identity,
+            "pid": os.getpid(),
+            "repo_head": self.loaded_git_commit_short,
+            "branch": self.loaded_git_branch,
+            "loaded_commit": self.loaded_git_commit_short,
+            "loaded_branch": self.loaded_git_branch,
+            "process_start_time": self.process_start_time,
+            "uptime_seconds": round(time.monotonic() - self.process_start_monotonic, 3),
+            "paper_only": True,
+            "live_locked": True,
+            "real_money_blocked": True,
+            "live_status": "LIVE_LOCKED",
+            "real_money_status": "BLOCKED",
+            "backend_mode": "PAPER_OPERATOR_API",
+            "supervisor_state": supervisor.get("state") or "UNKNOWN",
+            "active_run_id": supervisor.get("active_session_id"),
+            "timestamp_utc": _utc_now(),
+            "elapsed_ms": elapsed_ms,
+            "degraded_reason_codes": degraded_reasons,
+            "control_lane": True,
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
+    def version(self) -> dict[str, Any]:
+        return {
+            "source": "OPERATOR_VERSION",
+            "backend_commit": self.loaded_git_commit_short,
+            "ui_build_commit": self.loaded_git_commit_short,
+            "branch": self.loaded_git_branch,
+            "api_version": API_VERSION,
+            "operator_activation_version": OPERATOR_ACTIVATION_VERSION,
+            "started_at_utc": self.process_start_time,
+            "timestamp_utc": _utc_now(),
+            "paper_only": True,
+            "live_locked": True,
+            "real_money_blocked": True,
+            "secrets_values_exposed": False,
+        }
+
+    def runtime_minimal(self) -> dict[str, Any]:
+        supervisor = self._local_supervisor_summary()
+        return {
+            "source": "OPERATOR_RUNTIME_MINIMAL",
+            "supervisor_state": supervisor.get("state"),
+            "active_run_id": supervisor.get("active_session_id"),
+            "paper_stop_allowed": supervisor.get("paper_stop_allowed") is True,
+            "paper_only": True,
+            "live_locked": True,
+            "real_money_blocked": True,
+            "timestamp_utc": _utc_now(),
+            "secrets_values_exposed": False,
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+        }
+
+    def perf_recent(self) -> dict[str, Any]:
+        return self.perf_recorder.recent()
+
+    def snapshot_store_summary(self) -> dict[str, Any]:
+        return self.snapshot_store.summary()
 
     def readiness(self) -> dict[str, Any]:
         health = self.health()
@@ -1185,6 +1327,14 @@ class OperatorSnapshotProvider:
 
     def paper_control_state(self) -> dict[str, Any]:
         started_ns = time.perf_counter_ns()
+        cached = self.snapshot_store.get("paper_control_snapshot")
+        if cached and cached.get("fresh") is True:
+            payload = deepcopy(cached.get("payload") or {})
+            payload["snapshot_cache_status"] = "FRESH"
+            payload["snapshot_cache_age_ms"] = cached.get("age_ms")
+            payload["total_elapsed_ms"] = round((time.perf_counter_ns() - started_ns) / 1_000_000, 3)
+            return payload
+
         subchecks: list[dict[str, Any]] = []
 
         def elapsed_ms_since(start_ns: int) -> float:
@@ -1352,7 +1502,7 @@ class OperatorSnapshotProvider:
             else "Resolve the listed blocker before starting PAPER."
         )
         total_elapsed_ms = elapsed_ms_since(started_ns)
-        return {
+        payload = {
             "source": "OPERATOR_PAPER_CONTROL_STATE",
             "schema_version": "paper-control-state-v1",
             "backend_status": "DEGRADED" if required_failures else "OK",
@@ -1440,6 +1590,22 @@ class OperatorSnapshotProvider:
             "live_enabled": False,
             "real_money_enabled": False,
         }
+        payload["snapshot_cache_status"] = "MISS"
+        self.snapshot_store.set(
+            "paper_control_snapshot",
+            payload,
+            ttl_seconds=0.75,
+            source="OPERATOR_PAPER_CONTROL_STATE",
+            elapsed_ms=total_elapsed_ms,
+        )
+        return payload
+
+    def paper_control_state_synchronized(self) -> dict[str, Any]:
+        cached = self.snapshot_store.get("paper_control_snapshot")
+        if cached and cached.get("fresh") is True:
+            return self.paper_control_state()
+        with self._paper_control_state_lock:
+            return self.paper_control_state()
 
     def research(self) -> dict[str, Any]:
         return self.research_registry.snapshot()
@@ -3212,13 +3378,36 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     provider = provider or OperatorSnapshotProvider()
     router = APIRouter(prefix="/operator", tags=["operator-readonly"])
 
+    async def run_local(fn):
+        return await anyio.to_thread.run_sync(fn)
+
     @router.get("/status")
-    def status() -> dict[str, Any]:
-        return provider.status()
+    async def status() -> dict[str, Any]:
+        return await run_local(provider.status)
 
     @router.get("/health")
-    def health() -> dict[str, Any]:
+    async def health() -> dict[str, Any]:
         return provider.health()
+
+    @router.get("/launcher-status")
+    async def launcher_status() -> dict[str, Any]:
+        return provider.launcher_status()
+
+    @router.get("/version")
+    async def version() -> dict[str, Any]:
+        return provider.version()
+
+    @router.get("/runtime-minimal")
+    async def runtime_minimal() -> dict[str, Any]:
+        return provider.runtime_minimal()
+
+    @router.get("/perf/recent")
+    async def perf_recent() -> dict[str, Any]:
+        return provider.perf_recent()
+
+    @router.get("/snapshot-store")
+    async def snapshot_store() -> dict[str, Any]:
+        return provider.snapshot_store_summary()
 
     @router.get("/readiness")
     def readiness() -> dict[str, Any]:
@@ -3285,8 +3474,37 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
         return provider.world_awareness_runtime_status()
 
     @router.get("/paper-control-state")
-    def paper_control_state() -> dict[str, Any]:
-        return provider.paper_control_state()
+    async def paper_control_state() -> dict[str, Any]:
+        cached = provider.snapshot_store.get("paper_control_snapshot")
+        if cached and cached.get("fresh") is True:
+            return provider.paper_control_state()
+        return await run_local(provider.paper_control_state_synchronized)
+
+    @router.get("/events")
+    async def events():
+        async def stream():
+            while True:
+                payloads = [
+                    ("backend_status", await run_local(provider.health)),
+                    ("launcher_status", await run_local(provider.launcher_status)),
+                    ("runtime_minimal", await run_local(provider.runtime_minimal)),
+                ]
+                for event_name, payload in payloads:
+                    safe_payload = dict(payload)
+                    safe_payload["secrets_values_exposed"] = False
+                    yield f"event: {event_name}\ndata: {json.dumps(safe_payload, default=str)}\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store, max-age=0, must-revalidate",
+                "Pragma": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
 
     @router.get("/latest-run")
     def latest_run() -> dict[str, Any]:
@@ -3513,7 +3731,40 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
 
 def create_operator_app(provider: OperatorSnapshotProvider | None = None) -> FastAPI:
     provider = provider or OperatorSnapshotProvider()
-    app = FastAPI(title="Poverty Killer Operator Read-Only API", version=API_VERSION)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        if limiter.total_tokens < 120:
+            limiter.total_tokens = 120
+        yield
+
+    app = FastAPI(title="Poverty Killer Operator Read-Only API", version=API_VERSION, lifespan=lifespan)
+
+    @app.middleware("http")
+    async def operator_timing_middleware(request, call_next):
+        started_ns = time.perf_counter_ns()
+        in_flight = provider.perf_recorder.begin()
+        status_code = 500
+        error_marker = None
+        try:
+            response = await call_next(request)
+            status_code = int(getattr(response, "status_code", 200))
+            return response
+        except Exception as exc:
+            error_marker = exc.__class__.__name__
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+            provider.perf_recorder.finish(
+                path=str(request.url.path),
+                method=str(request.method),
+                status_code=status_code,
+                elapsed_ms=elapsed_ms,
+                in_flight_count=in_flight,
+                error_marker=error_marker,
+            )
+
     app.include_router(get_operator_router(provider))
     ui_dir = Path(__file__).resolve().parents[2] / "ui" / "operator-control-panel"
     if ui_dir.exists():

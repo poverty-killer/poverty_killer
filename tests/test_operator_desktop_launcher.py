@@ -118,7 +118,9 @@ def test_visible_launcher_presents_safe_backend_control_window():
     assert "Backend code current. Loaded commit matches repo HEAD." in text
     assert "Restart required after update" not in text
     assert "/operator/health" in text
-    assert "/operator/status" in text
+    assert "/operator/launcher-status" in text
+    assert 'Invoke-OperatorJson "/operator/status"' not in text
+    assert "RUNNING_LAUNCHER_STATUS_TIMEOUT" in text
     assert "Update-OperatorUiUrl" in text
     assert "$BaseUrl/operator-ui/?v=$version&t=$timestampMs" in text
     assert "operator_ui_opened=$script:UiUrl" in text
@@ -151,6 +153,7 @@ def test_visible_launcher_health_timeout_and_import_crash_are_not_silent():
 
     assert "function Wait-ForBackendReady" in text
     assert "RUNNING_STATUS_TIMEOUT" in text
+    assert "RUNNING_LAUNCHER_STATUS_TIMEOUT" in text
     assert 'Backend status timeout. This is degraded, not generic FAILED' in text
     assert '$loadedCommit = "BACKEND_NOT_RUNNING"' in text
     assert '$loadedCommit = "BACKEND_HEALTH_TIMEOUT"' in text
@@ -268,3 +271,19 @@ def test_operator_ui_assets_are_cache_busted_for_desktop_launcher():
     assert f"app.js?v={OPERATOR_UI_BUILD_PLACEHOLDER}" in text
     assert STALE_OPERATOR_UI_VERSION not in text
     assert "operator-credential-hotfix-20260531" not in text
+
+
+def test_operator_latency_diagnostic_script_measures_control_lane_without_paper_start():
+    text = Path("scripts/diagnose_operator_latency.ps1").read_text(encoding="utf-8")
+
+    assert "/operator/health" in text
+    assert "/operator/launcher-status" in text
+    assert "/operator/paper-control-state" in text
+    assert "/operator/status" in text
+    assert "20 health" not in text  # counts are generated, not a hardcoded report string
+    assert "reports/operator_perf" in text
+    assert "no_paper_start = $true" in text
+    assert "no_broker_mutation = $true" in text
+    assert "/operator/intent/paper/start" not in text
+    assert "ConvertTo-Json" in text
+    assert "p95_ms" in text

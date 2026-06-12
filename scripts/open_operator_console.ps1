@@ -325,7 +325,7 @@ function Get-LauncherStatus {
         $freshnessStatus = "Checking"
         $freshnessDetail = "Comparing backend loaded commit to repo HEAD."
         $healthState = "Checking"
-        $healthDetail = "Reading health and operator status."
+        $healthDetail = "Reading health and launcher-status."
         try {
             $health = Invoke-OperatorJson "/operator/health" 1
             $loadedCommit = First-TextValue $health.loaded_commit $health.git_commit_short "BACKEND_HEALTH_COMMIT_MISSING"
@@ -342,17 +342,22 @@ function Get-LauncherStatus {
                 $warning = "Unsafe health payload. Do not use this backend."
             }
             try {
-                $operatorStatus = Invoke-OperatorJson "/operator/status" 1
-                $loadedCommit = First-TextValue $operatorStatus.git_commit_short $loadedCommit
-                $loadedBranch = First-TextValue $operatorStatus.git_branch $loadedBranch
-                $startTime = First-TextValue $operatorStatus.process_start_time $startTime
-                $backendPid = First-TextValue $operatorStatus.backend_pid $backendPid
+                $launcherStatus = Invoke-OperatorJson "/operator/launcher-status" 1
+                $loadedCommit = First-TextValue $launcherStatus.loaded_commit $loadedCommit
+                $loadedBranch = First-TextValue $launcherStatus.loaded_branch $loadedBranch
+                $startTime = First-TextValue $launcherStatus.process_start_time $startTime
+                $backendPid = First-TextValue $launcherStatus.pid $backendPid
+                $healthDetail = "Launcher status OK; supervisor $($launcherStatus.supervisor_state); active run $($launcherStatus.active_run_id)."
+                if ($launcherStatus.api_status -ne "OK") {
+                    $status = "DEGRADED"
+                    $warning = "Launcher status degraded: $($launcherStatus.degraded_reason_codes -join ',')."
+                }
             } catch {
-                $status = "RUNNING_STATUS_TIMEOUT"
+                $status = "RUNNING_LAUNCHER_STATUS_TIMEOUT"
                 $healthState = "Connected"
-                $healthDetail = "Health OK; /operator/status timed out. Backend remains running; status detail is degraded."
-                $warning = "Backend health connected; /operator/status timed out. This is degraded, not failed."
-                Write-LauncherLog "operator_status_timeout=$($_.Exception.GetType().Name):$($_.Exception.Message)"
+                $healthDetail = "Health OK; /operator/launcher-status timed out. Backend remains running; launcher status is degraded."
+                $warning = "Backend health connected; /operator/launcher-status timed out. This is degraded, not failed."
+                Write-LauncherLog "operator_launcher_status_timeout=$($_.Exception.GetType().Name):$($_.Exception.Message)"
             }
             if ($loadedCommit -eq "UNKNOWN_NOT_AVAILABLE" -or $loadedCommit -like "BACKEND_*") {
                 $freshnessStatus = "Unknown"
@@ -955,7 +960,7 @@ function Refresh-LauncherStatus {
     if ($model.Status -eq "RUNNING") {
         $statusColor = $colorGood
         $statusLabel.ForeColor = $colorGood
-    } elseif ($model.Status -eq "RUNNING_STATUS_TIMEOUT") {
+    } elseif ($model.Status -in @("RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT")) {
         $statusColor = $colorWarn
         $statusLabel.ForeColor = $colorWarn
     } elseif ($model.Status -eq "FAILED") {
@@ -983,7 +988,7 @@ function Refresh-LauncherStatus {
     if ($model.Warning) {
         $warningLabel.Text = $model.Warning
         $warningLabel.ForeColor = $colorWarn
-    } elseif ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT") -and $model.FreshnessStatus -eq "Current") {
+    } elseif ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT") -and $model.FreshnessStatus -eq "Current") {
         $warningLabel.Text = "Backend code current. Local uncommitted files are diagnostics only."
         $warningLabel.ForeColor = $colorGood
     } elseif ($model.Status -eq "STOPPED") {
@@ -1016,10 +1021,10 @@ function Refresh-LauncherStatus {
         $diagnosticsPreview.Text = "$($model.FreshnessDetail) Local files are diagnostics only."
     }
 
-    $startButton.Enabled = $model.Status -notin @("RUNNING", "RUNNING_STATUS_TIMEOUT", "STARTING", "STOPPING")
-    $stopButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "FAILED")
-    $restartButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "FAILED")
-    $openButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT") -and $model.HealthState -eq "Connected"
+    $startButton.Enabled = $model.Status -notin @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT", "STARTING", "STOPPING")
+    $stopButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT", "FAILED")
+    $restartButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT", "FAILED")
+    $openButton.Enabled = $model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT") -and $model.HealthState -eq "Connected"
     $refreshButton.Enabled = $true
     $copyButton.Enabled = $true
     $toggleDiagnosticsButton.Enabled = $true
@@ -1033,7 +1038,7 @@ function Refresh-LauncherStatus {
     Set-ButtonTone $toggleDiagnosticsButton "secondary"
     if ($model.Status -eq "STOPPED") {
         Set-ButtonTone $startButton "good"
-    } elseif ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT")) {
+    } elseif ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT")) {
         if ($openButton.Enabled) {
             Set-ButtonTone $openButton "primary"
         }
@@ -1050,7 +1055,7 @@ function Wait-ForBackendReady {
     param([int]$Attempts = 18)
     $model = Refresh-LauncherStatus
     for ($attempt = 0; $attempt -lt $Attempts; $attempt += 1) {
-        if ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "FAILED")) {
+        if ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT", "FAILED")) {
             return $model
         }
         Start-Sleep -Milliseconds 500

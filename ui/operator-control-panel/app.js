@@ -47,8 +47,31 @@
     "/operator/historical-tests"
   ]);
   const OPTIONAL_BACKEND_ENDPOINTS = new Set([
-    "/operator/research/evidence-graph"
+    "/operator/research/evidence-graph",
+    "/operator/diagnostics",
+    "/operator/runs",
+    "/operator/action-center",
+    "/operator/alerts",
+    "/operator/system-map",
+    "/operator/world-awareness",
+    "/operator/world-awareness/runtime",
+    "/operator/research",
+    "/operator/historical-tests",
+    "/operator/ai/recommendations"
   ]);
+  const REQUEST_LANE_LIMITS = {
+    critical: 2,
+    normal: 3,
+    optional: 2
+  };
+  const REQUEST_LANE_BY_PRIORITY = {
+    0: "critical",
+    1: "normal",
+    2: "normal",
+    3: "optional"
+  };
+  let dataLoadGeneration = 0;
+  let activeLoadAbortController = null;
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
   const AI_ANSWER_MODES = {
     DETERMINISTIC: "DETERMINISTIC",
@@ -2132,9 +2155,16 @@
 
   function showScreen(id) {
     activeScreenId = id;
+    const existing = document.querySelector(`#screen-${id}`);
+    if (!existing) {
+      renderScreens(id);
+      refreshActiveScreenData(id);
+      return;
+    }
     document.querySelectorAll(".screen").forEach((el) => el.classList.toggle("active", el.id === `screen-${id}`));
     document.querySelectorAll(".nav-button").forEach((el) => el.classList.toggle("active", el.dataset.screen === id));
     renderAiChiefOverlay();
+    refreshActiveScreenData(id);
   }
 
   function renderCommand() {
@@ -5057,6 +5087,7 @@
 
   function renderScreens(selectedId) {
     const main = document.querySelector(".main");
+    const selected = selectedId || activeScreenId || "positions";
     const renderers = {
       command: renderCommand,
       action: renderActionCenter,
@@ -5078,9 +5109,11 @@
       diagnostics: renderDiagnostics,
       live: renderLive
     };
-    main.innerHTML = screens.map(([id]) => `<section class="screen" id="screen-${id}">${renderers[id]()}</section>`).join("");
+    const renderer = renderers[selected] || renderPositions;
+    main.innerHTML = `<section class="screen active" id="screen-${selected}">${renderer()}</section>`;
     window.PK_OPERATOR_UI_CONTROL_INVENTORY = buildUiControlInventory();
-    showScreen(selectedId || activeScreenId || "positions");
+    activeScreenId = selected;
+    document.querySelectorAll(".nav-button").forEach((el) => el.classList.toggle("active", el.dataset.screen === selected));
   }
 
   function backendFetchTimeoutMs(path) {
@@ -5100,10 +5133,24 @@
     return normalized;
   }
 
-  async function fetchJson(path) {
+  async function fetchJson(path, options) {
+    const opts = options || {};
     const timeoutMs = backendFetchTimeoutMs(path);
     const controller = new AbortController();
+    const externalSignal = opts.signal || null;
     let timedOut = false;
+    const abortFromExternalSignal = () => {
+      try {
+        controller.abort(new Error("request aborted by newer UI load"));
+      } catch (_error) {
+        controller.abort();
+      }
+    };
+    if (externalSignal && externalSignal.aborted) {
+      abortFromExternalSignal();
+    } else if (externalSignal) {
+      externalSignal.addEventListener("abort", abortFromExternalSignal, { once: true });
+    }
     const timeout = window.setTimeout(() => {
       timedOut = true;
       try {
@@ -5127,7 +5174,51 @@
       throw normalizeFetchError(path, error, timedOut, timeoutMs);
     } finally {
       window.clearTimeout(timeout);
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", abortFromExternalSignal);
+      }
     }
+  }
+
+  function createRequestScheduler() {
+    const queues = {
+      critical: [],
+      normal: [],
+      optional: []
+    };
+    const active = {
+      critical: 0,
+      normal: 0,
+      optional: 0
+    };
+    function laneForPriority(priority) {
+      return REQUEST_LANE_BY_PRIORITY[String(priority)] || "optional";
+    }
+    function pumpLane(lane) {
+      const limit = REQUEST_LANE_LIMITS[lane] || 1;
+      while (active[lane] < limit && queues[lane].length) {
+        const task = queues[lane].shift();
+        active[lane] += 1;
+        fetchJson(task.path, { signal: task.signal })
+          .then((payload) => task.resolve({ key: task.key, path: task.path, payload, optional: task.optional === true }))
+          .catch((error) => task.reject({ key: task.key, path: task.path, error, optional: task.optional === true }))
+          .finally(() => {
+            active[lane] = Math.max(0, active[lane] - 1);
+            pumpLane(lane);
+          });
+      }
+    }
+    return {
+      schedule(task) {
+        const priority = Number(task.priority ?? 3);
+        const lane = task.lane || laneForPriority(priority);
+        return new Promise((resolve, reject) => {
+          queues[lane].push({ ...task, lane, resolve, reject });
+          queues[lane].sort((a, b) => Number(a.priority ?? 3) - Number(b.priority ?? 3));
+          pumpLane(lane);
+        });
+      }
+    };
   }
 
   function describeFetchFailure(path, error) {
@@ -6386,86 +6477,209 @@
     return next;
   }
 
-  async function loadData() {
-    let status;
-    try {
-      status = await fetchJson("/operator/status");
-    } catch (error) {
-      logBackendFetchFailure("/operator/status", error);
-      return buildProductionUnavailableState(describeFetchFailure("/operator/status", error));
-    }
+  function statusFromLauncherStatus(launcherStatus, health) {
+    const payload = launcherStatus || {};
+    const healthPayload = health || {};
+    const supervisorState = pick(payload.supervisor_state, healthPayload.supervisor_status || "IDLE");
+    return {
+      api_version: pick(healthPayload.api_version, "operator-backend-v1"),
+      data_source: "OPERATOR_BACKEND",
+      git_commit_short: pick(payload.loaded_commit, healthPayload.loaded_commit || healthPayload.git_commit_short),
+      git_branch: pick(payload.loaded_branch, healthPayload.loaded_branch || healthPayload.git_branch),
+      loaded_commit: pick(payload.loaded_commit, healthPayload.loaded_commit),
+      loaded_branch: pick(payload.loaded_branch, healthPayload.loaded_branch),
+      process_start_time: pick(payload.process_start_time, healthPayload.process_start_time),
+      backend_pid: pick(payload.pid, healthPayload.pid || healthPayload.backend_pid),
+      bot_status: supervisorState === "RUNNING" ? "RUNNING" : "IDLE_NO_ACTIVE_PAPER_RUN",
+      runtime_mode: "PAPER",
+      mode_state: "PAPER_ENABLED",
+      capability_state: "PAPER_ENABLED",
+      active_profile: "PAPER_IDLE",
+      broker: "alpaca_paper",
+      endpoint: "https://paper-api.alpaca.markets",
+      market_data: "IDLE_NO_ACTIVE_MARKET_DATA_RUNTIME",
+      universe: [],
+      asset_classes: [],
+      dominant_blocker: supervisorState === "RUNNING" ? "SUPERVISOR_PROCESS_RUNNING_OR_RECENT" : "IDLE_NO_ACTIVE_PAPER_RUN",
+      runtime_attachment_state: supervisorState === "RUNNING" ? "SUPERVISOR_PROCESS_RUNNING_OR_RECENT" : "IDLE_NO_ACTIVE_PAPER_RUN",
+      runtime_attachment_detail: supervisorState === "RUNNING" ? "PAPER supervisor process is attached." : "No PAPER run currently attached.",
+      safety_verdict: "OPERATOR_SUPERVISOR_READY",
+      live_blocked: true,
+      real_money_blocked: true,
+      manual_trading_available: false,
+      force_trade_available: false,
+      supervisor: {
+        state: supervisorState,
+        active_session_id: payload.active_run_id || null,
+        paper_start_allowed: supervisorState !== "RUNNING",
+        paper_stop_allowed: supervisorState === "RUNNING",
+        paper_start_refusal_reason: supervisorState === "RUNNING" ? "DUPLICATE_ACTIVE_RUN" : null,
+        allowed_durations: [],
+        max_paper_duration_seconds: 432000
+      },
+      secrets_values_exposed: false,
+      updated_at: pick(payload.timestamp_utc, healthPayload.timestamp_utc)
+    };
+  }
 
-    const endpoints = [
-      ["health", "/operator/health"],
-      ["operatorReadiness", "/operator/readiness"],
-      ["storage", "/operator/storage"],
-      ["runtime", "/operator/runtime"],
-      ["profile", "/operator/profile"],
-      ["universe", "/operator/universe"],
-      ["readiness", "/operator/readiness/live"],
-      ["diagnostics", "/operator/diagnostics"],
-      ["contracts", "/operator/contracts"],
-      ["latestRun", "/operator/latest-run"],
-      ["orders", "/operator/orders-summary"],
-      ["fills", "/operator/fills-summary"],
-      ["tca", "/operator/tca-summary"],
-      ["audit", "/operator/audit-summary"],
-      ["world", "/operator/world-awareness"],
-      ["worldRuntime", "/operator/world-awareness/runtime"],
-      ["runs", "/operator/runs"],
-      ["explain", "/operator/explain/latest"],
-      ["actionCenter", "/operator/action-center"],
-      ["pnlDashboard", "/operator/pnl"],
-      ["tcaDashboard", "/operator/tca"],
-      ["alerts", "/operator/alerts"],
-      ["systemMap", "/operator/system-map"],
-      ["aiStatus", "/operator/ai/status"],
-      ["aiRouterSettings", "/operator/ai/router/settings"],
-      ["aiRecommendations", "/operator/ai/recommendations"],
-      ["providers", "/operator/providers"],
-      ["providerReadiness", "/operator/providers/readiness"],
-      ["credentialsProviders", "/operator/credentials/providers"],
-      ["portfolio", "/operator/portfolio"],
-      ["paperBaseline", "/operator/paper-baseline"],
-      ["launchReadiness", "/operator/launch-readiness"],
-      ["research", "/operator/research"],
-      ["evidenceGraph", "/operator/research/evidence-graph"],
-      ["historicalTests", "/operator/historical-tests"]
+  function uniqueEndpointTasks(tasks) {
+    const seen = new Set();
+    return tasks.filter((task) => {
+      const key = `${task.key}:${task.path}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function endpointTasksForScreen(screenId) {
+    const active = screenId || "positions";
+    const common = [
+      { key: "version", path: "/operator/version", priority: 0, lane: "critical" },
+      { key: "health", path: "/operator/health", priority: 0, lane: "critical" },
+      { key: "launcherStatus", path: "/operator/launcher-status", priority: 0, lane: "critical" },
+      { key: "paperControlState", path: "/operator/paper-control-state", priority: 0, lane: "critical" },
+      { key: "status", path: "/operator/status", priority: 0, lane: "critical" },
+      { key: "latestRun", path: "/operator/latest-run", priority: 1, lane: "normal" },
+      { key: "credentialsProviders", path: "/operator/credentials/providers", priority: 1, lane: "normal" },
+      { key: "paperBaseline", path: "/operator/paper-baseline", priority: 1, lane: "normal" },
+      { key: "launchReadiness", path: "/operator/launch-readiness", priority: 1, lane: "normal" },
+      { key: "contracts", path: "/operator/contracts", priority: 2, lane: "normal", optional: true }
     ];
-    const payload = { status };
+    const byScreen = {
+      positions: [
+        { key: "portfolio", path: "/operator/portfolio", priority: 2, lane: "normal" },
+        { key: "orders", path: "/operator/orders-summary", priority: 2, lane: "normal", optional: true }
+      ],
+      command: [
+        { key: "portfolio", path: "/operator/portfolio", priority: 2, lane: "normal" },
+        { key: "runtime", path: "/operator/runtime-minimal", priority: 1, lane: "normal" },
+        { key: "actionCenter", path: "/operator/action-center", priority: 3, lane: "optional", optional: true }
+      ],
+      activity: [
+        { key: "runtime", path: "/operator/runtime", priority: 2, lane: "normal" },
+        { key: "orders", path: "/operator/orders-summary", priority: 2, lane: "normal", optional: true },
+        { key: "fills", path: "/operator/fills-summary", priority: 3, lane: "optional", optional: true },
+        { key: "audit", path: "/operator/audit-summary", priority: 3, lane: "optional", optional: true }
+      ],
+      runs: [
+        { key: "runs", path: "/operator/runs", priority: 3, lane: "optional", optional: true },
+        { key: "explain", path: "/operator/explain/latest", priority: 3, lane: "optional", optional: true }
+      ],
+      pnl: [
+        { key: "pnlDashboard", path: "/operator/pnl", priority: 3, lane: "optional", optional: true },
+        { key: "tcaDashboard", path: "/operator/tca", priority: 3, lane: "optional", optional: true },
+        { key: "fills", path: "/operator/fills-summary", priority: 3, lane: "optional", optional: true },
+        { key: "tca", path: "/operator/tca-summary", priority: 3, lane: "optional", optional: true }
+      ],
+      decision: [
+        { key: "explain", path: "/operator/explain/latest", priority: 2, lane: "normal", optional: true }
+      ],
+      market: [
+        { key: "universe", path: "/operator/universe", priority: 2, lane: "normal", optional: true }
+      ],
+      risk: [
+        { key: "operatorReadiness", path: "/operator/readiness", priority: 2, lane: "normal", optional: true }
+      ],
+      alerts: [
+        { key: "alerts", path: "/operator/alerts", priority: 3, lane: "optional", optional: true }
+      ],
+      action: [
+        { key: "actionCenter", path: "/operator/action-center", priority: 3, lane: "optional", optional: true },
+        { key: "alerts", path: "/operator/alerts", priority: 3, lane: "optional", optional: true }
+      ],
+      providers: [
+        { key: "providers", path: "/operator/providers", priority: 2, lane: "normal" },
+        { key: "providerReadiness", path: "/operator/providers/readiness", priority: 2, lane: "normal" },
+        { key: "aiStatus", path: "/operator/ai/status", priority: 2, lane: "normal", optional: true },
+        { key: "aiRouterSettings", path: "/operator/ai/router/settings", priority: 2, lane: "normal", optional: true }
+      ],
+      ai: [
+        { key: "aiStatus", path: "/operator/ai/status", priority: 2, lane: "normal", optional: true },
+        { key: "aiRouterSettings", path: "/operator/ai/router/settings", priority: 2, lane: "normal", optional: true },
+        { key: "aiRecommendations", path: "/operator/ai/recommendations", priority: 3, lane: "optional", optional: true }
+      ],
+      research: [
+        { key: "research", path: "/operator/research", priority: 3, lane: "optional", optional: true },
+        { key: "evidenceGraph", path: "/operator/research/evidence-graph", priority: 3, lane: "optional", optional: true }
+      ],
+      world: [
+        { key: "world", path: "/operator/world-awareness", priority: 3, lane: "optional", optional: true },
+        { key: "worldRuntime", path: "/operator/world-awareness/runtime", priority: 3, lane: "optional", optional: true }
+      ],
+      diagnostics: [
+        { key: "diagnostics", path: "/operator/diagnostics", priority: 3, lane: "optional", optional: true },
+        { key: "perfRecent", path: "/operator/perf/recent", priority: 3, lane: "optional", optional: true }
+      ],
+      system: [
+        { key: "systemMap", path: "/operator/system-map", priority: 3, lane: "optional", optional: true },
+        { key: "storage", path: "/operator/storage", priority: 3, lane: "optional", optional: true },
+        { key: "diagnostics", path: "/operator/diagnostics", priority: 3, lane: "optional", optional: true }
+      ],
+      audit: [
+        { key: "audit", path: "/operator/audit-summary", priority: 3, lane: "optional", optional: true },
+        { key: "runs", path: "/operator/runs", priority: 3, lane: "optional", optional: true }
+      ],
+      historical: [
+        { key: "historicalTests", path: "/operator/historical-tests", priority: 3, lane: "optional", optional: true }
+      ],
+      live: [
+        { key: "readiness", path: "/operator/readiness/live", priority: 2, lane: "normal", optional: true }
+      ]
+    };
+    return uniqueEndpointTasks([...common, ...(byScreen[active] || [])]);
+  }
+
+  async function loadData(options) {
+    const opts = options || {};
+    const selectedScreen = opts.activeScreen || activeScreenId || "positions";
+    const generation = ++dataLoadGeneration;
+    if (activeLoadAbortController) {
+      activeLoadAbortController.abort();
+    }
+    activeLoadAbortController = new AbortController();
+    const signal = activeLoadAbortController.signal;
+    const payload = {};
     const failures = [];
     const endpointFailures = {};
-    try {
-      payload.paperControlState = await fetchJson("/operator/paper-control-state");
-    } catch (error) {
-      if (error && error.lifecycleAbort === true) {
-        logBackendFetchAbort("/operator/paper-control-state", error);
-      } else {
-        const failure = describeFetchFailure("/operator/paper-control-state", error);
-        logBackendFetchFailure("/operator/paper-control-state", error);
-        endpointFailures.paperControlState = failure;
-        failures.push(failure);
-      }
+    const scheduler = createRequestScheduler();
+    const tasks = endpointTasksForScreen(selectedScreen);
+    const taskResults = await Promise.allSettled(tasks.map((task) => scheduler.schedule({ ...task, signal })));
+    if (generation !== dataLoadGeneration) {
+      const stale = new Error("stale backend response ignored");
+      stale.lifecycleAbort = true;
+      throw stale;
     }
-    await Promise.all(endpoints.map(async ([key, path]) => {
-      try {
-        payload[key] = await fetchJson(path);
-      } catch (error) {
-        if (error && error.lifecycleAbort === true) {
-          logBackendFetchAbort(path, error);
-          return;
-        }
-        const failure = describeFetchFailure(path, error);
-        logBackendFetchFailure(path, error);
-        endpointFailures[key] = failure;
-        if (!OPTIONAL_BACKEND_ENDPOINTS.has(path)) {
-          failures.push(failure);
-        }
+    taskResults.forEach((result) => {
+      if (result.status === "fulfilled") {
+        payload[result.value.key] = result.value.payload;
+        return;
       }
-    }));
+      const failure = result.reason || {};
+      const error = failure.error || failure;
+      const path = failure.path || "unknown";
+      const key = failure.key || path;
+      if (error && error.lifecycleAbort === true) {
+        logBackendFetchAbort(path, error);
+        return;
+      }
+      const detail = describeFetchFailure(path, error);
+      logBackendFetchFailure(path, error);
+      endpointFailures[key] = detail;
+      if (failure.optional !== true && !OPTIONAL_BACKEND_ENDPOINTS.has(path)) {
+        failures.push(detail);
+      }
+    });
+    if (!payload.status && (payload.launcherStatus || payload.health)) {
+      payload.status = statusFromLauncherStatus(payload.launcherStatus, payload.health);
+    }
+    if (!payload.status) {
+      return buildProductionUnavailableState(endpointFailures.status || "operator backend status unavailable");
+    }
     payload.uiBuildCommit = uiBuildCommit();
     const backendCommit = String(
-      (payload.status && payload.status.git_commit_short)
+      (payload.version && payload.version.backend_commit)
+      || (payload.status && payload.status.git_commit_short)
       || (payload.health && (payload.health.loaded_commit || payload.health.git_commit_short))
       || ""
     );
@@ -6485,8 +6699,10 @@
     return normalized;
   }
 
+  let activeScreenRefreshToken = 0;
+
   async function boot() {
-    data = await loadData();
+    data = await loadData({ activeScreen: "positions" });
     aiOverlayOpen = shouldOpenAiDockFromUrl();
     aiWideMode = aiOverlayOpen && shouldUseWideAiDockFromUrl();
     syncAiDockedState();
@@ -6495,6 +6711,25 @@
     renderScreens("positions");
     renderRail();
     renderAiChiefOverlay();
+  }
+
+  async function refreshActiveScreenData(screenId) {
+    const selected = screenId || activeScreenId || "positions";
+    const refreshToken = ++activeScreenRefreshToken;
+    try {
+      const nextData = await loadData({ activeScreen: selected });
+      if (refreshToken !== activeScreenRefreshToken) return;
+      data = nextData;
+      renderTopBar();
+      renderScreens(selected);
+      renderRail();
+      renderAiChiefOverlay();
+    } catch (error) {
+      if (error && error.lifecycleAbort === true) {
+        return;
+      }
+      logBackendFetchFailure(`screen:${selected}`, error);
+    }
   }
 
   async function requestJson(path, options) {
