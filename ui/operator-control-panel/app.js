@@ -70,8 +70,15 @@
     2: "normal",
     3: "optional"
   };
+  const RUNTIME_ACTIVE_STATUSES = new Set(["STARTING", "RUNNING", "STOP_REQUESTED"]);
+  const RUNTIME_TERMINAL_STATUSES = new Set(["EXITED", "COMPLETED", "FAILED", "STOPPED", "REFUSED"]);
+  const LIFECYCLE_RECONCILE_INTERVAL_MS = 5000;
   let dataLoadGeneration = 0;
   let activeLoadAbortController = null;
+  let lifecyclePollTimer = null;
+  let lifecycleEventSource = null;
+  let lifecycleRefreshInFlight = false;
+  let lifecycleRefreshTimer = null;
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
   const AI_ANSWER_MODES = {
     DETERMINISTIC: "DETERMINISTIC",
@@ -275,6 +282,8 @@
 
   function statusColor(value) {
     const v = normalizeStatusText(value).toUpperCase();
+    if (["EXITED", "COMPLETED", "BOUNDED_RUNTIME_COMPLETED"].includes(v)) return "green";
+    if (["FAILED", "STOPPED"].includes(v)) return "red";
     if (v.includes("NO_ACTIVE") || v.includes("REFUSED")) return "yellow";
     if (v.includes("PASS") || v.includes("ALLOW") || v.includes("CLEAN") || v.includes("RUNNING") || v.includes("PAPER") || v.includes("READY") || v.includes("CONFIGURED")) return "green";
     if (v.includes("UNKNOWN") || v.includes("MISSING") || v.includes("DEGRADED") || v.includes("NO_TRADE") || v.includes("DECLINED")) return "yellow";
@@ -665,6 +674,50 @@
     if (value % 3600 === 0 && value >= 3600) return `${value / 3600} hour${value === 3600 ? "" : "s"}`;
     if (value % 60 === 0 && value >= 60) return `${value / 60} minute${value === 60 ? "" : "s"}`;
     return `${value} seconds`;
+  }
+
+  function sessionIdOf(session) {
+    return session && (session.session_id || session.sessionId || session.run_id || session.runId);
+  }
+
+  function rawSessionStatus(session) {
+    return String(session && (session.status || session.process_state || session.processState) || "").trim().toUpperCase();
+  }
+
+  function isActiveSessionStatus(status) {
+    return RUNTIME_ACTIVE_STATUSES.has(String(status || "").toUpperCase());
+  }
+
+  function isTerminalSessionStatus(status) {
+    return RUNTIME_TERMINAL_STATUSES.has(String(status || "").toUpperCase());
+  }
+
+  function sessionDisplayStatus(session) {
+    const status = rawSessionStatus(session);
+    if (status === "EXITED") {
+      const exitCode = session && session.exit_code;
+      return Number(exitCode) === 0 ? "COMPLETED" : "FAILED";
+    }
+    return status || "UNKNOWN";
+  }
+
+  function sessionTerminalVerdict(session) {
+    const display = sessionDisplayStatus(session);
+    if (display === "COMPLETED") return "COMPLETED";
+    if (["FAILED", "STOPPED", "REFUSED"].includes(display)) return display;
+    return display || "UNKNOWN";
+  }
+
+  function sessionRuntimeDetail(session, active) {
+    if (!sessionIdOf(session)) return "No PAPER run currently attached.";
+    const status = sessionDisplayStatus(session);
+    if (active) return `PAPER supervisor process is attached: ${sessionIdOf(session)}.`;
+    if (isTerminalSessionStatus(rawSessionStatus(session))) {
+      const ended = session.ended_at || session.endedAt || "ended_at unavailable";
+      const exitCode = session.exit_code !== undefined && session.exit_code !== null ? `; exit_code ${session.exit_code}` : "";
+      return `Latest PAPER session ${status}: ${sessionIdOf(session)}; ended ${ended}${exitCode}.`;
+    }
+    return `Latest PAPER session ${status}: ${sessionIdOf(session)}.`;
   }
 
   function backendDegradedSummary() {
@@ -1545,6 +1598,7 @@
       badge(sourceLabel(), dataSourceColor()),
       badge(s.runtimeMode, "green"),
       badge(s.activeProfile, "cyan"),
+      badge(`Runtime: ${data.supervisor.processState || s.botStatus || "UNKNOWN"}`, statusColor(data.supervisor.processState || s.botStatus || "UNKNOWN")),
       badge(`Broker: ${s.broker}`, "blue"),
       badge(endpointLabel, endpointLabel === "PAPER endpoint" ? "green" : "yellow"),
       badge("Live locked", "green"),
@@ -1613,6 +1667,47 @@
         <div class="proof-label">${escapeHtml(label)}</div>
         <div class="proof-value">${color ? badge(value, color) : escapeHtml(value || "unknown")}</div>
         <div class="proof-detail">${escapeHtml(detail || "")}</div>
+      </div>
+    `;
+  }
+
+  function renderSessionLifecycleCard(title, mode) {
+    const sup = data.supervisor || {};
+    const sessionId = sup.sessionId || "none";
+    const status = sup.processState || sup.lifecycleStatus || "NO_ACTIVE_PAPER_RUN";
+    const active = isActiveSessionStatus(status);
+    const terminal = isTerminalSessionStatus(sup.rawProcessState || status);
+    const rows = [
+      ["session_id", escapeHtml(sessionId)],
+      ["status", badge(status, statusColor(status))],
+      ["raw_status", badge(sup.rawProcessState || status, statusColor(sup.rawProcessState || status))],
+      ["pid", escapeHtml(active ? (sup.pid || "unknown") : (sup.pid || "not active"))],
+      ["started_at", escapeHtml(sup.startedAt || "not available")],
+      ["ended_at", escapeHtml(sup.endedAt || (terminal ? "not available" : "not ended"))],
+      ["exit_code", escapeHtml(sup.exitCode === undefined || sup.exitCode === null ? "not available" : sup.exitCode)],
+      ["duration_seconds", escapeHtml(sup.durationSeconds === null || sup.durationSeconds === undefined ? "not available" : sup.durationSeconds)],
+      ["watchlist", escapeHtml((sup.watchlist || []).join(", ") || "none")],
+      ["profile", escapeHtml(sup.profile || data.status.activeProfile || "PAPER_IDLE")],
+      ["stdout", escapeHtml(sup.wrapperStdoutPath || sup.stdoutPath || "not available")],
+      ["stderr", escapeHtml(sup.wrapperStderrPath || sup.stderrPath || "not available")],
+      ["child_stdout", escapeHtml(sup.childStdoutPath || "not available")],
+      ["child_stderr", escapeHtml(sup.childStderrPath || "not available")],
+      ["next_safe_action", escapeHtml(runPaperState().nextSafeAction || (active ? "Monitor the active PAPER run." : "Review readiness before starting another governed PAPER run."))]
+    ];
+    const content = `
+        <div class="split">
+          <h3>${escapeHtml(title || "Active Session")}</h3>
+          ${badge(status, statusColor(status))}
+        </div>
+        ${kv(rows)}
+        <div class="notice">${escapeHtml(sup.runtimeAttachmentDetail || "No runtime attachment detail loaded.")}</div>
+    `;
+    if (mode === "inline") {
+      return `<div class="runtime-session-inline" data-runtime-session-card>${content}</div>`;
+    }
+    return `
+      <div class="card span-6 runtime-session-card" data-runtime-session-card>
+        ${content}
       </div>
     `;
   }
@@ -1867,6 +1962,7 @@
         <div class="notice ${canRun.allowed === true ? "" : "error"}" data-run-paper-blocker-text>${escapeHtml(blockerText)}</div>
         <div class="notice" data-run-paper-next-action>Next safe action: ${escapeHtml(op.nextSafeAction || "Review launch readiness and do not run PAPER without approval.")}</div>
         ${sup.lastHistoricalRefusal ? `<div class="notice mono">Last historical refusal: ${tokenText(sup.lastHistoricalRefusal)}. Not current start authority.</div>` : ""}
+        ${renderSessionLifecycleCard("Active / Latest PAPER Session", "inline")}
         <div class="launch-control-layout">
           <div class="launch-input-panel">
             <div class="form-grid">
@@ -2592,6 +2688,7 @@
           ["Preflight", badge("PAPER_READ_ONLY_PREFLIGHT_REQUIRED", "yellow")],
           ["Credential status", "present/not present only; no secrets"]
         ])}</div>
+        ${renderSessionLifecycleCard("Active / Latest PAPER Session")}
         <div class="card span-6"><h3>Supervisor Session</h3>${kv([
           ["Supervisor", badge(sup.state, statusColor(sup.state))],
           ["Session", escapeHtml(sup.sessionId || "none")],
@@ -5854,6 +5951,115 @@
     state.status.lastHeartbeat = control.lastHeartbeat || state.status.lastHeartbeat;
   }
 
+  function lifecycleSourcesFromPayload(payload) {
+    const status = (payload && payload.status) || {};
+    const runtime = (payload && payload.runtime) || {};
+    const latestRun = (payload && payload.latestRun) || {};
+    const paperControlState = (payload && payload.paperControlState) || {};
+    const controlLatestRun = (paperControlState && paperControlState.latest_run) || {};
+    const supervisor = status.supervisor || latestRun || {};
+    const activeSession = supervisor.active_session || latestRun.active_session || runtime.active_session || {};
+    const latestSession = supervisor.latest_session
+      || latestRun.latest_session
+      || runtime.historical_latest_session
+      || runtime.latest_session
+      || controlLatestRun.latest_session
+      || {};
+    return { status, runtime, latestRun, paperControlState, controlLatestRun, supervisor, activeSession, latestSession };
+  }
+
+  function applyRuntimeLifecycleTruth(state, payload) {
+    const sources = lifecycleSourcesFromPayload(payload || {});
+    const activeSession = sources.activeSession || {};
+    const latestSession = sources.latestSession || {};
+    const activeStatus = rawSessionStatus(activeSession);
+    const latestStatus = rawSessionStatus(latestSession);
+    const hasActiveSession = Boolean(sessionIdOf(activeSession)) && isActiveSessionStatus(activeStatus);
+    const selectedSession = hasActiveSession ? activeSession : (sessionIdOf(latestSession) ? latestSession : {});
+    const hasSelectedSession = Boolean(sessionIdOf(selectedSession));
+    const selectedStatus = rawSessionStatus(selectedSession);
+    const selectedDisplayStatus = hasSelectedSession ? sessionDisplayStatus(selectedSession) : "NO_ACTIVE_PAPER_RUN";
+    const selectedActive = hasActiveSession && isActiveSessionStatus(selectedStatus);
+    const selectedTerminal = hasSelectedSession && isTerminalSessionStatus(selectedStatus);
+    const supervisorState = pick(sources.supervisor.state || sources.paperControlState.supervisor_state || sources.runtime.supervisor_state, state.supervisor.state || "UNKNOWN");
+    const backendStartAllowed = sources.supervisor.paper_start_allowed === true
+      || sources.runtime.paper_start_allowed === true
+      || sources.paperControlState.paper_start_allowed === true;
+    const startAllowed = selectedActive ? false : backendStartAllowed;
+    const stopAllowed = selectedActive && (sources.supervisor.paper_stop_allowed === true || sources.runtime.paper_stop_allowed === true || sources.paperControlState.paper_stop_allowed === true);
+    state.supervisor.state = supervisorState;
+    state.supervisor.sessionId = hasSelectedSession ? pick(selectedSession.session_id || selectedSession.run_id, "none") : "none";
+    state.supervisor.pid = hasSelectedSession ? pick(selectedSession.pid, selectedActive ? "unknown" : "not active") : "none";
+    state.supervisor.processState = selectedDisplayStatus;
+    state.supervisor.rawProcessState = hasSelectedSession ? selectedStatus : "NO_ACTIVE_PAPER_RUN";
+    state.supervisor.lifecycleStatus = selectedDisplayStatus;
+    state.supervisor.startedAt = hasSelectedSession ? pick(selectedSession.started_at || selectedSession.requested_at, "not available") : "not available";
+    state.supervisor.endedAt = hasSelectedSession ? pick(selectedSession.ended_at, "not ended") : "not available";
+    state.supervisor.exitCode = hasSelectedSession ? pick(selectedSession.exit_code, selectedTerminal ? "unknown" : "not exited") : "not available";
+    state.supervisor.durationSeconds = hasSelectedSession ? pick(selectedSession.duration_seconds || sources.runtime.duration_seconds, null) : null;
+    state.supervisor.profile = hasSelectedSession ? pick(selectedSession.profile || selectedSession.runtime_profile || state.status.activeProfile, "PAPER_IDLE") : "PAPER_IDLE";
+    state.supervisor.watchlist = hasSelectedSession ? pick(selectedSession.watchlist || state.status.universe, []) : [];
+    state.supervisor.stdoutPath = hasSelectedSession ? pick(selectedSession.stdout_path || sources.runtime.stdout_path, "not available") : "not available";
+    state.supervisor.stderrPath = hasSelectedSession ? pick(selectedSession.stderr_path || sources.runtime.stderr_path, "not available") : "not available";
+    state.supervisor.wrapperStdoutPath = hasSelectedSession ? pick(selectedSession.wrapper_stdout_path || sources.runtime.wrapper_stdout_path, state.supervisor.stdoutPath) : "not available";
+    state.supervisor.wrapperStderrPath = hasSelectedSession ? pick(selectedSession.wrapper_stderr_path || sources.runtime.wrapper_stderr_path, state.supervisor.stderrPath) : "not available";
+    state.supervisor.childStdoutPath = hasSelectedSession ? pick(selectedSession.child_stdout_path || sources.runtime.child_stdout_path, "not available") : "not available";
+    state.supervisor.childStderrPath = hasSelectedSession ? pick(selectedSession.child_stderr_path || sources.runtime.child_stderr_path, "not available") : "not available";
+    state.supervisor.paperStartAllowed = startAllowed === true;
+    state.supervisor.paperStopAllowed = stopAllowed === true;
+    state.supervisor.paperStartRefusalReason = startAllowed === true ? null : pick(sources.supervisor.paper_start_refusal_reason || sources.runtime.paper_start_refusal_reason || sources.paperControlState.dominant_blocker, null);
+    state.supervisor.paperStopRefusalReason = stopAllowed === true ? null : "NO_ACTIVE_RUN";
+    state.supervisor.runtimeAttachmentDetail = hasSelectedSession
+      ? sessionRuntimeDetail(selectedSession, selectedActive)
+      : (startAllowed === true ? "Ready. No PAPER run currently attached." : "No active PAPER run currently attached.");
+    state.supervisor.latestSessionTerminal = selectedTerminal;
+
+    if (hasSelectedSession) {
+      state.status.botStatus = selectedDisplayStatus;
+      state.status.uptime = state.supervisor.durationSeconds === null || state.supervisor.durationSeconds === undefined
+        ? "duration unavailable"
+        : `${state.supervisor.durationSeconds}s`;
+      state.status.lastDecision = selectedTerminal
+        ? state.supervisor.runtimeAttachmentDetail
+        : "PAPER supervisor process is attached.";
+    } else {
+      state.status.botStatus = "NO_ACTIVE_PAPER_RUN";
+      state.status.uptime = "no active runtime";
+      state.status.lastDecision = startAllowed === true ? "Ready. No PAPER run currently attached." : "No active PAPER run";
+    }
+    if (selectedActive) {
+      state.status.dominantBlocker = "SUPERVISOR_PROCESS_RUNNING_OR_RECENT";
+    } else if (selectedTerminal) {
+      state.status.dominantBlocker = startAllowed === true ? "READY_FOR_GOVERNED_PAPER" : "IDLE_NO_ACTIVE_PAPER_RUN";
+    }
+
+    if (hasSelectedSession) {
+      const existingRuns = Array.isArray(state.runArchive.runs) ? state.runArchive.runs : [];
+      const runId = sessionIdOf(selectedSession);
+      if (runId && !existingRuns.some((run) => run.runId === runId)) {
+        state.runArchive.runs = [
+          {
+            runId,
+            status: selectedDisplayStatus,
+            finalVerdict: selectedTerminal ? sessionTerminalVerdict(selectedSession) : "RUNNING",
+            profile: state.supervisor.profile,
+            durationSeconds: state.supervisor.durationSeconds || selectedSession.duration_seconds || "unknown",
+            ordersSubmitted: 0,
+            ordersAcknowledged: 0,
+            ordersCanceled: 0,
+            fillsObserved: 0,
+            tcaStatus: "NOT_HYDRATED",
+            reasonCodes: selectedTerminal ? [selectedDisplayStatus] : ["RUNNING"],
+            reportPath: selectedSession.report_path || ""
+          },
+          ...existingRuns
+        ];
+        state.runArchive.runCount = Math.max(Number(state.runArchive.runCount || 0), state.runArchive.runs.length);
+        state.runArchive.latestVerdict = state.runArchive.runs[0].finalVerdict;
+      }
+    }
+  }
+
   function normalizeBackendData(payload) {
     const next = buildProductionUnavailableState("backend connected; loading operator truth");
     const status = payload.status || {};
@@ -6472,6 +6678,7 @@
         `/operator/paper-control-state: ${endpointFailures.paperControlState}`
       );
     }
+    applyRuntimeLifecycleTruth(next, payload);
     reconcileBackendConnectedAuthority(next, endpointFailures);
     mergeCredentialTruthIntoProviderReadiness(next);
     return next;
@@ -6711,6 +6918,7 @@
     renderScreens("positions");
     renderRail();
     renderAiChiefOverlay();
+    startRuntimeLifecycleObservers();
   }
 
   async function refreshActiveScreenData(screenId) {
@@ -6729,6 +6937,81 @@
         return;
       }
       logBackendFetchFailure(`screen:${selected}`, error);
+    }
+  }
+
+  function renderLifecycleState() {
+    renderTopBar();
+    renderScreens(activeScreenId || "positions");
+    renderRail();
+    renderAiChiefOverlay();
+  }
+
+  async function fetchLifecyclePayload() {
+    const tasks = [
+      ["paperControlState", "/operator/paper-control-state"],
+      ["latestRun", "/operator/latest-run"],
+      ["status", "/operator/status"],
+      ["runtime", "/operator/runtime"]
+    ];
+    const results = await Promise.allSettled(tasks.map(([key, path]) => fetchJson(path).then((payload) => ({ key, payload }))));
+    const payload = {};
+    results.forEach((result) => {
+      if (result.status === "fulfilled") {
+        payload[result.value.key] = result.value.payload;
+      }
+    });
+    return payload;
+  }
+
+  async function reconcileRuntimeLifecycle(reason) {
+    if (lifecycleRefreshInFlight) return;
+    lifecycleRefreshInFlight = true;
+    try {
+      const payload = await fetchLifecyclePayload();
+      if (payload.paperControlState && payload.paperControlState.source) {
+        data.paperControlState = normalizePaperControlState(payload.paperControlState);
+        applyPaperControlState(data, data.paperControlState);
+      }
+      applyRuntimeLifecycleTruth(data, payload);
+      data.meta.lastUpdated = new Date().toISOString();
+      data.meta.lifecycleLastRefreshReason = reason || "poll";
+      renderLifecycleState();
+    } catch (error) {
+      logBackendFetchFailure(`runtime-lifecycle:${reason || "poll"}`, error);
+    } finally {
+      lifecycleRefreshInFlight = false;
+    }
+  }
+
+  function scheduleLifecycleRefresh(reason, delayMs) {
+    if (lifecycleRefreshTimer) return;
+    lifecycleRefreshTimer = window.setTimeout(() => {
+      lifecycleRefreshTimer = null;
+      reconcileRuntimeLifecycle(reason);
+    }, delayMs === undefined ? 250 : delayMs);
+  }
+
+  function startRuntimeLifecycleObservers() {
+    if (!lifecyclePollTimer) {
+      lifecyclePollTimer = window.setInterval(() => {
+        scheduleLifecycleRefresh("poll", 0);
+      }, LIFECYCLE_RECONCILE_INTERVAL_MS);
+    }
+    if (!lifecycleEventSource && "EventSource" in window) {
+      try {
+        lifecycleEventSource = new EventSource(`${operatorApiBase()}/operator/events`);
+        ["backend_status", "launcher_status", "runtime_minimal", "paper_control_state", "supervisor_state", "run_event"].forEach((eventName) => {
+          lifecycleEventSource.addEventListener(eventName, () => {
+            scheduleLifecycleRefresh(`sse:${eventName}`, 500);
+          });
+        });
+        lifecycleEventSource.onerror = () => {
+          scheduleLifecycleRefresh("sse-error-poll-fallback", 0);
+        };
+      } catch (error) {
+        logBackendFetchFailure("runtime-lifecycle:sse", error);
+      }
     }
   }
 

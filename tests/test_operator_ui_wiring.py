@@ -438,6 +438,55 @@ def test_operator_ui_uses_scheduler_and_active_screen_rendering():
     assert 'path: "/operator/ai/recommendations", priority: 3, lane: "optional", optional: true' in text
 
 
+def test_runtime_lifecycle_reconciles_completed_latest_session_without_refresh():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert "RUNTIME_ACTIVE_STATUSES" in text
+    assert "RUNTIME_TERMINAL_STATUSES" in text
+    assert "\"EXITED\"" in text
+    assert "\"COMPLETED\"" in text
+    assert "function sessionDisplayStatus" in text
+    assert "Number(exitCode) === 0 ? \"COMPLETED\" : \"FAILED\"" in text
+    assert "function applyRuntimeLifecycleTruth" in text
+    assert "const selectedSession = hasActiveSession ? activeSession" in text
+    assert "const startAllowed = selectedActive ? false : backendStartAllowed" in text
+    assert "sessionRuntimeDetail(selectedSession, selectedActive)" in text
+    assert "state.supervisor.paperStopAllowed = stopAllowed === true" in text
+    assert "state.supervisor.paperStartAllowed = startAllowed === true" in text
+    assert "state.runArchive.runs = [" in text
+    assert "Latest PAPER session ${status}" in text
+    assert "applyRuntimeLifecycleTruth(next, payload)" in text
+    assert "applyRuntimeLifecycleTruth(data, payload)" in text
+    assert "renderSessionLifecycleCard" in text
+    assert "Active / Latest PAPER Session" in text
+    assert "session_id" in text
+    assert "started_at" in text
+    assert "ended_at" in text
+    assert "exit_code" in text
+    assert "duration_seconds" in text
+    assert "child_stdout" in text
+    assert "child_stderr" in text
+    assert ".runtime-session-inline" in css
+
+
+def test_runtime_lifecycle_uses_sse_and_polling_fallback():
+    text = _app_text()
+
+    assert "LIFECYCLE_RECONCILE_INTERVAL_MS = 5000" in text
+    assert "function startRuntimeLifecycleObservers" in text
+    assert "new EventSource(`${operatorApiBase()}/operator/events`)" in text
+    assert "scheduleLifecycleRefresh(`sse:${eventName}`, 500)" in text
+    assert "scheduleLifecycleRefresh(\"sse-error-poll-fallback\", 0)" in text
+    assert "window.setInterval(() => {" in text
+    assert "reconcileRuntimeLifecycle(reason)" in text
+    assert "[\"paperControlState\", \"/operator/paper-control-state\"]" in text
+    assert "[\"latestRun\", \"/operator/latest-run\"]" in text
+    assert "[\"runtime\", \"/operator/runtime\"]" in text
+    assert "state.runArchive.runs = [" in text
+    assert "startRuntimeLifecycleObservers()" in text
+
+
 def test_paper_control_state_timeout_is_precise_fail_closed_authority():
     text = _app_text()
 
