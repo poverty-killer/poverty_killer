@@ -487,6 +487,55 @@ def test_runtime_lifecycle_uses_sse_and_polling_fallback():
     assert "startRuntimeLifecycleObservers()" in text
 
 
+def test_run_paper_form_draft_survives_lifecycle_reconciliation():
+    text = _app_text()
+
+    assert "const paperRunDrafts = {}" in text
+    assert "function paperRunDraftForRender" in text
+    assert "function syncPaperRunDraftFromDom" in text
+    assert "function refreshRunPaperControlDom" in text
+    assert "function paperDraftValidation" in text
+    assert "data-paper-draft-status" in text
+    assert "data-paper-draft-reset" in text
+    assert "const selectedDurationRaw = String(draft.durationRaw" in text
+    assert "String(seconds) === selectedDurationRaw" in text
+    assert "draft.watchlistRaw || defaultPaperWatchlist()" in text
+    assert "draft.profileAlpha !== false" in text
+    assert "draft.confirmPaper === true" in text
+    assert "PAPER_DRAFT_RESET_REASONS.RUN_STARTED" in text
+    assert "PAPER_DRAFT_RESET_REASONS.BACKEND_COMMIT_CHANGED" in text
+
+
+def test_lifecycle_refresh_patches_run_paper_without_remounting_form_controls():
+    text = _app_text()
+
+    assert 'if (activeScreenId === "command" || activeScreenId === "activity")' in text
+    assert "refreshRunPaperControlDom();" in text
+    assert 'renderScreens(activeScreenId || "positions")' in text
+    assert "syncPaperRunDraftFromDom(formId, { markDirty: false })" in text
+    assert '["paperControlState", "/operator/paper-control-state"]' in text
+    assert '["latestRun", "/operator/latest-run"]' in text
+    assert "applyPaperControlState(data, data.paperControlState)" in text
+    assert "applyRuntimeLifecycleTruth(data, payload)" in text
+    assert "sessionCard.outerHTML = renderSessionLifecycleCard" in text
+    assert "startButton.disabled = Boolean(effectiveDisabledReason)" in text
+
+
+def test_run_paper_start_payload_uses_preserved_draft_values():
+    text = _app_text()
+
+    assert "const draft = syncPaperRunDraftFromDom(formId || \"command\", { markDirty: false })" in text
+    assert "durationSeconds = paperDraftDurationSeconds(draft)" in text
+    assert "watchlist: normalizePaperWatchlist(draft.watchlistRaw)" in text
+    assert "validation," in text
+    assert "if (form.validation && form.validation.valid !== true)" in text
+    assert "duration_seconds: form.durationSeconds" in text
+    assert "watchlist: form.watchlist" in text
+    assert "syncPaperRunDraftFromDom(paperCard.dataset.paperFormCard || \"command\", { markDirty: true, dirtyFields: [field] })" in text
+    assert "event.target.matches(\"[data-paper-duration]\")" in text
+    assert "event.target.matches(\"[data-paper-watchlist]\")" in text
+
+
 def test_paper_control_state_timeout_is_precise_fail_closed_authority():
     text = _app_text()
 

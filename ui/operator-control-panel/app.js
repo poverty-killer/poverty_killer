@@ -73,12 +73,20 @@
   const RUNTIME_ACTIVE_STATUSES = new Set(["STARTING", "RUNNING", "STOP_REQUESTED"]);
   const RUNTIME_TERMINAL_STATUSES = new Set(["EXITED", "COMPLETED", "FAILED", "STOPPED", "REFUSED"]);
   const LIFECYCLE_RECONCILE_INTERVAL_MS = 5000;
+  const PAPER_DRAFT_RESET_REASONS = {
+    INITIAL_LOAD: "INITIAL_LOAD",
+    USER_RESET: "USER_RESET",
+    INVALID_DURATION_CLAMPED: "INVALID_DURATION_CLAMPED",
+    RUN_STARTED: "RUN_STARTED",
+    BACKEND_COMMIT_CHANGED: "BACKEND_COMMIT_CHANGED"
+  };
   let dataLoadGeneration = 0;
   let activeLoadAbortController = null;
   let lifecyclePollTimer = null;
   let lifecycleEventSource = null;
   let lifecycleRefreshInFlight = false;
   let lifecycleRefreshTimer = null;
+  const paperRunDrafts = {};
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
   const AI_ANSWER_MODES = {
     DETERMINISTIC: "DETERMINISTIC",
@@ -674,6 +682,230 @@
     if (value % 3600 === 0 && value >= 3600) return `${value / 3600} hour${value === 3600 ? "" : "s"}`;
     if (value % 60 === 0 && value >= 60) return `${value / 60} minute${value === 60 ? "" : "s"}`;
     return `${value} seconds`;
+  }
+
+  function paperFormId(formId) {
+    return String(formId || "command");
+  }
+
+  function paperDraftKey(formId) {
+    return paperFormId(formId);
+  }
+
+  function defaultPaperWatchlist() {
+    const sup = data.supervisor || {};
+    const watchlist = sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"];
+    return watchlist.join(",");
+  }
+
+  function paperDurationBounds() {
+    const sup = data.supervisor || {};
+    const minDuration = Number(sup.minPaperDurationSeconds || sup.min_paper_duration_seconds || 60);
+    const configuredMaxDuration = Number(sup.maxPaperDurationSeconds || sup.max_paper_duration_seconds || 432000);
+    const runnerMaxDuration = Number(sup.runnerMaxPaperDurationSeconds || sup.runner_max_paper_duration_seconds || 432000);
+    const maxDuration = Math.min(configuredMaxDuration || 432000, runnerMaxDuration || 432000, 432000);
+    const durationOptions = [
+      [180, "3 minutes"],
+      [300, "5 minutes"],
+      [900, "15 minutes"],
+      [1800, "30 minutes"],
+      [3600, "1 hour"],
+      [14400, "4 hours"],
+      [86400, "1 day"],
+      [259200, "72 hours"],
+      [432000, "5 days"]
+    ].filter(([seconds]) => seconds >= minDuration && seconds <= maxDuration);
+    const defaultDuration = durationOptions.some(([seconds]) => seconds === 300)
+      ? 300
+      : ((durationOptions[0] || [minDuration])[0]);
+    return { minDuration, configuredMaxDuration, runnerMaxDuration, maxDuration, durationOptions, defaultDuration };
+  }
+
+  function defaultPaperRunDraft(formId) {
+    const bounds = paperDurationBounds();
+    return {
+      formId: paperFormId(formId),
+      initialized: true,
+      dirty: false,
+      dirtyFields: {},
+      watchlistRaw: defaultPaperWatchlist(),
+      durationRaw: String(bounds.defaultDuration),
+      customAmountRaw: "5",
+      customUnit: "minutes",
+      profileAlpha: true,
+      confirmPaper: false,
+      confirmLiveLocked: false,
+      confirmRealMoneyBlocked: false,
+      confirmNoManualTrades: false,
+      lastInteractionAt: null,
+      lastResetReason: PAPER_DRAFT_RESET_REASONS.INITIAL_LOAD,
+      backendCommit: data.meta && data.meta.runtimeCommit ? data.meta.runtimeCommit : null,
+      startedSessionId: null
+    };
+  }
+
+  function paperRunDraft(formId) {
+    const key = paperDraftKey(formId);
+    if (!paperRunDrafts[key]) {
+      paperRunDrafts[key] = defaultPaperRunDraft(key);
+    }
+    return paperRunDrafts[key];
+  }
+
+  function paperRunDraftForRender(formId) {
+    const key = paperDraftKey(formId);
+    const draft = paperRunDraft(key);
+    const currentCommit = data.meta && data.meta.runtimeCommit ? data.meta.runtimeCommit : null;
+    if (draft.backendCommit && currentCommit && draft.backendCommit !== currentCommit) {
+      return resetPaperRunDraft(key, PAPER_DRAFT_RESET_REASONS.BACKEND_COMMIT_CHANGED);
+    }
+    if (!draft.backendCommit && currentCommit) {
+      draft.backendCommit = currentCommit;
+    }
+    return draft;
+  }
+
+  function resetPaperRunDraft(formId, reason) {
+    const key = paperDraftKey(formId);
+    paperRunDrafts[key] = {
+      ...defaultPaperRunDraft(key),
+      lastResetReason: reason || PAPER_DRAFT_RESET_REASONS.USER_RESET
+    };
+    return paperRunDrafts[key];
+  }
+
+  function normalizePaperWatchlist(raw) {
+    return String(raw || "")
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter(Boolean);
+  }
+
+  function paperDraftDurationSeconds(draft) {
+    const durationRaw = String((draft && draft.durationRaw) || "300");
+    if (durationRaw === "custom") {
+      const customAmount = Math.max(Number.parseInt((draft && draft.customAmountRaw) || "1", 10) || 1, 1);
+      const unit = (draft && draft.customUnit) || "minutes";
+      const unitMultiplier = unit === "days" ? 86400 : (unit === "hours" ? 3600 : 60);
+      return customAmount * unitMultiplier;
+    }
+    return Number.parseInt(durationRaw, 10) || 300;
+  }
+
+  function paperDraftValidation(draft, bounds) {
+    const effectiveBounds = bounds || paperDurationBounds();
+    const watchlist = normalizePaperWatchlist(draft && draft.watchlistRaw);
+    const durationSeconds = paperDraftDurationSeconds(draft || {});
+    if (!watchlist.length) {
+      return {
+        valid: false,
+        reason: "WATCHLIST_REQUIRED",
+        detail: "Enter at least one governed PAPER watchlist symbol."
+      };
+    }
+    if (durationSeconds < effectiveBounds.minDuration) {
+      return {
+        valid: false,
+        reason: "DURATION_BELOW_MINIMUM_SECONDS",
+        detail: `Selected duration ${formatDuration(durationSeconds)} is below the current minimum ${formatDuration(effectiveBounds.minDuration)}.`
+      };
+    }
+    if (durationSeconds > effectiveBounds.maxDuration) {
+      return {
+        valid: false,
+        reason: "DURATION_EXCEEDS_MAX_LEASE",
+        detail: `Selected duration ${formatDuration(durationSeconds)} exceeds the current governed PAPER lease max ${formatDuration(effectiveBounds.maxDuration)}.`
+      };
+    }
+    return {
+      valid: true,
+      reason: "PAPER_DRAFT_VALID",
+      detail: `Draft run length ${formatDuration(durationSeconds)} for ${watchlist.join(", ")}.`
+    };
+  }
+
+  function syncPaperRunDraftFromDom(formId, options) {
+    const opts = options || {};
+    const key = paperDraftKey(formId);
+    const card = document.querySelector(`[data-paper-form-card="${key}"]`) || document.querySelector("[data-paper-form-card]");
+    if (!card) return paperRunDraft(key);
+    const draft = paperRunDraft(key);
+    const readValue = (selector, fallback) => {
+      const el = card.querySelector(selector);
+      return el ? el.value : fallback;
+    };
+    const readChecked = (selector, fallback) => {
+      const el = card.querySelector(selector);
+      return el ? el.checked === true : fallback;
+    };
+    draft.watchlistRaw = readValue("[data-paper-watchlist]", draft.watchlistRaw);
+    draft.durationRaw = readValue("[data-paper-duration]", draft.durationRaw);
+    draft.customAmountRaw = readValue("[data-paper-duration-amount]", draft.customAmountRaw);
+    draft.customUnit = readValue("[data-paper-duration-unit]", draft.customUnit);
+    draft.profileAlpha = readChecked("[data-paper-profile-alpha]", draft.profileAlpha);
+    draft.confirmPaper = readChecked("[data-paper-confirm-paper]", draft.confirmPaper);
+    draft.confirmLiveLocked = readChecked("[data-paper-confirm-live-locked]", draft.confirmLiveLocked);
+    draft.confirmRealMoneyBlocked = readChecked("[data-paper-confirm-real-money-blocked]", draft.confirmRealMoneyBlocked);
+    draft.confirmNoManualTrades = readChecked("[data-paper-confirm-no-manual-trades]", draft.confirmNoManualTrades);
+    if (opts.markDirty) {
+      draft.dirty = true;
+      draft.lastInteractionAt = new Date().toISOString();
+      (opts.dirtyFields || []).forEach((field) => {
+        draft.dirtyFields[field] = true;
+      });
+    }
+    return draft;
+  }
+
+  function paperDraftDirtyLabel(draft) {
+    const reset = draft && draft.lastResetReason ? ` Last reset: ${draft.lastResetReason}.` : "";
+    if (!draft || !draft.dirty) return `Using backend defaults until edited.${reset}`;
+    const fields = Object.keys(draft.dirtyFields || {});
+    return `Editing draft preserved locally${fields.length ? `: ${fields.join(", ")}` : ""}.${reset}`;
+  }
+
+  function refreshRunPaperControlDom() {
+    document.querySelectorAll("[data-paper-form-card]").forEach((card) => {
+      const formId = card.dataset.paperFormCard || "command";
+      syncPaperRunDraftFromDom(formId, { markDirty: false });
+      const disabledReason = paperLaunchDisabledReason();
+      const draft = paperRunDraftForRender(formId);
+      const validation = paperDraftValidation(draft, paperDurationBounds());
+      const effectiveDisabledReason = validation.valid ? disabledReason : validation.detail;
+      const sessionCard = card.querySelector("[data-runtime-session-card]");
+      if (sessionCard) {
+        sessionCard.outerHTML = renderSessionLifecycleCard("Active / Latest PAPER Session", "inline");
+      }
+      const startButton = card.querySelector("[data-run-paper-start-control]");
+      if (startButton) {
+        startButton.disabled = Boolean(effectiveDisabledReason);
+      }
+      const startState = card.querySelector("[data-run-paper-start-state]");
+      if (startState) {
+        startState.classList.toggle("error", Boolean(effectiveDisabledReason));
+        startState.textContent = effectiveDisabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.";
+      }
+      const draftNotice = card.querySelector("[data-paper-draft-status]");
+      if (draftNotice) {
+        draftNotice.textContent = `${paperDraftDirtyLabel(draft)} ${validation.detail}`;
+        draftNotice.classList.toggle("error", validation.valid !== true);
+      }
+      const blockerText = card.querySelector("[data-run-paper-blocker-text]");
+      if (blockerText) {
+        const op = runPaperState();
+        const canRun = op.canRunPaper || {};
+        const overall = op.overallStatus || {};
+        blockerText.textContent = canRun.allowed === true
+          ? "No blocking readiness checks reported by backend start authority."
+          : (canRun.reason || overall.detail || "Backend start authority is blocked.");
+        blockerText.classList.toggle("error", canRun.allowed !== true);
+      }
+      const nextAction = card.querySelector("[data-run-paper-next-action]");
+      if (nextAction) {
+        const op = runPaperState();
+        nextAction.textContent = `Next safe action: ${op.nextSafeAction || "Review launch readiness and do not run PAPER without approval."}`;
+      }
+    });
   }
 
   function sessionIdOf(session) {
@@ -1896,27 +2128,16 @@
     const runtime = op.runtime || {};
     const brokerTruth = op.brokerTruth || {};
     const safetyLocks = op.safetyLocks || {};
-    const disabledReason = paperLaunchDisabledReason();
+    const backendDisabledReason = paperLaunchDisabledReason();
+    const draft = paperRunDraftForRender(formId);
+    const bounds = paperDurationBounds();
+    const { configuredMaxDuration, runnerMaxDuration, maxDuration, durationOptions } = bounds;
+    const validation = paperDraftValidation(draft, bounds);
+    const disabledReason = validation.valid ? backendDisabledReason : validation.detail;
     const startDisabled = disabledReason ? "disabled" : "";
-    const watchlist = (sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"]).join(",");
-    const minDuration = Number(sup.minPaperDurationSeconds || sup.min_paper_duration_seconds || 60);
-    const configuredMaxDuration = Number(sup.maxPaperDurationSeconds || sup.max_paper_duration_seconds || 432000);
-    const runnerMaxDuration = Number(sup.runnerMaxPaperDurationSeconds || sup.runner_max_paper_duration_seconds || 432000);
-    const maxDuration = Math.min(configuredMaxDuration || 432000, runnerMaxDuration || 432000, 432000);
-    const durationOptions = [
-      [180, "3 minutes"],
-      [300, "5 minutes"],
-      [900, "15 minutes"],
-      [1800, "30 minutes"],
-      [3600, "1 hour"],
-      [14400, "4 hours"],
-      [86400, "1 day"],
-      [259200, "72 hours"],
-      [432000, "5 days"]
-    ].filter(([seconds]) => seconds >= minDuration && seconds <= maxDuration);
-    const defaultDuration = durationOptions.some(([seconds]) => seconds === 300)
-      ? 300
-      : ((durationOptions[0] || [minDuration])[0]);
+    const watchlist = draft.watchlistRaw || defaultPaperWatchlist();
+    const selectedDurationRaw = String(draft.durationRaw || bounds.defaultDuration);
+    const customSelected = selectedDurationRaw === "custom" || !durationOptions.some(([seconds]) => String(seconds) === selectedDurationRaw);
     const runtimeAttachment = sup.sessionId && sup.sessionId !== "none"
       ? `PAPER run attached: ${sup.sessionId}`
       : (sup.paperStartAllowed === true ? "Ready. No PAPER run currently attached." : `No PAPER run currently attached; ${sup.paperStartRefusalReason || "start blocked"}.`);
@@ -1971,30 +2192,31 @@
               </label>
               <label>Run length
                 <select data-paper-duration data-paper-duration-max="${escapeHtml(maxDuration)}">
-                  ${durationOptions.map(([seconds, label]) => `<option value="${seconds}" ${seconds === defaultDuration ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
-                  <option value="custom">Custom minutes / hours / days</option>
+                  ${durationOptions.map(([seconds, label]) => `<option value="${seconds}" ${String(seconds) === selectedDurationRaw ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+                  <option value="custom" ${customSelected ? "selected" : ""}>Custom minutes / hours / days</option>
                 </select>
               </label>
               <label>Custom amount
-                <input data-paper-duration-amount type="number" min="1" max="5" value="5" inputmode="numeric">
+                <input data-paper-duration-amount type="number" min="1" max="5" value="${escapeHtml(draft.customAmountRaw || "5")}" inputmode="numeric">
               </label>
               <label>Custom unit
                 <select data-paper-duration-unit>
-                  <option value="minutes" selected>minutes</option>
-                  <option value="hours">hours</option>
-                  <option value="days">days</option>
+                  <option value="minutes" ${draft.customUnit === "minutes" ? "selected" : ""}>minutes</option>
+                  <option value="hours" ${draft.customUnit === "hours" ? "selected" : ""}>hours</option>
+                  <option value="days" ${draft.customUnit === "days" ? "selected" : ""}>days</option>
                 </select>
               </label>
             </div>
+            <div class="notice ${validation.valid ? "" : "error"}" data-paper-draft-status>${escapeHtml(`${paperDraftDirtyLabel(draft)} ${validation.detail}`)}</div>
           </div>
           <div class="launch-confirm-panel">
             <div class="launch-confirm-title">Safety confirmations</div>
             <div class="confirmation-grid">
-              <label class="checkline"><input data-paper-profile-alpha type="checkbox" checked> PAPER_EXPLORATION_ALPHA</label>
-              <label class="checkline"><input data-paper-confirm-paper type="checkbox"> PAPER-only</label>
-              <label class="checkline"><input data-paper-confirm-live-locked type="checkbox"> Live locked</label>
-              <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox"> Real-money blocked</label>
-              <label class="checkline"><input data-paper-confirm-no-manual-trades type="checkbox"> No manual trades</label>
+              <label class="checkline"><input data-paper-profile-alpha type="checkbox" ${draft.profileAlpha !== false ? "checked" : ""}> PAPER_EXPLORATION_ALPHA</label>
+              <label class="checkline"><input data-paper-confirm-paper type="checkbox" ${draft.confirmPaper === true ? "checked" : ""}> PAPER-only</label>
+              <label class="checkline"><input data-paper-confirm-live-locked type="checkbox" ${draft.confirmLiveLocked === true ? "checked" : ""}> Live locked</label>
+              <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox" ${draft.confirmRealMoneyBlocked === true ? "checked" : ""}> Real-money blocked</label>
+              <label class="checkline"><input data-paper-confirm-no-manual-trades type="checkbox" ${draft.confirmNoManualTrades === true ? "checked" : ""}> No manual trades</label>
             </div>
           </div>
         </div>
@@ -2002,6 +2224,7 @@
           <button class="intent-button paper primary-action" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" data-run-paper-start-control ${startDisabled}>
             Start Governed PAPER Run
           </button>
+          <button class="intent-button secondary" data-paper-draft-reset="${escapeHtml(formId)}" type="button">Reset draft</button>
           <span class="badge red">No manual trades / force trade unavailable</span>
         </div>
         <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
@@ -6942,7 +7165,11 @@
 
   function renderLifecycleState() {
     renderTopBar();
-    renderScreens(activeScreenId || "positions");
+    if (activeScreenId === "command" || activeScreenId === "activity") {
+      refreshRunPaperControlDom();
+    } else {
+      renderScreens(activeScreenId || "positions");
+    }
     renderRail();
     renderAiChiefOverlay();
   }
@@ -7040,32 +7267,20 @@
   }
 
   function paperRunFormValues(formId) {
-    const card = document.querySelector(`[data-paper-form-card="${formId || "command"}"]`) || document.querySelector("[data-paper-form-card]");
-    const watchlistRaw = ((card && card.querySelector("[data-paper-watchlist]")) || {}).value || "BTC/USD,ETH/USD,SOL/USD";
-    const durationRaw = ((card && card.querySelector("[data-paper-duration]")) || {}).value || "300";
-    const durationSelect = card && card.querySelector("[data-paper-duration]");
-    const maxDurationSeconds = Number((durationSelect && durationSelect.dataset && durationSelect.dataset.paperDurationMax) || data.supervisor.maxPaperDurationSeconds || 432000);
-    const customAmountRaw = ((card && card.querySelector("[data-paper-duration-amount]")) || {}).value || "5";
-    const customUnit = ((card && card.querySelector("[data-paper-duration-unit]")) || {}).value || "minutes";
-    const profileAlpha = ((card && card.querySelector("[data-paper-profile-alpha]")) || {}).checked !== false;
-    const confirmPaper = ((card && card.querySelector("[data-paper-confirm-paper]")) || {}).checked === true;
-    const confirmLiveLocked = ((card && card.querySelector("[data-paper-confirm-live-locked]")) || {}).checked === true;
-    const confirmRealMoneyBlocked = ((card && card.querySelector("[data-paper-confirm-real-money-blocked]")) || {}).checked === true;
-    const confirmNoManualTrades = ((card && card.querySelector("[data-paper-confirm-no-manual-trades]")) || {}).checked === true;
-    const customAmount = Math.max(Number.parseInt(customAmountRaw, 10) || 1, 1);
-    const unitMultiplier = customUnit === "days" ? 86400 : (customUnit === "hours" ? 3600 : 60);
-    const durationSeconds = durationRaw === "custom"
-      ? customAmount * unitMultiplier
-      : (Number.parseInt(durationRaw, 10) || 300);
+    const draft = syncPaperRunDraftFromDom(formId || "command", { markDirty: false });
+    const bounds = paperDurationBounds();
+    const validation = paperDraftValidation(draft, bounds);
+    const durationSeconds = paperDraftDurationSeconds(draft);
     return {
-      watchlist: watchlistRaw.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean),
+      watchlist: normalizePaperWatchlist(draft.watchlistRaw),
       durationSeconds,
-      profile: profileAlpha ? "PAPER_EXPLORATION_ALPHA" : data.status.activeProfile,
-      maxDurationSeconds,
-      confirmPaper,
-      confirmLiveLocked,
-      confirmRealMoneyBlocked,
-      confirmNoManualTrades
+      profile: draft.profileAlpha !== false ? "PAPER_EXPLORATION_ALPHA" : data.status.activeProfile,
+      maxDurationSeconds: bounds.maxDuration,
+      validation,
+      confirmPaper: draft.confirmPaper === true,
+      confirmLiveLocked: draft.confirmLiveLocked === true,
+      confirmRealMoneyBlocked: draft.confirmRealMoneyBlocked === true,
+      confirmNoManualTrades: draft.confirmNoManualTrades === true
     };
   }
 
@@ -7179,9 +7394,15 @@
         message = `${result.status || "UNKNOWN"}: ${result.baseline_snapshot_id || result.reason_code || "paper_baseline"}`;
       }
       if (intent === "paper-start") {
-        const form = paperRunFormValues(sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "command");
+        const formId = sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "command";
+        const form = paperRunFormValues(formId);
         if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked || !form.confirmNoManualTrades) {
           window.alert("Confirm PAPER-only, live locked, real-money blocked, and no manual trades before requesting the governed PAPER start.");
+          return;
+        }
+        if (form.validation && form.validation.valid !== true) {
+          window.alert(form.validation.detail || "Fix the Run PAPER draft before starting.");
+          refreshRunPaperControlDom();
           return;
         }
         if (form.durationSeconds > form.maxDurationSeconds) {
@@ -7202,6 +7423,10 @@
           live: false
         });
         message = `${result.status}: ${result.reason_code}`;
+        if (result.allowed === true || result.reason_code === "PAPER_RUN_STARTED") {
+          const draft = resetPaperRunDraft(formId, PAPER_DRAFT_RESET_REASONS.RUN_STARTED);
+          draft.startedSessionId = result.session_id || (result.session && result.session.session_id) || null;
+        }
       }
       if (intent === "paper-stop") {
         const confirmed = window.confirm("Request governed PAPER stop? This sends only the supervisor stop intent and preserves broker positions.");
@@ -7328,6 +7553,16 @@
   }
 
   document.addEventListener("input", (event) => {
+    const paperCard = event.target.closest("[data-paper-form-card]");
+    if (paperCard && (
+      event.target.matches("[data-paper-watchlist]")
+      || event.target.matches("[data-paper-duration-amount]")
+    )) {
+      const field = event.target.matches("[data-paper-watchlist]") ? "watchlist" : "custom_duration";
+      syncPaperRunDraftFromDom(paperCard.dataset.paperFormCard || "command", { markDirty: true, dirtyFields: [field] });
+      refreshRunPaperControlDom();
+      return;
+    }
     const aiQuestion = event.target.closest("[data-ai-chief-question]");
     if (aiQuestion) {
       aiQuestionText = aiQuestion.value;
@@ -7336,6 +7571,26 @@
     const homeQuestion = event.target.closest("[data-home-ai-question]");
     if (homeQuestion) {
       homeAiQuestionText = homeQuestion.value;
+    }
+  });
+
+  document.addEventListener("change", (event) => {
+    const paperCard = event.target.closest("[data-paper-form-card]");
+    if (paperCard && (
+      event.target.matches("[data-paper-duration]")
+      || event.target.matches("[data-paper-duration-unit]")
+      || event.target.matches("[data-paper-profile-alpha]")
+      || event.target.matches("[data-paper-confirm-paper]")
+      || event.target.matches("[data-paper-confirm-live-locked]")
+      || event.target.matches("[data-paper-confirm-real-money-blocked]")
+      || event.target.matches("[data-paper-confirm-no-manual-trades]")
+    )) {
+      let field = "confirmation";
+      if (event.target.matches("[data-paper-duration]")) field = "duration";
+      if (event.target.matches("[data-paper-duration-unit]")) field = "custom_duration";
+      if (event.target.matches("[data-paper-profile-alpha]")) field = "profile";
+      syncPaperRunDraftFromDom(paperCard.dataset.paperFormCard || "command", { markDirty: true, dirtyFields: [field] });
+      refreshRunPaperControlDom();
     }
   });
 
@@ -7354,6 +7609,13 @@
   });
 
   document.addEventListener("click", (event) => {
+    const paperDraftReset = event.target.closest("[data-paper-draft-reset]");
+    if (paperDraftReset) {
+      resetPaperRunDraft(paperDraftReset.dataset.paperDraftReset || "command", PAPER_DRAFT_RESET_REASONS.USER_RESET);
+      renderScreens(activeScreenId);
+      renderRail();
+      return;
+    }
     const aiOpen = event.target.closest("[data-ai-chief-open]");
     if (aiOpen) {
       setAiOverlayOpen(true);
