@@ -292,6 +292,8 @@
     const v = normalizeStatusText(value).toUpperCase();
     if (["EXITED", "COMPLETED", "BOUNDED_RUNTIME_COMPLETED"].includes(v)) return "green";
     if (["FAILED", "STOPPED"].includes(v)) return "red";
+    if (v.includes("NOT_APPROVED") || v.includes("SAFETY_CRITICAL")) return "red";
+    if (v.includes("CONDITIONAL_PASS") || v.includes("PENDING") || v.includes("SKIPPED") || v.includes("PARTIAL")) return "yellow";
     if (v.includes("NO_ACTIVE") || v.includes("REFUSED")) return "yellow";
     if (v.includes("PASS") || v.includes("ALLOW") || v.includes("CLEAN") || v.includes("RUNNING") || v.includes("PAPER") || v.includes("READY") || v.includes("CONFIGURED")) return "green";
     if (v.includes("UNKNOWN") || v.includes("MISSING") || v.includes("DEGRADED") || v.includes("NO_TRADE") || v.includes("DECLINED")) return "yellow";
@@ -2571,16 +2573,19 @@
         ${metric("Latest Verdict", archive.latestVerdict || "UNKNOWN", statusColor(archive.latestVerdict || "UNKNOWN"))}
         ${metric("Report Status", archive.reportStatus || "on demand", "gray")}
         <div class="card span-12"><h3>Runs</h3>${table(
-          ["Run", "Status", "Verdict", "Profile", "Duration", "Orders", "Fills", "TCA", "Report"],
+          ["Run", "Status", "Verdict", "Profile", "Duration", "Runtime New", "Historical", "POST/DELETE", "Open", "Fee/TCA", "72h", "Report"],
           archive.runs.map((run) => [
             escapeHtml(run.runId),
             badge(run.status, statusColor(run.status)),
             badge(run.finalVerdict, statusColor(run.finalVerdict)),
             escapeHtml(run.profile || "unknown"),
             escapeHtml(run.durationSeconds || "unknown"),
-            escapeHtml(`${run.ordersSubmitted}/${run.ordersAcknowledged}/${run.ordersCanceled}`),
-            escapeHtml(`${run.fillsObserved}`),
-            badge(run.tcaStatus, statusColor(run.tcaStatus)),
+            escapeHtml(`posts ${run.orderPostAcknowledged}/${run.orderPostAttempted}; cancels ${run.cancelAcknowledged}/${run.cancelAttempted}; fills ${run.runtimeFills}`),
+            escapeHtml(`broker fills ${run.brokerFilledOrders}; local fills ${run.localFills}; positions ${run.baselinePositionsCount}`),
+            escapeHtml(`${run.postCount}/${run.deleteCount}`),
+            escapeHtml(`${run.openOrdersAtShutdown}`),
+            badge(run.feeTcaStatus || run.tcaStatus, statusColor(run.feeTcaStatus || run.tcaStatus)),
+            badge(run.readiness72h || "UNKNOWN", statusColor(run.readiness72h || "UNKNOWN")),
             escapeHtml(run.reportPath || "not generated")
           ])
         )}</div>
@@ -3635,8 +3640,13 @@
       profile: run.profile || "unknown",
       duration_seconds: run.durationSeconds || "unknown",
       orders: `${run.ordersSubmitted}/${run.ordersAcknowledged}/${run.ordersCanceled}`,
+      runtime_new: `posts ${run.orderPostAcknowledged}/${run.orderPostAttempted}; cancels ${run.cancelAcknowledged}/${run.cancelAttempted}; fills ${run.runtimeFills}`,
+      historical_broker_local: `broker fills ${run.brokerFilledOrders}; local fills ${run.localFills}; baseline positions ${run.baselinePositionsCount}`,
+      broker_methods: `POST ${run.postCount}; DELETE ${run.deleteCount}`,
+      open_orders_at_shutdown: run.openOrdersAtShutdown,
       fills_observed: run.fillsObserved,
-      tca_status: run.tcaStatus,
+      tca_status: run.feeTcaStatus || run.tcaStatus,
+      readiness_72h: run.readiness72h,
       report_path: run.reportPath || "not generated",
       reason_codes: Array.isArray(run.reasonCodes) ? run.reasonCodes.slice(0, 8) : []
     };
@@ -6435,8 +6445,21 @@
         ordersSubmitted: pick(run.orders && run.orders.submitted, 0),
         ordersAcknowledged: pick(run.orders && run.orders.acknowledged, 0),
         ordersCanceled: pick(run.orders && run.orders.canceled, 0),
+        orderPostAttempted: pick(run.runtime_new_activity && run.runtime_new_activity.order_post_attempted, pick(run.orders && run.orders.submitted, 0)),
+        orderPostAcknowledged: pick(run.runtime_new_activity && run.runtime_new_activity.order_post_acknowledged, pick(run.orders && run.orders.acknowledged, 0)),
+        cancelAttempted: pick(run.runtime_new_activity && run.runtime_new_activity.cancel_attempted, pick(run.orders && run.orders.canceled, 0)),
+        cancelAcknowledged: pick(run.runtime_new_activity && run.runtime_new_activity.cancel_acknowledged, pick(run.orders && run.orders.canceled, 0)),
+        runtimeFills: pick(run.runtime_new_activity && run.runtime_new_activity.fill_hydration_count, pick(run.fills && run.fills.observed, 0)),
+        brokerFilledOrders: pick(run.historical_broker_local_activity && run.historical_broker_local_activity.broker_filled_orders, 0),
+        localFills: pick(run.historical_broker_local_activity && run.historical_broker_local_activity.local_fills, 0),
+        baselinePositionsCount: pick(run.baseline_positions && run.baseline_positions.positions_count, "unknown"),
+        postCount: pick(run.broker_method_counts && run.broker_method_counts.POST, 0),
+        deleteCount: pick(run.broker_method_counts && run.broker_method_counts.DELETE, 0),
+        openOrdersAtShutdown: pick(run.shutdown_open_orders && run.shutdown_open_orders.open_orders_count, "unknown"),
         fillsObserved: pick(run.fills && run.fills.observed, 0),
         tcaStatus: pick(run.tca && run.tca.status, "UNKNOWN"),
+        feeTcaStatus: pick(run.fee_tca && run.fee_tca.status, pick(run.tca && run.tca.fee_tca_status && run.tca.fee_tca_status.status, "UNKNOWN")),
+        readiness72h: pick(run.readiness_72h && run.readiness_72h.recommendation, "UNKNOWN"),
         reasonCodes: Array.isArray(run.reason_codes) ? run.reason_codes : [],
         reportPath: pick(run.report_path, "")
       }));

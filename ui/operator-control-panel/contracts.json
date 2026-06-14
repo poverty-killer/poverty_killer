@@ -730,7 +730,7 @@
     },
     "/operator/runs": {
       "source": "OPERATOR_SESSION_STORE",
-      "archive_version": "operator-run-archive-v1",
+      "archive_version": "operator-run-archive-v2",
       "run_count": 0,
       "runs": [
         {
@@ -747,12 +747,59 @@
           "child_log_paths": {"stdout": "path or null", "stderr": "path or null"},
           "exit_code": 0,
           "orders": {"submitted": 0, "acknowledged": 0, "canceled": 0},
+          "runtime_new_activity": {
+            "order_post_attempted": 0,
+            "order_post_authorized": 0,
+            "order_post_acknowledged": 0,
+            "submitted_count": 0,
+            "cancel_attempted": 0,
+            "cancel_authorized": 0,
+            "cancel_acknowledged": 0,
+            "fill_hydration_attempted_count": 0,
+            "fill_hydration_count": 0,
+            "source": "OMS_SHUTDOWN_ACCOUNTING"
+          },
+          "historical_broker_local_activity": {
+            "terminal_orders": 0,
+            "filled_orders": 0,
+            "canceled_orders": 0,
+            "broker_filled_orders": 0,
+            "local_fills": 0,
+            "legacy_local_fills": 0,
+            "source": "BROKER_AND_LOCAL_HISTORY_AT_SHUTDOWN"
+          },
+          "baseline_positions": {
+            "positions_count": 0,
+            "protected_baseline_context_observed": false,
+            "broker_positions_preserved": false,
+            "source": "BROKER_CONFIRMED_SHUTDOWN_OR_PREFLIGHT"
+          },
+          "broker_method_counts": {"GET": 0, "POST": 0, "DELETE": 0},
+          "shutdown_controls": {
+            "broker_flatten_called": false,
+            "broker_positions_preserved": false,
+            "mutation_performed": false,
+            "cancel_attempted": 0,
+            "cancel_authorized": 0,
+            "cancel_acknowledged": 0,
+            "close_attempted": false,
+            "liquidation_attempted": false
+          },
+          "shutdown_open_orders": {"open_orders_count": 0, "broker_confirmed_open_orders": 0},
           "fills": {
             "observed": 0,
             "fill_hydration_observed": false,
             "broker_fee_hydration_observed": false
           },
           "tca": {"status": "OBSERVED | UNKNOWN", "observed": false},
+          "fee_tca": {
+            "status": "SKIPPED | PENDING_FEE_DETAIL | COMPLETE | PARTIAL | UNKNOWN",
+            "tca_complete_count": 0,
+            "tca_fee_pending_count": 0,
+            "realized_vs_modeled_netedge_available_count": 0
+          },
+          "market_data_latency": {"status": "WARNINGS_PRESENT | NONE_OBSERVED", "warning_count_in_scanned_excerpt": 0},
+          "per_symbol_decisions": {"status": "OBSERVED | NO_DECISION_COMPILE_ATTEMPTS_IN_SCANNED_EXCERPT", "symbols": {}},
           "oms_shutdown_accounting": {"status": "OBSERVED | UNKNOWN", "observed": false},
           "safety_markers": {
             "live_marker": false,
@@ -762,7 +809,23 @@
           },
           "final_verdict": "PASS | CONDITIONAL_PASS | FAIL | UNKNOWN",
           "reason_codes": [],
-          "report_path": "path or null"
+          "readiness_72h": {
+            "recommendation": "NOT_APPROVED_NEEDS_SMALLER_PROOF | READY_FOR_72H_BOARD_REVIEW",
+            "blockers": [],
+            "warnings": [],
+            "live_trading_authorized": false,
+            "real_money_authorized": false,
+            "manual_controls_authorized": false
+          },
+          "report_path": "path or null",
+          "artifact_paths": {
+            "wrapper_stdout": "path or null",
+            "wrapper_stderr": "path or null",
+            "child_stdout": "path or null",
+            "child_stderr": "path or null",
+            "report": "path or null",
+            "json_report": "path or null"
+          }
         }
       ],
       "stores_log_contents": false,
@@ -770,7 +833,7 @@
     },
     "/operator/runs/{run_id}": "same run record shape as /operator/runs entries or NOT_FOUND",
     "/operator/runs/{run_id}/report": {
-      "report_version": "operator-run-report-v1",
+      "report_version": "operator-run-report-v2",
       "run_id": "paper_x",
       "markdown": "generated markdown report",
       "report_path": "state/operator/reports/paper_x.md",

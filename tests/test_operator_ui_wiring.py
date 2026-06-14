@@ -470,6 +470,31 @@ def test_runtime_lifecycle_reconciles_completed_latest_session_without_refresh()
     assert ".runtime-session-inline" in css
 
 
+def test_run_archive_ui_surfaces_report_truth_buckets_and_mock_data_is_labeled():
+    text = _app_text()
+    mock = MOCK_JS.read_text(encoding="utf-8")
+
+    assert "Runtime New" in text
+    assert "Historical" in text
+    assert "POST/DELETE" in text
+    assert "Fee/TCA" in text
+    assert "72h" in text
+    assert "run.runtime_new_activity && run.runtime_new_activity.order_post_acknowledged" in text
+    assert "run.historical_broker_local_activity && run.historical_broker_local_activity.broker_filled_orders" in text
+    assert "run.baseline_positions && run.baseline_positions.positions_count" in text
+    assert "run.broker_method_counts && run.broker_method_counts.POST" in text
+    assert "run.shutdown_open_orders && run.shutdown_open_orders.open_orders_count" in text
+    assert "run.fee_tca && run.fee_tca.status" in text
+    assert "run.readiness_72h && run.readiness_72h.recommendation" in text
+    assert "CONDITIONAL_PASS" in text
+    assert "NOT_APPROVED" in text
+    forbidden_mock_claim = "Mock DecisionFrame" + " BUY passed hard blockers"
+    assert forbidden_mock_claim not in mock
+    assert "Static mock-only DecisionFrame sample" in mock
+    assert "STATIC_MOCK_DATA_NOT_RUNTIME_EVIDENCE" in mock
+    assert "NOT_APPROVED_MOCK_DATA" in mock
+
+
 def test_runtime_lifecycle_uses_sse_and_polling_fallback():
     text = _app_text()
 

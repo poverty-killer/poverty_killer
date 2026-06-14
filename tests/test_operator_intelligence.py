@@ -76,10 +76,14 @@ def test_run_archive_prefers_structured_shutdown_accounting_over_free_text_marke
         "\n".join(
             [
                 "[OMS_DIAG] SHUTDOWN_RECONCILIATION fields={'performed': True, 'open_orders_count': 0, "
+                "'broker_confirmed_open_orders': 0, 'local_open_orders_before_final_reconcile': 0, "
+                "'local_open_orders_after_final_reconcile': 0, 'positions_count': 10, "
+                "'broker_positions_preserved': True, 'broker_flatten_called': False, "
                 "'order_post_attempted': 0, 'order_post_acknowledged': 0, "
                 "'cancel_attempted': 0, 'cancel_acknowledged': 0, "
                 "'fill_hydration_attempted_count': 0, 'fill_hydration_count': 0, "
                 "'broker_filled_orders': 21, 'filled_orders': 21, 'canceled_orders': 94, "
+                "'local_fills': 41, 'legacy_local_fills': 33, 'local_order_id_mappings': 116, "
                 "'broker_fee_hydration_attempted_count': 0, 'broker_fee_hydration_count': 0, "
                 "'broker_fee_activity_records_seen_count': 0, "
                 "'fee_hydration_skipped': True, 'fee_hydration_skip_reason': 'BROKER_READ_NOT_AUTHORIZED', "
@@ -87,16 +91,26 @@ def test_run_archive_prefers_structured_shutdown_accounting_over_free_text_marke
                 "'tca_records_count': 0, 'tca_complete_count': 3, 'tca_fee_pending_count': 8, "
                 "'mutation_performed': False, 'mutation_method_counts': {'GET': 80, 'POST': 0, 'DELETE': 0}}",
                 "[OMS_DIAG] SHUTDOWN_ACCOUNTING fields={'submitted_count': 0, 'acknowledged_count': 0, "
+                "'last_broker_open_orders_count': 0, 'last_broker_positions_count': 10, "
+                "'broker_positions_preserved': True, 'broker_flatten_called': False, "
                 "'order_post_attempted': 0, 'order_post_acknowledged': 0, "
                 "'cancel_attempted': 0, 'cancel_acknowledged': 0, "
                 "'fill_hydration_attempted_count': 0, 'fill_hydration_count': 0, "
                 "'broker_filled_orders': 21, 'filled_orders': 21, 'canceled_orders': 94, "
+                "'local_fills': 41, 'legacy_local_fills': 33, 'local_order_id_mappings': 116, "
                 "'broker_fee_hydration_attempted_count': 0, 'broker_fee_hydration_count': 0, "
                 "'broker_fee_activity_records_seen_count': 0, "
                 "'fee_hydration_skipped': True, 'fee_hydration_skip_reason': 'BROKER_READ_NOT_AUTHORIZED', "
                 "'account_activity_read_authorized': False, 'broker_read_profile': 'PAPER_SMOKE_STRICT_READS', "
                 "'tca_records_count': 0, 'tca_complete_count': 3, 'tca_fee_pending_count': 8, "
+                "'realized_vs_modeled_netedge_available_count': 0, "
                 "'mutation_performed': False, 'mutation_method_counts': {'GET': 80, 'POST': 0, 'DELETE': 0}}",
+                "LATENCY EVIDENCE ONLY: status=MARKET_DATA_LATENCY_DEGRADED reason=REST_LATENCY_THRESHOLD_EXCEEDED "
+                "source=market_data.rest_polling_rtt latency_ms=250.5 threshold=200.0ms",
+                "[DISPATCH_DIAG] reason_code=decision_compile_attempted fields={'symbol': 'SOL/USD', "
+                "'submitted': False, 'submit_signal_called': False, 'frame_id': 'df_fixture', "
+                "'frame_output': 'SELL', 'frame_status': 'PASS', "
+                "'no_submit_reason_code': 'PAPER_BASELINE_PROTECTED'}",
             ]
         ),
     )
@@ -110,6 +124,27 @@ def test_run_archive_prefers_structured_shutdown_accounting_over_free_text_marke
     assert run["fills"]["broker_fee_hydration_observed"] is False
     assert run["fills"]["broker_fee_hydration_skipped"] is True
     assert run["fills"]["broker_fee_hydration_skip_reason"] == "BROKER_READ_NOT_AUTHORIZED"
+    assert run["runtime_new_activity"]["order_post_acknowledged"] == 0
+    assert run["runtime_new_activity"]["cancel_acknowledged"] == 0
+    assert run["runtime_new_activity"]["fill_hydration_count"] == 0
+    assert run["historical_broker_local_activity"]["broker_filled_orders"] == 21
+    assert run["historical_broker_local_activity"]["local_fills"] == 41
+    assert run["baseline_positions"]["positions_count"] == 10
+    assert run["baseline_positions"]["broker_positions_preserved"] is True
+    assert run["broker_method_counts"]["POST"] == 0
+    assert run["broker_method_counts"]["DELETE"] == 0
+    assert run["shutdown_controls"]["broker_flatten_called"] is False
+    assert run["shutdown_open_orders"]["open_orders_count"] == 0
+    assert run["fee_tca"]["status"] == "SKIPPED"
+    assert run["fee_tca"]["tca_complete_count"] == 3
+    assert run["fee_tca"]["tca_fee_pending_count"] == 8
+    assert run["market_data_latency"]["status"] == "WARNINGS_PRESENT"
+    assert run["market_data_latency"]["warning_count_in_scanned_excerpt"] == 1
+    assert run["per_symbol_decisions"]["symbols"]["SOL/USD"]["decision_attempts"] == 1
+    assert run["per_symbol_decisions"]["symbols"]["SOL/USD"]["no_submit_reasons"]["PAPER_BASELINE_PROTECTED"] == 1
+    assert run["readiness_72h"]["recommendation"] == "NOT_APPROVED_NEEDS_SMALLER_PROOF"
+    assert "NO_RUNTIME_NEW_ORDER_ACKNOWLEDGEMENTS" in run["readiness_72h"]["blockers"]
+    assert "FEE_TCA_STATUS_SKIPPED" in run["readiness_72h"]["blockers"]
     assert run["tca"]["status"] == "OBSERVED"
     assert run["oms_shutdown_accounting"]["status"] == "OBSERVED"
     assert run["final_verdict"] == "PASS"
@@ -246,6 +281,14 @@ def test_report_generator_writes_markdown_and_json_without_mutating_logs(tmp_pat
     assert Path(report["report_path"]).exists()
     assert Path(report["json_report_path"]).exists()
     assert "Final Plain-English Summary" in report["markdown"]
+    assert "Runtime-New Orders / Fills / Cancels" in report["markdown"]
+    assert "Historical Broker / Local Orders / Fills" in report["markdown"]
+    assert "Broker Method Counts" in report["markdown"]
+    assert "Shutdown Controls" in report["markdown"]
+    assert "Open Orders At Shutdown" in report["markdown"]
+    assert "Market Data Latency" in report["markdown"]
+    assert "Per-Symbol Decision Summary" in report["markdown"]
+    assert "72-Hour Readiness Recommendation" in report["markdown"]
     assert log_path.read_text(encoding="utf-8") == before
     assert report["logs_mutated"] is False
 
