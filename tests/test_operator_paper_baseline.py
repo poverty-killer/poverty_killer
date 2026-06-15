@@ -267,13 +267,17 @@ def test_runtime_context_does_not_baseline_block_unprotected_symbol() -> None:
             allow_portal_fallback=False,
             paper_baseline_runtime_context=context,
         ),
-        symbol="MSFT",
+        symbol="LTC/USD",
         signal=SimpleNamespace(side="buy", quantity=Decimal("1"), metadata={"quote_fresh": True}),
         runtime=SimpleNamespace(last_price=Decimal("100")),
         is_attack=False,
     )
 
     assert PAPER_BASELINE_SYMBOL_PROTECTED not in verdict["reason_codes"]
+    assert verdict["verdict"] == "ALLOW"
+    assert verdict["route_permitted"] is True
+    assert verdict["mutation_permitted"] is True
+    assert verdict["capability_identity"]["portal_name"] == "alpaca_paper"
 
 
 def test_main_loop_pre_trade_guard_blocks_protected_baseline_sell_before_route() -> None:

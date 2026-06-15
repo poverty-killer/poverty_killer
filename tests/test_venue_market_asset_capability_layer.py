@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.config import Config
+from app.instrument_registry import InstrumentRegistry
 from app.market.capability_registry import build_default_capability_registry
 from app.market.venue_capabilities import PortalSelectionRequest, classify_quote_session
 from main import (
@@ -9,6 +10,25 @@ from main import (
     resolve_runtime_portal,
     resolve_runtime_universe,
 )
+
+
+CONFIRMED_UNHELD_CRYPTO_SPECS = {
+    "LTC/USD": {
+        "min_size": 0.022079929,
+        "step_size": 0.000000001,
+        "tick_size": 0.000000001,
+    },
+    "AVAX/USD": {
+        "min_size": 0.148669924,
+        "step_size": 0.000000001,
+        "tick_size": 0.000000001,
+    },
+    "LINK/USD": {
+        "min_size": 0.12300123,
+        "step_size": 0.000000001,
+        "tick_size": 0.000000001,
+    },
+}
 
 
 def test_kraken_crypto_preservation_for_current_runtime_symbols():
@@ -31,6 +51,48 @@ def test_kraken_crypto_preservation_for_current_runtime_symbols():
         capability_discovery_mode="active_markets",
     )
     assert get_active_symbols(config) == {"BTC/USD", "ETH/USD", "SOL/USD"}
+
+
+def test_confirmed_unheld_crypto_instruments_use_alpaca_paper_asset_specs():
+    for symbol, expected in CONFIRMED_UNHELD_CRYPTO_SPECS.items():
+        instrument = InstrumentRegistry.get_instrument(symbol)
+
+        assert instrument is not None
+        assert instrument.asset_class.value == "crypto"
+        assert instrument.session.value == "24_7"
+        assert instrument.min_size == expected["min_size"]
+        assert instrument.step_size == expected["step_size"]
+        assert instrument.tick_size == expected["tick_size"]
+        assert instrument.min_notional == 10.0
+
+
+def test_confirmed_unheld_crypto_runtime_watchlist_resolves_to_alpaca_paper_capability():
+    watchlist = ("BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD")
+    config = Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        runtime_watchlist=list(watchlist),
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+    )
+
+    resolution = resolve_runtime_universe(config)
+    assert resolution.reason == "UNIVERSE_READY"
+    assert resolution.symbols == watchlist
+    assert get_active_symbols(config) == set(watchlist)
+
+    for symbol in CONFIRMED_UNHELD_CRYPTO_SPECS:
+        result = resolve_runtime_portal(config, symbol=symbol, asset_class="crypto")
+
+        assert result.ready is True
+        assert result.selected is not None
+        assert result.selected.portal_name == "alpaca_paper"
+        assert result.selected.execution_adapter == "alpaca_paper_rest"
+        assert result.selected.supported_actions == frozenset({"buy", "sell_to_close"})
+        assert result.selected.default_order_type == "limit"
+        assert result.selected.default_time_in_force == "GTC"
+        assert str(result.selected.min_notional) == "10.00"
+        assert result.selected.live_blocked is True
 
 
 def test_legacy_crypto_only_capability_discovery_mode_preserves_old_surface():

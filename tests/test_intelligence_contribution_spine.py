@@ -38,8 +38,11 @@ from app.strategies.strategy_vote_adapters import (
     adapt_sector_rotation_to_vote,
 )
 from app.strategies.council_metadata import (
+    FEED_MISSING,
+    FEED_REAL,
     KEY_CONTRIBUTION_ROLE,
     KEY_EXECUTION_CANDIDATE,
+    KEY_FEED_STATUS,
     KEY_FRESH_ENTRY_AUTHORIZED,
     KEY_PROTECTIVE_ONLY,
     ROLE_ENTRY,
@@ -380,8 +383,10 @@ def test_contributor_role_boundaries_remain_metadata_only_and_non_executing():
     assert entry_vote.metadata[KEY_FRESH_ENTRY_AUTHORIZED] is True
     assert entry_vote.metadata[KEY_PROTECTIVE_ONLY] is False
     assert entry_vote.metadata[KEY_EXECUTION_CANDIDATE] is True
+    assert entry_vote.metadata[KEY_FEED_STATUS] == FEED_REAL
     assert exit_vote.metadata[KEY_CONTRIBUTION_ROLE] == ROLE_EXIT
     assert exit_vote.metadata[KEY_FRESH_ENTRY_AUTHORIZED] is False
+    assert exit_vote.metadata[KEY_FEED_STATUS] == FEED_MISSING
 
     for adapter in (adapt_sector_rotation_to_vote, adapt_liquidity_void_to_vote):
         source = inspect.getsource(adapter)

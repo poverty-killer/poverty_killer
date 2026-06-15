@@ -71,7 +71,7 @@ def _valid_request() -> dict:
         "mode": "PAPER",
         "profile": "PAPER_EXPLORATION_ALPHA",
         "duration_seconds": 300,
-        "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+        "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD"],
         "approve_autonomous_paper": True,
     }
 
@@ -137,7 +137,7 @@ def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
     assert "-PaperExplorationAlpha" in command
     assert "-DurationSeconds" in command
     assert "300" in command
-    assert "BTC/USD,ETH/USD,SOL/USD" in command
+    assert "BTC/USD,ETH/USD,SOL/USD,LTC/USD,AVAX/USD,LINK/USD" in command
     assert "APCA_API_SECRET_KEY" not in " ".join(command)
     assert result["session"]["wrapper_stdout_path"] == result["session"]["stdout_path"]
     assert result["session"]["runtime_profile"] == "LOCAL_PAPER"

@@ -270,6 +270,7 @@ def build_decision_frame_from_runtime(
         _market_truth_evidence(symbol=symbol, snapshot=snap),
         _signal_evidence(signal, snap),
         _vote_evidence(strategy_vote, snap),
+        _executable_intent_evidence(signal, strategy_vote, snap),
         _fusion_evidence(fusion, snap),
     ]
     evidence.extend(_dispatch_evidence_items(dispatch_evidence, snap))
@@ -449,6 +450,83 @@ def _vote_evidence(strategy_vote: Any, snapshot: Mapping[str, Any]) -> ModuleEvi
         snapshot_id=str(snapshot.get("snapshot_id") or "") if snapshot else None,
         candle_id=_int_or_none(getattr(strategy_vote, "timestamp_ns", None)),
         metadata={"strategy_id": str(getattr(strategy_vote, "strategy_id", ""))},
+    )
+
+
+def _signal_side_to_frame_signal(value: Any) -> str:
+    side = str(value or "").strip().upper()
+    if side in {"BUY", "LONG"}:
+        return SIGNAL_BUY
+    if side in {"SELL", "SHORT"}:
+        return SIGNAL_SELL
+    if side in {"FLAT", "NO_ACTION"}:
+        return SIGNAL_NO_ACTION
+    return SIGNAL_NONE
+
+
+def _vote_signal_to_frame_signal(strategy_vote: Any) -> str:
+    raw_signal = getattr(strategy_vote, "signal", None)
+    return _signal_side_to_frame_signal(getattr(raw_signal, "value", raw_signal))
+
+
+def _executable_intent_evidence(
+    signal: Any,
+    strategy_vote: Any,
+    snapshot: Mapping[str, Any],
+) -> ModuleEvidence:
+    snapshot_id = str(snapshot.get("snapshot_id") or "") if snapshot else None
+    candle_id = _int_or_none(snapshot.get("candle_id")) if snapshot else None
+    missing: list[str] = []
+    if signal is None:
+        missing.append("StrategySignal")
+    if strategy_vote is None:
+        missing.append("StrategyVote")
+    if missing:
+        return ModuleEvidence(
+            module_name="ExecutableIntent",
+            authority_class=AUTHORITY_EXECUTION,
+            status=BLOCK,
+            signal=SIGNAL_NONE,
+            reason_codes=("EXECUTABLE_INTENT_MISSING",),
+            snapshot_id=snapshot_id,
+            candle_id=candle_id,
+            metadata={"missing": tuple(missing)},
+        )
+
+    signal_side = _signal_side_to_frame_signal(getattr(signal, "side", None))
+    vote_signal = _vote_signal_to_frame_signal(strategy_vote)
+    if signal_side not in {SIGNAL_BUY, SIGNAL_SELL} or vote_signal not in {SIGNAL_BUY, SIGNAL_SELL}:
+        return ModuleEvidence(
+            module_name="ExecutableIntent",
+            authority_class=AUTHORITY_EXECUTION,
+            status=BLOCK,
+            signal=SIGNAL_NONE,
+            reason_codes=("EXECUTABLE_INTENT_NON_DIRECTIONAL",),
+            snapshot_id=snapshot_id,
+            candle_id=candle_id,
+            metadata={"signal_side": signal_side, "vote_signal": vote_signal},
+        )
+    if signal_side != vote_signal:
+        return ModuleEvidence(
+            module_name="ExecutableIntent",
+            authority_class=AUTHORITY_EXECUTION,
+            status=BLOCK,
+            signal=SIGNAL_NONE,
+            reason_codes=("EXECUTABLE_INTENT_DIRECTION_MISMATCH",),
+            snapshot_id=snapshot_id,
+            candle_id=candle_id,
+            metadata={"signal_side": signal_side, "vote_signal": vote_signal},
+        )
+
+    return ModuleEvidence(
+        module_name="ExecutableIntent",
+        authority_class=AUTHORITY_EXECUTION,
+        status=CONTRIBUTED,
+        signal=SIGNAL_NONE,
+        reason_codes=(),
+        snapshot_id=snapshot_id,
+        candle_id=candle_id,
+        metadata={"signal_side": signal_side, "vote_signal": vote_signal},
     )
 
 

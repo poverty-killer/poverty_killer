@@ -55,6 +55,7 @@ def _dispatch_loop() -> types.SimpleNamespace:
     )
     loop.execution_engine = MagicMock()
     loop.execution_engine.submit_signal = MagicMock(return_value=True)
+    loop.execution_engine.get_status.return_value = {"last_latency_truth": {}}
     loop._build_truth_frame = MagicMock(return_value="truth-frame-stub")
     loop._update_shadow_front_overlays = MagicMock()
     loop._generate_signal_and_vote = MagicMock(return_value=(None, None))
@@ -65,11 +66,22 @@ def _dispatch_loop() -> types.SimpleNamespace:
         compilation_cycles=0,
     )
     loop.insider_engine = MagicMock()
+    loop.signal_fusion = MagicMock()
+    loop.signal_fusion._telemetry = {}
+    loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(
+        loop, MainLoop
+    )
     loop._consume_observed_pair_sector_rotation = (
         MainLoop._consume_observed_pair_sector_rotation.__get__(loop, MainLoop)
     )
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
+    )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
+    )
+    loop._classify_shadow_front_decline = (
+        MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
     )
     loop._classify_sector_rotation_observed_pair = (
         MainLoop._classify_sector_rotation_observed_pair.__get__(loop, MainLoop)
@@ -77,7 +89,30 @@ def _dispatch_loop() -> types.SimpleNamespace:
     loop._clear_stale_sector_rotation_observed_pair = (
         MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
     )
+    loop._runtime_module_frame_evidence = (
+        MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    )
+    loop._apply_signal_economic_metadata = (
+        MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    )
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = (
+        MainLoop._compile_scorecard_frame_no_submit.__get__(loop, MainLoop)
+    )
+    loop._primary_no_submit_reason_code = MainLoop._primary_no_submit_reason_code
     return loop
+
+
+def _assert_no_submit_truth_compile(loop) -> None:
+    loop.execution_engine.submit_signal.assert_not_called()
+    assert loop.decision_compiler.compile.call_count == 1
+    _, compile_kwargs = loop.decision_compiler.compile.call_args
+    assert compile_kwargs.get("strategy_votes") == []
+    additional_inputs = compile_kwargs.get("additional_inputs") or {}
+    assert additional_inputs.get("no_submit_reason_code")
+    decision_frame = additional_inputs.get("decision_frame") or {}
+    assert decision_frame.get("frame_output") == "NO_TRADE"
+    assert decision_frame.get("frame_status") == "BLOCK"
 
 
 def _runtime(
@@ -188,8 +223,7 @@ def test_same_candle_observed_pair_rule_remains_strict():
         exchange_ts_ns=T0_NS,
     )
 
-    loop.decision_compiler.compile.assert_not_called()
-    loop.execution_engine.submit_signal.assert_not_called()
+    _assert_no_submit_truth_compile(loop)
     assert loop._metrics.orders_submitted == 0
 
 

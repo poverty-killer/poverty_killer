@@ -425,7 +425,7 @@ def adapt_sector_rotation_to_vote(
         requires_existing_position=is_exit,
         execution_candidate=True,
         directional_bias=bias,
-        feed_status=FEED_MISSING,
+        feed_status=FEED_REAL,
         raw_confidence=signal.confidence,
         normalized_confidence=signal.confidence,
         reason=signal.reason or "sector_rotation_strategy_vote",

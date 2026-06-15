@@ -4344,8 +4344,11 @@ class MainLoop:
             reason_code,
             sleeve=repr(SleeveType.SECTOR_ROTATION),
             observed_pair_admitted=True,
+            observed_pair_consumed=True,
             **reason_fields,
         )
+        runtime.last_sector_rotation_observed_signal = None
+        runtime.last_sector_rotation_observed_vote = None
         return observed_signal, observed_vote
 
     def _consume_observed_pair_liquidity_void(
@@ -4691,11 +4694,11 @@ class MainLoop:
         for signal in (entry_signal, exit_signal):
             if signal is None:
                 continue
-            # OBSERVE-ONLY (Stage 2-C): synthesize a StrategyVote via the
-            # approved adapter for telemetry/inspection ONLY. This vote is
-            # NOT passed to DecisionCompiler, NOT inserted into any active
-            # strategy_votes list, NOT routed to StrategyRouter /
-            # SignalFusion / ExecutionEngine.
+            # Governed PAPER promotion seam: capture the native signal and its
+            # approved StrategyVote on the runtime. Dispatch may consume this
+            # pair only through _consume_observed_pair_sector_rotation, which
+            # enforces PAPER mode, symbol match, and same-candle equality before
+            # the shared DecisionCompiler -> ExecutionEngine path can proceed.
             try:
                 vote = adapt_sector_rotation_to_vote(
                     signal,

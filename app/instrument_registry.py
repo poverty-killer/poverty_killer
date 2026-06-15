@@ -126,6 +126,60 @@ class InstrumentRegistry:
             volatility_multiplier=1.8,
             liquidity_multiplier=0.8,
         )
+
+        alpaca_confirmed_crypto = (
+            (
+                "LTC/USD",
+                "Litecoin / US Dollar",
+                0.022079929,
+                0.000000001,
+                0.000000001,
+                1.6,
+                0.8,
+            ),
+            (
+                "AVAX/USD",
+                "Avalanche / US Dollar",
+                0.148669924,
+                0.000000001,
+                0.000000001,
+                1.9,
+                0.7,
+            ),
+            (
+                "LINK/USD",
+                "Chainlink / US Dollar",
+                0.12300123,
+                0.000000001,
+                0.000000001,
+                1.7,
+                0.75,
+            ),
+        )
+        for (
+            symbol,
+            description,
+            min_order_size,
+            min_trade_increment,
+            price_increment,
+            volatility_multiplier,
+            liquidity_multiplier,
+        ) in alpaca_confirmed_crypto:
+            cls.INSTRUMENTS[symbol] = InstrumentSpec(
+                symbol=symbol,
+                asset_class=AssetClass.CRYPTO,
+                exchange=ExchangeType.KRAKEN,
+                min_size=min_order_size,
+                step_size=min_trade_increment,
+                tick_size=price_increment,
+                margin_available=False,
+                session=MarketSession.CRYPTO_24_7,
+                description=description,
+                whale_threshold_usd=500000.0,
+                min_notional=10.0,
+                volatility_multiplier=volatility_multiplier,
+                liquidity_multiplier=liquidity_multiplier,
+            )
     
     @classmethod
     def _init_equities(cls):

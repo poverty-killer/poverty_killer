@@ -310,6 +310,35 @@ def test_decision_compiler_emits_no_trade_from_empty_frame():
     assert record.metadata["frame_output"] == FRAME_OUTPUT_NO_TRADE
 
 
+def test_runtime_frame_blocks_advisory_direction_without_executable_intent():
+    frame = build_decision_frame_from_runtime(
+        symbol="ETH/USD",
+        snapshot=_snapshot(),
+        created_at_ns=T0_NS,
+        timeout_ns=60 * NS_PER_SECOND,
+        active_threshold_profile=resolve_active_threshold_profile(Config()),
+        signal=None,
+        strategy_vote=None,
+        fusion=types.SimpleNamespace(confidence=0.60, preferred_sleeve="sector_rotation"),
+        dispatch_evidence=(
+            {
+                "module": "ShansCurve",
+                "authority_class": "ALPHA",
+                "status": CONTRIBUTED,
+                "reason_code": "SHANS_READY",
+                "signal": "SELL",
+                "confidence": Decimal("0.80"),
+            },
+        ),
+    )
+
+    assert frame["frame_status"] == FRAME_BLOCK
+    assert frame["frame_output"] == FRAME_OUTPUT_NO_TRADE
+    assert "EXECUTABLE_INTENT_MISSING" in frame["frame_reason_codes"]
+    assert frame["module_evidence"]["ShansCurve"]["signal"] == "SELL"
+    assert frame["module_evidence"]["ExecutableIntent"]["status"] == BLOCK
+
+
 def test_paper_exploration_profile_relaxes_alpha_thresholds_and_logs_values():
     config = Config(broker_mode="paper", alpaca_paper=True, paper_exploration_alpha_enabled=True)
     profile = resolve_active_threshold_profile(config)

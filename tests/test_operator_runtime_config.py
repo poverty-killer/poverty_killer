@@ -13,7 +13,7 @@ def test_operator_runtime_config_defaults_are_safe(tmp_path):
     assert cfg.live_enabled is False
     assert cfg.real_money_enabled is False
     assert cfg.allowed_profile == "PAPER_EXPLORATION_ALPHA"
-    assert cfg.allowed_watchlist == ("BTC/USD", "ETH/USD", "SOL/USD")
+    assert cfg.allowed_watchlist == ("BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD")
     assert cfg.min_paper_duration_seconds == 60
     assert cfg.max_paper_duration_seconds == 432000
     assert cfg.operator_session_store_path == tmp_path / "state" / "operator" / "sessions.jsonl"

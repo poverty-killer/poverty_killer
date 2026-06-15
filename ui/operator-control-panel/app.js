@@ -696,7 +696,10 @@
 
   function defaultPaperWatchlist() {
     const sup = data.supervisor || {};
-    const watchlist = sup.watchlist && sup.watchlist.length ? sup.watchlist : ["BTC/USD", "ETH/USD", "SOL/USD"];
+    const allowed = sup.allowedWatchlist || sup.allowed_watchlist || [];
+    const watchlist = sup.watchlist && sup.watchlist.length
+      ? sup.watchlist
+      : (allowed.length ? allowed : ["BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD"]);
     return watchlist.join(",");
   }
 
@@ -6396,6 +6399,7 @@
     next.supervisor.durationSeconds = hasActiveSession ? pick(activeSession.duration_seconds || runtime.duration_seconds, null) : null;
     next.supervisor.profile = hasActiveSession ? pick(activeSession.profile || status.active_profile, "PAPER_IDLE") : "PAPER_IDLE";
     next.supervisor.watchlist = hasActiveSession ? pick(activeSession.watchlist || status.universe, []) : [];
+    next.supervisor.allowedWatchlist = pick(supervisor.allowed_watchlist || runtime.allowed_watchlist, []);
     next.supervisor.stdoutPath = hasActiveSession ? pick(activeSession.stdout_path || runtime.stdout_path, "not available") : "not available";
     next.supervisor.stderrPath = hasActiveSession ? pick(activeSession.stderr_path || runtime.stderr_path, "not available") : "not available";
     next.supervisor.wrapperStdoutPath = hasActiveSession ? pick(activeSession.wrapper_stdout_path || runtime.wrapper_stdout_path, next.supervisor.stdoutPath) : "not available";

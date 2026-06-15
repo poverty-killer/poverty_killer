@@ -164,6 +164,7 @@ def _make_test_loop(
     # ExecutionEngine is mocked — submit_signal returns True for the admit path.
     loop.execution_engine = MagicMock()
     loop.execution_engine.submit_signal = MagicMock(return_value=True)
+    loop.execution_engine.get_status.return_value = {"last_latency_truth": {}}
 
     # _build_truth_frame is replaced with a stub so we don't pull in the
     # full ExchangeTruth/PortfolioTruth/ExecutionTruth/StrategyTruth graph.
@@ -181,14 +182,22 @@ def _make_test_loop(
     # Metrics + insider engine touched by overlay paths we don't enter here.
     loop._metrics = types.SimpleNamespace(orders_submitted=0, orders_rejected=0, compilation_cycles=0)
     loop.insider_engine = MagicMock()
+    loop.signal_fusion = MagicMock()
+    loop.signal_fusion._telemetry = {}
 
     # Bind the consume helpers so _dispatch_fusion's `self._consume_observed_pair_*`
     # calls resolve correctly on the test double.
+    loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(
+        loop, MainLoop
+    )
     loop._consume_observed_pair_sector_rotation = (
         MainLoop._consume_observed_pair_sector_rotation.__get__(loop, MainLoop)
     )
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
+    )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
     )
     loop._classify_shadow_front_decline = (
         MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
@@ -199,6 +208,17 @@ def _make_test_loop(
     loop._clear_stale_sector_rotation_observed_pair = (
         MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
     )
+    loop._runtime_module_frame_evidence = (
+        MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    )
+    loop._apply_signal_economic_metadata = (
+        MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    )
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = (
+        MainLoop._compile_scorecard_frame_no_submit.__get__(loop, MainLoop)
+    )
+    loop._primary_no_submit_reason_code = MainLoop._primary_no_submit_reason_code
 
     return loop
 
@@ -207,6 +227,20 @@ def _bind(loop, method_name):
     """Bind an unbound MainLoop method to our test-double instance."""
     func = getattr(MainLoop, method_name)
     return func.__get__(loop, MainLoop)
+
+
+def _assert_no_submit_truth_compile(loop) -> dict:
+    """Blocked candidates may compile only an explicit no-submit truth frame."""
+    loop.execution_engine.submit_signal.assert_not_called()
+    assert loop.decision_compiler.compile.call_count == 1
+    _, compile_kwargs = loop.decision_compiler.compile.call_args
+    assert compile_kwargs.get("strategy_votes") == []
+    additional_inputs = compile_kwargs.get("additional_inputs") or {}
+    assert additional_inputs.get("no_submit_reason_code")
+    decision_frame = additional_inputs.get("decision_frame") or {}
+    assert decision_frame.get("frame_output") == "NO_TRADE"
+    assert decision_frame.get("frame_status") == "BLOCK"
+    return additional_inputs
 
 
 # =============================================================================
@@ -327,6 +361,8 @@ class TestConsumeObservedPairSectorRotation:
         sig, vote = consume("ETH/USD", rt, ts)
         assert sig is observed_sig
         assert vote is observed_vote
+        assert rt.last_sector_rotation_observed_signal is None
+        assert rt.last_sector_rotation_observed_vote is None
 
     def test_blocks_when_only_vote_ts_matches(self):
         loop = _make_test_loop()
@@ -421,8 +457,7 @@ class TestDispatchFusionFallbackAndDecline:
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", rt, fusion=self._make_fusion(ts), exchange_ts_ns=ts)
 
-        loop.execution_engine.submit_signal.assert_not_called()
-        loop.decision_compiler.compile.assert_not_called()
+        _assert_no_submit_truth_compile(loop)
 
     def test_sf_decline_with_stale_sr_pair_yields_all_sleeves_declined(self):
         """
@@ -442,8 +477,7 @@ class TestDispatchFusionFallbackAndDecline:
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("SOL/USD", rt, fusion=self._make_fusion(dispatch_ts), exchange_ts_ns=dispatch_ts)
 
-        loop.execution_engine.submit_signal.assert_not_called()
-        loop.decision_compiler.compile.assert_not_called()
+        _assert_no_submit_truth_compile(loop)
 
     def test_sf_decline_with_fresh_sr_pair_reaches_decision_compiler_and_submit(self):
         """
@@ -553,8 +587,7 @@ class TestAllSleevesDeclinedInvariant:
         ts = 11_000_000_000_000
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", rt, fusion=self._make_fusion(ts), exchange_ts_ns=ts)
-        loop.execution_engine.submit_signal.assert_not_called()
-        loop.decision_compiler.compile.assert_not_called()
+        _assert_no_submit_truth_compile(loop)
 
     def test_no_registered_candidates_no_submission(self):
         """
@@ -658,8 +691,7 @@ class TestPacketDoctrineInvariants:
         )
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", rt, fusion=fusion, exchange_ts_ns=ts)
-        loop.execution_engine.submit_signal.assert_not_called()
-        loop.decision_compiler.compile.assert_not_called()
+        _assert_no_submit_truth_compile(loop)
 
 
 class TestAdvisoryMetadataSpine:
@@ -748,8 +780,7 @@ class TestAdvisoryMetadataSpine:
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", rt, fusion=self._make_fusion(dispatch_ts), exchange_ts_ns=dispatch_ts)
 
-        loop.execution_engine.submit_signal.assert_not_called()
-        loop.decision_compiler.compile.assert_not_called()
+        _assert_no_submit_truth_compile(loop)
 
     def test_fusion_aggression_metadata_is_advisory_to_commander_contract_on_admit_path(self):
         loop = _make_test_loop()
@@ -889,8 +920,7 @@ class TestAdvisoryMetadataSpine:
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", rt, fusion=fusion, exchange_ts_ns=dispatch_ts)
 
-        loop.execution_engine.submit_signal.assert_not_called()
-        loop.decision_compiler.compile.assert_not_called()
+        _assert_no_submit_truth_compile(loop)
 
     def test_dispatch_and_submit_paths_do_not_import_dormant_advisory_or_aggression_modules(self):
         import inspect
@@ -906,7 +936,6 @@ class TestAdvisoryMetadataSpine:
             "session_calendar",
             "opportunity_ranking",
             "world_awareness",
-            "moving_floor",
             "net_edge_governor",
             "trade_efficiency_governor",
         )
