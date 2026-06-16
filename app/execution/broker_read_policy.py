@@ -28,6 +28,8 @@ READ_TRADE_EVENTS = "trade_events"
 READ_CLOCK = "clock"
 READ_ASSETS = "assets"
 
+TCA_ACCOUNT_ACTIVITY_TYPES = frozenset({"FILL", "CFEE", "FEE"})
+
 KNOWN_READ_FAMILIES = frozenset(
     {
         READ_ACCOUNT,
@@ -78,14 +80,27 @@ class BrokerReadPermissionProfile:
     name: str
     allowed_families: frozenset[str]
     denied_families: frozenset[str]
+    allowed_account_activity_types: frozenset[str] = frozenset()
 
     @property
     def account_activity_reads_allowed(self) -> bool:
-        return self.allows(READ_ACCOUNT_ACTIVITIES)
+        return self.allows(READ_ACCOUNT_ACTIVITIES, "FILL")
 
     @property
     def fee_hydration_allowed(self) -> bool:
-        return self.allows(READ_FEE_HYDRATION) and self.account_activity_reads_allowed
+        return self.allows(READ_FEE_HYDRATION, "CFEE,FEE") and self.account_activity_reads_allowed
+
+    def _account_activity_type_allowed(self, activity_type: Any | None) -> bool:
+        if READ_ACCOUNT_ACTIVITIES not in self.allowed_families:
+            return False
+        requested = {
+            item.strip().upper()
+            for item in str(activity_type or "").split(",")
+            if item.strip()
+        }
+        if not requested:
+            return False
+        return requested.issubset(self.allowed_account_activity_types)
 
     def allows(self, family: Any, activity_type: Any | None = None) -> bool:
         normalized = normalize_broker_read_family(family, activity_type)
@@ -93,6 +108,8 @@ class BrokerReadPermissionProfile:
             return False
         if normalized in self.denied_families:
             return False
+        if normalized == READ_ACCOUNT_ACTIVITIES:
+            return self._account_activity_type_allowed(activity_type)
         return normalized in self.allowed_families
 
     def denial_reason(self, family: Any, activity_type: Any | None = None) -> str:
@@ -115,6 +132,7 @@ class BrokerReadPermissionProfile:
             "profile": self.name,
             "allowed_families": sorted(self.allowed_families),
             "denied_families": sorted(self.denied_families),
+            "allowed_account_activity_types": sorted(self.allowed_account_activity_types),
             "account_activity_read_authorized": self.account_activity_reads_allowed,
             "fee_hydration_allowed": self.fee_hydration_allowed,
             "deny_unknown_read_family": True,
@@ -128,11 +146,13 @@ def broker_read_profile_for_name(name: Any) -> BrokerReadPermissionProfile:
             name=PAPER_TCA_EXTENDED_READS,
             allowed_families=EXTENDED_ALLOWED_READS,
             denied_families=KNOWN_READ_FAMILIES - EXTENDED_ALLOWED_READS,
+            allowed_account_activity_types=TCA_ACCOUNT_ACTIVITY_TYPES,
         )
     return BrokerReadPermissionProfile(
         name=PAPER_SMOKE_STRICT_READS,
         allowed_families=STRICT_ALLOWED_READS,
         denied_families=KNOWN_READ_FAMILIES - STRICT_ALLOWED_READS,
+        allowed_account_activity_types=frozenset(),
     )
 
 

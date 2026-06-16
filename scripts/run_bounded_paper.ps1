@@ -12,6 +12,7 @@ param(
     [string]$CryptoMarketDataProviders = "coinbase_public,kraken_public",
     [string]$Watchlist = $env:POVERTY_KILLER_RUNTIME_WATCHLIST,
     [switch]$PaperExplorationAlpha,
+    [switch]$TcaExtendedReads,
     [string]$PythonPath = "venv\Scripts\python.exe",
     [string]$LogDirectory = "logs\paper_runs"
 )
@@ -20,6 +21,7 @@ $ErrorActionPreference = "Stop"
 $PaperEndpoint = "https://paper-api.alpaca.markets"
 $LiveEndpoint = "https://api.alpaca.markets"
 $StrictReadProfile = "PAPER_SMOKE_STRICT_READS"
+$ExtendedReadProfile = "PAPER_TCA_EXTENDED_READS"
 
 function Fail-Closed {
     param([string]$Reason)
@@ -115,6 +117,9 @@ Require-NonEmptyEnv "POVERTY_KILLER_EXECUTION_BROKER"
 Require-NonEmptyEnv "POVERTY_KILLER_MARKET_DATA_PROVIDERS"
 Require-NonEmptyEnv "POVERTY_KILLER_CRYPTO_MARKET_DATA_PROVIDERS"
 
+if ($TcaExtendedReads) {
+    $env:PK_BROKER_READ_PROFILE = $ExtendedReadProfile
+}
 if ([string]::IsNullOrWhiteSpace($env:PK_BROKER_READ_PROFILE)) {
     $env:PK_BROKER_READ_PROFILE = $StrictReadProfile
 }
@@ -123,6 +128,13 @@ if ($env:PK_BROKER_READ_PROFILE -eq $StrictReadProfile) {
     $env:PK_BROKER_READ_DENY_ACCOUNT_ACTIVITIES = "1"
     $env:PK_FEE_HYDRATION_ALLOWED = "0"
     $env:PK_ACCOUNT_ACTIVITY_READS_ALLOWED = "0"
+}
+if ($env:PK_BROKER_READ_PROFILE -eq $ExtendedReadProfile) {
+    $env:PK_BROKER_READ_ALLOWLIST = "account,orders,positions,account_activities,fill_activity_hydration,fee_hydration,fee_activities"
+    $env:PK_BROKER_READ_DENY_ACCOUNT_ACTIVITIES = "0"
+    $env:PK_FEE_HYDRATION_ALLOWED = "1"
+    $env:PK_ACCOUNT_ACTIVITY_READS_ALLOWED = "1"
+    $env:PK_ACCOUNT_ACTIVITY_TYPES_ALLOWLIST = "FILL,CFEE,FEE"
 }
 if ($env:PK_BROKER_READ_PROFILE -eq $StrictReadProfile) {
     $allowedReadFamilies = @("account", "orders", "positions")
@@ -145,6 +157,32 @@ if ($env:PK_BROKER_READ_PROFILE -eq $StrictReadProfile) {
     }
     if ($env:PK_FEE_HYDRATION_ALLOWED -ne "0") {
         Fail-Closed "FEE_HYDRATION_NOT_AUTHORIZED"
+    }
+}
+if ($env:PK_BROKER_READ_PROFILE -eq $ExtendedReadProfile) {
+    $allowedReadFamilies = @("account", "orders", "positions", "account_activities", "fill_activity_hydration", "fee_hydration", "fee_activities")
+    $configuredReadFamilies = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:PK_BROKER_READ_ALLOWLIST)) {
+        $configuredReadFamilies = $env:PK_BROKER_READ_ALLOWLIST.Split(",") | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    }
+    foreach ($requiredReadFamily in $allowedReadFamilies) {
+        if ($configuredReadFamilies -notcontains $requiredReadFamily) {
+            Fail-Closed "BROKER_READ_ALLOWLIST_MISSING_$($requiredReadFamily.ToUpperInvariant())"
+        }
+    }
+    foreach ($configuredReadFamily in $configuredReadFamilies) {
+        if ($allowedReadFamilies -notcontains $configuredReadFamily) {
+            Fail-Closed "BROKER_READ_NOT_AUTHORIZED_$($configuredReadFamily.ToUpperInvariant())"
+        }
+    }
+    if ($env:PK_ACCOUNT_ACTIVITY_READS_ALLOWED -ne "1") {
+        Fail-Closed "ACCOUNT_ACTIVITY_READS_REQUIRED_FOR_TCA_EXTENDED"
+    }
+    if ($env:PK_FEE_HYDRATION_ALLOWED -ne "1") {
+        Fail-Closed "FEE_HYDRATION_REQUIRED_FOR_TCA_EXTENDED"
+    }
+    if ($env:PK_ACCOUNT_ACTIVITY_TYPES_ALLOWLIST -ne "FILL,CFEE,FEE") {
+        Fail-Closed "ACCOUNT_ACTIVITY_TYPES_NOT_TCA_SCOPED"
     }
 }
 Write-Host "Broker read profile: $($env:PK_BROKER_READ_PROFILE)"

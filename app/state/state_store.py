@@ -141,11 +141,16 @@ class StateStore:
                     status TEXT NOT NULL,
                     is_terminal INTEGER NOT NULL DEFAULT 0,
                     terminal_reason TEXT,
+                    order_metadata TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (client_order_id, broker)
                 )
             """)
+            cursor.execute("PRAGMA table_info(order_id_mappings)")
+            order_mapping_columns = {str(row[1]) for row in cursor.fetchall()}
+            if "order_metadata" not in order_mapping_columns:
+                cursor.execute("ALTER TABLE order_id_mappings ADD COLUMN order_metadata TEXT")
 
             # Passive reservation ledger persistence. This is durable fact
             # storage only; StateStore does not own exposure authority.
@@ -735,6 +740,11 @@ class StateStore:
                     "status": mapping["status"],
                     "is_terminal": is_terminal,
                     "terminal_reason": mapping.get("terminal_reason"),
+                    "order_metadata": (
+                        json.dumps(mapping.get("order_metadata"), sort_keys=True, default=str)
+                        if isinstance(mapping.get("order_metadata"), (dict, list, tuple))
+                        else mapping.get("order_metadata")
+                    ),
                     "created_at": created_at,
                     "updated_at": now,
                 }
@@ -774,6 +784,7 @@ class StateStore:
                     return None
                 result = dict(row)
                 result["is_terminal"] = bool(result.get("is_terminal"))
+                result["order_metadata"] = self._json_dict_or_empty(result.get("order_metadata"))
                 return result
         except Exception as e:
             logger.error("Failed to get order ID mapping %s/%s: %s", broker, client_order_id, e)
@@ -820,6 +831,7 @@ class StateStore:
                     return None
                 result = dict(rows[0])
                 result["is_terminal"] = bool(result.get("is_terminal"))
+                result["order_metadata"] = self._json_dict_or_empty(result.get("order_metadata"))
                 return result
         except Exception as e:
             logger.error(
@@ -862,6 +874,7 @@ class StateStore:
                 for row in cursor.fetchall():
                     result = dict(row)
                     result["is_terminal"] = bool(result.get("is_terminal"))
+                    result["order_metadata"] = self._json_dict_or_empty(result.get("order_metadata"))
                     results.append(result)
                 return results
         except Exception as e:
@@ -908,6 +921,38 @@ class StateStore:
         updated["is_terminal"] = True
         updated["terminal_reason"] = terminal_reason
         return self.upsert_order_id_mapping(updated)
+
+    def update_broker_fill_metadata(self, fill_id: str, metadata_updates: Dict[str, Any]) -> str:
+        """Idempotently enrich broker fill metadata without inventing broker facts."""
+        safe_fill_id = str(fill_id or "").strip()
+        if not safe_fill_id or not isinstance(metadata_updates, dict):
+            return "failed"
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute("SELECT * FROM broker_fill_ledger WHERE fill_id = ?", (safe_fill_id,))
+                existing = cursor.fetchone()
+                if existing is None:
+                    conn.rollback()
+                    return "missing"
+                existing_dict = dict(existing)
+                metadata = self._json_dict_or_empty(existing_dict.get("metadata"))
+                metadata.update(metadata_updates)
+                cursor.execute(
+                    """
+                    UPDATE broker_fill_ledger
+                    SET metadata = ?, observed_at_ns = ?
+                    WHERE fill_id = ?
+                    """,
+                    (json.dumps(metadata, sort_keys=True, default=str), now_ns(), safe_fill_id),
+                )
+                conn.commit()
+                return "updated"
+        except Exception as e:
+            logger.error("Failed to update broker fill metadata %s: %s", fill_id, e)
+            return "failed"
 
     @staticmethod
     def _reservation_bool(value: Any) -> int:

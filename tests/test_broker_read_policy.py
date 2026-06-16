@@ -66,6 +66,9 @@ def test_extended_tca_profile_exists_but_is_not_default():
     assert extended.name == PAPER_TCA_EXTENDED_READS
     assert extended.allows(READ_ACCOUNT_ACTIVITIES, "FILL") is True
     assert extended.allows(READ_FEE_HYDRATION, "CFEE,FEE") is True
+    assert extended.allows(READ_ACCOUNT_ACTIVITIES, "CFEE,FEE") is True
+    assert extended.allows(READ_ACCOUNT_ACTIVITIES, "DIV") is False
+    assert extended.allows(READ_ACCOUNT_ACTIVITIES) is False
 
 
 def test_alpaca_adapter_denies_account_activities_before_network_under_strict_profile():
@@ -90,3 +93,15 @@ def test_alpaca_adapter_allows_account_orders_positions_under_strict_profile():
 
     assert [call["method"] for call in transport.calls] == ["GET", "GET", "GET"]
     assert adapter.request_counts["GET"] == 3
+
+
+def test_extended_tca_profile_rejects_non_tca_account_activity_before_network():
+    transport = CaptureTransport()
+    adapter = _adapter(profile=PAPER_TCA_EXTENDED_READS, transport=transport)
+
+    with pytest.raises(BrokerGatewayError) as exc_info:
+        adapter.get_account_activities(activity_types="DIV")
+
+    assert exc_info.value.reason_code == BROKER_READ_NOT_AUTHORIZED
+    assert transport.calls == []
+    assert adapter.request_counts.get("GET", 0) == 0

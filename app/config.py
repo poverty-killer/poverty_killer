@@ -279,6 +279,54 @@ class ExecutionConfig(BaseModel):
     taker_fee_bps: float = Field(default=16.0, ge=0, le=100, description="Taker fee in basis points")
     maker_fee_bps: float = Field(default=8.0, ge=0, le=50, description="Maker fee in basis points")
 
+    # Post-fill NetEdge realization. This is an advisory measurement overlay,
+    # not the pre-trade admission gate.
+    net_edge_realization_model_version: str = Field(
+        default="net_edge_realization_v1_conservative_crypto",
+        min_length=1,
+        description="Version pinned into each run's post-fill NetEdge realization records",
+    )
+    net_edge_realization_fee_side: Literal["maker", "taker"] = Field(
+        default="taker",
+        description="Fee side used for conservative post-fill realization when broker fee truth is unavailable",
+    )
+    net_edge_realization_maker_fee_bps: float = Field(
+        default=15.0,
+        ge=0,
+        le=100,
+        description="Conservative modeled maker fee in basis points for post-fill realization",
+    )
+    net_edge_realization_taker_fee_bps: float = Field(
+        default=25.0,
+        ge=0,
+        le=100,
+        description="Conservative modeled taker fee in basis points for post-fill realization",
+    )
+    net_edge_realization_spread_bps: float = Field(
+        default=10.0,
+        ge=0,
+        le=500,
+        description="Conservative spread cost in basis points for post-fill realization",
+    )
+    net_edge_realization_slippage_bps: float = Field(
+        default=8.0,
+        ge=0,
+        le=500,
+        description="Conservative slippage cost in basis points for post-fill realization",
+    )
+    net_edge_realization_latency_bps: float = Field(
+        default=4.0,
+        ge=0,
+        le=500,
+        description="Conservative latency drag in basis points for post-fill realization",
+    )
+    net_edge_realization_exit_cost_bps: float = Field(
+        default=25.0,
+        ge=0,
+        le=500,
+        description="Conservative round-trip exit cost in basis points for post-fill realization",
+    )
+
     # Order management
     max_order_retries: int = Field(default=3, ge=0, le=10, description="Maximum retries for failed orders")
     retry_delay_seconds: float = Field(default=1.0, ge=0.1, le=10, description="Delay between retries")

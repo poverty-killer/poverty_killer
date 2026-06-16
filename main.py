@@ -485,6 +485,7 @@ class SovereignHeartbeat:
             execution_broker=self._execution_broker,
             broker_gateway_adapter=self._broker_gateway_adapter,
             broker_read_profile=config.broker_read_permission_profile,
+            execution_config=config.execution,
         )
 
         self.masking_layer = MaskingLayer(

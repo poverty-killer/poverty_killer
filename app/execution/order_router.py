@@ -87,6 +87,7 @@ from app.utils.time_utils import now_ns
 from app.telemetry.event_store import TelemetryEventStore
 from app.telemetry.fill_recorder import FillRecorder, build_passive_reservation_candidate_delta
 import app.utils.enums as _pb_enums
+from app.config import ExecutionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,9 @@ class ActiveOrderIdMapping:
     status: str = "acknowledged"
     is_terminal: bool = False
     terminal_reason: Optional[str] = None
+    order_metadata: Optional[Dict[str, Any]] = None
     durable: bool = False
+    hydrated: bool = False
 
 
 class OrderRouter:
@@ -181,6 +184,7 @@ class OrderRouter:
         execution_broker: str = INTERNAL_PAPER_EXECUTION_BROKER,
         broker_gateway_adapter: Optional[Any] = None,
         broker_read_profile: Optional[Any] = None,
+        execution_config: Optional[Any] = None,
     ):
         self.primary_exchange = primary_exchange
         self.secondary_exchange = secondary_exchange
@@ -200,6 +204,7 @@ class OrderRouter:
         self._reservation_lifecycle_enabled = bool(reservation_lifecycle_enabled)
         self.execution_broker = str(execution_broker or INTERNAL_PAPER_EXECUTION_BROKER).strip().lower()
         self._broker_gateway_adapter = broker_gateway_adapter
+        self._net_edge_realization_run_config = self._build_net_edge_realization_run_config(execution_config)
         adapter_profile = getattr(broker_gateway_adapter, "broker_read_permission_profile", None)
         self._broker_read_profile: BrokerReadPermissionProfile = (
             coerce_broker_read_profile(broker_read_profile)
@@ -1012,6 +1017,116 @@ class OrderRouter:
     def _mapping_broker(self) -> str:
         return "paper" if self.paper_mode else str(self.primary_exchange).lower()
 
+    def _realization_decimal(self, value: Any, default: str = "0") -> _Decimal:
+        try:
+            return _Decimal(str(value))
+        except Exception:
+            return _Decimal(default)
+
+    def _build_net_edge_realization_run_config(self, execution_config: Optional[Any]) -> Dict[str, Any]:
+        config = execution_config if execution_config is not None else ExecutionConfig()
+
+        def attr(name: str, default: Any) -> Any:
+            return getattr(config, name, default)
+
+        maker_fee_bps = self._realization_decimal(attr("net_edge_realization_maker_fee_bps", "15.0"))
+        taker_fee_bps = self._realization_decimal(attr("net_edge_realization_taker_fee_bps", "25.0"))
+        fee_side = str(attr("net_edge_realization_fee_side", "taker") or "taker").strip().lower()
+        if fee_side not in {"maker", "taker"}:
+            fee_side = "taker"
+        selected_fee_bps = maker_fee_bps if fee_side == "maker" else taker_fee_bps
+        spread_bps = self._realization_decimal(attr("net_edge_realization_spread_bps", "10.0"))
+        slippage_bps = self._realization_decimal(attr("net_edge_realization_slippage_bps", "8.0"))
+        latency_bps = self._realization_decimal(attr("net_edge_realization_latency_bps", "4.0"))
+        exit_cost_bps = self._realization_decimal(attr("net_edge_realization_exit_cost_bps", "25.0"))
+        total_cost_bps = selected_fee_bps + spread_bps + slippage_bps + latency_bps + exit_cost_bps
+        return {
+            "source": "ExecutionConfig",
+            "model_version": str(
+                attr("net_edge_realization_model_version", "net_edge_realization_v1_conservative_crypto")
+            ),
+            "fee_side": fee_side,
+            "maker_fee_bps": str(maker_fee_bps),
+            "taker_fee_bps": str(taker_fee_bps),
+            "selected_fee_bps": str(selected_fee_bps),
+            "spread_bps": str(spread_bps),
+            "slippage_bps": str(slippage_bps),
+            "latency_bps": str(latency_bps),
+            "round_trip_exit_cost_bps": str(exit_cost_bps),
+            "total_cost_bps": str(total_cost_bps),
+            "modeled_values_are_advisory": True,
+            "broker_truth_authority": False,
+        }
+
+    def _json_safe_dict(self, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        try:
+            return dict(json.loads(json.dumps(value, sort_keys=True, default=str)))
+        except Exception:
+            return dict(value)
+
+    def _order_metadata_snapshot(self, order: OrderRequest) -> Dict[str, Any]:
+        return {
+            "decision_uuid": getattr(order, "decision_uuid", None),
+            "exchange_ts_ns": int(getattr(order, "exchange_ts_ns", 0) or 0),
+            "receive_ts_ns": int(getattr(order, "receive_ts_ns", 0) or 0),
+            "limit_price": str(order.limit_price) if getattr(order, "limit_price", None) is not None else None,
+            "metadata": self._json_safe_dict(getattr(order, "metadata", {}) or {}),
+            "net_edge_realization_config": dict(self._net_edge_realization_run_config),
+        }
+
+    def _mapping_order_snapshot(self, mapping: ActiveOrderIdMapping) -> Dict[str, Any]:
+        if isinstance(mapping.order_metadata, dict):
+            return dict(mapping.order_metadata)
+        return {}
+
+    def _fill_order_snapshot(
+        self,
+        mapping: ActiveOrderIdMapping,
+        order: Optional[OrderRequest],
+    ) -> Dict[str, Any]:
+        if order is not None:
+            return self._order_metadata_snapshot(order)
+        return self._mapping_order_snapshot(mapping)
+
+    def _fill_order_metadata(
+        self,
+        mapping: ActiveOrderIdMapping,
+        order: Optional[OrderRequest],
+        order_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if order is not None:
+            return self._json_safe_dict(getattr(order, "metadata", {}) or {})
+        snapshot = order_snapshot if isinstance(order_snapshot, dict) else self._mapping_order_snapshot(mapping)
+        metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
+        return dict(metadata)
+
+    def _fill_order_limit_price(
+        self,
+        order: Optional[OrderRequest],
+        order_snapshot: Dict[str, Any],
+    ) -> Optional[_Decimal]:
+        if order is not None and getattr(order, "limit_price", None) is not None:
+            return _Decimal(str(order.limit_price))
+        value = order_snapshot.get("limit_price")
+        if value in (None, ""):
+            return None
+        try:
+            return _Decimal(str(value))
+        except Exception:
+            return None
+
+    def _fill_order_decision_ts_ns(
+        self,
+        mapping: ActiveOrderIdMapping,
+        order: Optional[OrderRequest],
+        order_snapshot: Dict[str, Any],
+    ) -> int:
+        if order is not None:
+            return int(getattr(order, "exchange_ts_ns", 0) or mapping.submit_ts_ns or 0)
+        return int(order_snapshot.get("exchange_ts_ns") or mapping.submit_ts_ns or 0)
+
     def _value_as_str(self, value: Any) -> str:
         if hasattr(value, "value"):
             return str(value.value)
@@ -1044,6 +1159,7 @@ class OrderRouter:
             "status": mapping.status,
             "is_terminal": mapping.is_terminal,
             "terminal_reason": mapping.terminal_reason,
+            "order_metadata": mapping.order_metadata,
         }
 
     def _mapping_from_record(self, record: Dict[str, Any]) -> Optional[ActiveOrderIdMapping]:
@@ -1065,7 +1181,9 @@ class OrderRouter:
                 status=str(record.get("status") or "unknown"),
                 is_terminal=bool(record.get("is_terminal")),
                 terminal_reason=record.get("terminal_reason"),
+                order_metadata=record.get("order_metadata") if isinstance(record.get("order_metadata"), dict) else None,
                 durable=True,
+                hydrated=True,
             )
         except Exception as exc:
             logger.error("Invalid stored order ID mapping: %s", exc)
@@ -1257,7 +1375,7 @@ class OrderRouter:
             "broker_fee_activity_duplicate_ignored_count": 0,
             "fee_hydration_skipped": False,
             "fee_hydration_skip_reason": None,
-            "account_activity_read_authorized": self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES),
+            "account_activity_read_authorized": self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES, "FILL"),
             "broker_read_profile": self._broker_read_profile.name,
             "tca_complete_count": 0,
             "tca_estimated_count": 0,
@@ -1483,6 +1601,7 @@ class OrderRouter:
             status=status,
             is_terminal=is_terminal,
             terminal_reason=terminal_reason,
+            order_metadata=self._order_metadata_snapshot(order),
         )
 
         if self._state_store is not None:
@@ -1938,11 +2057,14 @@ class OrderRouter:
         active_mapping = self._active_order_id_mappings.get((broker_name, client_id))
         mutation_scope = ["state_store_order_id_mapping"]
         if active_mapping is not None:
-            active_mapping.status = terminal_status
-            active_mapping.is_terminal = True
-            active_mapping.terminal_reason = terminal_reason
-            active_mapping.durable = True
-            mutation_scope.append("active_order_id_mapping")
+            if active_mapping.hydrated:
+                self._active_order_id_mappings.pop((broker_name, client_id), None)
+            else:
+                active_mapping.status = terminal_status
+                active_mapping.is_terminal = True
+                active_mapping.terminal_reason = terminal_reason
+                active_mapping.durable = True
+                mutation_scope.append("active_order_id_mapping")
 
         result["applied"] = True
         result["reason"] = "terminal_mapping_updated"
@@ -4172,6 +4294,21 @@ class OrderRouter:
 
             tca_fields = self._fee_tca_fields_for_fill_row(row, fee_amount)
             fee_source = "BROKER_CFEE" if activity.get("activity_type") == "CFEE" else "BROKER_FEE"
+            fee_enriched_row = dict(row)
+            fee_enriched_row.update(
+                {
+                    "fee": str(fee_amount),
+                    "fee_currency": str(fee_currency),
+                    "fee_bps": tca_fields.get("fee_bps"),
+                    "tca_status": tca_fields.get("tca_status"),
+                    "execution_quality_verdict": tca_fields.get("execution_quality_verdict"),
+                    "realized_vs_modeled_netedge": tca_fields.get("realized_vs_modeled_netedge"),
+                }
+            )
+            net_edge_realization = self._net_edge_realization_record_for_row(
+                fee_enriched_row,
+                source_event=source_event,
+            )
             update_status = updater(
                 str(row.get("fill_id")),
                 fee=fee_amount,
@@ -4197,11 +4334,17 @@ class OrderRouter:
                     "fee_match_confidence": match.get("confidence"),
                     "fee_match_keys": tuple(match.get("keys") or ()),
                     "fee_activity_description": activity.get("description"),
+                    "net_edge_realization": net_edge_realization,
                 },
             )
             if update_status in {"updated", "duplicate"}:
                 if activity.get("activity_key"):
                     used_activity_keys.add(str(activity.get("activity_key")))
+                round_trip_updates = (
+                    self._update_entry_realizations_for_position_close(fee_enriched_row)
+                    if str(row.get("action") or "").strip().lower() == "sell_to_close"
+                    else []
+                )
                 result.update(
                     {
                         "status": "FEE_ACTIVITY_MATCHED",
@@ -4217,6 +4360,8 @@ class OrderRouter:
                         "tca_status": tca_fields.get("tca_status"),
                         "execution_quality_verdict": tca_fields.get("execution_quality_verdict"),
                         "realized_netedge_available": bool(tca_fields.get("realized_netedge_available")),
+                        "net_edge_realization_status": net_edge_realization.get("realized_net_edge_status"),
+                        "round_trip_entry_updates": tuple(round_trip_updates),
                         "legacy_fill_inserted": self._insert_legacy_fill_after_fee_match(
                             row,
                             fee=fee_amount,
@@ -4299,7 +4444,7 @@ class OrderRouter:
                 if self._broker_fee_hydration_skipped
                 else ("AUTHORIZED" if self._fee_activity_read_authorized() else "NOT_AUTHORIZED")
             ),
-            "account_activity_read_authorized": self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES),
+            "account_activity_read_authorized": self._broker_read_allowed(READ_ACCOUNT_ACTIVITIES, "FILL"),
             "broker_read_profile": self._broker_read_profile.name,
             "tca_complete_count": int(tca_complete_count),
             "tca_estimated_count": int(tca_estimated_count),
@@ -4338,16 +4483,18 @@ class OrderRouter:
         fee: Optional[_Decimal],
         fill_ts_ns: Optional[int],
         order: Optional[OrderRequest],
+        order_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        metadata = dict(getattr(order, "metadata", {}) or {}) if order is not None else {}
+        snapshot = order_snapshot if isinstance(order_snapshot, dict) else self._fill_order_snapshot(mapping, order)
+        metadata = self._fill_order_metadata(mapping, order, snapshot)
         net_edge = metadata.get("net_edge_evaluation") if isinstance(metadata.get("net_edge_evaluation"), dict) else {}
         context = metadata.get("net_edge_context") if isinstance(metadata.get("net_edge_context"), dict) else {}
         reference = self._order_metadata_decimal(
             metadata,
             ("modeled_entry_price", "reference_price", "decision_reference_price", "signal_price"),
         )
-        if reference is None and order is not None and getattr(order, "limit_price", None) is not None:
-            reference = _Decimal(str(order.limit_price))
+        if reference is None:
+            reference = self._fill_order_limit_price(order, snapshot)
         modeled_net_edge = self._order_metadata_decimal(
             dict(net_edge),
             ("net_adversarial_edge", "net_edge", "modeled_net_edge"),
@@ -4372,7 +4519,7 @@ class OrderRouter:
         if fee is not None and notional > 0:
             fee_bps = (fee / notional) * _Decimal("10000")
 
-        decision_ts_ns = int(getattr(order, "exchange_ts_ns", 0) or mapping.submit_ts_ns or 0)
+        decision_ts_ns = self._fill_order_decision_ts_ns(mapping, order, snapshot)
         ack_ts_ns = int(mapping.ack_ts_ns or 0)
         latency_decision_to_ack_ms = None
         latency_ack_to_fill_ms = None
@@ -4413,6 +4560,291 @@ class OrderRouter:
             "execution_quality_verdict": verdict,
             "realized_netedge_available": realized_vs_modeled is not None,
         }
+
+    def _context_bps(self, context: Dict[str, Any], key: str) -> _Decimal:
+        return self._realization_decimal(context.get(key), "0")
+
+    def _net_edge_realization_record(
+        self,
+        *,
+        fill_id: str,
+        mapping: ActiveOrderIdMapping,
+        action: str,
+        quantity: _Decimal,
+        price: _Decimal,
+        fee: Optional[_Decimal],
+        fee_currency: Optional[str],
+        tca_fields: Dict[str, Any],
+        metadata: Dict[str, Any],
+        source_event: str,
+        broker_activity_id: Optional[str],
+    ) -> Dict[str, Any]:
+        context = metadata.get("net_edge_context") if isinstance(metadata.get("net_edge_context"), dict) else {}
+        net_edge = metadata.get("net_edge_evaluation") if isinstance(metadata.get("net_edge_evaluation"), dict) else {}
+        modeled_net_edge = self._realization_decimal(tca_fields.get("modeled_net_edge"), "NaN")
+        slippage_bps = self._realization_decimal(tca_fields.get("slippage_bps"), "NaN")
+        modeled_net_edge_known = modeled_net_edge == modeled_net_edge
+        slippage_known = slippage_bps == slippage_bps
+
+        pre_trade_fee_bps = self._context_bps(context, "fee_bps")
+        pre_trade_spread_bps = self._context_bps(context, "spread_bps")
+        pre_trade_slippage_bps = self._context_bps(context, "slippage_bps")
+        pre_trade_latency_bps = self._context_bps(context, "latency_drag_bps")
+        pre_trade_exit_bps = self._context_bps(context, "exit_execution_cost_bps")
+        pre_trade_partial_bps = self._context_bps(context, "partial_fill_drag_bps")
+        pre_trade_total_bps = (
+            pre_trade_fee_bps
+            + pre_trade_spread_bps
+            + pre_trade_slippage_bps
+            + pre_trade_latency_bps
+            + pre_trade_exit_bps
+            + pre_trade_partial_bps
+        )
+
+        config = dict(self._net_edge_realization_run_config)
+        configured_total_bps = self._realization_decimal(config.get("total_cost_bps"))
+        configured_fee_bps = self._realization_decimal(config.get("selected_fee_bps"))
+        extra_realism_drag_bps = max(configured_total_bps - pre_trade_total_bps, _Decimal("0"))
+        adverse_slippage_extra_bps = (
+            max(slippage_bps - pre_trade_slippage_bps, _Decimal("0")) if slippage_known else None
+        )
+        broker_fee_bps = self._realization_decimal(tca_fields.get("fee_bps"), "NaN")
+        broker_fee_bps_known = broker_fee_bps == broker_fee_bps
+        broker_fee_extra_bps = (
+            max(broker_fee_bps - configured_fee_bps, _Decimal("0")) if broker_fee_bps_known else _Decimal("0")
+        )
+
+        realized_net_edge = None
+        status = "UNKNOWN"
+        reason = "MISSING_EXPECTED_EDGE_OR_REFERENCE"
+        if modeled_net_edge_known and adverse_slippage_extra_bps is not None:
+            total_drag_bps = extra_realism_drag_bps + adverse_slippage_extra_bps + broker_fee_extra_bps
+            realized_net_edge = modeled_net_edge - (total_drag_bps / _Decimal("10000"))
+            status = "PASS" if realized_net_edge > _Decimal("0") else "FAIL"
+            reason = "ENTRY_TIME_ADVISORY_REALIZATION_POSITIVE" if status == "PASS" else "ENTRY_TIME_ADVISORY_REALIZATION_NON_POSITIVE"
+
+        action_text = str(action or "").strip().lower()
+        close_observed = action_text == "sell_to_close" or str(mapping.side).strip().lower() == "sell"
+        round_trip_truth_status = (
+            "AT_CLOSE_FILL_OBSERVED_PAIRING_PENDING"
+            if close_observed
+            else "UNKNOWN_UNTIL_POSITION_CLOSE"
+        )
+        true_net_profit_status = (
+            "UNKNOWN_PENDING_ENTRY_CLOSE_PAIRING"
+            if close_observed
+            else "UNKNOWN_UNTIL_POSITION_CLOSE"
+        )
+        fee_source = "BROKER_CONFIRMED" if fee is not None and fee_currency else "MODELED_ADVISORY"
+        record = {
+            "record_type": "NET_EDGE_REALIZATION",
+            "schema_version": 1,
+            "source_event": source_event,
+            "fill_id": fill_id,
+            "broker_activity_id": broker_activity_id,
+            "client_order_id": mapping.client_order_id,
+            "broker_order_id": mapping.broker_order_id or mapping.venue_order_id,
+            "symbol": mapping.symbol,
+            "side": mapping.side,
+            "action": action,
+            "measurement_label": "ENTRY_TIME_ADVISORY_ESTIMATE",
+            "modeled_values_are_advisory": True,
+            "broker_truth_authority": {
+                "quantity": True,
+                "price": True,
+                "fill_timestamp": True,
+                "fee": bool(fee is not None and fee_currency),
+                "net_profit": False,
+            },
+            "expected_edge": str(modeled_net_edge) if modeled_net_edge_known else None,
+            "expected_edge_source": (
+                "net_edge_evaluation.net_adversarial_edge"
+                if isinstance(net_edge, dict) and net_edge.get("net_adversarial_edge") is not None
+                else "net_edge_context"
+            ),
+            "decision_reference_price": tca_fields.get("modeled_entry_price"),
+            "fill_price": str(price),
+            "quantity": str(quantity),
+            "notional": tca_fields.get("notional"),
+            "slippage": tca_fields.get("slippage"),
+            "slippage_bps": tca_fields.get("slippage_bps"),
+            "pre_trade_cost_bps": {
+                "fee_bps": str(pre_trade_fee_bps),
+                "spread_bps": str(pre_trade_spread_bps),
+                "slippage_bps": str(pre_trade_slippage_bps),
+                "latency_drag_bps": str(pre_trade_latency_bps),
+                "partial_fill_drag_bps": str(pre_trade_partial_bps),
+                "exit_execution_cost_bps": str(pre_trade_exit_bps),
+                "total_bps": str(pre_trade_total_bps),
+            },
+            "realization_cost_model": config,
+            "fee_source": fee_source,
+            "broker_fee": str(fee) if fee is not None else None,
+            "broker_fee_currency": fee_currency or None,
+            "broker_fee_bps": str(broker_fee_bps) if broker_fee_bps_known else None,
+            "modeled_fee_bps": str(configured_fee_bps),
+            "incremental_adverse_slippage_bps": (
+                str(adverse_slippage_extra_bps) if adverse_slippage_extra_bps is not None else None
+            ),
+            "additional_realism_drag_bps": str(extra_realism_drag_bps),
+            "broker_fee_extra_bps": str(broker_fee_extra_bps),
+            "realized_net_edge": str(realized_net_edge) if realized_net_edge is not None else None,
+            "realized_net_edge_status": status,
+            "reason_code": reason,
+            "round_trip_truth_status": round_trip_truth_status,
+            "true_net_profit_status": true_net_profit_status,
+            "at_close_actual_round_trip": None,
+        }
+        logger.info("[OMS_DIAG] NET_EDGE_REALIZATION fields=%s", record)
+        return record
+
+    def _net_edge_realization_record_for_row(
+        self,
+        row: Dict[str, Any],
+        *,
+        source_event: str,
+    ) -> Dict[str, Any]:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        mapping = ActiveOrderIdMapping(
+            client_order_id=str(row.get("client_order_id") or ""),
+            broker=str(row.get("broker") or "alpaca"),
+            symbol=str(row.get("symbol") or ""),
+            side=str(row.get("side") or ""),
+            order_type="",
+            venue_order_id=str(row.get("broker_order_id") or "") or None,
+            broker_order_id=str(row.get("broker_order_id") or "") or None,
+            exchange_txid=None,
+            command_id_namespace="venue_order_id",
+            command_order_id=str(row.get("broker_order_id") or ""),
+            id_mapping_source="broker_fill_ledger",
+            submit_ts_ns=0,
+            ack_ts_ns=0,
+        )
+        quantity = self._decimal_from_payload(row, ("quantity",)) or _Decimal("0")
+        price = self._decimal_from_payload(row, ("price",)) or _Decimal("0")
+        fee = self._decimal_from_payload(row, ("fee",))
+        tca_fields = {
+            "notional": row.get("notional"),
+            "modeled_entry_price": row.get("modeled_entry_price"),
+            "modeled_net_edge": row.get("modeled_net_edge"),
+            "slippage": row.get("slippage"),
+            "slippage_bps": row.get("slippage_bps"),
+            "fee_bps": row.get("fee_bps"),
+        }
+        return self._net_edge_realization_record(
+            fill_id=str(row.get("fill_id") or ""),
+            mapping=mapping,
+            action=str(row.get("action") or ""),
+            quantity=quantity,
+            price=price,
+            fee=fee,
+            fee_currency=str(row.get("fee_currency") or "").strip() or None,
+            tca_fields=tca_fields,
+            metadata=metadata,
+            source_event=source_event,
+            broker_activity_id=str(row.get("broker_activity_id") or "").strip() or None,
+        )
+
+    def _update_entry_realizations_for_position_close(self, close_fill: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if self._state_store is None:
+            return []
+        lister = getattr(self._state_store, "list_broker_fill_ledger", None)
+        updater = getattr(self._state_store, "update_broker_fill_metadata", None)
+        if not callable(lister) or not callable(updater):
+            return []
+        if str(close_fill.get("side") or "").strip().lower() != "sell":
+            return []
+        close_quantity = self._decimal_from_payload(close_fill, ("quantity",))
+        close_price = self._decimal_from_payload(close_fill, ("price",))
+        if close_quantity is None or close_quantity <= 0 or close_price is None or close_price <= 0:
+            return []
+        close_fee = self._decimal_from_payload(close_fill, ("fee",))
+        close_fee_currency = str(close_fill.get("fee_currency") or "").strip()
+        remaining = close_quantity
+        updates: List[Dict[str, Any]] = []
+        rows = lister(missing_fee_only=False)
+        for row in sorted(rows, key=lambda item: int(item.get("fill_ts_ns") or 0)):
+            if remaining <= 0:
+                break
+            if str(row.get("fill_id")) == str(close_fill.get("fill_id")):
+                continue
+            if self._normalize_broker_symbol(row.get("symbol")) != self._normalize_broker_symbol(close_fill.get("symbol")):
+                continue
+            if str(row.get("side") or "").strip().lower() != "buy":
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            realization = metadata.get("net_edge_realization") if isinstance(metadata.get("net_edge_realization"), dict) else None
+            if not realization:
+                continue
+            at_close_update = (
+                realization.get("at_close_actual_round_trip")
+                if isinstance(realization.get("at_close_actual_round_trip"), dict)
+                else {}
+            )
+            if at_close_update.get("close_fill_id"):
+                continue
+            entry_quantity = self._decimal_from_payload(row, ("quantity",))
+            entry_price = self._decimal_from_payload(row, ("price",))
+            if entry_quantity is None or entry_quantity <= 0 or entry_price is None or entry_price <= 0:
+                continue
+            matched_quantity = min(entry_quantity, remaining)
+            if matched_quantity <= 0:
+                continue
+            entry_fee = self._decimal_from_payload(row, ("fee",))
+            entry_fee_currency = str(row.get("fee_currency") or "").strip()
+            gross_pnl = (close_price - entry_price) * matched_quantity
+            entry_fee_alloc = (entry_fee * (matched_quantity / entry_quantity)) if entry_fee is not None else None
+            close_fee_alloc = (close_fee * (matched_quantity / close_quantity)) if close_fee is not None else None
+            actual_net_profit = None
+            true_net_profit_status = "UNKNOWN_BROKER_FEE_PENDING"
+            if (
+                entry_fee_alloc is not None
+                and close_fee_alloc is not None
+                and entry_fee_currency
+                and close_fee_currency
+                and entry_fee_currency == close_fee_currency
+            ):
+                actual_net_profit = gross_pnl - entry_fee_alloc - close_fee_alloc
+                true_net_profit_status = "BROKER_CONFIRMED_AFTER_POSITION_CLOSE"
+            updated_realization = dict(realization)
+            updated_realization["measurement_label"] = "AT_CLOSE_ACTUAL_ROUND_TRIP"
+            updated_realization["round_trip_truth_status"] = (
+                "AT_CLOSE_ACTUAL_NET_PROFIT_CONFIRMED"
+                if actual_net_profit is not None
+                else "AT_CLOSE_FILL_OBSERVED_BROKER_FEE_PENDING"
+            )
+            updated_realization["true_net_profit_status"] = true_net_profit_status
+            updated_realization["at_close_actual_round_trip"] = {
+                "close_fill_id": close_fill.get("fill_id"),
+                "close_client_order_id": close_fill.get("client_order_id"),
+                "matched_quantity": str(matched_quantity),
+                "entry_price": row.get("price"),
+                "close_price": close_fill.get("price"),
+                "gross_pnl": str(gross_pnl),
+                "entry_broker_fee": str(entry_fee_alloc) if entry_fee_alloc is not None else None,
+                "close_broker_fee": str(close_fee_alloc) if close_fee_alloc is not None else None,
+                "fee_currency": entry_fee_currency if entry_fee_currency == close_fee_currency else None,
+                "actual_net_profit": str(actual_net_profit) if actual_net_profit is not None else None,
+                "broker_truth_authority": actual_net_profit is not None,
+                "updated_by_close_fill": True,
+            }
+            update_status = updater(
+                str(row.get("fill_id")),
+                {"net_edge_realization": updated_realization},
+            )
+            updates.append(
+                {
+                    "entry_fill_id": row.get("fill_id"),
+                    "close_fill_id": close_fill.get("fill_id"),
+                    "matched_quantity": str(matched_quantity),
+                    "status": update_status,
+                    "true_net_profit_status": true_net_profit_status,
+                }
+            )
+            remaining -= matched_quantity
+        if updates:
+            logger.info("[OMS_DIAG] NET_EDGE_ROUND_TRIP_UPDATE fields=%s", tuple(updates))
+        return updates
 
     def _hydrate_fill_ledger_from_broker_payload(
         self,
@@ -4517,6 +4949,7 @@ class OrderRouter:
             if hydration_status == "HYDRATED"
             else "BROKER_FILL_FEE_DETAIL_UNAVAILABLE"
         )
+        order_snapshot = self._fill_order_snapshot(mapping, order)
         tca_fields = self._fill_tca_fields(
             mapping=mapping,
             quantity=quantity,
@@ -4524,20 +4957,35 @@ class OrderRouter:
             fee=fee,
             fill_ts_ns=fill_ts_ns,
             order=order,
+            order_snapshot=order_snapshot,
         )
-        metadata = dict(getattr(order, "metadata", {}) or {}) if order is not None else {}
+        metadata = self._fill_order_metadata(mapping, order, order_snapshot)
         candidate_lifecycle = metadata.get("candidate_lifecycle") if isinstance(metadata.get("candidate_lifecycle"), dict) else {}
+        action = metadata.get("action") or ("sell_to_close" if str(mapping.side).lower() == "sell" else "buy_to_open")
+        net_edge_realization = self._net_edge_realization_record(
+            fill_id=fill_id,
+            mapping=mapping,
+            action=str(action),
+            quantity=quantity,
+            price=price,
+            fee=fee,
+            fee_currency=fee_currency or None,
+            tca_fields=tca_fields,
+            metadata=metadata,
+            source_event=source_event,
+            broker_activity_id=broker_activity_id,
+        )
         fill_record = {
             "fill_id": fill_id,
             "broker_order_id": broker_order_id,
             "client_order_id": mapping.client_order_id,
-            "decision_uuid": getattr(order, "decision_uuid", None) if order is not None else None,
+            "decision_uuid": getattr(order, "decision_uuid", None) if order is not None else order_snapshot.get("decision_uuid"),
             "frame_id": metadata.get("frame_id"),
             "candidate_id": candidate_lifecycle.get("candidate_id"),
             "snapshot_id": metadata.get("snapshot_id"),
             "symbol": mapping.symbol,
             "side": mapping.side,
-            "action": metadata.get("action") or ("sell_to_close" if str(mapping.side).lower() == "sell" else "buy_to_open"),
+            "action": action,
             "quantity": str(quantity),
             "price": str(price),
             "notional": tca_fields.get("notional"),
@@ -4567,6 +5015,12 @@ class OrderRouter:
                 "order_status": payload.get("status"),
                 "net_edge_evaluation": metadata.get("net_edge_evaluation"),
                 "net_edge_context": metadata.get("net_edge_context"),
+                "order_metadata_capture": {
+                    "available": bool(metadata),
+                    "source": "order_request" if order is not None else "durable_order_id_mapping",
+                    "decision_uuid": getattr(order, "decision_uuid", None) if order is not None else order_snapshot.get("decision_uuid"),
+                },
+                "net_edge_realization": net_edge_realization,
                 "fee_status": "FEE_ACTIVITY_MATCHED" if fee is not None and fee_currency else "FEE_PENDING_BROKER_ACTIVITY",
                 "fee_source": "BROKER_FILL_ACTIVITY" if fee is not None and fee_currency else "UNAVAILABLE",
                 "fee_hydration_reason_code": hydration_reason,
@@ -4593,8 +5047,14 @@ class OrderRouter:
                 "tca_status": tca_fields.get("tca_status"),
                 "execution_quality_verdict": tca_fields.get("execution_quality_verdict"),
                 "realized_netedge_available": bool(tca_fields.get("realized_netedge_available")),
+                "net_edge_realization_status": net_edge_realization.get("realized_net_edge_status"),
             }
         )
+        close_updates: List[Dict[str, Any]] = []
+        if ledger_status in {"inserted", "duplicate"} and str(action).strip().lower() == "sell_to_close":
+            close_updates = self._update_entry_realizations_for_position_close(fill_record)
+            if close_updates:
+                result["round_trip_entry_updates"] = tuple(close_updates)
         if fee is not None and fee_currency:
             legacy_fill_id = f"legacy:{fill_id}"
             legacy_inserted = self._state_store.insert_fill(
