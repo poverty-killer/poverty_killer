@@ -8,7 +8,8 @@ Verifies:
 - SHADOW_FRONT remains preferred_sleeve in RANGING in both paths
 - SR remains eligible and preferred in TRENDING_BULL / TRENDING_BEAR
 - SR remains deprioritized in RANGING when flag is False
-- CRISIS and UNKNOWN regime eligibility maps are unaffected by the flag
+- CRISIS keeps GammaFront preferred while admitting FLV as a governed fallback
+- UNKNOWN keeps FLV preferred regardless of the flag
 - StrategyConfig field defaults and construction are correct
 """
 
@@ -206,13 +207,15 @@ class TestTrendingUnchanged:
 
 class TestNoRegressionOtherRegimes:
     @pytest.mark.parametrize("flag", [False, True])
-    def test_crisis_gamma_front_eligible(self, flag):
+    def test_crisis_gamma_front_preferred_with_flv_secondary(self, flag):
         fusion = _build_fusion(sr_ranging_eligible=flag)
         _inject(fusion, RegimeType.CRISIS)
         d = fusion.fuse(BASE_TS)
         assert d.gamma_front_eligible
+        assert d.liquidity_void_eligible
         assert d.preferred_sleeve == SleeveType.GAMMA_FRONT.value
         assert not d.sector_rotation_eligible
+        assert SleeveType.FLV.value not in d.deprioritized_sleeves
 
     @pytest.mark.parametrize("flag", [False, True])
     def test_unknown_flv_preferred(self, flag):
@@ -220,4 +223,5 @@ class TestNoRegressionOtherRegimes:
         _inject(fusion, RegimeType.UNKNOWN)
         d = fusion.fuse(BASE_TS)
         assert d.preferred_sleeve == SleeveType.FLV.value
+        assert d.liquidity_void_eligible
         assert not d.sector_rotation_eligible

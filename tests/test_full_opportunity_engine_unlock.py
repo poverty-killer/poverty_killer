@@ -102,10 +102,15 @@ class _Book:
         return self._bid_depth, self._ask_depth
 
 
-def _candle(price: str, ts: int) -> SimpleNamespace:
+def _candle(price: str, ts: int, *, high: str | None = None, low: str | None = None) -> SimpleNamespace:
+    close = Decimal(price)
     return SimpleNamespace(
         symbol="ETH/USD",
-        close=float(Decimal(price)),
+        open=float(close),
+        high=float(Decimal(high) if high is not None else close),
+        low=float(Decimal(low) if low is not None else close),
+        close=float(close),
+        volume=100.0,
         exchange_ts_ns=ts,
     )
 
@@ -312,9 +317,24 @@ def test_moving_floor_breach_builds_broker_position_backed_sell_to_close_candida
     runtime = _moving_floor_runtime()
     snapshot = _snapshot()
 
-    loop._observe_moving_floor("ETH/USD", runtime, _candle("100", T0_NS), snapshot)
-    loop._observe_moving_floor("ETH/USD", runtime, _candle("110", T0_NS + 60_000_000_000), snapshot)
-    loop._observe_moving_floor("ETH/USD", runtime, _candle("107", T0_NS + 120_000_000_000), snapshot)
+    loop._observe_moving_floor(
+        "ETH/USD",
+        runtime,
+        _candle("100", T0_NS, high="100.20", low="100.00"),
+        snapshot,
+    )
+    loop._observe_moving_floor(
+        "ETH/USD",
+        runtime,
+        _candle("110", T0_NS + 60_000_000_000, high="112.00", low="111.80"),
+        snapshot,
+    )
+    loop._observe_moving_floor(
+        "ETH/USD",
+        runtime,
+        _candle("107", T0_NS + 120_000_000_000, high="107.00", low="106.80"),
+        snapshot,
+    )
 
     signal = runtime.last_moving_floor_observed_signal
     vote = runtime.last_moving_floor_observed_vote
@@ -325,8 +345,32 @@ def test_moving_floor_breach_builds_broker_position_backed_sell_to_close_candida
     assert signal.metadata["requires_existing_position"] is True
     assert signal.metadata["broker_position_backed"] is True
     assert signal.metadata["fresh_entry_authorized"] is False
+    assert signal.metadata["action"] == "sell_to_close"
+    assert signal.metadata["execution_action"] == "sell_to_close"
     assert signal.metadata["order_action"] == "sell_to_close"
+    assert signal.metadata["position_lifecycle_transition"]["target_state"] == "FLAT"
+    assert signal.metadata["position_lifecycle_transition"]["cooldown_state"] == "PENDING_FILL"
+    assert (
+        signal.metadata["position_lifecycle_transition"]["round_trip_realization"]
+        == "AT_CLOSE_ON_SELL_TO_CLOSE_FILL"
+    )
+    assert signal.metadata["moving_floor_exit_context"]["at_close_realization_expected"] is True
+    assert (
+        signal.metadata["moving_floor_exit_context"]["net_edge_realization_label"]
+        == "AT_CLOSE_ACTUAL_ROUND_TRIP"
+    )
+    floor_evidence = signal.metadata["moving_floor_exit_context"]["volatility_floor"]
+    assert floor_evidence["method"] == "ATR_CHANDELIER_AUGMENT"
+    assert floor_evidence["topological_obi_preserved"] is True
+    assert floor_evidence["one_directional_ratchet"] is True
+    assert floor_evidence["atr_source"] == "tick_atr"
+    assert Decimal(floor_evidence["chandelier_floor"]) > Decimal("0")
     assert Decimal(signal.metadata["expected_move_bps"]) > Decimal("0")
+    assert (
+        runtime.last_moving_floor_evidence["evidence"]["position_lifecycle_transition"]
+        == "BROKER_POSITION_BACKED_SELL_TO_CLOSE_PENDING_FLAT_COOLDOWN"
+    )
+    assert runtime.last_moving_floor_evidence["evidence"]["round_trip_realization"] == "AT_CLOSE_ON_BROKER_ACK"
 
     runtime_for_guardrail = SimpleNamespace(last_price=107.0)
     verdict = _build_pre_trade_guardrail_verdict(

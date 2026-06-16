@@ -25,6 +25,8 @@ from app.portfolio.opportunity_ranking import (
 )
 from app.strategies.adaptive_dc import AdaptiveDC, DCMarketTick
 from app.strategies.council_metadata import (
+    FEED_REAL,
+    KEY_FEED_STATUS,
     MODULE_ADAPTIVE_DC,
     MODULE_GAMMA_FRONT,
     MODULE_LIQUIDITY_VOID,
@@ -276,6 +278,12 @@ def test_existing_entry_adapters_remain_entry_metadata_only():
         liquidity_vote,
         module=MODULE_LIQUIDITY_VOID,
         source_output_type=SOURCE_STRATEGY_SIGNAL,
+    )
+    assert liquidity_vote.metadata[KEY_FEED_STATUS] == FEED_REAL
+    assert liquidity_vote.metadata["activation_path"] == "governed_observed_pair_active_candidate"
+    assert (
+        liquidity_vote.metadata["active_promotion_requires"]
+        == "fusion_router_admission_same_candle_netedge_and_broker_guards"
     )
 
 

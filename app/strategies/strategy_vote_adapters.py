@@ -262,11 +262,13 @@ def adapt_liquidity_void_to_vote(
         requires_existing_position=is_exit,
         execution_candidate=True,
         directional_bias=bias,
-        feed_status=FEED_MISSING,
+        feed_status=FEED_REAL,
         raw_confidence=signal.confidence,
         normalized_confidence=signal.confidence,
         reason=signal.reason or "liquidity_void_strategy_vote",
         symbol=signal.symbol,
+        activation_path="governed_observed_pair_active_candidate",
+        active_promotion_requires="fusion_router_admission_same_candle_netedge_and_broker_guards",
         **preserved_meta,
     )
 

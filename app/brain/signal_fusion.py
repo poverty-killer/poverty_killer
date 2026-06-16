@@ -747,9 +747,10 @@ class SignalFusion:
             
         elif regime_type == RegimeType.CRISIS:
             gamma_front_eligible = True
+            liquidity_void_eligible = True
             preferred_sleeve = SleeveType.GAMMA_FRONT.value
             deprioritized_sleeves = [SleeveType.SECTOR_ROTATION.value, SleeveType.SHADOW_FRONT.value]
-            logger.info("[FUSION_DIAG] Regime CRISIS -> preferred_sleeve=GAMMA_FRONT")
+            logger.info("[FUSION_DIAG] Regime CRISIS -> preferred_sleeve=GAMMA_FRONT, FLV=secondary")
             
         elif regime_type == RegimeType.UNKNOWN:
             preferred_sleeve = SleeveType.FLV.value

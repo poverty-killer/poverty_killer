@@ -127,27 +127,26 @@ class SymbolRuntime:
     sector_rotation_strategy: Optional[Any] = None
     moving_floor_strategy: Optional[Any] = None
 
-    # OBSERVE-ONLY (Stage 2-B): last raw StrategySignal emitted by dormant sleeves.
-    # Bounded by overwrite (only most-recent kept). NOT dispatched, NOT adapted to
-    # StrategyVote, NOT inserted into any decision pipeline. Diagnostic visibility only.
+    # Observed-pair producer buffer: last raw StrategySignal emitted by governed
+    # sleeves. Bounded by overwrite (only most-recent kept). This record does
+    # not dispatch; candle consumers must still pass Fusion/Router, freshness,
+    # UUID/dedupe, compiler, NetEdge, OMS, broker-boundary, and risk gates.
     last_liquidity_void_observed_signal: Optional[Any] = None
     last_sector_rotation_observed_signal: Optional[Any] = None
 
-    # OBSERVE-ONLY (Stage 2-C): last StrategyVote synthesized by the approved
-    # adapter from a dormant-sleeve signal. Bounded by overwrite. NOT passed to
-    # DecisionCompiler / StrategyRouter / SignalFusion / ExecutionEngine /
-    # OrderRouter / RiskGuard / PositionSizing. Telemetry/inspection only.
+    # Observed-pair producer buffer: last StrategyVote synthesized by the
+    # approved adapter. Bounded by overwrite. This record does not create order
+    # authority; it is admissible only through the governed consumer path.
     last_liquidity_void_observed_vote: Optional[Any] = None
     last_sector_rotation_observed_vote: Optional[Any] = None
     last_moving_floor_observed_signal: Optional[Any] = None
     last_moving_floor_observed_vote: Optional[Any] = None
     last_moving_floor_evidence: Optional[Dict[str, Any]] = None
 
-    # OBSERVE-ONLY (Stage 2-D3 / Option C): consumed marker for LiquidityVoid
-    # paper-dispatch. Tracks the decision_uuid of the most-recent LV observation
-    # admitted by candle dispatch under the buffered pre-candle scheme. Prevents
-    # the same observation from being re-admitted on subsequent candles.
-    # Bounded by overwrite. Diagnostic-only — no order authority.
+    # Consumed marker for LiquidityVoid paper dispatch. Tracks the decision_uuid
+    # of the most-recent LV observation admitted by candle dispatch under the
+    # buffered pre-candle scheme. Prevents the same observation from being
+    # re-admitted on subsequent candles. Bounded by overwrite.
     last_liquidity_void_consumed_decision_uuid: Optional[str] = None
 
     # Last whale alert (cached for overlay conversion)
@@ -486,11 +485,9 @@ class SymbolRuntime:
 
     def record_observed_signal(self, sleeve_name: str, signal: Any) -> None:
         """
-        OBSERVE-ONLY (Stage 2-B): record the most-recent raw StrategySignal
-        emitted by a dormant sleeve. Bounded by overwrite. Diagnostic-only —
-        the recorded signal is NOT dispatched, NOT adapted to StrategyVote,
-        NOT routed to DecisionCompiler / StrategyRouter / SignalFusion /
-        ExecutionEngine. No order authority is created by this record.
+        Record the most-recent raw StrategySignal emitted by a governed sleeve.
+        Bounded by overwrite. No dispatch occurs here; order authority can only
+        be created later by the governed consumer path.
         """
         if sleeve_name == "liquidity_void":
             self.last_liquidity_void_observed_signal = signal
@@ -501,12 +498,9 @@ class SymbolRuntime:
 
     def record_observed_vote(self, sleeve_name: str, vote: Any) -> None:
         """
-        OBSERVE-ONLY (Stage 2-C): record the most-recent StrategyVote
-        synthesized by an approved adapter from a dormant-sleeve signal.
-        Bounded by overwrite. Telemetry/inspection only — the recorded vote
-        is NOT passed to DecisionCompiler / StrategyRouter / SignalFusion /
-        ExecutionEngine / OrderRouter / RiskGuard / PositionSizing. No order
-        authority is created by this record.
+        Record the most-recent StrategyVote synthesized by an approved adapter.
+        Bounded by overwrite. No dispatch occurs here; order authority can only
+        be created later by the governed consumer path.
         """
         if sleeve_name == "liquidity_void":
             self.last_liquidity_void_observed_vote = vote

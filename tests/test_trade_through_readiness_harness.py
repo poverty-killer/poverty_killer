@@ -71,6 +71,23 @@ def _build_book(t0_ns: int) -> OrderBookSnapshot:
     )
 
 
+def _candle_truth(t0_ns: int) -> dict:
+    return {
+        "symbol": "ETH/USD",
+        "data_source_type": "runtime",
+        "consumer_timestamp_ns": t0_ns,
+        "candle_start_ts_ns": t0_ns,
+        "candle_close_ts_ns": t0_ns,
+        "latest_candle_ts_ns": t0_ns,
+        "latest_book_ts_ns": t0_ns,
+        "receive_ts_ns": t0_ns,
+        "candle_freshness_policy_ms": 1_000.0,
+        "data_health_reason_code": "DATA_HEALTHY",
+        "candle_freshness_reason_code": "CANDLE_RUNTIME_FRESH",
+        "executable_market_truth": True,
+    }
+
+
 def _build_strategy_signal(t0_ns: int) -> StrategySignal:
     return StrategySignal(
         strategy="sector_rotation",
@@ -78,10 +95,19 @@ def _build_strategy_signal(t0_ns: int) -> StrategySignal:
         side="buy",
         confidence=0.9,
         quantity=0.5,
-        price=None,
+        price=2500.0,
         exchange_ts_ns=t0_ns,
         reason="trade_through_readiness_harness",
-        metadata={},
+        metadata={
+            "expected_move_bps": "200",
+            "spread_bps": "4.0",
+            "fee_bps": "6.0",
+            "slippage_bps": "8.0",
+            "latency_drag_bps": "4.0",
+            "partial_fill_drag_bps": "4.0",
+            "exit_execution_cost_bps": "4.0",
+            "order_type": "market",
+        },
         regime=None,
     )
 
@@ -149,6 +175,9 @@ def _build_loop(execution_engine) -> types.SimpleNamespace:
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
     )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
+    )
     loop._classify_shadow_front_decline = MainLoop._classify_shadow_front_decline.__get__(
         loop, MainLoop
     )
@@ -158,6 +187,14 @@ def _build_loop(execution_engine) -> types.SimpleNamespace:
     loop._clear_stale_sector_rotation_observed_pair = (
         MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
     )
+    loop._runtime_module_frame_evidence = (
+        MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    )
+    loop._apply_signal_economic_metadata = (
+        MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    )
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = MagicMock()
     return loop
 
 
@@ -230,6 +267,7 @@ def test_known_good_candidate_reaches_real_paper_fill_and_fill_telemetry(tmp_pat
                 shadow_front_eligible=True,
             ),
             exchange_ts_ns=T0_NS,
+            candle_execution_truth=_candle_truth(T0_NS),
         )
 
         loop.decision_compiler.compile.assert_called_once()
@@ -503,6 +541,7 @@ def test_no_trade_when_same_clock_pair_is_missing():
                 shadow_front_eligible=True,
             ),
             exchange_ts_ns=T0_NS,
+            candle_execution_truth=_candle_truth(T0_NS),
         )
 
     loop.decision_compiler.compile.assert_not_called()

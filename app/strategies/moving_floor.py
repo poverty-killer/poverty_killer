@@ -122,6 +122,7 @@ class FloorPolicyConfig:
 
     # Thresholds
     high_quality_obi_threshold: Decimal = Decimal("-0.50")
+    chandelier_atr_multiplier: Decimal = Decimal("3.0")
 
     # Slippage Simulator (BPS)
     slippage_bps_normal: Decimal = Decimal("5.0")
@@ -134,6 +135,14 @@ class FloorPolicyConfig:
         object.__setattr__(self, "base_buffer", _ensure_positive(_d(self.base_buffer, field_name="base_buffer"), "base_buffer"))
         object.__setattr__(self, "min_buffer", _ensure_positive(_d(self.min_buffer, field_name="min_buffer"), "min_buffer"))
         object.__setattr__(self, "max_buffer", _ensure_positive(_d(self.max_buffer, field_name="max_buffer"), "max_buffer"))
+        object.__setattr__(
+            self,
+            "chandelier_atr_multiplier",
+            _ensure_positive(
+                _d(self.chandelier_atr_multiplier, field_name="chandelier_atr_multiplier"),
+                "chandelier_atr_multiplier",
+            ),
+        )
 
         if self.min_buffer > self.max_buffer:
             raise ValueError("min_buffer cannot exceed max_buffer")
@@ -155,6 +164,11 @@ class FloorMarketTick:
     book_integrity: BookIntegrity = BookIntegrity.UNKNOWN
     replay_mode: ReplayMode = ReplayMode.LIVE
     execution_mode: ExecutionMode = ExecutionMode.LIVE
+    high_price: Optional[Decimal] = None
+    low_price: Optional[Decimal] = None
+    previous_close: Optional[Decimal] = None
+    atr: Optional[Decimal] = None
+    chandelier_lookback_high: Optional[Decimal] = None
 
     def __post_init__(self) -> None:
         if not self.symbol:
@@ -162,6 +176,29 @@ class FloorMarketTick:
         object.__setattr__(self, "price", _ensure_positive(_d(self.price, field_name="price"), "price"))
         object.__setattr__(self, "bid_volume", _ensure_non_negative(_d(self.bid_volume, field_name="bid_volume"), "bid_volume"))
         object.__setattr__(self, "ask_volume", _ensure_non_negative(_d(self.ask_volume, field_name="ask_volume"), "ask_volume"))
+        high_price = self.high_price if self.high_price is not None else self.price
+        low_price = self.low_price if self.low_price is not None else self.price
+        object.__setattr__(self, "high_price", _ensure_positive(_d(high_price, field_name="high_price"), "high_price"))
+        object.__setattr__(self, "low_price", _ensure_positive(_d(low_price, field_name="low_price"), "low_price"))
+        if self.high_price < self.low_price:
+            raise ValueError("high_price cannot be less than low_price")
+        if self.previous_close is not None:
+            object.__setattr__(
+                self,
+                "previous_close",
+                _ensure_positive(_d(self.previous_close, field_name="previous_close"), "previous_close"),
+            )
+        if self.atr is not None:
+            object.__setattr__(self, "atr", _ensure_non_negative(_d(self.atr, field_name="atr"), "atr"))
+        if self.chandelier_lookback_high is not None:
+            object.__setattr__(
+                self,
+                "chandelier_lookback_high",
+                _ensure_positive(
+                    _d(self.chandelier_lookback_high, field_name="chandelier_lookback_high"),
+                    "chandelier_lookback_high",
+                ),
+            )
         if self.timestamp_ns <= 0:
             raise ValueError("timestamp_ns must be strictly positive")
 
@@ -187,12 +224,19 @@ class FloorEngineState:
     last_ratchet_ts_ns: Optional[int]
     last_signal_ts_ns: Optional[int]
     event_count: int
+    last_atr: Decimal = ZERO
+    last_chandelier_floor: Decimal = ZERO
+    last_volatility_buffer_pct: Decimal = ZERO
+    last_floor_source: str = "TOPOLOGICAL_OBI"
 
     def __post_init__(self) -> None:
         if self.current_floor < ZERO: raise ValueError("current_floor cannot be negative")
         if self.highest_price_seen < ZERO: raise ValueError("highest_price_seen cannot be negative")
         if self.event_count < 0: raise ValueError("event_count cannot be negative")
         if self.last_buffer_pct < ZERO: raise ValueError("last_buffer_pct cannot be negative")
+        if self.last_atr < ZERO: raise ValueError("last_atr cannot be negative")
+        if self.last_chandelier_floor < ZERO: raise ValueError("last_chandelier_floor cannot be negative")
+        if self.last_volatility_buffer_pct < ZERO: raise ValueError("last_volatility_buffer_pct cannot be negative")
 
         if self.last_obi < Decimal("-1.0") or self.last_obi > Decimal("1.0"):
             raise ValueError(f"last_obi must be bounded [-1.0, 1.0], got {self.last_obi}")
@@ -239,6 +283,7 @@ class FloorEvent:
     suppressed: bool = False
     suppress_reason: Optional[str] = None
     rationale: tuple[str, ...] = field(default_factory=tuple)
+    volatility_floor: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True, slots=True)
 class FloorSignalAssessment:
@@ -307,7 +352,8 @@ class TopologicalMovingFloor:
     __slots__ = (
         'policy', '_symbol', '_phase', '_current_floor', '_highest_price_seen',
         '_last_obi', '_last_buffer_pct', '_last_tick_ts_ns', '_last_ratchet_ts_ns',
-        '_last_signal_ts_ns', '_event_count', 'logger'
+        '_last_signal_ts_ns', '_event_count', '_last_atr', '_last_chandelier_floor',
+        '_last_volatility_buffer_pct', '_last_floor_source', 'logger'
     )
 
     def __init__(self, base_buffer: Decimal = Decimal("0.0200")) -> None:
@@ -324,6 +370,10 @@ class TopologicalMovingFloor:
         self._last_ratchet_ts_ns: Optional[int] = None
         self._last_signal_ts_ns: Optional[int] = None
         self._event_count: int = 0
+        self._last_atr = ZERO
+        self._last_chandelier_floor = ZERO
+        self._last_volatility_buffer_pct = ZERO
+        self._last_floor_source = "TOPOLOGICAL_OBI"
 
     # ------------------------------------------------------------------
     # Canonical API / Observability
@@ -342,6 +392,10 @@ class TopologicalMovingFloor:
             last_ratchet_ts_ns=self._last_ratchet_ts_ns,
             last_signal_ts_ns=self._last_signal_ts_ns,
             event_count=self._event_count,
+            last_atr=self._last_atr,
+            last_chandelier_floor=self._last_chandelier_floor,
+            last_volatility_buffer_pct=self._last_volatility_buffer_pct,
+            last_floor_source=self._last_floor_source,
         )
 
     def restore_state(self, state: FloorEngineState) -> None:
@@ -362,6 +416,92 @@ class TopologicalMovingFloor:
         self._last_ratchet_ts_ns = state.last_ratchet_ts_ns
         self._last_signal_ts_ns = state.last_signal_ts_ns
         self._event_count = state.event_count
+        self._last_atr = state.last_atr
+        self._last_chandelier_floor = state.last_chandelier_floor
+        self._last_volatility_buffer_pct = state.last_volatility_buffer_pct
+        self._last_floor_source = state.last_floor_source
+
+    def _floor_candidate_with_volatility(
+        self,
+        *,
+        tick: FloorMarketTick,
+        dynamic_buffer: Decimal,
+        topological_candidate: Decimal,
+    ) -> tuple[Decimal, dict[str, Any]]:
+        """
+        Augment the OBI floor with ATR/Chandelier evidence.
+
+        The topology/OBI floor remains active. ATR/Chandelier can only tighten
+        the candidate floor via the same one-way ratchet invariant; unavailable
+        OHLC/ATR inputs are recorded as evidence and do not fabricate a floor.
+        """
+        high_price = tick.high_price or tick.price
+        low_price = tick.low_price or tick.price
+        high_low_range = max(high_price - low_price, ZERO)
+        true_range = high_low_range
+        atr_source = "true_range"
+        if tick.previous_close is not None:
+            true_range = max(
+                high_low_range,
+                abs(high_price - tick.previous_close),
+                abs(low_price - tick.previous_close),
+            )
+
+        atr = tick.atr if tick.atr is not None and tick.atr > ZERO else true_range
+        if tick.atr is not None and tick.atr > ZERO:
+            atr_source = "tick_atr"
+        elif atr <= ZERO:
+            atr_source = "unavailable_close_only"
+
+        lookback_high = max(
+            tick.price,
+            high_price,
+            self._highest_price_seen,
+            tick.chandelier_lookback_high or ZERO,
+        )
+        raw_chandelier_floor = ZERO
+        chandelier_candidate = ZERO
+        volatility_buffer_pct = ZERO
+        if atr > ZERO and lookback_high > ZERO:
+            volatility_buffer_pct = (atr * self.policy.chandelier_atr_multiplier) / lookback_high
+            raw_chandelier_floor = lookback_high - (atr * self.policy.chandelier_atr_multiplier)
+            if raw_chandelier_floor > ZERO:
+                max_current_tick_floor = tick.price * (ONE - self.policy.min_buffer)
+                chandelier_candidate = min(raw_chandelier_floor, max_current_tick_floor)
+
+        selected_candidate = topological_candidate
+        selected_source = "TOPOLOGICAL_OBI"
+        if chandelier_candidate > topological_candidate:
+            selected_candidate = chandelier_candidate
+            selected_source = "ATR_CHANDELIER"
+
+        if selected_candidate >= tick.price:
+            selected_candidate = topological_candidate
+            selected_source = "TOPOLOGICAL_OBI_INVARIANT_FALLBACK"
+
+        self._last_atr = atr
+        self._last_chandelier_floor = chandelier_candidate
+        self._last_volatility_buffer_pct = volatility_buffer_pct
+        self._last_floor_source = selected_source
+
+        evidence = {
+            "method": "ATR_CHANDELIER_AUGMENT",
+            "topological_floor": str(topological_candidate),
+            "chandelier_floor": str(chandelier_candidate),
+            "raw_chandelier_floor": str(raw_chandelier_floor),
+            "selected_floor": str(selected_candidate),
+            "selected_floor_source": selected_source,
+            "atr": str(atr),
+            "atr_source": atr_source,
+            "true_range": str(true_range),
+            "lookback_high": str(lookback_high),
+            "chandelier_atr_multiplier": str(self.policy.chandelier_atr_multiplier),
+            "volatility_buffer_pct": str(volatility_buffer_pct),
+            "dynamic_buffer_pct": str(dynamic_buffer),
+            "one_directional_ratchet": True,
+            "topological_obi_preserved": True,
+        }
+        return selected_candidate, evidence
 
     # ------------------------------------------------------------------
     # Pipeline Execution
@@ -429,11 +569,23 @@ class TopologicalMovingFloor:
         dynamic_buffer = _clamp(calculated_buffer, self.policy.min_buffer, self.policy.max_buffer)
         self._last_buffer_pct = dynamic_buffer
 
+        topological_candidate = tick.price * (ONE - dynamic_buffer)
+        if topological_candidate >= tick.price:
+            raise ValueError(f"Catastrophic Invariant: Candidate floor {topological_candidate} >= price {tick.price}")
+
+        new_candidate, volatility_floor = self._floor_candidate_with_volatility(
+            tick=tick,
+            dynamic_buffer=dynamic_buffer,
+            topological_candidate=topological_candidate,
+        )
+
+        observed_high = max(tick.price, tick.high_price or tick.price)
+
         # 1. Initialization
         if self._phase == FloorPhase.UNINITIALIZED:
             self._phase = FloorPhase.ARMED
-            self._highest_price_seen = tick.price
-            self._current_floor = tick.price * (ONE - dynamic_buffer)
+            self._highest_price_seen = observed_high
+            self._current_floor = new_candidate
             self._last_ratchet_ts_ns = tick.timestamp_ns
             self._event_count += 1
 
@@ -446,19 +598,15 @@ class TopologicalMovingFloor:
                 local_timestamp_ms=local_ms, phase=self._phase, price=tick.price,
                 current_floor=self._current_floor, obi=obi, dynamic_buffer_pct=dynamic_buffer,
                 regime=tick.regime, toxicity_level=tick.toxicity_level, book_integrity=tick.book_integrity,
-                rationale=("floor_armed",)
+                rationale=("floor_armed", "atr_chandelier_evidence_recorded"),
+                volatility_floor=volatility_floor,
             )
 
         # Update observability metric (Not used for ratchet math)
-        if tick.price > self._highest_price_seen:
-            self._highest_price_seen = tick.price
+        if observed_high > self._highest_price_seen:
+            self._highest_price_seen = observed_high
 
         # 2. Trailing Current-Price Ratchet Logic with Hysteresis
-        new_candidate = tick.price * (ONE - dynamic_buffer)
-
-        if new_candidate >= tick.price:
-            raise ValueError(f"Catastrophic Invariant: Candidate floor {new_candidate} >= price {tick.price}")
-
         if new_candidate > self._current_floor:
             time_since_ratchet = tick.timestamp_ns - (self._last_ratchet_ts_ns or 0)
 
@@ -472,7 +620,8 @@ class TopologicalMovingFloor:
                     local_timestamp_ms=local_ms, phase=self._phase, price=tick.price,
                     current_floor=self._current_floor, obi=obi, dynamic_buffer_pct=dynamic_buffer,
                     regime=tick.regime, toxicity_level=tick.toxicity_level, book_integrity=tick.book_integrity,
-                    rationale=("floor_ratchet_up",)
+                    rationale=("floor_ratchet_up", f"selected_floor_source:{self._last_floor_source}"),
+                    volatility_floor=volatility_floor,
                 )
 
         # 3. Breach Logic
@@ -485,7 +634,8 @@ class TopologicalMovingFloor:
                 local_timestamp_ms=local_ms, phase=self._phase, price=tick.price,
                 current_floor=self._current_floor, obi=obi, dynamic_buffer_pct=dynamic_buffer,
                 regime=tick.regime, toxicity_level=tick.toxicity_level, book_integrity=tick.book_integrity,
-                rationale=("price_crossed_topological_support",)
+                rationale=("price_crossed_topological_support", f"last_floor_source:{self._last_floor_source}"),
+                volatility_floor=volatility_floor,
             )
 
         return None

@@ -118,7 +118,8 @@ from app.strategies.council_metadata import (
     BIAS_SHORT, BIAS_LONG, BIAS_UNKNOWN,
     FEED_MISSING,
 )
-# OBSERVE-ONLY (Stage 2-C): adapter imports for telemetry-only StrategyVote
+# Observed-pair adapter imports. Producers buffer votes; governed candle
+# consumers decide whether a pair can reach the shared dispatch path.
 # synthesis from dormant-sleeve signals. Adapters are NOT invoked from any
 # dispatch / DecisionCompiler / Fusion / execution path.
 from app.strategies.strategy_vote_adapters import (
@@ -1130,7 +1131,7 @@ def _log_sector_rotation_diag(
     candle_ts_ns: int,
     detail: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Emit observe-only SectorRotation producer evidence."""
+    """Emit SectorRotation observed-pair producer evidence."""
     logger.info(
         "[SECTOR_ROTATION_DIAG] symbol=%s reason_code=%s candle_ts_ns=%s detail=%s",
         symbol,
@@ -2243,9 +2244,13 @@ class MainLoop:
 
         try:
             bid_depth, ask_depth = order_book.depth_at_levels(10)
+            candle_close = Decimal(str(candle.close))
+            candle_high = _to_decimal_or_none(getattr(candle, "high", None)) or candle_close
+            candle_low = _to_decimal_or_none(getattr(candle, "low", None)) or candle_close
+            candle_range = candle_high - candle_low if candle_high >= candle_low else Decimal("0")
             tick = FloorMarketTick(
                 symbol=symbol,
-                price=Decimal(str(candle.close)),
+                price=candle_close,
                 timestamp_ns=candle.exchange_ts_ns,
                 bid_volume=Decimal(str(bid_depth)),
                 ask_volume=Decimal(str(ask_depth)),
@@ -2253,6 +2258,9 @@ class MainLoop:
                 liquidity_regime=LiquidityRegime.UNKNOWN,
                 toxicity_level=self._moving_floor_toxicity_level(runtime),
                 book_integrity=self._moving_floor_book_integrity(order_book),
+                high_price=candle_high,
+                low_price=candle_low,
+                atr=candle_range,
             )
             event, assessment, recommendation = runtime.moving_floor_strategy.process_tick(
                 tick,
@@ -2274,6 +2282,7 @@ class MainLoop:
             return
 
         state = runtime.moving_floor_strategy.snapshot_state()
+        volatility_floor = dict(getattr(event, "volatility_floor", None) or {})
         if recommendation is None:
             reason = "MOVING_FLOOR_NO_BREACH"
             status = "DECLINED"
@@ -2295,6 +2304,7 @@ class MainLoop:
                     "floor_phase": getattr(state.phase, "value", state.phase),
                     "current_floor": str(state.current_floor),
                     "highest_price_seen": str(state.highest_price_seen),
+                    "volatility_floor": volatility_floor,
                 },
             }
             return
@@ -2319,6 +2329,7 @@ class MainLoop:
             position=fresh_position,
             candle=candle,
             position_evidence=fresh_evidence,
+            volatility_floor=volatility_floor,
         )
         if signal is None:
             runtime.last_moving_floor_evidence = {
@@ -2361,6 +2372,9 @@ class MainLoop:
                 "highest_price_seen": str(state.highest_price_seen),
                 "worst_case_fill_price": str(recommendation.worst_case_fill_price),
                 "candidate_side": "sell_to_close",
+                "volatility_floor": volatility_floor,
+                "position_lifecycle_transition": "BROKER_POSITION_BACKED_SELL_TO_CLOSE_PENDING_FLAT_COOLDOWN",
+                "round_trip_realization": "AT_CLOSE_ON_BROKER_ACK",
             },
         }
         _log_dispatch_diag(
@@ -2379,6 +2393,7 @@ class MainLoop:
         position: Mapping[str, Any],
         candle: Candle,
         position_evidence: Mapping[str, Any],
+        volatility_floor: Optional[Mapping[str, Any]] = None,
     ) -> Optional[StrategySignal]:
         quantity = _to_decimal_or_none(position.get("quantity"))
         average_entry = _to_decimal_or_none(position.get("average_entry_price"))
@@ -2393,6 +2408,28 @@ class MainLoop:
         ):
             return None
         expected_move_bps = ((worst_case - average_entry) / average_entry) * Decimal("10000")
+        floor_evidence = dict(volatility_floor or {})
+        lifecycle_transition = {
+            "source_module": "MovingFloor",
+            "from_state": "LONG_BROKER_POSITION",
+            "target_state": "FLAT",
+            "cooldown_state": "PENDING_FILL",
+            "cooldown_reason": "MOVING_FLOOR_PROTECTIVE_FLOOR_CLOSE",
+            "round_trip_realization": "AT_CLOSE_ON_SELL_TO_CLOSE_FILL",
+            "realization_authority": "OrderRouter broker_fill_ledger sell_to_close hydration",
+            "broker_position_backed": True,
+            "fresh_entry_authorized": False,
+        }
+        exit_context = {
+            "source_module": "MovingFloor",
+            "protective_only": True,
+            "candidate_side": "sell_to_close",
+            "floor_close": True,
+            "cooldown_required": True,
+            "at_close_realization_expected": True,
+            "net_edge_realization_label": "AT_CLOSE_ACTUAL_ROUND_TRIP",
+            "volatility_floor": floor_evidence,
+        }
         metadata = {
             "source_module": "MovingFloor",
             "protective_only": True,
@@ -2400,12 +2437,18 @@ class MainLoop:
             "fresh_entry_authorized": False,
             "execution_candidate": True,
             "broker_position_backed": True,
+            "action": "sell_to_close",
+            "execution_action": "sell_to_close",
+            "order_action": "sell_to_close",
+            "position_lifecycle_transition": lifecycle_transition,
+            "moving_floor_exit_context": exit_context,
             "existing_positions": (dict(position),),
             "protective_context": {
                 "source_module": "MovingFloor",
                 "protective_only": True,
                 "broker_position_backed": True,
                 "position_truth": dict(position_evidence),
+                "position_lifecycle_transition": lifecycle_transition,
             },
             "expected_move_bps": str(expected_move_bps),
             "gross_edge_bps": str(expected_move_bps),
@@ -2414,7 +2457,6 @@ class MainLoop:
             "average_entry_price": str(average_entry),
             "valid_until_ns": int(candle.exchange_ts_ns) + 60_000_000_000,
             "asset_class": _infer_asset_class_for_guardrail(recommendation.symbol, {}),
-            "order_action": "sell_to_close",
         }
         return StrategySignal(
             strategy="moving_floor",
@@ -2848,10 +2890,9 @@ class MainLoop:
         runtime.update_sentiment_engine(exchange_ts_ns)
 
         # ================================================================
-        # OBSERVE-ONLY (Stage 2-B): LiquidityVoid feed pumping
-        # Dormant sleeve receives real per-symbol overlays + the order book
-        # and may emit Optional[StrategySignal]. Returned signal is LOGGED
-        # ONLY — not dispatched, not adapted, not voted, no execution path.
+        # LiquidityVoid observed-pair feed pumping. The producer receives real
+        # per-symbol overlays + the order book and may emit Optional[
+        # StrategySignal]; only a governed candle consumer can admit the pair.
         # ================================================================
         self._observe_liquidity_void(symbol, runtime, order_book)
 
@@ -2975,12 +3016,11 @@ class MainLoop:
         self.commander.update_equity(self._last_equity, exchange_ts_ns)
 
         # ================================================================
-        # OBSERVE-ONLY (Stage 2-B): SectorRotation feed pumping
-        # Dormant sleeve receives real per-symbol overlays + the candle and
-        # may emit Optional[StrategySignal] (entry from update_candle, exit
-        # from update_price). Returned signals are LOGGED ONLY — not
-        # dispatched, not adapted, not voted, no execution path. Runs before
-        # the LIVE GATE so observation continues regardless of Shans state.
+        # SectorRotation observed-pair feed pumping. The producer receives real
+        # per-symbol overlays + the candle and may emit Optional[
+        # StrategySignal] (entry from update_candle, exit from update_price).
+        # Only a governed candle consumer can admit the pair. Runs before the
+        # LIVE GATE so observation continues regardless of Shans state.
         # ================================================================
         self._observe_sector_rotation(symbol, runtime, candle)
 
@@ -3341,13 +3381,11 @@ class MainLoop:
         sleeve_registry = {
             SleeveType.SHADOW_FRONT:    runtime.shadow_front_strategy,
             SleeveType.GAMMA_FRONT:     runtime.gamma_front_strategy,
-            # STAGE 2-D1: Paper-only proving lane. SECTOR_ROTATION is dispatchable
-            # via observed (signal, vote) pair when Fusion/Router admits it and
-            # broker_mode == "paper". FLV is registered for naturally-inert
-            # routing (Fusion never sets liquidity_void_eligible=True today; the
-            # branch is intentionally not implemented in 2-D1 due to event-clock
-            # mismatch between order-book observation and candle dispatch — see
-            # post-patch report §3 for the Stage 2-D2/D3 hand-off).
+            # Governed observed-pair proving lane. SectorRotation and FLV are
+            # dispatchable only when Fusion/Router admit them, broker_mode is
+            # paper, and their buffered (signal, vote) pair satisfies the
+            # consumer freshness/UUID gates before the shared compiler,
+            # NetEdge, OMS, broker-boundary, and risk gates run.
             SleeveType.SECTOR_ROTATION: runtime.sector_rotation_strategy,
             SleeveType.FLV:             runtime.liquidity_void_strategy,
         }
@@ -3524,13 +3562,12 @@ class MainLoop:
                     terminal_sleeve_for_score = module_name
 
             elif sleeve == SleeveType.FLV:
-                # STAGE 2-D3 (Option C): Paper-only active vote admission for
-                # LiquidityVoid via the buffered pre-candle candidate scheme.
-                # Reaches this branch only when Fusion/Router admits FLV; today
-                # that requires Stage 2-D2's UNKNOWN-regime eligibility flag.
-                # LV observation continues firing on order-book ingress; this
-                # branch READS the buffered (signal, vote) without re-firing
-                # LV's strategy methods or its adapter. Edge preserved.
+                # Paper-only active vote admission for LiquidityVoid via the
+                # buffered pre-candle candidate scheme. Reaches this branch
+                # only when Fusion/Router admit FLV (UNKNOWN preferred or
+                # CRISIS fallback). LV observation continues firing on
+                # order-book ingress; this branch READS the buffered
+                # (signal, vote) without re-firing LV methods or its adapter.
                 logger.info("[DISPATCH] %s: FLV branch entered (paper-only)", symbol)
                 sig, vote = self._consume_observed_pair_liquidity_void(
                     symbol, runtime, exchange_ts_ns,
@@ -4507,16 +4544,14 @@ class MainLoop:
         return observed_signal, observed_vote
 
     # =========================================================================
-    # STAGE 2-B: OBSERVE-ONLY DORMANT SLEEVE FEED PUMPING
+    # OBSERVED-PAIR FEED PUMPING
     # =========================================================================
     # Drives LiquidityVoidStrategy and SectorRotationStrategy with real,
     # already-available per-symbol feeds and captures their Optional[
-    # StrategySignal] outputs for diagnostic logging only. NEVER:
-    #   - converted via strategy_vote_adapters
-    #   - inserted into any strategy_votes list
-    #   - passed to DecisionCompiler / StrategyRouter / SignalFusion
-    #   - submitted to ExecutionEngine / OrderRouter
-    #   - used for risk/sizing/order-generation decisions
+    # StrategySignal] outputs for a bounded observed-pair buffer. The producer
+    # never dispatches. Consumers may admit an observed pair only through
+    # Fusion/Router eligibility, paper-mode, freshness, UUID/dedupe, compiler,
+    # NetEdge, OMS, broker-boundary, and risk gates.
     # =========================================================================
 
     def _log_observed_signal(
@@ -4539,7 +4574,7 @@ class MainLoop:
     def _log_observed_vote(
         self, symbol: str, sleeve_name: str, vote: StrategyVote
     ) -> None:
-        """Emit OBSERVE_ONLY_VOTE diagnostic line for a telemetry-only StrategyVote."""
+        """Emit observed-pair vote diagnostic line for a buffered StrategyVote."""
         metadata = getattr(vote, "metadata", None) or {}
         metadata_keys = sorted(metadata.keys())
         logger.info(
@@ -4558,11 +4593,13 @@ class MainLoop:
         self, symbol: str, runtime: SymbolRuntime, order_book: OrderBookSnapshot
     ) -> None:
         """
-        Observe-only feed pump for LiquidityVoidStrategy (Stage 2-B).
+        Governed observed-pair feed pump for LiquidityVoidStrategy.
 
         Feeds real per-symbol overlays then captures returned Optional[
-        StrategySignal] from update_order_book. Returned signal is logged
-        only — never dispatched, adapted, voted, or routed to execution.
+        StrategySignal] from update_order_book. This producer never dispatches;
+        the candle consumer may only admit the buffered pair through paper-mode,
+        freshness/UUID, Fusion/Router, compiler, NetEdge, OMS, broker-boundary,
+        and risk gates.
         """
         sleeve = runtime.liquidity_void_strategy
         if sleeve is None:
@@ -4590,10 +4627,9 @@ class MainLoop:
         runtime.record_observed_signal("liquidity_void", signal)
         self._log_observed_signal(symbol, "liquidity_void", signal)
 
-        # OBSERVE-ONLY (Stage 2-C): synthesize a StrategyVote via the approved
-        # adapter for telemetry/inspection ONLY. This vote is NOT passed to
-        # DecisionCompiler, NOT inserted into any active strategy_votes list,
-        # NOT routed to StrategyRouter / SignalFusion / ExecutionEngine.
+        # Synthesize the paired StrategyVote once at the producer edge. The
+        # vote remains buffered until the governed candle consumer admits it;
+        # this producer does not call DecisionCompiler, Fusion, or execution.
         try:
             vote = adapt_liquidity_void_to_vote(
                 signal,
@@ -4613,7 +4649,7 @@ class MainLoop:
         self, symbol: str, runtime: SymbolRuntime, candle: Candle
     ) -> None:
         """
-        Observe-only feed pump for SectorRotationStrategy (Stage 2-B).
+        Governed observed-pair feed pump for SectorRotationStrategy.
 
         Feeds real per-symbol overlays then captures Optional[StrategySignal]
         from update_candle (entry path) and update_price (exit path) using
@@ -4621,8 +4657,8 @@ class MainLoop:
         update_candle on the same tick is replay-safe per source truth: on
         the entry tick, elapsed-from-entry is 0 so no TTL/TP/SL/exit fires;
         on non-entry ticks update_price is needed to observe exits at all.
-        Returned signals are logged only — never dispatched, adapted,
-        voted, or routed to execution.
+        Returned signals are buffered; this producer never dispatches, and the
+        candle consumer may only admit a pair through the shared gated path.
         """
         sleeve = runtime.sector_rotation_strategy
         if sleeve is None:
