@@ -2582,6 +2582,200 @@ class MainLoop:
         return result
 
     @staticmethod
+    def _sizing_evidence_from_leadership(snapshot: Any) -> Dict[str, Any]:
+        status = getattr(snapshot, "status", "")
+        return {
+            "sleeve_id": getattr(snapshot, "sleeve_id", None),
+            "regime": getattr(snapshot, "regime", None),
+            "status": str(getattr(status, "value", status)),
+            "multiplier": str(getattr(snapshot, "multiplier", "")),
+            "sample_count": getattr(snapshot, "sample_count", None),
+            "required_samples": getattr(snapshot, "required_samples", None),
+            "eligible_sleeves": getattr(snapshot, "eligible_sleeves", None),
+            "sleeve_edge": str(getattr(snapshot, "sleeve_edge", "")),
+            "leader_sleeve_id": getattr(snapshot, "leader_sleeve_id", None),
+            "reason_code": getattr(snapshot, "reason_code", None),
+        }
+
+    @staticmethod
+    def _sizing_evidence_from_kelly(overlay: Any) -> Dict[str, Any]:
+        risk_of_ruin = getattr(overlay, "risk_of_ruin_estimate", None)
+        status = getattr(overlay, "status", "")
+        return {
+            "sleeve_id": getattr(overlay, "sleeve_id", None),
+            "regime": getattr(overlay, "regime", None),
+            "status": str(getattr(status, "value", status)),
+            "effective_kelly_cap": str(getattr(overlay, "effective_kelly_cap", "")),
+            "sample_count": getattr(overlay, "sample_count", None),
+            "required_samples": getattr(overlay, "required_samples", None),
+            "risk_of_ruin_estimate": str(risk_of_ruin) if risk_of_ruin is not None else None,
+            "reason_code": getattr(overlay, "reason_code", None),
+        }
+
+    @staticmethod
+    def _position_sizing_strategy(strategy_id: Any) -> SleeveType | str:
+        value = str(getattr(strategy_id, "value", strategy_id) or "")
+        if value == StrategyID.LIQUIDITY_VOID.value:
+            return SleeveType.FLV
+        try:
+            return SleeveType(value)
+        except ValueError:
+            return value or "unknown"
+
+    @staticmethod
+    def _metadata_decimal(metadata: Mapping[str, Any], *keys: str) -> Optional[Decimal]:
+        for key in keys:
+            if key not in metadata:
+                continue
+            value = _vote_decimal(metadata.get(key))
+            if value is not None and value > Decimal("0"):
+                return value
+        return None
+
+    def _apply_position_sizing_authority(
+        self,
+        *,
+        symbol: str,
+        runtime: SymbolRuntime,
+        signal: StrategySignal,
+        strategy_vote: StrategyVote,
+    ) -> Dict[str, Any]:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        if not isinstance(signal.metadata, dict):
+            signal.metadata = metadata
+        vote_metadata = strategy_vote.metadata if isinstance(strategy_vote.metadata, dict) else {}
+        if not isinstance(strategy_vote.metadata, dict):
+            strategy_vote.metadata = vote_metadata
+
+        side = str(getattr(signal, "side", "") or "").lower()
+        protective_or_exit = (
+            side != "buy"
+            or metadata.get("protective_only") is True
+            or metadata.get("requires_existing_position") is True
+            or vote_metadata.get("protective_only") is True
+            or vote_metadata.get("requires_existing_position") is True
+        )
+        if protective_or_exit:
+            evidence = {
+                "status": "BYPASSED",
+                "reason_code": "BYPASSED_PROTECTIVE_OR_EXIT_USES_BROKER_POSITION",
+                "authority": "BrokerPositionTruthForExit",
+                "original_quantity": str(getattr(signal, "quantity", "")),
+            }
+            metadata["position_sizing_authority"] = evidence["authority"]
+            metadata["position_sizing_evidence"] = evidence
+            vote_metadata["position_sizing_evidence"] = evidence
+            return evidence
+
+        price = _vote_decimal(getattr(signal, "price", None)) or _vote_decimal(getattr(runtime, "last_price", None))
+        if price is None or price <= Decimal("0"):
+            signal.quantity = 0.0
+            evidence = {
+                "status": "BLOCK",
+                "reason_code": "POSITION_SIZING_PRICE_MISSING",
+                "authority": "PositionSizingEngine",
+                "broker_post": False,
+            }
+            metadata["position_sizing_authority"] = "PositionSizingEngine"
+            metadata["position_sizing_evidence"] = evidence
+            vote_metadata["position_sizing_evidence"] = evidence
+            return evidence
+
+        strategy_id = getattr(strategy_vote, "strategy_id", None) or getattr(signal, "strategy", None)
+        sizing_strategy = self._position_sizing_strategy(strategy_id)
+        sleeve_id = str(getattr(strategy_id, "value", strategy_id) or getattr(signal, "strategy", "") or "unknown")
+        regime = self._get_dispatch_regime(runtime)
+        execution_engine = getattr(self, "execution_engine", None)
+        refresh = getattr(execution_engine, "refresh_trade_efficiency_from_broker_ledger", None)
+        if callable(refresh):
+            refresh(getattr(signal, "exchange_ts_ns", None))
+        governor = getattr(execution_engine, "trade_efficiency_governor", None)
+        if governor is not None:
+            leadership_snapshot = governor.get_leadership_snapshot(sleeve_id, regime)
+            kelly_overlay = governor.get_kelly_overlay(sleeve_id, regime)
+            leadership_multiplier = leadership_snapshot.multiplier
+            kelly_cap = kelly_overlay.effective_kelly_cap
+            leadership_evidence = self._sizing_evidence_from_leadership(leadership_snapshot)
+            kelly_evidence = self._sizing_evidence_from_kelly(kelly_overlay)
+        else:
+            leadership_multiplier = Decimal("1.00")
+            kelly_cap = None
+            leadership_evidence = {
+                "status": "UNAVAILABLE",
+                "reason_code": "TRADE_EFFICIENCY_GOVERNOR_UNAVAILABLE",
+            }
+            kelly_evidence = {
+                "status": "UNAVAILABLE",
+                "reason_code": "TRADE_EFFICIENCY_GOVERNOR_UNAVAILABLE",
+            }
+
+        stop_loss_pct = self._metadata_decimal(metadata, "stop_loss_pct", "stop_pct", "stop_loss_fraction")
+        atr = self._metadata_decimal(metadata, "atr", "atr_usd", "average_true_range")
+        confidence = _vote_decimal(getattr(strategy_vote, "confidence", None)) or _vote_decimal(getattr(signal, "confidence", None)) or Decimal("0")
+        volatility = _vote_decimal(getattr(runtime, "current_volatility", None)) or Decimal("0.20")
+        capital_usd = Decimal(str(self._last_equity))
+        kelly_multiplier = Decimal(str(self.commander.get_kelly_multiplier()))
+        original_quantity = str(getattr(signal, "quantity", ""))
+
+        try:
+            sizing_result = self.position_sizing_engine.calculate_position_size(
+                capital_usd=capital_usd,
+                confidence=confidence,
+                volatility=volatility,
+                regime=regime,
+                strategy=sizing_strategy,
+                price=price,
+                kelly_multiplier=kelly_multiplier,
+                stop_loss_pct=stop_loss_pct,
+                atr=atr,
+                leadership_multiplier=leadership_multiplier,
+                kelly_cap=kelly_cap,
+                risk_of_ruin_evidence=kelly_evidence,
+            )
+        except Exception as exc:
+            signal.quantity = 0.0
+            evidence = {
+                "status": "BLOCK",
+                "reason_code": "POSITION_SIZING_ENGINE_FAILED",
+                "authority": "PositionSizingEngine",
+                "message": str(exc),
+                "broker_post": False,
+            }
+            metadata["position_sizing_authority"] = "PositionSizingEngine"
+            metadata["position_sizing_evidence"] = evidence
+            vote_metadata["position_sizing_evidence"] = evidence
+            return evidence
+
+        signal.quantity = float(sizing_result.quantity)
+        strategy_vote.risk_appetite = sizing_result.position_pct
+        sizing_dict = sizing_result.to_dict()
+        evidence = {
+            "status": "PASS" if sizing_result.quantity > Decimal("0") else "BLOCK",
+            "reason_code": "POSITION_SIZING_ENGINE_AUTHORITY_APPLIED",
+            "authority": "PositionSizingEngine",
+            "sleeve_id": sleeve_id,
+            "strategy_cap_sleeve": str(getattr(sizing_strategy, "value", sizing_strategy)),
+            "original_signal_quantity": original_quantity,
+            "sized_quantity": str(sizing_result.quantity),
+            "position_pct": str(sizing_result.position_pct),
+            "capital_usd": str(capital_usd),
+            "price": str(price),
+            "leadership": leadership_evidence,
+            "kelly_overlay": kelly_evidence,
+            "result": sizing_dict,
+        }
+        metadata["position_sizing_authority"] = "PositionSizingEngine"
+        metadata["position_sizing_evidence"] = evidence
+        metadata["position_sizing_result"] = sizing_dict
+        metadata["trade_efficiency_leadership"] = leadership_evidence
+        metadata["kelly_overlay"] = kelly_evidence
+        metadata["sleeve_id"] = sleeve_id
+        metadata.setdefault("sleeve", sleeve_id)
+        vote_metadata["position_sizing_evidence"] = evidence
+        vote_metadata["risk_appetite_after_position_sizing"] = str(sizing_result.position_pct)
+        return evidence
+
+    @staticmethod
     def _net_edge_frame_evidence(net_edge_evaluation: Dict[str, Any]) -> Dict[str, Any]:
         reason = str(net_edge_evaluation.get("reason_code") or "NET_EDGE_UNKNOWN")
         return {
@@ -3806,6 +4000,16 @@ class MainLoop:
         if isinstance(vote_metadata, dict):
             vote_metadata["strategy_evidence_snapshot_id"] = candidate_market_snapshot.get("snapshot_id")
             vote_metadata["strategy_evidence_candle_id"] = candidate_market_snapshot.get("candle_id")
+
+        apply_position_sizing = getattr(self, "_apply_position_sizing_authority", None)
+        if isinstance(signal_metadata, dict) and callable(apply_position_sizing):
+            sizing_evidence = apply_position_sizing(
+                symbol=symbol,
+                runtime=runtime,
+                signal=signal,
+                strategy_vote=strategy_vote,
+            )
+            signal_metadata["position_sizing_evidence"] = sizing_evidence
 
         execution_status: Dict[str, Any] = {}
         execution_engine = getattr(self, "execution_engine", None)

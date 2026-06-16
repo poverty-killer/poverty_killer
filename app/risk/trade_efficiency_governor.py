@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum, unique
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,18 @@ class SleeveEfficiencyState(str, Enum):
     QUARANTINED = "QUARANTINED"
     RECOVERY_OBSERVATION = "RECOVERY_OBSERVATION"
 
+@unique
+class LeadershipStatus(str, Enum):
+    NEUTRAL_INSUFFICIENT_SAMPLE = "NEUTRAL_INSUFFICIENT_SAMPLE"
+    NEUTRAL_NO_PEER_SAMPLE = "NEUTRAL_NO_PEER_SAMPLE"
+    ACTIVE = "ACTIVE"
+
+@unique
+class KellyOverlayStatus(str, Enum):
+    DORMANT_INSUFFICIENT_REALIZED_SAMPLE = "DORMANT_INSUFFICIENT_REALIZED_SAMPLE"
+    ACTIVE_RISK_OF_RUIN_CONFIRMED = "ACTIVE_RISK_OF_RUIN_CONFIRMED"
+    ACTIVE_RISK_OF_RUIN_BLOCKED = "ACTIVE_RISK_OF_RUIN_BLOCKED"
+
 class EfficiencyPolicyConfig:
     __slots__ = (
         'short_window', 'medium_window', 'long_window', 'min_recovery_samples',
@@ -45,7 +57,11 @@ class EfficiencyPolicyConfig:
         'deg_ncr_dehydrated', 'deg_fbr_dehydrated', 'deg_fpbr_dehydrated',
         'deg_ncr_quarantined', 'deg_fbr_quarantined', 'deg_fpbr_quarantined',
         'rec_ncr_med', 'rec_fbr_med', 'rec_fpbr_med',
-        'rec_ncr_full', 'rec_fbr_full', 'rec_fpbr_full'
+        'rec_ncr_full', 'rec_fbr_full', 'rec_fpbr_full',
+        'leadership_min_samples', 'leadership_min_active_sleeves',
+        'leadership_max_boost', 'leadership_max_cut',
+        'kelly_min_samples', 'kelly_dormant_cap', 'kelly_active_cap',
+        'risk_of_ruin_max'
     )
 
     def __init__(self):
@@ -80,6 +96,16 @@ class EfficiencyPolicyConfig:
         self.rec_fbr_full = Decimal("0.45")
         self.rec_fpbr_full = Decimal("0.45")
 
+        self.leadership_min_samples: int = 50
+        self.leadership_min_active_sleeves: int = 2
+        self.leadership_max_boost: Decimal = Decimal("0.15")
+        self.leadership_max_cut: Decimal = Decimal("0.15")
+
+        self.kelly_min_samples: int = 50
+        self.kelly_dormant_cap: Decimal = Decimal("0.25")
+        self.kelly_active_cap: Decimal = Decimal("0.50")
+        self.risk_of_ruin_max: Decimal = Decimal("0.01")
+
 @dataclass(frozen=True, slots=True)
 class EfficiencyTransition:
     sleeve_id: str
@@ -87,6 +113,30 @@ class EfficiencyTransition:
     new_state: SleeveEfficiencyState
     reason_code: str
     timestamp_ns: int
+
+@dataclass(frozen=True, slots=True)
+class LeadershipSnapshot:
+    sleeve_id: str
+    regime: str
+    status: LeadershipStatus
+    multiplier: Decimal
+    sample_count: int
+    required_samples: int
+    eligible_sleeves: int
+    sleeve_edge: Decimal
+    leader_sleeve_id: Optional[str]
+    reason_code: str
+
+@dataclass(frozen=True, slots=True)
+class KellyOverlay:
+    sleeve_id: str
+    regime: str
+    status: KellyOverlayStatus
+    effective_kelly_cap: Decimal
+    sample_count: int
+    required_samples: int
+    risk_of_ruin_estimate: Optional[Decimal]
+    reason_code: str
 
 # ============================================================================
 # O(1) RING BUFFER KERNEL
@@ -180,23 +230,190 @@ class TradeEfficiencyGovernor:
     Rolling State Machine Kernel for Trade Efficiency.
     """
 
-    __slots__ = ('policy', '_matrices')
+    __slots__ = ('policy', '_matrices', '_regime_metrics')
 
     def __init__(self, policy: Optional[EfficiencyPolicyConfig] = None):
         self.policy = policy or EfficiencyPolicyConfig()
         self._matrices: Dict[str, SleeveStateMatrix] = {}
+        self._regime_metrics: Dict[str, Dict[str, O1RollingMetrics]] = {}
+
+    @staticmethod
+    def _normalize_regime(regime: Optional[Any]) -> str:
+        if regime is None:
+            return "UNKNOWN"
+        value = getattr(regime, "value", regime)
+        text = str(value).strip()
+        return text.upper() if text else "UNKNOWN"
+
+    @staticmethod
+    def _to_decimal(value: Any, default: Decimal = ZERO) -> Decimal:
+        if value is None:
+            return default
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _mapping_get_path(source: Mapping[str, Any], *path: str) -> Any:
+        node: Any = source
+        for key in path:
+            if not isinstance(node, Mapping):
+                return None
+            node = node.get(key)
+        return node
+
+    def _regime_window(self, regime: str, sleeve_id: str) -> O1RollingMetrics:
+        sleeve_windows = self._regime_metrics.setdefault(regime, {})
+        window = sleeve_windows.get(sleeve_id)
+        if window is None:
+            window = O1RollingMetrics(self.policy.long_window)
+            sleeve_windows[sleeve_id] = window
+        return window
+
+    def _state_ceiling(self, state: SleeveEfficiencyState) -> Decimal:
+        if state == SleeveEfficiencyState.NORMAL:
+            return self.policy.ceiling_normal
+        if state == SleeveEfficiencyState.THROTTLED:
+            return self.policy.ceiling_throttled
+        if state == SleeveEfficiencyState.DEHYDRATED:
+            return self.policy.ceiling_dehydrated
+        if state == SleeveEfficiencyState.QUARANTINED:
+            return self.policy.ceiling_quarantined
+        return self.policy.ceiling_recovery
 
     def get_sleeve_state(self, sleeve_id: str) -> SleeveEfficiencyState:
         matrix = self._matrices.get(sleeve_id)
         return matrix.current_state if matrix else SleeveEfficiencyState.NORMAL
 
-    def get_sizing_multiplier(self, sleeve_id: str) -> Decimal:
-        state = self.get_sleeve_state(sleeve_id)
-        if state == SleeveEfficiencyState.NORMAL: return self.policy.ceiling_normal
-        if state == SleeveEfficiencyState.THROTTLED: return self.policy.ceiling_throttled
-        if state == SleeveEfficiencyState.DEHYDRATED: return self.policy.ceiling_dehydrated
-        if state == SleeveEfficiencyState.QUARANTINED: return self.policy.ceiling_quarantined
-        return self.policy.ceiling_recovery
+    def get_leadership_snapshot(self, sleeve_id: str, regime: Optional[Any] = None) -> LeadershipSnapshot:
+        regime_key = self._normalize_regime(regime)
+        regime_map = self._regime_metrics.get(regime_key, {})
+        sleeve_window = regime_map.get(sleeve_id)
+        sample_count = sleeve_window.count if sleeve_window else 0
+        required = self.policy.leadership_min_samples
+
+        if sample_count < required:
+            return LeadershipSnapshot(
+                sleeve_id=sleeve_id,
+                regime=regime_key,
+                status=LeadershipStatus.NEUTRAL_INSUFFICIENT_SAMPLE,
+                multiplier=Decimal("1.00"),
+                sample_count=sample_count,
+                required_samples=required,
+                eligible_sleeves=0,
+                sleeve_edge=ZERO,
+                leader_sleeve_id=None,
+                reason_code="LEADERSHIP_NEUTRAL_INSUFFICIENT_SAMPLE",
+            )
+
+        eligible = {
+            peer_sleeve: metrics
+            for peer_sleeve, metrics in regime_map.items()
+            if metrics.count >= required
+        }
+        if len(eligible) < self.policy.leadership_min_active_sleeves:
+            return LeadershipSnapshot(
+                sleeve_id=sleeve_id,
+                regime=regime_key,
+                status=LeadershipStatus.NEUTRAL_NO_PEER_SAMPLE,
+                multiplier=Decimal("1.00"),
+                sample_count=sample_count,
+                required_samples=required,
+                eligible_sleeves=len(eligible),
+                sleeve_edge=sleeve_window.calculate_cer(),
+                leader_sleeve_id=None,
+                reason_code="LEADERSHIP_NEUTRAL_NO_PEER_SAMPLE",
+            )
+
+        edges = {peer_sleeve: metrics.calculate_cer() for peer_sleeve, metrics in eligible.items()}
+        sleeve_edge = edges.get(sleeve_id, ZERO)
+        leader_sleeve_id = max(edges, key=edges.get)
+        min_edge = min(edges.values())
+        max_edge = max(edges.values())
+        spread = max_edge - min_edge
+
+        if abs(spread) <= EPSILON:
+            multiplier = Decimal("1.00")
+        else:
+            rank = (sleeve_edge - min_edge) / spread
+            centered = (rank * Decimal("2")) - Decimal("1")
+            if centered >= ZERO:
+                multiplier = Decimal("1.00") + (self.policy.leadership_max_boost * centered)
+            else:
+                multiplier = Decimal("1.00") + (self.policy.leadership_max_cut * centered)
+
+        multiplier = max(Decimal("0.00"), multiplier).quantize(Decimal("0.0001"))
+        return LeadershipSnapshot(
+            sleeve_id=sleeve_id,
+            regime=regime_key,
+            status=LeadershipStatus.ACTIVE,
+            multiplier=multiplier,
+            sample_count=sample_count,
+            required_samples=required,
+            eligible_sleeves=len(eligible),
+            sleeve_edge=sleeve_edge,
+            leader_sleeve_id=leader_sleeve_id,
+            reason_code="LEADERSHIP_ACTIVE_REALIZED_EDGE_RANK",
+        )
+
+    def get_kelly_overlay(self, sleeve_id: str, regime: Optional[Any] = None) -> KellyOverlay:
+        regime_key = self._normalize_regime(regime)
+        metrics = self._regime_metrics.get(regime_key, {}).get(sleeve_id)
+        sample_count = metrics.count if metrics else 0
+        required = self.policy.kelly_min_samples
+
+        if sample_count < required:
+            return KellyOverlay(
+                sleeve_id=sleeve_id,
+                regime=regime_key,
+                status=KellyOverlayStatus.DORMANT_INSUFFICIENT_REALIZED_SAMPLE,
+                effective_kelly_cap=self.policy.kelly_dormant_cap,
+                sample_count=sample_count,
+                required_samples=required,
+                risk_of_ruin_estimate=None,
+                reason_code="KELLY_DORMANT_INSUFFICIENT_REALIZED_SAMPLE",
+            )
+
+        false_positive_rate = metrics.calculate_fpbr()
+        win_rate = Decimal("1.00") - false_positive_rate
+        if false_positive_rate <= ZERO:
+            risk_of_ruin = ZERO
+        elif win_rate <= ZERO or false_positive_rate >= win_rate:
+            risk_of_ruin = Decimal("1.00")
+        else:
+            risk_of_ruin = (false_positive_rate / max(win_rate, EPSILON)) ** sample_count
+        risk_of_ruin = min(Decimal("1.00"), max(ZERO, risk_of_ruin)).quantize(Decimal("0.000001"))
+
+        if risk_of_ruin < self.policy.risk_of_ruin_max:
+            return KellyOverlay(
+                sleeve_id=sleeve_id,
+                regime=regime_key,
+                status=KellyOverlayStatus.ACTIVE_RISK_OF_RUIN_CONFIRMED,
+                effective_kelly_cap=self.policy.kelly_active_cap,
+                sample_count=sample_count,
+                required_samples=required,
+                risk_of_ruin_estimate=risk_of_ruin,
+                reason_code="KELLY_ACTIVE_RISK_OF_RUIN_LT_1PCT",
+            )
+
+        return KellyOverlay(
+            sleeve_id=sleeve_id,
+            regime=regime_key,
+            status=KellyOverlayStatus.ACTIVE_RISK_OF_RUIN_BLOCKED,
+            effective_kelly_cap=self.policy.kelly_dormant_cap,
+            sample_count=sample_count,
+            required_samples=required,
+            risk_of_ruin_estimate=risk_of_ruin,
+            reason_code="KELLY_FAIL_CLOSED_RISK_OF_RUIN_GE_1PCT",
+        )
+
+    def get_sizing_multiplier(self, sleeve_id: str, regime: Optional[Any] = None) -> Decimal:
+        state_multiplier = self._state_ceiling(self.get_sleeve_state(sleeve_id))
+        if state_multiplier <= ZERO:
+            return state_multiplier
+        leadership = self.get_leadership_snapshot(sleeve_id, regime).multiplier
+        return (state_multiplier * leadership).quantize(Decimal("0.0001"))
 
     def force_quarantine(self, sleeve_id: str, timestamp_ns: int, reason: str) -> EfficiencyTransition:
         """Explicit hard-quarantine override seam for external intervention."""
@@ -215,7 +432,7 @@ class TradeEfficiencyGovernor:
     def register_trade_result(
         self, sleeve_id: str, timestamp_ns: int, gross_pnl: Decimal, net_pnl: Decimal,
         fee_cost: Decimal, spread_tax: Decimal, slippage_drag: Decimal,
-        carry_drag: Decimal, capital_committed: Decimal
+        carry_drag: Decimal, capital_committed: Decimal, regime: Optional[Any] = None
     ) -> Optional[EfficiencyTransition]:
         """
         Ingests metrics and evaluates hysteresis. Returns an EfficiencyTransition object
@@ -232,9 +449,104 @@ class TradeEfficiencyGovernor:
         matrix.short_window.insert(gross_pnl, net_pnl, friction, is_fp, capital_committed)
         matrix.med_window.insert(gross_pnl, net_pnl, friction, is_fp, capital_committed)
         matrix.long_window.insert(gross_pnl, net_pnl, friction, is_fp, capital_committed)
+        self._regime_window(self._normalize_regime(regime), sleeve_id).insert(
+            gross_pnl,
+            net_pnl,
+            friction,
+            is_fp,
+            capital_committed,
+        )
         matrix.samples_since_transition += 1
 
         return self._evaluate_state_transitions(sleeve_id, matrix, timestamp_ns)
+
+    def register_confirmed_round_trip_realization(
+        self,
+        ledger_row: Mapping[str, Any],
+        timestamp_ns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Imports broker-confirmed at-close round-trip truth from a fill ledger row.
+
+        Advisory entry-time realizations and modeled estimates are explicitly rejected.
+        """
+        metadata = ledger_row.get("metadata")
+        if not isinstance(metadata, Mapping):
+            return {"status": "SKIPPED", "reason_code": "METADATA_MISSING"}
+
+        realization = metadata.get("net_edge_realization")
+        if not isinstance(realization, Mapping):
+            return {"status": "SKIPPED", "reason_code": "NET_EDGE_REALIZATION_MISSING"}
+
+        if realization.get("measurement_label") != "AT_CLOSE_ACTUAL_ROUND_TRIP":
+            return {"status": "SKIPPED", "reason_code": "NOT_AT_CLOSE_ACTUAL_ROUND_TRIP"}
+        if realization.get("true_net_profit_status") != "BROKER_CONFIRMED_AFTER_POSITION_CLOSE":
+            return {"status": "SKIPPED", "reason_code": "NOT_BROKER_CONFIRMED_AFTER_POSITION_CLOSE"}
+
+        actual_round_trip = realization.get("at_close_actual_round_trip")
+        if not isinstance(actual_round_trip, Mapping):
+            return {"status": "SKIPPED", "reason_code": "ACTUAL_ROUND_TRIP_MISSING"}
+        if actual_round_trip.get("broker_truth_authority") is not True:
+            return {"status": "SKIPPED", "reason_code": "BROKER_TRUTH_AUTHORITY_FALSE"}
+
+        net_profit_raw = actual_round_trip.get("actual_net_profit")
+        if net_profit_raw is None:
+            return {"status": "SKIPPED", "reason_code": "ACTUAL_NET_PROFIT_MISSING"}
+
+        sleeve_id = (
+            self._mapping_get_path(metadata, "net_edge_context", "sleeve_id")
+            or self._mapping_get_path(metadata, "net_edge_evaluation", "sleeve_id")
+            or self._mapping_get_path(metadata, "order_metadata_capture", "metadata", "sleeve_id")
+            or metadata.get("sleeve_id")
+            or metadata.get("strategy")
+            or ledger_row.get("sleeve_id")
+            or ledger_row.get("strategy")
+        )
+        if not sleeve_id:
+            return {"status": "SKIPPED", "reason_code": "SLEEVE_ID_MISSING"}
+
+        regime = (
+            self._mapping_get_path(metadata, "net_edge_context", "regime")
+            or self._mapping_get_path(metadata, "net_edge_evaluation", "regime")
+            or self._mapping_get_path(metadata, "order_metadata_capture", "metadata", "regime")
+            or metadata.get("regime")
+            or "UNKNOWN"
+        )
+
+        net_pnl = self._to_decimal(net_profit_raw)
+        gross_pnl = self._to_decimal(actual_round_trip.get("gross_pnl"), net_pnl)
+        entry_fee = self._to_decimal(actual_round_trip.get("entry_fee"))
+        close_fee = self._to_decimal(actual_round_trip.get("close_fee"))
+        fee_cost = entry_fee + close_fee
+        spread_tax = self._to_decimal(actual_round_trip.get("spread_tax"))
+        slippage_drag = self._to_decimal(actual_round_trip.get("slippage_drag"))
+        carry_drag = self._to_decimal(actual_round_trip.get("carry_drag"))
+        matched_quantity = abs(self._to_decimal(actual_round_trip.get("matched_quantity")))
+        entry_price = self._to_decimal(actual_round_trip.get("entry_price"))
+        capital_committed = abs(entry_price * matched_quantity)
+        if capital_committed <= ZERO:
+            capital_committed = abs(self._to_decimal(ledger_row.get("notional")))
+        if capital_committed <= ZERO:
+            return {"status": "SKIPPED", "reason_code": "CAPITAL_COMMITTED_MISSING"}
+
+        self.register_trade_result(
+            sleeve_id=str(sleeve_id),
+            timestamp_ns=int(timestamp_ns or ledger_row.get("fill_ts_ns") or 0),
+            gross_pnl=gross_pnl,
+            net_pnl=net_pnl,
+            fee_cost=fee_cost,
+            spread_tax=spread_tax,
+            slippage_drag=slippage_drag,
+            carry_drag=carry_drag,
+            capital_committed=capital_committed,
+            regime=regime,
+        )
+        return {
+            "status": "IMPORTED",
+            "reason_code": "BROKER_CONFIRMED_AT_CLOSE_ROUND_TRIP_IMPORTED",
+            "sleeve_id": str(sleeve_id),
+            "regime": self._normalize_regime(regime),
+        }
 
     def _evaluate_state_transitions(self, sleeve_id: str, matrix: SleeveStateMatrix, timestamp_ns: int) -> Optional[EfficiencyTransition]:
         """

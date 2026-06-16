@@ -17,9 +17,11 @@ from app.execution.broker_read_policy import (
     PAPER_TCA_EXTENDED_READS,
     broker_read_profile_for_name,
 )
+from app.execution.engine import ExecutionEngine
 from app.execution.order_router import ActiveOrderIdMapping, OrderRouter
 from app.models import OrderRequest
 from app.models.enums import OrderSide, OrderType, SleeveType
+from app.risk.trade_efficiency_governor import LeadershipStatus, TradeEfficiencyGovernor
 from app.state.state_store import StateStore
 
 
@@ -120,6 +122,66 @@ def _partial_fill(store: StateStore, *, fill_id: str = "fill-1", broker_order_id
         }
     )
     assert status == "inserted"
+
+
+def test_execution_engine_imports_confirmed_at_close_ledger_rows_once(tmp_path):
+    store = _store(tmp_path)
+    status = store.upsert_broker_fill_ledger(
+        {
+            "fill_id": "entry-confirmed-1",
+            "broker_order_id": "broker-confirmed-1",
+            "client_order_id": "client-confirmed-1",
+            "decision_uuid": "decision-confirmed-1",
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "action": "buy_to_open",
+            "quantity": "0.01",
+            "price": "10000",
+            "notional": "100",
+            "fill_timestamp": T0,
+            "fill_ts_ns": T0_NS,
+            "source": "broker_activity",
+            "hydration_status": "COMPLETE",
+            "hydration_reason_code": "BROKER_FILL_FEE_DETAIL_CONFIRMED",
+            "metadata": {
+                "net_edge_context": {
+                    "sleeve_id": "sector_rotation",
+                    "regime": "trending_bull",
+                },
+                "net_edge_realization": {
+                    "measurement_label": "AT_CLOSE_ACTUAL_ROUND_TRIP",
+                    "true_net_profit_status": "BROKER_CONFIRMED_AFTER_POSITION_CLOSE",
+                    "at_close_actual_round_trip": {
+                        "broker_truth_authority": True,
+                        "actual_net_profit": "7.50",
+                        "gross_pnl": "10.00",
+                        "entry_fee": "1.00",
+                        "close_fee": "1.50",
+                        "matched_quantity": "0.01",
+                        "entry_price": "10000",
+                    },
+                },
+            },
+            "created_at_ns": T0_NS,
+            "observed_at_ns": T0_NS,
+        }
+    )
+    assert status == "inserted"
+
+    engine = ExecutionEngine.__new__(ExecutionEngine)
+    engine.order_router = SimpleNamespace(_state_store=store)
+    engine.trade_efficiency_governor = TradeEfficiencyGovernor()
+    engine._trade_efficiency_imported_fill_ids = set()
+
+    first = engine.refresh_trade_efficiency_from_broker_ledger(T0_NS)
+    second = engine.refresh_trade_efficiency_from_broker_ledger(T0_NS + 1)
+
+    assert first["imported"] == 1
+    assert second["imported"] == 0
+    assert second["skipped_reasons"]["DUPLICATE_FILL_ROW"] == 1
+    snapshot = engine.trade_efficiency_governor.get_leadership_snapshot("sector_rotation", "trending_bull")
+    assert snapshot.sample_count == 1
+    assert snapshot.status == LeadershipStatus.NEUTRAL_INSUFFICIENT_SAMPLE
 
 
 def _net_edge_order(

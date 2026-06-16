@@ -22,6 +22,8 @@ from app.risk.net_edge_governor import (
     NetEdgeGovernor,
 )
 from app.risk.trade_efficiency_governor import (
+    KellyOverlayStatus,
+    LeadershipStatus,
     SleeveEfficiencyState,
     TradeEfficiencyGovernor,
 )
@@ -239,3 +241,164 @@ def test_trade_efficiency_governor_throttles_and_quarantines_sleeve_without_exec
     assert governor.get_sizing_multiplier("shadow_front") == Decimal("0.00")
     assert not hasattr(governor, "order_router")
     assert not hasattr(governor, "execution_engine")
+
+
+def test_trade_efficiency_governor_imports_confirmed_at_close_rows_only():
+    governor = TradeEfficiencyGovernor()
+    advisory = {
+        "fill_id": "entry-1",
+        "metadata": {
+            "net_edge_realization": {
+                "measurement_label": "ENTRY_MODELED_ADVISORY",
+                "true_net_profit_status": "MODELED_ONLY",
+            },
+            "net_edge_context": {"sleeve_id": "sector_rotation", "regime": "trending_bull"},
+        },
+    }
+    assert governor.register_confirmed_round_trip_realization(advisory)["status"] == "SKIPPED"
+
+    confirmed = {
+        "fill_id": "entry-2",
+        "fill_ts_ns": T0_NS,
+        "metadata": {
+            "net_edge_context": {"sleeve_id": "sector_rotation", "regime": "trending_bull"},
+            "net_edge_realization": {
+                "measurement_label": "AT_CLOSE_ACTUAL_ROUND_TRIP",
+                "true_net_profit_status": "BROKER_CONFIRMED_AFTER_POSITION_CLOSE",
+                "at_close_actual_round_trip": {
+                    "broker_truth_authority": True,
+                    "actual_net_profit": "7.50",
+                    "gross_pnl": "10.00",
+                    "entry_fee": "1.00",
+                    "close_fee": "1.50",
+                    "matched_quantity": "2",
+                    "entry_price": "100",
+                },
+            },
+        },
+    }
+    result = governor.register_confirmed_round_trip_realization(confirmed)
+    assert result["status"] == "IMPORTED"
+    snapshot = governor.get_leadership_snapshot("sector_rotation", "trending_bull")
+    assert snapshot.sample_count == 1
+    assert snapshot.status == LeadershipStatus.NEUTRAL_INSUFFICIENT_SAMPLE
+
+
+def test_trade_efficiency_leadership_is_sample_gated_then_active_by_regime():
+    governor = TradeEfficiencyGovernor()
+    transition = governor.register_trade_result(
+        sleeve_id="sector_rotation",
+        timestamp_ns=T0_NS,
+        gross_pnl=Decimal("10"),
+        net_pnl=Decimal("8"),
+        fee_cost=Decimal("1"),
+        spread_tax=Decimal("0.5"),
+        slippage_drag=Decimal("0.5"),
+        carry_drag=Decimal("0"),
+        capital_committed=Decimal("100"),
+        regime="trending_bull",
+    )
+    assert transition is None
+    thin = governor.get_leadership_snapshot("sector_rotation", "trending_bull")
+    assert thin.status == LeadershipStatus.NEUTRAL_INSUFFICIENT_SAMPLE
+    assert thin.multiplier == Decimal("1.00")
+
+    for offset in range(49):
+        governor.register_trade_result(
+            sleeve_id="sector_rotation",
+            timestamp_ns=T0_NS + offset + 1,
+            gross_pnl=Decimal("10"),
+            net_pnl=Decimal("8"),
+            fee_cost=Decimal("1"),
+            spread_tax=Decimal("0.5"),
+            slippage_drag=Decimal("0.5"),
+            carry_drag=Decimal("0"),
+            capital_committed=Decimal("100"),
+            regime="trending_bull",
+        )
+        governor.register_trade_result(
+            sleeve_id="liquidity_void",
+            timestamp_ns=T0_NS + offset + 1,
+            gross_pnl=Decimal("10"),
+            net_pnl=Decimal("2"),
+            fee_cost=Decimal("1"),
+            spread_tax=Decimal("0.5"),
+            slippage_drag=Decimal("0.5"),
+            carry_drag=Decimal("0"),
+            capital_committed=Decimal("100"),
+            regime="trending_bull",
+        )
+    governor.register_trade_result(
+        sleeve_id="liquidity_void",
+        timestamp_ns=T0_NS + 50,
+        gross_pnl=Decimal("10"),
+        net_pnl=Decimal("2"),
+        fee_cost=Decimal("1"),
+        spread_tax=Decimal("0.5"),
+        slippage_drag=Decimal("0.5"),
+        carry_drag=Decimal("0"),
+        capital_committed=Decimal("100"),
+        regime="trending_bull",
+    )
+
+    leader = governor.get_leadership_snapshot("sector_rotation", "trending_bull")
+    laggard = governor.get_leadership_snapshot("liquidity_void", "trending_bull")
+    assert leader.status == LeadershipStatus.ACTIVE
+    assert laggard.status == LeadershipStatus.ACTIVE
+    assert leader.multiplier > Decimal("1.00")
+    assert laggard.multiplier < Decimal("1.00")
+    assert governor.get_sizing_multiplier("sector_rotation", "trending_bull") == leader.multiplier
+
+
+def test_kelly_overlay_dormant_until_sample_then_risk_of_ruin_fail_closed():
+    governor = TradeEfficiencyGovernor()
+    for offset in range(49):
+        governor.register_trade_result(
+            sleeve_id="shadow_front",
+            timestamp_ns=T0_NS + offset,
+            gross_pnl=Decimal("10"),
+            net_pnl=Decimal("8"),
+            fee_cost=Decimal("1"),
+            spread_tax=Decimal("0.5"),
+            slippage_drag=Decimal("0.5"),
+            carry_drag=Decimal("0"),
+            capital_committed=Decimal("100"),
+            regime="ranging",
+        )
+    dormant = governor.get_kelly_overlay("shadow_front", "ranging")
+    assert dormant.status == KellyOverlayStatus.DORMANT_INSUFFICIENT_REALIZED_SAMPLE
+    assert dormant.effective_kelly_cap == Decimal("0.25")
+
+    governor.register_trade_result(
+        sleeve_id="shadow_front",
+        timestamp_ns=T0_NS + 49,
+        gross_pnl=Decimal("10"),
+        net_pnl=Decimal("8"),
+        fee_cost=Decimal("1"),
+        spread_tax=Decimal("0.5"),
+        slippage_drag=Decimal("0.5"),
+        carry_drag=Decimal("0"),
+        capital_committed=Decimal("100"),
+        regime="ranging",
+    )
+    active = governor.get_kelly_overlay("shadow_front", "ranging")
+    assert active.status == KellyOverlayStatus.ACTIVE_RISK_OF_RUIN_CONFIRMED
+    assert active.effective_kelly_cap == Decimal("0.50")
+    assert active.risk_of_ruin_estimate == Decimal("0.000000")
+
+    for offset in range(50):
+        governor.register_trade_result(
+            sleeve_id="gamma_front",
+            timestamp_ns=T0_NS + offset,
+            gross_pnl=Decimal("10"),
+            net_pnl=Decimal("-2"),
+            fee_cost=Decimal("1"),
+            spread_tax=Decimal("0.5"),
+            slippage_drag=Decimal("0.5"),
+            carry_drag=Decimal("0"),
+            capital_committed=Decimal("100"),
+            regime="ranging",
+        )
+    blocked = governor.get_kelly_overlay("gamma_front", "ranging")
+    assert blocked.status == KellyOverlayStatus.ACTIVE_RISK_OF_RUIN_BLOCKED
+    assert blocked.effective_kelly_cap == Decimal("0.25")

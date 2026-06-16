@@ -610,6 +610,30 @@ def test_decision_compiler_carries_seam7f_attribution_sections_without_flattenin
     assert "risk_attribution" in record.outputs["additional"]
 
 
+def test_position_sizing_leadership_boost_remains_under_global_cap():
+    sizing = PositionSizingEngine(SimpleNamespace(risk=SimpleNamespace(max_risk_per_trade=Decimal("0.02"))))
+    result = sizing.calculate_position_size(
+        capital_usd=Decimal("1000"),
+        confidence=Decimal("1.00"),
+        volatility=Decimal("0.20"),
+        regime=RegimeType.TRENDING_BULL,
+        strategy=SleeveType.SHADOW_FRONT,
+        price=Decimal("100"),
+        kelly_multiplier=Decimal("0.50"),
+        stop_loss_pct=Decimal("0.001"),
+        leadership_multiplier=Decimal("5.00"),
+        kelly_cap=Decimal("0.50"),
+        risk_of_ruin_evidence={"status": "ACTIVE_RISK_OF_RUIN_CONFIRMED"},
+    )
+
+    assert result.leadership_adjusted is True
+    assert result.leadership_multiplier == Decimal("5.00")
+    assert result.kelly_cap == Decimal("0.50")
+    assert result.notional_usd == Decimal("250.00")
+    assert result.position_pct <= Decimal("0.25")
+    assert result.capped_by_global is True
+
+
 def test_missing_economic_truth_fails_closed_and_no_fake_profitability_is_emitted():
     efficiency = TradeEfficiencyGovernor()
     denied = NetEdgeGovernor(efficiency).evaluate(

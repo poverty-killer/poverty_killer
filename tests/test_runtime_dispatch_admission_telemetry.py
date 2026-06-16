@@ -19,6 +19,9 @@ from app.main_loop import (
 from app.brain.data_validator import DataContinuityValidator
 from app.models import Candle
 from app.models.enums import SleeveType
+from app.models.enums import RegimeType
+from app.risk.position_sizing import PositionSizingEngine
+from app.risk.trade_efficiency_governor import TradeEfficiencyGovernor
 
 
 LOGGER_NAME = "app.main_loop"
@@ -101,6 +104,7 @@ def _runtime(
 ) -> types.SimpleNamespace:
     return types.SimpleNamespace(
         last_price=2500.0,
+        current_volatility=0.20,
         shadow_front_strategy=MagicMock(),
         gamma_front_strategy=None,
         sector_rotation_strategy=MagicMock(),
@@ -236,6 +240,32 @@ def _dispatch(loop: types.SimpleNamespace, runtime: types.SimpleNamespace) -> No
     )
 
 
+def _sizing_loop() -> types.SimpleNamespace:
+    loop = types.SimpleNamespace()
+    loop._last_equity = 1000.0
+    loop.commander = types.SimpleNamespace(get_kelly_multiplier=lambda: Decimal("0.85"))
+    loop.position_sizing_engine = PositionSizingEngine(
+        types.SimpleNamespace(risk=types.SimpleNamespace(max_risk_per_trade=Decimal("0.02")))
+    )
+    loop.execution_engine = types.SimpleNamespace(
+        trade_efficiency_governor=TradeEfficiencyGovernor(),
+        refresh_trade_efficiency_from_broker_ledger=lambda *_args, **_kwargs: {
+            "status": "OK",
+            "imported": 0,
+            "skipped": 0,
+        },
+    )
+    loop._get_dispatch_regime = lambda runtime: RegimeType.TRENDING_BULL
+    loop._apply_position_sizing_authority = MainLoop._apply_position_sizing_authority.__get__(
+        loop, MainLoop
+    )
+    loop._sizing_evidence_from_leadership = MainLoop._sizing_evidence_from_leadership
+    loop._sizing_evidence_from_kelly = MainLoop._sizing_evidence_from_kelly
+    loop._position_sizing_strategy = MainLoop._position_sizing_strategy
+    loop._metadata_decimal = MainLoop._metadata_decimal
+    return loop
+
+
 class _NoSignalSectorRotation:
     def update_macro_state(self, macro_signal) -> None:
         return None
@@ -277,6 +307,55 @@ class _SignalSectorRotation:
 
     def get_last_decline_detail(self) -> dict:
         return {}
+
+
+def test_position_sizing_authority_replaces_observed_pair_provisional_quantity():
+    loop = _sizing_loop()
+    runtime = _runtime()
+    signal = _signal()
+    signal.quantity = 999.0
+    vote = _vote()
+    vote.strategy_id = "sector_rotation"
+
+    evidence = loop._apply_position_sizing_authority(
+        symbol="ETH/USD",
+        runtime=runtime,
+        signal=signal,
+        strategy_vote=vote,
+    )
+
+    assert evidence["status"] == "PASS"
+    assert evidence["authority"] == "PositionSizingEngine"
+    assert evidence["original_signal_quantity"] == "999.0"
+    assert Decimal(str(signal.quantity)) < Decimal("999.0")
+    assert Decimal(signal.metadata["position_sizing_result"]["notional_usd"]) <= Decimal("250.00")
+    assert signal.metadata["trade_efficiency_leadership"]["status"] == "NEUTRAL_INSUFFICIENT_SAMPLE"
+    assert signal.metadata["kelly_overlay"]["status"] == "DORMANT_INSUFFICIENT_REALIZED_SAMPLE"
+    assert vote.metadata["risk_appetite_after_position_sizing"] == signal.metadata["position_sizing_result"]["position_pct"]
+
+
+def test_position_sizing_authority_bypasses_protective_exit_quantity():
+    loop = _sizing_loop()
+    runtime = _runtime()
+    signal = _signal()
+    signal.side = "sell"
+    signal.quantity = 0.05
+    signal.metadata = {"requires_existing_position": True}
+    vote = _vote()
+    vote.strategy_id = "moving_floor"
+    vote.metadata = {"requires_existing_position": True}
+
+    evidence = loop._apply_position_sizing_authority(
+        symbol="ETH/USD",
+        runtime=runtime,
+        signal=signal,
+        strategy_vote=vote,
+    )
+
+    assert evidence["status"] == "BYPASSED"
+    assert evidence["reason_code"] == "BYPASSED_PROTECTIVE_OR_EXIT_USES_BROKER_POSITION"
+    assert signal.quantity == 0.05
+    assert signal.metadata["position_sizing_authority"] == "BrokerPositionTruthForExit"
 
 
 def test_sector_rotation_no_signal_diag_does_not_submit(caplog):

@@ -68,6 +68,10 @@ class PositionSizeResult:
     capped_by_strategy: bool
     capped_by_global: bool
     reason: str
+    leadership_adjusted: bool = False
+    leadership_multiplier: Decimal = Decimal('1.00')
+    kelly_cap: Decimal = Decimal(str(KELLY_FRACTION_MAX))
+    risk_of_ruin_evidence: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -83,6 +87,10 @@ class PositionSizeResult:
             "kelly_adjusted": self.kelly_adjusted,
             "capped_by_strategy": self.capped_by_strategy,
             "capped_by_global": self.capped_by_global,
+            "leadership_adjusted": self.leadership_adjusted,
+            "leadership_multiplier": str(self.leadership_multiplier),
+            "kelly_cap": str(self.kelly_cap),
+            "risk_of_ruin_evidence": self.risk_of_ruin_evidence,
             "reason": self.reason,
         }
 
@@ -310,6 +318,9 @@ class PositionSizingEngine:
         kelly_multiplier: Decimal,
         stop_loss_pct: Optional[Decimal] = None,
         atr: Optional[Decimal] = None,
+        leadership_multiplier: Decimal = Decimal('1.00'),
+        kelly_cap: Optional[Decimal] = None,
+        risk_of_ruin_evidence: Optional[Dict[str, Any]] = None,
     ) -> PositionSizeResult:
         """
         Calculate position size using stop-loss-based risk sizing (PRIMARY PATH).
@@ -360,16 +371,24 @@ class PositionSizingEngine:
         # Convert confidence to Decimal with proper precision
         confidence_dec = decimal_confidence(confidence)
 
-        # Kelly: upper clamp only (preserve zero and small positive values)
+        # Kelly: upper clamp only (preserve zero and small positive values).
+        # The optional cap is supplied by TradeEfficiencyGovernor only after
+        # broker-confirmed sample/risk-of-ruin gates; it still has a hard 0.50 ceiling.
+        effective_kelly_cap = self.kelly_fraction_max
+        if kelly_cap is not None:
+            effective_kelly_cap = min(Decimal('0.50'), max(Decimal('0'), Decimal(str(kelly_cap))))
         clamped_kelly = kelly_multiplier
         kelly_adjusted = False
-        if clamped_kelly > self.kelly_fraction_max:
-            clamped_kelly = self.kelly_fraction_max
+        if clamped_kelly > effective_kelly_cap:
+            clamped_kelly = effective_kelly_cap
             kelly_adjusted = True
         # Ensure non-negative (defensive)
         if clamped_kelly < Decimal('0'):
             clamped_kelly = Decimal('0')
             kelly_adjusted = True
+
+        leadership_mult = max(Decimal('0'), Decimal(str(leadership_multiplier)))
+        leadership_adjusted = leadership_mult != Decimal('1.00')
 
         # Regime adjustment
         regime_mult = self._get_regime_multiplier(regime)
@@ -386,6 +405,7 @@ class PositionSizingEngine:
         risk_capital = risk_capital * clamped_kelly
         risk_capital = risk_capital * regime_mult
         risk_capital = risk_capital * vol_mult
+        risk_capital = risk_capital * leadership_mult
 
         # Denominator: price * stop_distance_fraction
         # This yields dollar distance to stop: price * fraction = dollar amount
@@ -423,6 +443,10 @@ class PositionSizingEngine:
             reason_parts.append(f"conf={confidence_dec:.3f}")
         if kelly_adjusted:
             reason_parts.append(f"kelly_upper_clamped={clamped_kelly:.3f}")
+        if effective_kelly_cap != self.kelly_fraction_max:
+            reason_parts.append(f"kelly_cap={effective_kelly_cap:.3f}")
+        if leadership_adjusted:
+            reason_parts.append(f"leadership={leadership_mult:.4f}")
         if regime_adjusted:
             reason_parts.append(f"regime={regime.value}")
         if volatility_adjusted:
@@ -448,6 +472,10 @@ class PositionSizingEngine:
             capped_by_strategy=capped_by_strategy,
             capped_by_global=capped_by_global,
             reason=reason,
+            leadership_adjusted=leadership_adjusted,
+            leadership_multiplier=leadership_mult,
+            kelly_cap=effective_kelly_cap,
+            risk_of_ruin_evidence=risk_of_ruin_evidence,
         )
 
     def calculate_notional_based_size(
@@ -459,6 +487,9 @@ class PositionSizingEngine:
         strategy: Union[SleeveType, str],
         price: Decimal,
         kelly_multiplier: Decimal,
+        leadership_multiplier: Decimal = Decimal('1.00'),
+        kelly_cap: Optional[Decimal] = None,
+        risk_of_ruin_evidence: Optional[Dict[str, Any]] = None,
     ) -> PositionSizeResult:
         """
         Calculate position size using notional-based sizing (FALLBACK PATH).
@@ -489,15 +520,22 @@ class PositionSizingEngine:
         # Convert confidence to Decimal with proper precision
         confidence_dec = decimal_confidence(confidence)
 
+        effective_kelly_cap = self.kelly_fraction_max
+        if kelly_cap is not None:
+            effective_kelly_cap = min(Decimal('0.50'), max(Decimal('0'), Decimal(str(kelly_cap))))
+
         # Kelly: upper clamp only (preserve zero and small positive values)
         clamped_kelly = kelly_multiplier
         kelly_adjusted = False
-        if clamped_kelly > self.kelly_fraction_max:
-            clamped_kelly = self.kelly_fraction_max
+        if clamped_kelly > effective_kelly_cap:
+            clamped_kelly = effective_kelly_cap
             kelly_adjusted = True
         if clamped_kelly < Decimal('0'):
             clamped_kelly = Decimal('0')
             kelly_adjusted = True
+
+        leadership_mult = max(Decimal('0'), Decimal(str(leadership_multiplier)))
+        leadership_adjusted = leadership_mult != Decimal('1.00')
 
         # Regime adjustment
         regime_mult = self._get_regime_multiplier(regime)
@@ -513,6 +551,7 @@ class PositionSizingEngine:
         notional_usd = notional_usd * clamped_kelly
         notional_usd = notional_usd * regime_mult
         notional_usd = notional_usd * vol_mult
+        notional_usd = notional_usd * leadership_mult
         notional_usd = notional_usd.quantize(USD_PRECISION)
 
         # Apply caps
@@ -534,6 +573,10 @@ class PositionSizingEngine:
             reason_parts.append(f"conf={confidence_dec:.3f}")
         if kelly_adjusted:
             reason_parts.append(f"kelly_upper_clamped={clamped_kelly:.3f}")
+        if effective_kelly_cap != self.kelly_fraction_max:
+            reason_parts.append(f"kelly_cap={effective_kelly_cap:.3f}")
+        if leadership_adjusted:
+            reason_parts.append(f"leadership={leadership_mult:.4f}")
         if regime_adjusted:
             reason_parts.append(f"regime={regime.value}")
         if volatility_adjusted:
@@ -559,6 +602,10 @@ class PositionSizingEngine:
             capped_by_strategy=capped_by_strategy,
             capped_by_global=capped_by_global,
             reason=reason,
+            leadership_adjusted=leadership_adjusted,
+            leadership_multiplier=leadership_mult,
+            kelly_cap=effective_kelly_cap,
+            risk_of_ruin_evidence=risk_of_ruin_evidence,
         )
 
     def calculate_position_size(
@@ -572,6 +619,9 @@ class PositionSizingEngine:
         kelly_multiplier: Decimal = Decimal('0.85'),
         stop_loss_pct: Optional[Decimal] = None,
         atr: Optional[Decimal] = None,
+        leadership_multiplier: Decimal = Decimal('1.00'),
+        kelly_cap: Optional[Decimal] = None,
+        risk_of_ruin_evidence: Optional[Dict[str, Any]] = None,
     ) -> PositionSizeResult:
         """
         Calculate deterministic position size.
@@ -617,6 +667,9 @@ class PositionSizingEngine:
                     kelly_multiplier=kelly_multiplier,
                     stop_loss_pct=stop_loss_pct,
                     atr=atr,
+                    leadership_multiplier=leadership_multiplier,
+                    kelly_cap=kelly_cap,
+                    risk_of_ruin_evidence=risk_of_ruin_evidence,
                 )
             except PositionSizingError as e:
                 logger.warning(f"Risk-based sizing failed: {e}, falling back to notional-based")
@@ -631,6 +684,9 @@ class PositionSizingEngine:
             strategy=strategy,
             price=price,
             kelly_multiplier=kelly_multiplier,
+            leadership_multiplier=leadership_multiplier,
+            kelly_cap=kelly_cap,
+            risk_of_ruin_evidence=risk_of_ruin_evidence,
         )
 
     def get_strategy_cap_percent(self, strategy: Union[SleeveType, str]) -> Decimal:

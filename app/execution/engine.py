@@ -275,6 +275,7 @@ class ExecutionEngine:
         self.shadow_read_only = bool(shadow_read_only)
         self.trade_efficiency_governor = trade_efficiency_governor or TradeEfficiencyGovernor()
         self.net_edge_governor = net_edge_governor or NetEdgeGovernor(self.trade_efficiency_governor)
+        self._trade_efficiency_imported_fill_ids: set[str] = set()
 
         self._signal_ttl_ns = int(max(0.0, signal_ttl_ms) * NS_PER_MS)
         self._recalibration_pause_ns = int(max(0.0, recalibration_pause_sec) * NS_PER_SECOND)
@@ -1219,6 +1220,73 @@ class ExecutionEngine:
             candidate_lifecycle=candidate_lifecycle or None,
         )
 
+    def refresh_trade_efficiency_from_broker_ledger(
+        self,
+        current_ns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Pull broker-confirmed round-trip realization rows into the pure governor.
+
+        This is a read-only ledger import. Advisory modeled estimates, entry-time
+        projections, rows without broker-confirmed net profit, and duplicate fill
+        rows are ignored fail-closed by the governor/import set.
+        """
+        state_store = getattr(self.order_router, "_state_store", None)
+        if state_store is None or not hasattr(state_store, "list_broker_fill_ledger"):
+            return {
+                "status": "SKIPPED",
+                "reason_code": "BROKER_FILL_LEDGER_UNAVAILABLE",
+                "imported": 0,
+                "skipped": 0,
+            }
+
+        imported = 0
+        skipped = 0
+        skipped_reasons: Dict[str, int] = {}
+        try:
+            rows = state_store.list_broker_fill_ledger()
+        except Exception as exc:
+            logger.warning("Trade efficiency ledger import skipped: %s", exc)
+            return {
+                "status": "SKIPPED",
+                "reason_code": "BROKER_FILL_LEDGER_READ_FAILED",
+                "message": str(exc),
+                "imported": 0,
+                "skipped": 0,
+            }
+
+        for row in rows:
+            if not isinstance(row, dict):
+                skipped += 1
+                skipped_reasons["ROW_NOT_MAPPING"] = skipped_reasons.get("ROW_NOT_MAPPING", 0) + 1
+                continue
+            fill_id = str(row.get("fill_id") or row.get("id") or "")
+            if fill_id and fill_id in self._trade_efficiency_imported_fill_ids:
+                skipped += 1
+                skipped_reasons["DUPLICATE_FILL_ROW"] = skipped_reasons.get("DUPLICATE_FILL_ROW", 0) + 1
+                continue
+
+            result = self.trade_efficiency_governor.register_confirmed_round_trip_realization(
+                row,
+                timestamp_ns=current_ns,
+            )
+            reason_code = str(result.get("reason_code") or result.get("status") or "UNKNOWN")
+            if result.get("status") == "IMPORTED":
+                imported += 1
+                if fill_id:
+                    self._trade_efficiency_imported_fill_ids.add(fill_id)
+            else:
+                skipped += 1
+                skipped_reasons[reason_code] = skipped_reasons.get(reason_code, 0) + 1
+
+        return {
+            "status": "OK",
+            "reason_code": "BROKER_CONFIRMED_ROUND_TRIP_IMPORT_COMPLETE",
+            "imported": imported,
+            "skipped": skipped,
+            "skipped_reasons": skipped_reasons,
+        }
+
     def evaluate_signal_net_edge(
         self,
         signal: StrategySignal,
@@ -1234,6 +1302,7 @@ class ExecutionEngine:
         expected edge remains fail-closed.
         """
         current_time_ns = int(current_ns or now_ns())
+        self.refresh_trade_efficiency_from_broker_ledger(current_time_ns)
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         try:
             candidate, model_inputs = self._build_net_edge_candidate_context(
