@@ -2098,13 +2098,17 @@ class ExecutionEngine:
         return candidate
 
     def _extract_order_timestamp_ns(self, order: OrderRequest) -> int:
-        """Extract best available authoritative timestamp from pending order."""
+        """Extract pending-order age timestamp.
+
+        Pending order lifetime starts when the engine creates/submits the order,
+        not at the signal candle timestamp that justified the order.
+        """
         exchange_ts_ns = self._normalize_timestamp_ns(getattr(order, "exchange_ts_ns", 0))
         receive_ts_ns = self._normalize_timestamp_ns(getattr(order, "receive_ts_ns", 0))
-        if exchange_ts_ns > 0:
-            return exchange_ts_ns
         if receive_ts_ns > 0:
             return receive_ts_ns
+        if exchange_ts_ns > 0:
+            return exchange_ts_ns
         return 0
 
     def _timestamp_ns_to_utc_datetime(self, timestamp_ns: Optional[int]) -> Optional[datetime]:

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 from unittest.mock import MagicMock
 
+import app.execution.engine as engine_module
 from app.commander import Commander
 from app.execution.alpaca_paper_adapter import (
     EXPECTED_ALPACA_PAPER_BASE_URL,
@@ -263,6 +264,45 @@ def test_zombie_sweeper_handles_ns_datetime_and_iso_order_timestamps_without_err
 
     assert {call.args[0] for call in router.cancel_order.call_args_list} == set(timestamp_cases)
     assert engine.get_oms_shutdown_accounting()["zombie_sweeper_errors"] == 0
+
+
+def test_zombie_sweeper_ages_pending_orders_from_receive_timestamp_not_signal_candle(monkeypatch):
+    current_ns = T0_NS + 70_000_000_000
+    fresh_submit_ns = current_ns - 2_000_000_000
+    stale_signal_candle_ns = current_ns - 65_000_000_000
+    router = MagicMock()
+    router.cancel_order.return_value = False
+    router.is_order_terminal.return_value = False
+    risk_guard = MagicMock()
+    risk_guard.register_recalibrate_callback = MagicMock()
+    risk_guard.register_emergency_callback = MagicMock()
+    risk_guard.register_zombie_callback = MagicMock()
+    risk_guard.register_lag_callback = MagicMock()
+    risk_guard.register_vol_fuse_callback = MagicMock()
+    risk_guard.update_pending_orders = MagicMock()
+    engine = ExecutionEngine(
+        commander=MagicMock(spec=Commander),
+        risk_guard=risk_guard,
+        order_router=router,
+        masking_layer=MagicMock(),
+        max_pending_age_sec=5.0,
+    )
+    engine._state.pending_orders["fresh-submit-stale-candle"] = SimpleNamespace(
+        exchange_ts_ns=stale_signal_candle_ns,
+        receive_ts_ns=fresh_submit_ns,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1"),
+    )
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+
+    engine._sweep_zombie_orders()
+
+    router.cancel_order.assert_not_called()
+    risk_guard.update_pending_orders.assert_called_once()
+    assert risk_guard.update_pending_orders.call_args.kwargs["oldest_timestamp"] == datetime.fromtimestamp(
+        fresh_submit_ns / 1_000_000_000,
+        tz=timezone.utc,
+    )
 
 
 def test_risk_guard_accepts_pending_order_ns_timestamp_without_datetime_math_error(tmp_path):
