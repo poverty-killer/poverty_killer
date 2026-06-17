@@ -73,6 +73,33 @@ _DEFAULT_MODELED_SLIPPAGE_BPS = Decimal("8.0")
 _DEFAULT_MODELED_LATENCY_DRAG_BPS = Decimal("4.0")
 _DEFAULT_MODELED_PARTIAL_FILL_BPS = Decimal("4.0")
 _DEFAULT_MODELED_EXIT_COST_BPS = Decimal("4.0")
+_BROKER_WORKING_ORDER_STATUSES = frozenset(
+    {
+        "accepted",
+        "accepted_for_bidding",
+        "acknowledged",
+        "new",
+        "open",
+        "partial",
+        "partial_fill",
+        "partially_filled",
+        "pending",
+        "pending_new",
+        "submitted",
+    }
+)
+_BROKER_UNKNOWN_ORDER_STATUSES = frozenset(
+    {
+        "",
+        "broker_final_state_unknown",
+        "broker_state_unknown",
+        "not_found",
+        "none",
+        "unknown",
+    }
+)
+_ZOMBIE_UNKNOWN_STATUS_HARD_TTL_MULTIPLIER = 3
+_ZOMBIE_UNKNOWN_STATUS_MIN_EXTRA_NS = 30 * NS_PER_SECOND
 
 
 @dataclass(slots=True)
@@ -280,6 +307,10 @@ class ExecutionEngine:
         self._signal_ttl_ns = int(max(0.0, signal_ttl_ms) * NS_PER_MS)
         self._recalibration_pause_ns = int(max(0.0, recalibration_pause_sec) * NS_PER_SECOND)
         self._max_pending_age_ns = int(max(0.0, max_pending_age_sec) * NS_PER_SECOND)
+        self._unknown_status_pending_hard_ttl_ns = max(
+            self._max_pending_age_ns * _ZOMBIE_UNKNOWN_STATUS_HARD_TTL_MULTIPLIER,
+            self._max_pending_age_ns + _ZOMBIE_UNKNOWN_STATUS_MIN_EXTRA_NS,
+        )
 
         self._state = ExecutionState()
         self._execution_queue: queue.Queue = queue.Queue()
@@ -2288,6 +2319,15 @@ class ExecutionEngine:
             "reconciliation_conflict",
         }
 
+    def _normalize_order_status_text(self, status: Any) -> str:
+        if status is None:
+            return "unknown"
+        value = getattr(status, "value", status)
+        text = str(value or "").strip().lower()
+        if not text or text.startswith("<") or "magicmock" in text:
+            return "unknown"
+        return text
+
     def _router_order_is_terminal(self, order_id: str) -> bool:
         checker = getattr(self.order_router, "is_order_terminal", None)
         if callable(checker):
@@ -2303,9 +2343,69 @@ class ExecutionEngine:
                 return False
         return False
 
+    def _router_order_status_text(self, order_id: str) -> str:
+        getter = getattr(self.order_router, "get_order_status", None)
+        if callable(getter):
+            try:
+                return self._normalize_order_status_text(getter(order_id))
+            except Exception:
+                return "unknown"
+        return "unknown"
+
     def _remove_pending_order(self, order_id: str) -> None:
         with self._lock:
             self._state.pending_orders.pop(order_id, None)
+
+    def _zombie_sweep_action_for_order(
+        self,
+        order_id: str,
+        order: OrderRequest,
+        *,
+        current_ns: int,
+    ) -> str:
+        status = self._router_order_status_text(order_id)
+        if self._is_terminal_order_status(status):
+            self._remove_pending_order(order_id)
+            logger.info(
+                "[OMS_DIAG] ZOMBIE_SWEEP_TERMINAL_WITHOUT_CANCEL fields=%s",
+                {
+                    "client_order_id": order_id,
+                    "broker_status": status,
+                    "cancel_attempted": False,
+                    "broker_truth_anchor": True,
+                },
+            )
+            return "terminal_removed"
+
+        if status in _BROKER_WORKING_ORDER_STATUSES:
+            logger.info(
+                "[OMS_DIAG] ZOMBIE_SWEEP_DEFER_BROKER_WORKING fields=%s",
+                {
+                    "client_order_id": order_id,
+                    "broker_status": status,
+                    "cancel_attempted": False,
+                    "broker_truth_anchor": True,
+                },
+            )
+            return "defer_working"
+
+        order_ts_ns = self._extract_order_timestamp_ns(order)
+        order_age_ns = (current_ns - order_ts_ns) if order_ts_ns > 0 else 0
+        if status in _BROKER_UNKNOWN_ORDER_STATUSES and order_age_ns < self._unknown_status_pending_hard_ttl_ns:
+            logger.info(
+                "[OMS_DIAG] ZOMBIE_SWEEP_DEFER_UNKNOWN_STATUS fields=%s",
+                {
+                    "client_order_id": order_id,
+                    "broker_status": status,
+                    "order_age_sec": round(order_age_ns / NS_PER_SECOND, 6),
+                    "hard_ttl_sec": round(self._unknown_status_pending_hard_ttl_ns / NS_PER_SECOND, 6),
+                    "cancel_attempted": False,
+                    "broker_truth_anchor": True,
+                },
+            )
+            return "defer_unknown"
+
+        return "cancel"
 
     def _prune_terminal_pending_orders(self) -> Tuple[str, ...]:
         with self._lock:
@@ -2332,7 +2432,13 @@ class ExecutionEngine:
                     zombie_orders.append(order_id)
 
         for order_id in zombie_orders:
-            self._cancel_pending_order_with_pcv(order_id)
+            with self._lock:
+                order = self._state.pending_orders.get(order_id)
+            if order is None:
+                continue
+            action = self._zombie_sweep_action_for_order(order_id, order, current_ns=current_ns)
+            if action == "cancel":
+                self._cancel_pending_order_with_pcv(order_id)
 
         with self._lock:
             oldest_ts_ns: Optional[int] = None

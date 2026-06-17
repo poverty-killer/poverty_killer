@@ -433,8 +433,7 @@ def test_g4_live_runtime_correlation_slash_runs_before_netedge(monkeypatch):
     assert admitted is True
 
 
-def test_g5_live_runtime_per_symbol_cap_blocks_before_broker_route(monkeypatch):
-    gate = _expect_gate("G5", LIVE_RUNTIME)
+def test_p3d_live_runtime_per_symbol_cap_clamps_before_netedge_and_broker_route(monkeypatch):
     assert EXPOSURE_AUTHORITY_STATUS == LIVE_RUNTIME
     router = MagicMock()
     current_ns = T0_NS + 14 * NS_PER_SECOND
@@ -447,11 +446,68 @@ def test_g5_live_runtime_per_symbol_cap_blocks_before_broker_route(monkeypatch):
         metadata=_canonical_metadata("ETH/USD", market_truth, snapshot),
     )
     signal.quantity = 1.0
+    original_qty = Decimal(str(signal.quantity))
     manager = ExposureManager(
         initial_equity=Decimal("1000"),
         max_utilization=Decimal("0.95"),
         max_asset_concentration=Decimal("0.15"),
     )
+    verdict = _build_pre_trade_guardrail_verdict(
+        config=_portfolio_risk_config(max_utilization=0.95, max_asset_concentration=0.15),
+        symbol="ETH/USD",
+        signal=signal,
+        runtime=SimpleNamespace(last_price=200.0),
+        is_attack=False,
+        exposure_manager=manager,
+    )
+    signal.metadata["pre_trade_guardrail_verdict"] = verdict
+    engine = _engine(router)
+    netedge_seen_quantities: list[Decimal] = []
+    original_evaluator = engine.evaluate_signal_net_edge
+
+    def capture_netedge_quantity(*args, **kwargs):
+        netedge_seen_quantities.append(Decimal(str(args[0].quantity)))
+        return original_evaluator(*args, **kwargs)
+
+    engine.evaluate_signal_net_edge = capture_netedge_quantity
+
+    admitted = engine.submit_signal(signal, Decimal("200.00"), is_attack=False)
+    exposure = _exposure_evidence(verdict)
+
+    assert verdict["route_permitted"] is True
+    assert verdict["reason_codes"] == ("PRE_TRADE_GUARDRAILS_ALLOW",)
+    assert exposure["reason_code"] == "ASSET_CONCENTRATION_CLAMP_APPLIED"
+    assert exposure["exposure_manager_called"] is True
+    assert exposure["adjusted"] is True
+    assert Decimal(exposure["original_quantity"]) == original_qty
+    assert Decimal(exposure["adjusted_quantity"]) == Decimal("0.7500")
+    assert Decimal(exposure["adjusted_notional"]) == Decimal("150.0000")
+    assert Decimal(str(signal.quantity)) == Decimal(exposure["adjusted_quantity"])
+    assert signal.metadata["requested_notional"] == exposure["adjusted_notional"]
+    assert netedge_seen_quantities[-1] == Decimal("0.75")
+    assert admitted is True
+
+
+def test_g5_live_runtime_per_symbol_cap_blocks_when_already_at_cap(monkeypatch):
+    gate = _expect_gate("G5", LIVE_RUNTIME)
+    assert EXPOSURE_AUTHORITY_STATUS == LIVE_RUNTIME
+    router = MagicMock()
+    current_ns = T0_NS + 14 * NS_PER_SECOND
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+    market_truth, _, snapshot = _snapshot_payload(symbol="ETH/USD", current_ns=current_ns)
+    signal = _strategy_signal(
+        symbol="ETH/USD",
+        candle_id=snapshot["candle_id"],
+        expected_move_bps="200",
+        metadata=_canonical_metadata("ETH/USD", market_truth, snapshot),
+    )
+    signal.quantity = 0.1
+    manager = ExposureManager(
+        initial_equity=Decimal("1000"),
+        max_utilization=Decimal("0.95"),
+        max_asset_concentration=Decimal("0.15"),
+    )
+    manager.force_inventory_sync("ETH/USD", Decimal("0.75"), Decimal("200"))
     verdict = _build_pre_trade_guardrail_verdict(
         config=_portfolio_risk_config(max_utilization=0.95, max_asset_concentration=0.15),
         symbol="ETH/USD",
@@ -470,6 +526,7 @@ def test_g5_live_runtime_per_symbol_cap_blocks_before_broker_route(monkeypatch):
     assert verdict["route_permitted"] is False
     assert gate.reason_code in verdict["reason_codes"]
     assert exposure["reason_code"] == gate.reason_code
+    assert exposure["details"]["concentration_clamp_applied"] is False
     assert exposure["exposure_manager_called"] is True
     assert admitted is False
     assert block.reason_code == gate.reason_code
@@ -577,11 +634,11 @@ def test_g8_live_runtime_stale_market_truth_halts_before_broker_route():
 def test_g9_live_runtime_zombie_ttl_sweeper_cancels_aged_pending_order(monkeypatch):
     _expect_gate("G9", LIVE_RUNTIME)
     current_ns = T0_NS + 30 * NS_PER_SECOND
-    stale_submit_ns = current_ns - 5 * NS_PER_SECOND
+    stale_submit_ns = current_ns - 40 * NS_PER_SECOND
     router = MagicMock()
     router.is_order_terminal.return_value = False
     router.cancel_order.return_value = True
-    router.get_order_status.return_value = "canceled"
+    router.get_order_status.side_effect = ["unknown", "canceled"]
     engine = _engine(router, max_pending_age_sec=1.0)
     engine._state.pending_orders["zombie-order"] = SimpleNamespace(
         exchange_ts_ns=stale_submit_ns,

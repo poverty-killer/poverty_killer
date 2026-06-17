@@ -92,6 +92,33 @@ def _order(order_id: str = "client-1", symbol: str = "BTC/USD") -> OrderRequest:
     )
 
 
+def _risk_guard_mock() -> MagicMock:
+    risk_guard = MagicMock()
+    risk_guard.register_recalibrate_callback = MagicMock()
+    risk_guard.register_emergency_callback = MagicMock()
+    risk_guard.register_zombie_callback = MagicMock()
+    risk_guard.register_lag_callback = MagicMock()
+    risk_guard.register_vol_fuse_callback = MagicMock()
+    risk_guard.update_pending_orders = MagicMock()
+    return risk_guard
+
+
+def _execution_engine_for_zombie_test(
+    router: MagicMock,
+    *,
+    max_pending_age_sec: float = 1.0,
+) -> tuple[ExecutionEngine, MagicMock]:
+    risk_guard = _risk_guard_mock()
+    engine = ExecutionEngine(
+        commander=MagicMock(spec=Commander),
+        risk_guard=risk_guard,
+        order_router=router,
+        masking_layer=MagicMock(),
+        max_pending_age_sec=max_pending_age_sec,
+    )
+    return engine, risk_guard
+
+
 def _adapter_with_ack(status_payload: dict | None = None, *, delete_status: int = 204) -> tuple[AlpacaPaperBrokerAdapter, RoutingTransport]:
     status_payload = status_payload or {
         "id": "broker-1",
@@ -264,6 +291,99 @@ def test_zombie_sweeper_handles_ns_datetime_and_iso_order_timestamps_without_err
 
     assert {call.args[0] for call in router.cancel_order.call_args_list} == set(timestamp_cases)
     assert engine.get_oms_shutdown_accounting()["zombie_sweeper_errors"] == 0
+
+
+def test_zombie_sweeper_defers_broker_working_order_without_cancel(monkeypatch):
+    current_ns = T0_NS + 20 * 1_000_000_000
+    stale_submit_ns = current_ns - 10 * 1_000_000_000
+    router = MagicMock()
+    router.is_order_terminal.return_value = False
+    router.get_order_status.return_value = "open"
+    router.cancel_order.return_value = True
+    engine, risk_guard = _execution_engine_for_zombie_test(router, max_pending_age_sec=1.0)
+    engine._state.pending_orders["broker-open-order"] = SimpleNamespace(
+        exchange_ts_ns=stale_submit_ns,
+        receive_ts_ns=stale_submit_ns,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1"),
+    )
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+
+    engine._sweep_zombie_orders()
+
+    router.cancel_order.assert_not_called()
+    assert "broker-open-order" in engine._state.pending_orders
+    risk_guard.update_pending_orders.assert_called_once()
+
+
+def test_zombie_sweeper_removes_terminal_broker_order_without_cancel(monkeypatch):
+    current_ns = T0_NS + 20 * 1_000_000_000
+    stale_submit_ns = current_ns - 10 * 1_000_000_000
+    router = MagicMock()
+    router.is_order_terminal.return_value = False
+    router.get_order_status.return_value = "filled"
+    router.cancel_order.return_value = True
+    engine, risk_guard = _execution_engine_for_zombie_test(router, max_pending_age_sec=1.0)
+    engine._state.pending_orders["broker-filled-order"] = SimpleNamespace(
+        exchange_ts_ns=stale_submit_ns,
+        receive_ts_ns=stale_submit_ns,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1"),
+    )
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+
+    engine._sweep_zombie_orders()
+
+    router.cancel_order.assert_not_called()
+    assert "broker-filled-order" not in engine._state.pending_orders
+    risk_guard.update_pending_orders.assert_called_once()
+
+
+def test_zombie_sweeper_defers_unknown_status_until_hard_ttl(monkeypatch):
+    current_ns = T0_NS + 20 * 1_000_000_000
+    stale_submit_ns = current_ns - 5 * 1_000_000_000
+    router = MagicMock()
+    router.is_order_terminal.return_value = False
+    router.get_order_status.return_value = "unknown"
+    router.cancel_order.return_value = True
+    engine, risk_guard = _execution_engine_for_zombie_test(router, max_pending_age_sec=1.0)
+    engine._state.pending_orders["unknown-status-order"] = SimpleNamespace(
+        exchange_ts_ns=stale_submit_ns,
+        receive_ts_ns=stale_submit_ns,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1"),
+    )
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+
+    engine._sweep_zombie_orders()
+
+    router.cancel_order.assert_not_called()
+    assert "unknown-status-order" in engine._state.pending_orders
+    risk_guard.update_pending_orders.assert_called_once()
+
+
+def test_zombie_sweeper_cancels_unknown_status_after_hard_ttl(monkeypatch):
+    current_ns = T0_NS + 60 * 1_000_000_000
+    stale_submit_ns = current_ns - 40 * 1_000_000_000
+    router = MagicMock()
+    router.is_order_terminal.return_value = False
+    router.get_order_status.side_effect = ["unknown", "canceled"]
+    router.cancel_order.return_value = True
+    engine, risk_guard = _execution_engine_for_zombie_test(router, max_pending_age_sec=1.0)
+    engine._state.pending_orders["hard-ttl-orphan"] = SimpleNamespace(
+        exchange_ts_ns=stale_submit_ns,
+        receive_ts_ns=stale_submit_ns,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1"),
+    )
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+
+    engine._sweep_zombie_orders()
+
+    router.cancel_order.assert_called_once_with("hard-ttl-orphan")
+    assert "hard-ttl-orphan" not in engine._state.pending_orders
+    assert "hard-ttl-orphan" in engine._cancel_attempted_order_ids
+    risk_guard.update_pending_orders.assert_called_once()
 
 
 def test_zombie_sweeper_ages_pending_orders_from_receive_timestamp_not_signal_candle(monkeypatch):

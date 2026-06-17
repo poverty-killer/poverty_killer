@@ -994,20 +994,80 @@ class ExposureManager:
                 )
 
             if projected_asset_concentration > max_asset:
-                return self._portfolio_gate_evidence(
-                    status="CONTRIBUTED_BLOCK",
-                    reason_code="ASSET_CONCENTRATION_VETO",
-                    summary="ExposureManager blocked broker intent above B1 per-symbol concentration cap.",
-                    policy_version=policy,
-                    symbol=symbol,
-                    original_qty=qty_dec,
-                    adjusted_qty=adjusted_qty,
-                    price=price_dec,
-                    details=base_details,
-                )
+                asset_cap_notional = self._total_equity * max_asset
+                asset_headroom = asset_cap_notional - current_asset
+                if asset_headroom <= ZERO:
+                    return self._portfolio_gate_evidence(
+                        status="CONTRIBUTED_BLOCK",
+                        reason_code="ASSET_CONCENTRATION_VETO",
+                        summary="ExposureManager blocked broker intent because current symbol exposure is already at or above the B1 concentration cap.",
+                        policy_version=policy,
+                        symbol=symbol,
+                        original_qty=qty_dec,
+                        adjusted_qty=adjusted_qty,
+                        price=price_dec,
+                        details={
+                            **base_details,
+                            "asset_cap_notional": str(asset_cap_notional),
+                            "asset_headroom_notional": str(asset_headroom),
+                            "concentration_clamp_applied": False,
+                        },
+                    )
 
-            reason_code = "CORRELATION_SLASH_APPLIED" if slash_details["slash_applied"] else "EXPOSURE_MANAGER_AUTHORIZED"
+                clamped_qty = _quantize_down(asset_headroom / price_dec, self.policy.quantity_step)
+                if clamped_qty <= ZERO:
+                    return self._portfolio_gate_evidence(
+                        status="CONTRIBUTED_BLOCK",
+                        reason_code="ASSET_CONCENTRATION_CLAMP_ZERO_QUANTITY",
+                        summary="Per-symbol concentration clamp reduced the candidate below minimum executable quantity.",
+                        policy_version=policy,
+                        symbol=symbol,
+                        original_qty=qty_dec,
+                        adjusted_qty=ZERO,
+                        price=price_dec,
+                        details={
+                            **base_details,
+                            "asset_cap_notional": str(asset_cap_notional),
+                            "asset_headroom_notional": str(asset_headroom),
+                            "concentration_clamp_applied": True,
+                            "pre_clamp_quantity": str(adjusted_qty),
+                            "clamped_quantity": str(clamped_qty),
+                        },
+                    )
+
+                adjusted_qty = clamped_qty
+                adjusted_notional = adjusted_qty * price_dec
+                projected_global = current_global + adjusted_notional
+                projected_asset = current_asset + adjusted_notional
+                projected_global_utilization = _safe_div(projected_global, self._total_equity)
+                projected_asset_concentration = _safe_div(projected_asset, self._total_equity)
+                base_details = {
+                    **base_details,
+                    "asset_cap_notional": str(asset_cap_notional),
+                    "asset_headroom_notional": str(asset_headroom),
+                    "concentration_clamp_applied": True,
+                    "pre_clamp_quantity": str(qty_dec),
+                    "pre_clamp_adjusted_quantity": str(
+                        _quantize_down(qty_dec * slash_details["slash_factor"], self.policy.quantity_step)
+                        if slash_details["slash_applied"]
+                        else qty_dec
+                    ),
+                    "clamped_quantity": str(adjusted_qty),
+                    "projected_order_notional": str(adjusted_notional),
+                    "projected_global_notional": str(projected_global),
+                    "projected_asset_notional": str(projected_asset),
+                    "projected_global_utilization": str(projected_global_utilization),
+                    "projected_asset_concentration": str(projected_asset_concentration),
+                }
+
+            if base_details.get("concentration_clamp_applied") is True:
+                reason_code = "ASSET_CONCENTRATION_CLAMP_APPLIED"
+            else:
+                reason_code = "CORRELATION_SLASH_APPLIED" if slash_details["slash_applied"] else "EXPOSURE_MANAGER_AUTHORIZED"
             summary = (
+                "ExposureManager clamped broker intent to the remaining B1 per-symbol concentration headroom before economic re-evaluation."
+                if reason_code == "ASSET_CONCENTRATION_CLAMP_APPLIED"
+                else
                 "ExposureManager applied correlation slash before economic re-evaluation."
                 if slash_details["slash_applied"]
                 else "ExposureManager authorized broker intent under B1 portfolio-risk policy."
