@@ -84,6 +84,7 @@ class PreTradeGuardrailRequest:
     protective_context: Mapping[str, Any] | None = None
     economics_context: Mapping[str, Any] | None = None
     strategy_context: Mapping[str, Any] | None = None
+    exposure_authority_evidence: Mapping[str, Any] | None = None
     source: str = "pre_trade_guardrails"
     action: str | None = None
 
@@ -300,47 +301,9 @@ def evaluate_pre_trade_guardrails(request: PreTradeGuardrailRequest) -> PreTrade
             )
         )
 
-    exposure_reason = _exposure_reason(request)
+    exposure_reason = _append_exposure_authority_evidence(evidence, request)
     if exposure_reason:
         reasons.append(exposure_reason)
-        evidence.append(
-            GuardrailEvidence(
-                module="ownership/exposure logic",
-                status=CONTRIBUTED_BLOCK,
-                reason_code=exposure_reason,
-                summary="Existing exposure blocks duplicate/add-on routing without explicit authority.",
-            )
-        )
-    else:
-        evidence.append(
-            GuardrailEvidence(
-                module="ownership/exposure logic",
-                status=CONTRIBUTED_ALLOW,
-                reason_code="NO_BLOCKING_EXISTING_EXPOSURE",
-                summary="No blocking duplicate exposure was supplied to the guardrail.",
-            )
-        )
-
-    open_order_reason = _open_order_reason(request)
-    if open_order_reason:
-        reasons.append(open_order_reason)
-        evidence.append(
-            GuardrailEvidence(
-                module="open-order/reservation lifecycle",
-                status=CONTRIBUTED_BLOCK,
-                reason_code=open_order_reason,
-                summary="Open broker order or reservation conflict blocks routing.",
-            )
-        )
-    else:
-        evidence.append(
-            GuardrailEvidence(
-                module="open-order/reservation lifecycle",
-                status=CONTRIBUTED_ALLOW,
-                reason_code="NO_OPEN_ORDER_OR_RESERVATION_CONFLICT",
-                summary="No blocking open-order or reservation conflict was supplied.",
-            )
-        )
 
     protective_context = request.protective_context or {}
     if protective_context.get("block_reason"):
@@ -455,43 +418,40 @@ def _requested_notional(request: PreTradeGuardrailRequest) -> Decimal | None:
     return abs(request.quantity * price)
 
 
-def _exposure_reason(request: PreTradeGuardrailRequest) -> str | None:
-    if _request_action(request) == "sell_to_close":
+def _append_exposure_authority_evidence(
+    evidence: list[GuardrailEvidence],
+    request: PreTradeGuardrailRequest,
+) -> str | None:
+    authority = request.exposure_authority_evidence
+    if not isinstance(authority, Mapping):
+        evidence.append(
+            GuardrailEvidence(
+                module="ExposureManager",
+                status=CONTRIBUTED_MISSING_TRUTH,
+                reason_code="EXPOSURE_MANAGER_EVIDENCE_MISSING",
+                summary="Canonical portfolio-risk authority evidence was not supplied to the guardrail.",
+                details={
+                    "required_by_active_path": request.source == "main_loop_dispatch",
+                    "source": request.source,
+                    "note": "ExecutionEngine fails closed for broker-intent orders that require this evidence.",
+                },
+            )
+        )
         return None
-    symbol = request.symbol.upper()
-    for position in request.existing_positions:
-        position_symbol = str(position.get("symbol", "")).upper()
-        if position_symbol != symbol:
-            continue
-        quantity = _to_decimal(position.get("quantity", position.get("qty", "0")))
-        if quantity is None or quantity == Decimal("0"):
-            continue
-        if request.add_on_allowed or request.approval_present:
-            return None
-        return "DUPLICATE_EXISTING_EXPOSURE"
-    return None
 
-
-def _open_order_reason(request: PreTradeGuardrailRequest) -> str | None:
-    symbol = request.symbol.upper()
-    side = request.side.lower()
-    open_statuses = {"open", "accepted", "pending", "new", "partially_filled", "unknown"}
-    for order in request.open_orders:
-        if str(order.get("symbol", "")).upper() != symbol:
-            continue
-        status = str(order.get("status", "")).lower()
-        if not status:
-            return "ORPHAN_OPEN_ORDER"
-        if status == "unknown":
-            return "UNKNOWN_OPEN_ORDER"
-        if status in open_statuses and str(order.get("side", side)).lower() == side:
-            return "OPEN_ORDER_CONFLICT"
-    for reservation in request.reservations:
-        if str(reservation.get("symbol", "")).upper() != symbol:
-            continue
-        status = str(reservation.get("status", "active")).lower()
-        if status in {"active", "reserved", "pending", "unknown"}:
-            return "RESERVATION_CONFLICT"
+    status = str(authority.get("status") or CONTRIBUTED_MISSING_TRUTH)
+    reason = str(authority.get("reason_code") or "EXPOSURE_MANAGER_UNKNOWN")
+    evidence.append(
+        GuardrailEvidence(
+            module="ExposureManager",
+            status=status,
+            reason_code=reason,
+            summary=str(authority.get("summary") or "ExposureManager supplied canonical portfolio-risk evidence."),
+            details=authority,
+        )
+    )
+    if status == CONTRIBUTED_BLOCK or authority.get("route_permitted") is False or authority.get("authorized") is False:
+        return reason
     return None
 
 
@@ -565,9 +525,9 @@ def _append_advisory_evidence(
     evidence.append(
         GuardrailEvidence(
             module="StrategyAllocator / SovereignGovernor",
-            status=DORMANT_BY_POLICY,
-            reason_code="ALLOCATOR_GOVERNOR_NOT_MUTATION_AUTHORITY",
-            summary="Allocation/governor context is advisory unless explicitly wired by strategy law.",
+            status=CONTRIBUTED_ADVISORY,
+            reason_code="ALLOCATOR_GOVERNOR_DELEGATED_TO_EXPOSURE_MANAGER",
+            summary="Portfolio heat, concentration, and correlation authority is delegated to ExposureManager.",
         )
     )
     evidence.append(

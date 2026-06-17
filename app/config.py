@@ -363,6 +363,44 @@ class Config(BaseSettings):
         default=False,
         description="Enable paper-only reservation lifecycle mutation. Ignored unless broker_mode is paper.",
     )
+    portfolio_risk_gate_policy_version: str = Field(
+        default="P3B_B1_V1",
+        description="Pinned portfolio risk gate policy version recorded with each governed PAPER run.",
+    )
+    portfolio_risk_gate_paper_enabled: bool = Field(
+        default=True,
+        description="Enable PAPER-only ExposureManager portfolio risk gate authority. Ignored unless broker_mode is paper.",
+    )
+    portfolio_risk_max_utilization: float = Field(
+        default=0.50,
+        ge=0,
+        le=1,
+        description="B1 maximum effective portfolio utilization before new broker intent is blocked.",
+    )
+    portfolio_risk_max_asset_concentration: float = Field(
+        default=0.15,
+        ge=0,
+        le=1,
+        description="B1 maximum per-symbol effective concentration before new broker intent is blocked.",
+    )
+    portfolio_risk_cash_reserve_pct: float = Field(
+        default=0.10,
+        ge=0,
+        le=1,
+        description="B1 cash reserve floor used to cap deployable utilization.",
+    )
+    portfolio_risk_correlation_threshold: float = Field(
+        default=0.80,
+        ge=0,
+        le=1,
+        description="B1 absolute correlation threshold that triggers size slashing.",
+    )
+    portfolio_risk_correlation_slash_factor: float = Field(
+        default=0.50,
+        ge=0,
+        le=1,
+        description="B1 quantity multiplier applied before NetEdge when correlation threshold is breached.",
+    )
     paper_exploration_alpha_enabled: bool = Field(
         default=False,
         description=(

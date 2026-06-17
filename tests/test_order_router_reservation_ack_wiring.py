@@ -217,6 +217,24 @@ def test_default_order_router_reservation_lifecycle_disabled():
     assert router._reservation_lifecycle_coordinator is None
 
 
+def test_order_router_blocks_required_portfolio_risk_gate_without_evidence_before_paper_broker():
+    router = OrderRouter(paper_mode=True)
+    order = _order()
+    order.metadata.update(
+        {
+            "portfolio_risk_gate_required": True,
+            "portfolio_risk_gate_policy_version": "P3B_B1_V1",
+        }
+    )
+
+    assert router.submit_order(order) is None
+    assert router._paper_broker is not None
+    assert router._paper_broker.open_orders == {}
+    assert router._paper_broker.execution_reports == []
+    source = inspect.getsource(OrderRouter.submit_order)
+    assert "evaluate_pre_trade_portfolio_gate" not in source
+
+
 def test_default_disabled_order_router_makes_zero_coordinator_calls_on_paper_ack():
     coordinator = _SpyCoordinator()
     router = OrderRouter(

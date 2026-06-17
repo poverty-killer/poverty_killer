@@ -74,11 +74,11 @@ getcontext().prec = 28
 logger = logging.getLogger(__name__)
 
 
-# Bundle 7A authority seam marker (non-runtime):
-# ExposureManager is designated as the future canonical portfolio/exposure
-# authority seam, but remains dormant/non-authoritative in the current live
-# runtime until a separate Board-approved wiring packet is executed.
-EXPOSURE_AUTHORITY_STATUS = "DORMANT_SEAM"
+# P3B/B1 authority seam marker:
+# ExposureManager is the canonical portfolio-risk authority for the governed
+# PAPER runtime. It does not own execution or broker authority; the live path
+# consumes its verdict as risk evidence before broker submission.
+EXPOSURE_AUTHORITY_STATUS = "LIVE_RUNTIME"
 
 
 # ============================================================================
@@ -512,21 +512,23 @@ class ExposureManager:
     - hedge-aware residual exposure
     - mutation journaling
 
-    Bundle 7A authority posture:
-    - This class is the future canonical exposure authority seam.
-    - It is intentionally NOT wired into the current live execution path.
-    - It is intentionally NOT the active runtime veto owner yet.
+    P3B/B1 authority posture:
+    - This class is the canonical portfolio-risk authority for governed PAPER.
+    - It supplies pre-trade risk evidence to MainLoop/DecisionFrame/ExecutionEngine.
+    - It does not own broker mutation or execution routing authority.
     """
 
     def __init__(
         self,
         initial_equity: Decimal,
         max_utilization: Decimal = Decimal("0.80"),
+        max_asset_concentration: Decimal = Decimal("0.25"),
         sleeve_limits: Optional[Dict[SleeveType, Decimal]] = None,
     ):
         self.policy = ExposurePolicyConfig(
             initial_equity=_d(initial_equity, field_name="initial_equity"),
             max_utilization=_d(max_utilization, field_name="max_utilization"),
+            max_asset_concentration=_d(max_asset_concentration, field_name="max_asset_concentration"),
             sleeve_caps=sleeve_limits,
         )
 
@@ -783,6 +785,548 @@ class ExposureManager:
                 hedge_aware=True,
                 rationale=("intent_authorized_under_sovereign_effective_exposure_policy",),
             )
+
+    def evaluate_pre_trade_portfolio_gate(
+        self,
+        *,
+        policy_version: str,
+        sleeve: Any,
+        symbol: str,
+        side: Any,
+        qty: Any,
+        price: Any,
+        action: Optional[str] = None,
+        broker_position_backed: bool = False,
+        max_utilization: Optional[Any] = None,
+        max_asset_concentration: Optional[Any] = None,
+        cash_reserve_pct: Optional[Any] = None,
+        correlation_threshold: Optional[Any] = None,
+        correlation_slash_factor: Optional[Any] = None,
+        correlation_pairs: Optional[Dict[Any, Any]] = None,
+        correlation_truth_status: Optional[str] = None,
+        existing_positions: Iterable[Dict[str, Any]] = (),
+        open_orders: Iterable[Dict[str, Any]] = (),
+        reservations: Iterable[Dict[str, Any]] = (),
+    ) -> Dict[str, Any]:
+        """
+        Canonical read-only PAPER pre-trade portfolio-risk gate.
+
+        This method is intentionally side-effect free. It does not reserve,
+        release, fill, route, or call a broker. Runtime callers consume the
+        returned evidence before broker submission; durable reservation mutation
+        remains owned by the paper-scoped reservation lifecycle after broker ack.
+        """
+        with self._lock:
+            policy = str(policy_version or "UNKNOWN_POLICY")
+            normalized_symbol = self._normalize_symbol(symbol)
+            side_value = _enum_from_ledger(OrderSide, side, field_name="side")
+            qty_dec = _ensure_positive(_d(qty, field_name="qty"), "qty")
+            price_dec = _ensure_positive(_d(price, field_name="price"), "price")
+            action_text = str(action or side_value.value or "").strip().lower()
+
+            max_util = (
+                _d(max_utilization, field_name="max_utilization")
+                if max_utilization is not None
+                else self.policy.max_utilization
+            )
+            max_asset = (
+                _d(max_asset_concentration, field_name="max_asset_concentration")
+                if max_asset_concentration is not None
+                else self.policy.max_asset_concentration
+            )
+            cash_reserve = (
+                _d(cash_reserve_pct, field_name="cash_reserve_pct")
+                if cash_reserve_pct is not None
+                else ZERO
+            )
+            if cash_reserve < ZERO or cash_reserve >= ONE:
+                return self._portfolio_gate_evidence(
+                    status="CONTRIBUTED_BLOCK",
+                    reason_code="PORTFOLIO_RISK_POLICY_INVALID",
+                    summary="Portfolio risk policy has an invalid cash reserve.",
+                    policy_version=policy,
+                    symbol=symbol,
+                    original_qty=qty_dec,
+                    adjusted_qty=ZERO,
+                    price=price_dec,
+                    details={"cash_reserve_pct": str(cash_reserve)},
+                )
+            effective_max_utilization = min(max_util, ONE - cash_reserve)
+
+            if side_value == OrderSide.SELL:
+                if action_text == "sell_to_close" and broker_position_backed:
+                    return self._portfolio_gate_evidence(
+                        status="CONTRIBUTED_ALLOW",
+                        reason_code="EXPOSURE_REDUCE_ONLY_BROKER_BACKED",
+                        summary="Broker-position-backed exit is reduce-only and does not open fresh exposure.",
+                        policy_version=policy,
+                        symbol=symbol,
+                        original_qty=qty_dec,
+                        adjusted_qty=qty_dec,
+                        price=price_dec,
+                        details={
+                            "reduce_only": True,
+                            "broker_position_backed": True,
+                            "side": side_value.value,
+                            "action": action_text,
+                        },
+                    )
+                return self._portfolio_gate_evidence(
+                    status="CONTRIBUTED_BLOCK",
+                    reason_code="SELL_REQUIRES_BROKER_POSITION_BACKED_AUTHORITY",
+                    summary="SELL intent is not broker-position-backed reduce-only authority.",
+                    policy_version=policy,
+                    symbol=symbol,
+                    original_qty=qty_dec,
+                    adjusted_qty=ZERO,
+                    price=price_dec,
+                    details={
+                        "reduce_only": action_text == "sell_to_close",
+                        "broker_position_backed": bool(broker_position_backed),
+                        "side": side_value.value,
+                        "action": action_text,
+                    },
+                )
+
+            external = self._external_exposure_summary(
+                symbol=normalized_symbol,
+                fallback_price=price_dec,
+                existing_positions=existing_positions,
+                open_orders=open_orders,
+                reservations=reservations,
+            )
+            internal_global = self._effective_gross_notional
+            internal_asset = self._asset_total_mark_notional(symbol) + self._asset_reserved_notional(symbol)
+            use_internal_global = internal_global > ZERO
+            use_internal_asset = internal_asset > ZERO
+            current_global = internal_global if use_internal_global else external["total_notional"]
+            current_asset = internal_asset if use_internal_asset else external["symbol_notional"]
+            existing_symbols = set(self._active_exposure_symbols_locked())
+            existing_symbols.update(external["symbols"])
+            existing_symbols.discard(normalized_symbol)
+
+            adjusted_qty = qty_dec
+            slash_details = self._correlation_slash_decision(
+                symbol=normalized_symbol,
+                existing_symbols=existing_symbols,
+                correlation_pairs=correlation_pairs or {},
+                correlation_truth_status=correlation_truth_status,
+                correlation_threshold=(
+                    _d(correlation_threshold, field_name="correlation_threshold")
+                    if correlation_threshold is not None
+                    else Decimal("1")
+                ),
+                correlation_slash_factor=(
+                    _d(correlation_slash_factor, field_name="correlation_slash_factor")
+                    if correlation_slash_factor is not None
+                    else ONE
+                ),
+            )
+            if slash_details["blocked"]:
+                return self._portfolio_gate_evidence(
+                    status="CONTRIBUTED_BLOCK",
+                    reason_code=slash_details["reason_code"],
+                    summary=slash_details["summary"],
+                    policy_version=policy,
+                    symbol=symbol,
+                    original_qty=qty_dec,
+                    adjusted_qty=ZERO,
+                    price=price_dec,
+                    details={
+                        **slash_details,
+                        "current_global_notional_source": "internal" if use_internal_global else "external",
+                        "current_asset_notional_source": "internal" if use_internal_asset else "external",
+                    },
+                )
+            if slash_details["slash_applied"]:
+                adjusted_qty = _quantize_down(qty_dec * slash_details["slash_factor"], self.policy.quantity_step)
+                if adjusted_qty <= ZERO:
+                    return self._portfolio_gate_evidence(
+                        status="CONTRIBUTED_BLOCK",
+                        reason_code="CORRELATION_SLASH_ZERO_QUANTITY",
+                        summary="Correlation slash reduced the candidate below minimum executable quantity.",
+                        policy_version=policy,
+                        symbol=symbol,
+                        original_qty=qty_dec,
+                        adjusted_qty=ZERO,
+                        price=price_dec,
+                        details=slash_details,
+                    )
+
+            adjusted_notional = adjusted_qty * price_dec
+            projected_global = current_global + adjusted_notional
+            projected_asset = current_asset + adjusted_notional
+            projected_global_utilization = _safe_div(projected_global, self._total_equity)
+            projected_asset_concentration = _safe_div(projected_asset, self._total_equity)
+
+            base_details = {
+                "policy_version": policy,
+                "max_utilization": str(effective_max_utilization),
+                "configured_max_utilization": str(max_util),
+                "cash_reserve_pct": str(cash_reserve),
+                "max_asset_concentration": str(max_asset),
+                "current_global_notional": str(current_global),
+                "current_global_notional_source": "internal" if use_internal_global else "external",
+                "current_asset_notional": str(current_asset),
+                "current_asset_notional_source": "internal" if use_internal_asset else "external",
+                "projected_order_notional": str(adjusted_notional),
+                "projected_global_notional": str(projected_global),
+                "projected_asset_notional": str(projected_asset),
+                "projected_global_utilization": str(projected_global_utilization),
+                "projected_asset_concentration": str(projected_asset_concentration),
+                "existing_correlated_symbols": sorted(existing_symbols),
+                "external_exposure_counts": external["source_counts"],
+                "external_duplicates_skipped": external["duplicates_skipped"],
+                **slash_details,
+            }
+
+            if projected_global_utilization > effective_max_utilization:
+                return self._portfolio_gate_evidence(
+                    status="CONTRIBUTED_BLOCK",
+                    reason_code="GLOBAL_UTILIZATION_BREACH",
+                    summary="ExposureManager blocked broker intent above B1 effective portfolio utilization cap.",
+                    policy_version=policy,
+                    symbol=symbol,
+                    original_qty=qty_dec,
+                    adjusted_qty=adjusted_qty,
+                    price=price_dec,
+                    details=base_details,
+                )
+
+            if projected_asset_concentration > max_asset:
+                return self._portfolio_gate_evidence(
+                    status="CONTRIBUTED_BLOCK",
+                    reason_code="ASSET_CONCENTRATION_VETO",
+                    summary="ExposureManager blocked broker intent above B1 per-symbol concentration cap.",
+                    policy_version=policy,
+                    symbol=symbol,
+                    original_qty=qty_dec,
+                    adjusted_qty=adjusted_qty,
+                    price=price_dec,
+                    details=base_details,
+                )
+
+            reason_code = "CORRELATION_SLASH_APPLIED" if slash_details["slash_applied"] else "EXPOSURE_MANAGER_AUTHORIZED"
+            summary = (
+                "ExposureManager applied correlation slash before economic re-evaluation."
+                if slash_details["slash_applied"]
+                else "ExposureManager authorized broker intent under B1 portfolio-risk policy."
+            )
+            return self._portfolio_gate_evidence(
+                status="CONTRIBUTED_ALLOW",
+                reason_code=reason_code,
+                summary=summary,
+                policy_version=policy,
+                symbol=symbol,
+                original_qty=qty_dec,
+                adjusted_qty=adjusted_qty,
+                price=price_dec,
+                details=base_details,
+            )
+
+    def _portfolio_gate_evidence(
+        self,
+        *,
+        status: str,
+        reason_code: str,
+        summary: str,
+        policy_version: str,
+        symbol: str,
+        original_qty: Decimal,
+        adjusted_qty: Decimal,
+        price: Decimal,
+        details: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        adjusted_notional = adjusted_qty * price if adjusted_qty > ZERO else ZERO
+        return {
+            "module": "ExposureManager",
+            "authority_class": "RISK",
+            "status": status,
+            "reason_code": reason_code,
+            "summary": summary,
+            "policy_version": policy_version,
+            "symbol": symbol,
+            "authorized": status != "CONTRIBUTED_BLOCK",
+            "route_permitted": status != "CONTRIBUTED_BLOCK",
+            "broker_post": False,
+            "exposure_manager_called": True,
+            "live_wired": True,
+            "active_veto_owner": True,
+            "original_quantity": str(original_qty),
+            "adjusted_quantity": str(adjusted_qty),
+            "adjusted_notional": str(adjusted_notional),
+            "adjusted": adjusted_qty != original_qty,
+            "details": details,
+        }
+
+    def _external_exposure_summary(
+        self,
+        *,
+        symbol: str,
+        fallback_price: Decimal,
+        existing_positions: Iterable[Dict[str, Any]],
+        open_orders: Iterable[Dict[str, Any]],
+        reservations: Iterable[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        total = ZERO
+        symbol_total = ZERO
+        symbols: set[str] = set()
+        seen_keys: set[str] = set()
+        duplicates_skipped = 0
+        source_counts = {"positions": 0, "open_orders": 0, "reservations": 0}
+
+        for source_name, rows in (
+            ("positions", existing_positions),
+            ("open_orders", open_orders),
+            ("reservations", reservations),
+        ):
+            for row in rows or ():
+                if not isinstance(row, dict):
+                    continue
+                if source_name == "open_orders" and not self._external_order_active(row):
+                    continue
+                if source_name == "reservations" and not self._external_reservation_active(row):
+                    continue
+                row_symbol = self._normalize_symbol(row.get("symbol"))
+                if not row_symbol:
+                    continue
+                dedupe_key = self._external_exposure_dedupe_key(row, source_name)
+                if dedupe_key and dedupe_key in seen_keys:
+                    duplicates_skipped += 1
+                    continue
+                if dedupe_key:
+                    seen_keys.add(dedupe_key)
+                notional = self._external_row_notional(row, fallback_price=fallback_price)
+                if notional <= ZERO:
+                    continue
+                symbols.add(row_symbol)
+                total += notional
+                source_counts[source_name] += 1
+                if row_symbol == symbol:
+                    symbol_total += notional
+
+        return {
+            "total_notional": total,
+            "symbol_notional": symbol_total,
+            "symbols": symbols,
+            "source_counts": source_counts,
+            "duplicates_skipped": duplicates_skipped,
+        }
+
+    def _external_row_notional(self, row: Dict[str, Any], *, fallback_price: Decimal) -> Decimal:
+        for key in ("notional", "market_value", "current_exposure", "notional_basis", "value"):
+            value = row.get(key)
+            if value not in (None, ""):
+                try:
+                    return abs(_d(value, field_name=key))
+                except ValueError:
+                    continue
+        qty = None
+        for key in ("quantity", "qty", "open_qty", "remaining_qty", "original_qty"):
+            value = row.get(key)
+            if value not in (None, ""):
+                try:
+                    qty = abs(_d(value, field_name=key))
+                    break
+                except ValueError:
+                    continue
+        if qty is None or qty <= ZERO:
+            return ZERO
+        price = None
+        for key in (
+            "mark_price",
+            "current_price",
+            "average_entry_price",
+            "avg_entry_price",
+            "limit_price",
+            "price_basis",
+            "price",
+        ):
+            value = row.get(key)
+            if value not in (None, ""):
+                try:
+                    price = _d(value, field_name=key)
+                    break
+                except ValueError:
+                    continue
+        if price is None or price <= ZERO:
+            price = fallback_price
+        return qty * price if price > ZERO else ZERO
+
+    @staticmethod
+    def _external_order_active(row: Dict[str, Any]) -> bool:
+        status = str(row.get("status", "open")).strip().lower()
+        return status in {"open", "accepted", "pending", "new", "partially_filled", "unknown", "active"}
+
+    @staticmethod
+    def _external_reservation_active(row: Dict[str, Any]) -> bool:
+        status = str(row.get("status", "active")).strip().lower()
+        return status in {
+            "active",
+            "reserved",
+            "pending",
+            "unknown",
+            "created",
+            "routing",
+            "acknowledged",
+            "partially_filled",
+        }
+
+    @staticmethod
+    def _external_exposure_dedupe_key(row: Dict[str, Any], source_name: str) -> Optional[str]:
+        for key in ("reservation_dedupe_key", "dedupe_key", "client_order_id", "order_id", "reservation_id", "id"):
+            value = row.get(key)
+            if value not in (None, ""):
+                return f"{source_name}:{value}"
+        return None
+
+    def _active_exposure_symbols_locked(self) -> set[str]:
+        symbols: set[str] = set()
+        for sleeve_positions in self._inventory.values():
+            for symbol, position in sleeve_positions.items():
+                if position.qty != ZERO:
+                    symbols.add(self._normalize_symbol(symbol))
+        for reservation in self._reservations.values():
+            if reservation.open_qty > ZERO and reservation.status not in {
+                ReservationStatus.CANCELLED,
+                ReservationStatus.FILLED,
+                ReservationStatus.REJECTED,
+                ReservationStatus.EXPIRED,
+            }:
+                symbols.add(self._normalize_symbol(reservation.symbol))
+        return symbols
+
+    def _correlation_slash_decision(
+        self,
+        *,
+        symbol: str,
+        existing_symbols: set[str],
+        correlation_pairs: Dict[Any, Any],
+        correlation_truth_status: Optional[str],
+        correlation_threshold: Decimal,
+        correlation_slash_factor: Decimal,
+    ) -> Dict[str, Any]:
+        if not existing_symbols:
+            return {
+                "blocked": False,
+                "slash_applied": False,
+                "reason_code": "CORRELATION_EMPTY_BOOK_ALLOW",
+                "summary": "No existing exposure requires correlation truth.",
+                "max_correlation": None,
+                "max_correlation_symbol": None,
+                "slash_factor": ONE,
+                "correlation_truth_status": correlation_truth_status or "EMPTY_BOOK_NOT_REQUIRED",
+            }
+
+        truth_status = str(correlation_truth_status or "").strip().upper()
+        if truth_status in {"MISSING", "STALE", "UNKNOWN", "UNAVAILABLE"}:
+            return {
+                "blocked": True,
+                "slash_applied": False,
+                "reason_code": f"CORRELATION_TRUTH_{truth_status}",
+                "summary": "Correlation truth is missing or stale while existing exposure is present.",
+                "max_correlation": None,
+                "max_correlation_symbol": None,
+                "slash_factor": ONE,
+                "correlation_truth_status": truth_status,
+            }
+
+        max_corr: Optional[Decimal] = None
+        max_symbol: Optional[str] = None
+        for existing in sorted(existing_symbols):
+            lookup = self._lookup_correlation_pair(correlation_pairs, symbol, existing)
+            if lookup is None:
+                continue
+            corr, pair_status = lookup
+            if pair_status in {"STALE", "MISSING", "UNKNOWN", "UNAVAILABLE"}:
+                return {
+                    "blocked": True,
+                    "slash_applied": False,
+                    "reason_code": f"CORRELATION_TRUTH_{pair_status}",
+                    "summary": "Pair-level correlation truth is missing or stale while existing exposure is present.",
+                    "max_correlation": None,
+                    "max_correlation_symbol": existing,
+                    "slash_factor": ONE,
+                    "correlation_truth_status": pair_status,
+                }
+            abs_corr = abs(corr)
+            if max_corr is None or abs_corr > max_corr:
+                max_corr = abs_corr
+                max_symbol = existing
+
+        if max_corr is None:
+            return {
+                "blocked": True,
+                "slash_applied": False,
+                "reason_code": "CORRELATION_TRUTH_MISSING",
+                "summary": "No correlation pair was supplied for existing exposure.",
+                "max_correlation": None,
+                "max_correlation_symbol": None,
+                "slash_factor": ONE,
+                "correlation_truth_status": truth_status or "MISSING",
+            }
+
+        if max_corr >= correlation_threshold:
+            return {
+                "blocked": False,
+                "slash_applied": True,
+                "reason_code": "CORRELATION_SLASH_APPLIED",
+                "summary": "Correlation threshold breached; candidate quantity is slashed before NetEdge.",
+                "max_correlation": str(max_corr),
+                "max_correlation_symbol": max_symbol,
+                "slash_factor": correlation_slash_factor,
+                "correlation_threshold": str(correlation_threshold),
+                "correlation_truth_status": truth_status or "FRESH",
+            }
+
+        return {
+            "blocked": False,
+            "slash_applied": False,
+            "reason_code": "CORRELATION_BELOW_THRESHOLD",
+            "summary": "Correlation truth was present and below the B1 slash threshold.",
+            "max_correlation": str(max_corr),
+            "max_correlation_symbol": max_symbol,
+            "slash_factor": ONE,
+            "correlation_threshold": str(correlation_threshold),
+            "correlation_truth_status": truth_status or "FRESH",
+        }
+
+    def _lookup_correlation_pair(
+        self,
+        correlation_pairs: Dict[Any, Any],
+        symbol: str,
+        existing: str,
+    ) -> Optional[Tuple[Decimal, str]]:
+        if not correlation_pairs:
+            return None
+        candidates = (
+            (symbol, existing),
+            (existing, symbol),
+            tuple(sorted((symbol, existing))),
+            f"{symbol}|{existing}",
+            f"{existing}|{symbol}",
+            f"{symbol}:{existing}",
+            f"{existing}:{symbol}",
+        )
+        value = None
+        for key in candidates:
+            if key in correlation_pairs:
+                value = correlation_pairs[key]
+                break
+        if value is None:
+            return None
+        status = "FRESH"
+        if isinstance(value, dict):
+            status = str(value.get("status") or value.get("truth_status") or "FRESH").strip().upper()
+            value = value.get("correlation")
+        try:
+            return _d(value, field_name="correlation"), status
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_symbol(symbol: Any) -> str:
+        return str(symbol or "").strip().upper().replace("-", "/")
 
     # ------------------------------------------------------------------
     # Reservation management
@@ -2645,17 +3189,19 @@ def exposure_authority_seam_metadata() -> Dict[str, Any]:
     """
     Return static seam metadata for governance/test visibility.
 
-    This helper has no runtime side effects and does not activate wiring.
+    This helper has no runtime side effects.
     """
     return {
         "authority_module": "app.risk.exposure_manager",
         "authority_class": "ExposureManager",
         "status": EXPOSURE_AUTHORITY_STATUS,
-        "live_wired": False,
-        "active_veto_owner": False,
+        "live_wired": True,
+        "active_veto_owner": True,
+        "policy_version": "P3B_B1_V1",
+        "scope": "paper_runtime_only",
         "notes": (
-            "Future canonical portfolio/exposure authority seam",
-            "Requires separate Board-approved wiring packet",
+            "Canonical PAPER portfolio-risk authority",
+            "Broker mutation remains owned by execution/router and paper-scoped lifecycle",
         ),
     }
 

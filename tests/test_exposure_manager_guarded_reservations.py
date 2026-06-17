@@ -350,7 +350,7 @@ def test_open_ledger_upsert_failure_rolls_back_memory(tmp_path):
     assert manager.reservations_for() == []
 
 
-def test_no_lifecycle_wiring_and_broker_adapter_inactive():
+def test_live_paper_lifecycle_wiring_and_broker_adapter_inactive():
     import app.execution.engine as execution_engine_module
     import app.execution.order_router as order_router_module
     import app.main_loop as main_loop_module
@@ -358,11 +358,12 @@ def test_no_lifecycle_wiring_and_broker_adapter_inactive():
 
     metadata = exposure_authority_seam_metadata()
     assert metadata["status"] == EXPOSURE_AUTHORITY_STATUS
-    assert metadata["live_wired"] is False
-    assert metadata["active_veto_owner"] is False
+    assert metadata["status"] == "LIVE_RUNTIME"
+    assert metadata["live_wired"] is True
+    assert metadata["active_veto_owner"] is True
 
     assert "guarded_open_reservation" not in inspect.getsource(execution_engine_module.ExecutionEngine)
     assert "guarded_apply_fill_to_reservation" not in inspect.getsource(fill_recorder_module)
     assert "guarded_release_reservation" not in inspect.getsource(order_router_module.OrderRouter)
-    assert "ExposureManager" not in inspect.getsource(main_loop_module.create_main_loop)
+    assert "exposure_manager" in inspect.getsource(main_loop_module.create_main_loop)
     assert "broker_adapter" not in inspect.getsource(ExposureManager.guarded_open_reservation)

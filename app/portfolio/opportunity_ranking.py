@@ -186,7 +186,9 @@ class OpportunityRanker:
     Ranks potential signals by expected net edge after costs,
     capacity constraints, correlation penalties, and drawdown state.
 
-    This is passive: it does not allocate, route, or execute.
+    This is passive: it does not allocate, route, execute, or veto live
+    portfolio exposure. Governed PAPER pre-trade capacity/correlation authority
+    is delegated to ExposureManager.
     """
     min_net_edge_bps: Decimal = Decimal("5.0")       # Minimum net edge to consider
     min_confidence: Decimal = Decimal("0.50")         # Minimum signal confidence
@@ -349,7 +351,11 @@ class OpportunityRanker:
             total_skipped=skipped_count,
             top_opportunity=top.symbol if top else None,
             top_opportunity_score=top.score if top else Decimal("0"),
-            assumptions=("pre_integration", "estimated_costs", "no_live_correlation_data"),
+            assumptions=(
+                "passive_ranker",
+                "estimated_costs",
+                "live_capacity_correlation_delegated_to_exposure_manager",
+            ),
         )
 
 

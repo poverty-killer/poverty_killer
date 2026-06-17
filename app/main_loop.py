@@ -309,6 +309,136 @@ def _build_runtime_decision_frame(
     )
 
 
+def _portfolio_risk_gate_enabled(config: Any) -> bool:
+    return bool(
+        getattr(config, "portfolio_risk_gate_paper_enabled", False)
+        and str(getattr(config, "broker_mode", "")).lower() == "paper"
+    )
+
+
+def _portfolio_risk_gate_block_evidence(
+    *,
+    config: Any,
+    symbol: str,
+    reason_code: str,
+    summary: str,
+    broker_post: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "module": "ExposureManager",
+        "authority_class": "RISK",
+        "status": "CONTRIBUTED_BLOCK",
+        "reason_code": reason_code,
+        "summary": summary,
+        "policy_version": str(getattr(config, "portfolio_risk_gate_policy_version", "P3B_B1_V1")),
+        "symbol": symbol,
+        "authorized": False,
+        "route_permitted": False,
+        "broker_post": broker_post,
+        "exposure_manager_called": False,
+        "live_wired": True,
+        "active_veto_owner": True,
+        "details": {"source": "main_loop.portfolio_risk_gate"},
+    }
+
+
+def _apply_portfolio_risk_gate_to_signal(
+    *,
+    config: Any,
+    symbol: str,
+    signal: Any,
+    runtime: Any,
+    exposure_manager: Any,
+) -> Dict[str, Any]:
+    metadata = signal.metadata if isinstance(getattr(signal, "metadata", None), dict) else {}
+    if not isinstance(getattr(signal, "metadata", None), dict):
+        signal.metadata = metadata
+
+    enabled = _portfolio_risk_gate_enabled(config)
+    metadata["portfolio_risk_gate_required"] = enabled
+    metadata["portfolio_risk_gate_policy_version"] = str(
+        getattr(config, "portfolio_risk_gate_policy_version", "P3B_B1_V1")
+    )
+    if not enabled:
+        evidence = {
+            "module": "ExposureManager",
+            "authority_class": "RISK",
+            "status": "NOT_CONFIGURED",
+            "reason_code": "PORTFOLIO_RISK_GATE_NOT_ENABLED_FOR_RUNTIME",
+            "summary": "Portfolio risk gate is not enabled for this runtime mode.",
+            "policy_version": metadata["portfolio_risk_gate_policy_version"],
+            "symbol": symbol,
+            "authorized": True,
+            "route_permitted": True,
+            "broker_post": False,
+            "exposure_manager_called": False,
+            "live_wired": False,
+            "active_veto_owner": False,
+        }
+        metadata["portfolio_risk_gate_evidence"] = evidence
+        return evidence
+
+    if exposure_manager is None:
+        evidence = _portfolio_risk_gate_block_evidence(
+            config=config,
+            symbol=symbol,
+            reason_code="EXPOSURE_MANAGER_EVIDENCE_MISSING",
+            summary="Portfolio risk gate is enabled but ExposureManager is not wired.",
+        )
+        metadata["portfolio_risk_gate_evidence"] = evidence
+        return evidence
+
+    price = _vote_decimal(getattr(runtime, "last_price", None)) or _vote_decimal(getattr(signal, "price", None))
+    qty = _vote_decimal(getattr(signal, "quantity", None))
+    if price is None or price <= Decimal("0") or qty is None or qty <= Decimal("0"):
+        evidence = _portfolio_risk_gate_block_evidence(
+            config=config,
+            symbol=symbol,
+            reason_code="PORTFOLIO_RISK_GATE_PRICE_OR_QTY_MISSING",
+            summary="ExposureManager cannot evaluate broker intent without positive price and quantity.",
+        )
+        metadata["portfolio_risk_gate_evidence"] = evidence
+        return evidence
+
+    correlation_pairs = metadata.get("correlation_pairs")
+    if not isinstance(correlation_pairs, dict):
+        correlation_pairs = metadata.get("correlation_truth")
+    if not isinstance(correlation_pairs, dict):
+        correlation_pairs = {}
+
+    evidence = exposure_manager.evaluate_pre_trade_portfolio_gate(
+        policy_version=metadata["portfolio_risk_gate_policy_version"],
+        sleeve=metadata.get("sleeve") or getattr(signal, "strategy", None),
+        symbol=symbol,
+        side=getattr(signal, "side", "buy"),
+        qty=qty,
+        price=price,
+        action=metadata.get("execution_action") or metadata.get("action") or getattr(signal, "side", None),
+        broker_position_backed=metadata.get("broker_position_backed") is True,
+        max_utilization=getattr(config, "portfolio_risk_max_utilization", None),
+        max_asset_concentration=getattr(config, "portfolio_risk_max_asset_concentration", None),
+        cash_reserve_pct=getattr(config, "portfolio_risk_cash_reserve_pct", None),
+        correlation_threshold=getattr(config, "portfolio_risk_correlation_threshold", None),
+        correlation_slash_factor=getattr(config, "portfolio_risk_correlation_slash_factor", None),
+        correlation_pairs=correlation_pairs,
+        correlation_truth_status=metadata.get("correlation_truth_status"),
+        existing_positions=_metadata_sequence(metadata.get("existing_positions")),
+        open_orders=_metadata_sequence(metadata.get("open_orders")),
+        reservations=_metadata_sequence(metadata.get("reservations")),
+    )
+    metadata["portfolio_risk_gate_evidence"] = evidence
+    if evidence.get("authorized") is True and evidence.get("adjusted") is True:
+        adjusted_qty = _vote_decimal(evidence.get("adjusted_quantity"))
+        if adjusted_qty is not None and adjusted_qty > Decimal("0"):
+            signal.quantity = float(adjusted_qty)
+            metadata["portfolio_risk_original_quantity"] = evidence.get("original_quantity")
+            metadata["portfolio_risk_adjusted_quantity"] = evidence.get("adjusted_quantity")
+            metadata["requested_notional"] = evidence.get("adjusted_notional")
+            details = evidence.get("details") if isinstance(evidence.get("details"), dict) else {}
+            metadata["correlation_slash_factor"] = str(details.get("slash_factor"))
+    return evidence
+
+
 def _emit_candidate_scorecard_diag(
     reason_code: str,
     *,
@@ -958,10 +1088,26 @@ def _build_pre_trade_guardrail_verdict(
     signal: Any,
     runtime: Any,
     is_attack: bool,
+    exposure_manager: Any = None,
 ) -> Dict[str, Any]:
     metadata = getattr(signal, "metadata", None)
     if not isinstance(metadata, dict):
         metadata = {}
+        signal.metadata = metadata
+
+    should_apply_portfolio_gate = (
+        _portfolio_risk_gate_enabled(config)
+        and not isinstance(metadata.get("portfolio_risk_gate_evidence"), dict)
+        and (exposure_manager is not None or metadata.get("portfolio_risk_gate_required") is True)
+    )
+    if should_apply_portfolio_gate:
+        _apply_portfolio_risk_gate_to_signal(
+            config=config,
+            symbol=symbol,
+            signal=signal,
+            runtime=runtime,
+            exposure_manager=exposure_manager,
+        )
 
     current_price = _to_decimal_or_none(getattr(runtime, "last_price", None))
     quantity = _to_decimal_or_none(getattr(signal, "quantity", None)) or Decimal("0")
@@ -1104,6 +1250,7 @@ def _build_pre_trade_guardrail_verdict(
             protective_context=protective_context or None,
             economics_context=metadata.get("economics_context"),
             strategy_context=metadata.get("strategy_context"),
+            exposure_authority_evidence=metadata.get("portfolio_risk_gate_evidence"),
             source="main_loop_dispatch",
         )
     )
@@ -1248,6 +1395,7 @@ def create_main_loop(
     safety_gate: SafetyGate,
     telemetry_store: Optional[TelemetryEventStore] = None,
     active_symbols: Optional[Set[str]] = None,
+    exposure_manager: Optional[Any] = None,
 ) -> "MainLoop":
     """
     Factory function for MainLoop assembly.
@@ -1299,6 +1447,7 @@ def create_main_loop(
         telemetry_store=telemetry_store,
         active_symbols=active_symbols or {symbol},
         safety_gate=safety_gate,
+        exposure_manager=exposure_manager,
     )
 
 
@@ -1413,6 +1562,7 @@ class MainLoop:
         telemetry_store: Optional[TelemetryEventStore] = None,
         active_symbols: Optional[Set[str]] = None,
         safety_gate: Optional[SafetyGate] = None,
+        exposure_manager: Optional[Any] = None,
     ):
         self.config = config
         self.commander = commander
@@ -1434,6 +1584,7 @@ class MainLoop:
         self.health_log_interval_iterations = health_log_interval_iterations
         self.telemetry_store = telemetry_store
         self.safety_gate = safety_gate
+        self.exposure_manager = exposure_manager
 
         # Active symbols set (all symbols that can participate in paper trading)
         self.active_symbols: Set[str] = active_symbols or {symbol}
@@ -4011,6 +4162,16 @@ class MainLoop:
             )
             signal_metadata["position_sizing_evidence"] = sizing_evidence
 
+        if isinstance(signal_metadata, dict):
+            portfolio_risk_evidence = _apply_portfolio_risk_gate_to_signal(
+                config=self.config,
+                symbol=symbol,
+                signal=signal,
+                runtime=runtime,
+                exposure_manager=getattr(self, "exposure_manager", None),
+            )
+            signal_metadata["portfolio_risk_gate_evidence"] = portfolio_risk_evidence
+
         execution_status: Dict[str, Any] = {}
         execution_engine = getattr(self, "execution_engine", None)
         get_execution_status = getattr(execution_engine, "get_status", None)
@@ -4036,6 +4197,7 @@ class MainLoop:
             signal=signal,
             runtime=runtime,
             is_attack=aggression_contract.execution_is_attack,
+            exposure_manager=getattr(self, "exposure_manager", None),
         )
         if isinstance(signal_metadata, dict):
             signal_metadata["pre_trade_guardrail_verdict"] = pre_trade_guardrail_verdict

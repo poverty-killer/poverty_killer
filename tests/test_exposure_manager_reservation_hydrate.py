@@ -307,21 +307,22 @@ def test_hydrate_rejects_over_original_fill_progress_fail_closed():
     assert manager.reservations_for() == []
 
 
-def test_exposure_manager_remains_not_live_wired_and_broker_adapter_inactive():
+def test_exposure_manager_live_wired_without_broker_adapter_mutation_authority():
     import app.execution.engine as execution_engine_module
     import app.main_loop as main_loop_module
 
     metadata = exposure_authority_seam_metadata()
     assert metadata["status"] == EXPOSURE_AUTHORITY_STATUS
-    assert metadata["live_wired"] is False
-    assert metadata["active_veto_owner"] is False
+    assert metadata["status"] == "LIVE_RUNTIME"
+    assert metadata["live_wired"] is True
+    assert metadata["active_veto_owner"] is True
 
     create_main_loop_src = inspect.getsource(main_loop_module.create_main_loop)
     submit_signal_src = inspect.getsource(execution_engine_module.ExecutionEngine.submit_signal)
     hydrate_src = inspect.getsource(ExposureManager.hydrate_reservations_from_ledger)
 
-    assert "ExposureManager" not in create_main_loop_src
-    assert "ExposureManager" not in submit_signal_src
+    assert "exposure_manager" in create_main_loop_src
+    assert "_portfolio_risk_gate_missing_evidence" in submit_signal_src
     assert "broker_adapter" not in hydrate_src
     assert "reserve_intent(" not in hydrate_src
     assert "release_reservation(" not in hydrate_src

@@ -220,6 +220,29 @@ def _build_test_loop(*, broker_mode: str = "paper") -> types.SimpleNamespace:
     )
     loop.insider_engine = MagicMock()
 
+    loop._active_threshold_profile = (
+        MainLoop._active_threshold_profile.__get__(loop, MainLoop)
+    )
+    loop._classify_shadow_front_decline = (
+        MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
+    )
+    loop._classify_sector_rotation_observed_pair = (
+        MainLoop._classify_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._clear_stale_sector_rotation_observed_pair = (
+        MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._runtime_module_frame_evidence = (
+        MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
+    )
+    loop._apply_signal_economic_metadata = (
+        MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    )
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = MagicMock(return_value=None)
     loop._consume_observed_pair_sector_rotation = (
         MainLoop._consume_observed_pair_sector_rotation.__get__(loop, MainLoop)
     )
@@ -419,7 +442,7 @@ def _drive_one_trade(
 
         loop = _build_test_loop(broker_mode=broker_mode)
 
-        def _capture(signal, current_price, is_attack):
+        def _capture(signal, current_price, is_attack, **_kwargs):
             captured.append(
                 {
                     "signal": signal,
@@ -464,28 +487,28 @@ def _drive_one_trade(
 
 class TestExposureAuthoritySeamClarity:
 
-    def test_exposure_manager_import_safe_and_marked_dormant_seam(self):
+    def test_exposure_manager_import_safe_and_marked_live_runtime_seam(self):
         metadata = exposure_authority_seam_metadata()
 
         assert metadata["authority_module"] == "app.risk.exposure_manager"
         assert metadata["authority_class"] == "ExposureManager"
         assert metadata["status"] == EXPOSURE_AUTHORITY_STATUS
-        assert metadata["status"] == "DORMANT_SEAM"
-        assert metadata["live_wired"] is False
-        assert metadata["active_veto_owner"] is False
+        assert metadata["status"] == "LIVE_RUNTIME"
+        assert metadata["live_wired"] is True
+        assert metadata["active_veto_owner"] is True
 
         manager = ExposureManager(initial_equity=Decimal("20000"))
         assert manager is not None
 
-    def test_exposure_manager_not_live_wired_into_execution_path(self):
+    def test_exposure_manager_live_wired_into_execution_path(self):
         import app.main_loop as main_loop_module
         import app.execution.engine as execution_engine_module
 
         create_main_loop_src = inspect.getsource(main_loop_module.create_main_loop)
         submit_signal_src = inspect.getsource(execution_engine_module.ExecutionEngine.submit_signal)
 
-        assert "ExposureManager" not in create_main_loop_src
-        assert "ExposureManager" not in submit_signal_src
+        assert "exposure_manager" in create_main_loop_src
+        assert "_portfolio_risk_gate_missing_evidence" in submit_signal_src
 
     def test_no_duplicate_portfolio_veto_owner_active_in_live_path(self):
         import app.main_loop as main_loop_module
@@ -494,9 +517,10 @@ class TestExposureAuthoritySeamClarity:
         dispatch_src = inspect.getsource(main_loop_module.MainLoop._dispatch_fusion)
         submit_signal_src = inspect.getsource(execution_engine_module.ExecutionEngine.submit_signal)
 
-        # Live path keeps existing risk_guard veto owner and has no exposure-manager veto.
+        # MainLoop delegates portfolio math to ExposureManager; ExecutionEngine only enforces evidence.
         assert "validate_intent" not in dispatch_src
-        assert "ExposureManager" not in dispatch_src
+        assert "_apply_portfolio_risk_gate_to_signal" in dispatch_src
+        assert "evaluate_pre_trade_portfolio_gate" not in submit_signal_src
         assert "risk_guard.can_trade" in submit_signal_src
 
     def test_portfolio_truth_hydration_source_contract_unchanged(self):
@@ -1052,7 +1076,7 @@ class TestGateEvidenceCapturesPassAndBlockReason:
 
             loop = _build_test_loop(broker_mode="paper")
             loop.execution_engine.submit_signal = MagicMock(
-                side_effect=lambda signal, current_price, is_attack:
+                side_effect=lambda signal, current_price, is_attack, **_kwargs:
                     captured.append({"signal": signal}) or True
             )
 
@@ -1301,7 +1325,6 @@ class TestAdvisoryMetadataSpine:
             "session_calendar",
             "opportunity_ranking",
             "world_awareness",
-            "moving_floor",
             "net_edge_governor",
             "trade_efficiency_governor",
         )

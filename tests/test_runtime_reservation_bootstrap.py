@@ -120,12 +120,16 @@ def test_root_bootstrap_creates_exposure_manager_and_disabled_coordinator(tmp_pa
     assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_enabled"] is False
     assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_scope"] == "disabled"
     assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_live_blocked"] is False
+    assert root.reservation_lifecycle_bootstrap_status["portfolio_risk_gate_paper_enabled"] is False
+    assert root.reservation_lifecycle_bootstrap_status["portfolio_risk_gate_policy_version"] == "P3B_B1_V1"
 
 
 def test_config_default_reservation_lifecycle_paper_enabled_false():
     config = Config()
 
     assert config.reservation_lifecycle_paper_enabled is False
+    assert config.portfolio_risk_gate_paper_enabled is True
+    assert config.portfolio_risk_gate_policy_version == "P3B_B1_V1"
 
 
 def test_paper_requested_enables_effective_reservation_lifecycle(tmp_path):
@@ -141,6 +145,22 @@ def test_paper_requested_enables_effective_reservation_lifecycle(tmp_path):
     assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_enabled"] is True
     assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_scope"] == "paper"
     assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_live_blocked"] is False
+
+
+def test_portfolio_risk_gate_paper_enables_effective_reservation_lifecycle(tmp_path):
+    store = _store(tmp_path)
+    root = _root_with_store(store)
+
+    root._bootstrap_reservation_lifecycle_disabled(
+        _config(portfolio_risk_gate_paper_enabled=True)
+    )
+
+    assert root.reservation_lifecycle_enabled is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_paper_requested"] is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_enabled"] is True
+    assert root.reservation_lifecycle_bootstrap_status["reservation_lifecycle_scope"] == "paper"
+    assert root.reservation_lifecycle_bootstrap_status["portfolio_risk_gate_paper_enabled"] is True
+    assert root.reservation_lifecycle_bootstrap_status["portfolio_risk_gate_policy_version"] == "P3B_B1_V1"
 
 
 def test_live_requested_keeps_effective_reservation_lifecycle_disabled(tmp_path):
@@ -245,7 +265,7 @@ def test_hydrate_failure_keeps_coordinator_disabled_and_fail_closed(monkeypatch)
         guarded_fill_called = False
         guarded_release_called = False
 
-        def __init__(self, initial_equity):
+        def __init__(self, initial_equity, **_kwargs):
             self.initial_equity = initial_equity
 
         def hydrate_reservations_from_ledger(self, rows, *, release_tombstones=None, fill_progress=None):
@@ -291,10 +311,12 @@ def test_bootstrap_passes_disabled_coordinator_only_to_order_router():
     assert "self._bootstrap_reservation_lifecycle_disabled(config)" in heartbeat_init
     assert "reservation_lifecycle_coordinator=self.reservation_lifecycle_coordinator" in heartbeat_init
     assert "reservation_lifecycle_enabled=self.reservation_lifecycle_enabled" in heartbeat_init
+    assert "exposure_manager=self.exposure_manager" in heartbeat_init
     assert "reservation_lifecycle_coordinator" in order_router_init.parameters
     assert "reservation_lifecycle_enabled" in order_router_init.parameters
     assert "reservation_lifecycle_coordinator" not in execution_engine_init.parameters
     assert "reservation_lifecycle_coordinator" not in main_loop_init.parameters
+    assert "exposure_manager" in main_loop_init.parameters
     assert "reservation_lifecycle_coordinator" not in fill_recorder_init.parameters
 
 

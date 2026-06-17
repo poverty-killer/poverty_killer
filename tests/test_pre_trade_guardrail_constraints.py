@@ -98,6 +98,7 @@ def _verdict(
     existing_positions=(),
     open_orders=(),
     reservations=(),
+    exposure_authority_evidence=None,
 ):
     capability, portal_result = _cap(symbol, asset_class=asset_class, tif=tif)
     quote_options = {"market_open": None if asset_class == "crypto" else True}
@@ -123,8 +124,27 @@ def _verdict(
             existing_positions=existing_positions,
             open_orders=open_orders,
             reservations=reservations,
+            exposure_authority_evidence=exposure_authority_evidence,
         )
     )
+
+
+def _exposure_authority_evidence(reason_code: str, *, block: bool = True) -> dict:
+    return {
+        "module": "ExposureManager",
+        "authority_class": "RISK",
+        "status": "CONTRIBUTED_BLOCK" if block else "CONTRIBUTED_ALLOW",
+        "reason_code": reason_code,
+        "summary": "canonical ExposureManager portfolio-risk evidence",
+        "policy_version": "P3B_B1_V1",
+        "symbol": "BTC/USD",
+        "authorized": not block,
+        "route_permitted": not block,
+        "broker_post": False,
+        "exposure_manager_called": True,
+        "live_wired": True,
+        "active_veto_owner": True,
+    }
 
 
 def _risk_guard():
@@ -286,11 +306,19 @@ def test_quote_session_and_market_data_blocking_reasons_are_preserved():
     assert "MARKET_CLOSED" in closed.reason_codes
 
 
-def test_exposure_open_order_and_reservation_conflicts_block_before_routing():
-    duplicate = _verdict(existing_positions=({"symbol": "BTC/USD", "quantity": "0.01"},))
-    open_order = _verdict(open_orders=({"symbol": "BTC/USD", "side": "buy", "status": "open"},))
-    orphan = _verdict(open_orders=({"symbol": "BTC/USD", "side": "buy"},))
-    reserved = _verdict(reservations=({"symbol": "BTC/USD", "status": "active"},))
+def test_exposure_manager_conflict_evidence_blocks_before_routing():
+    duplicate = _verdict(
+        exposure_authority_evidence=_exposure_authority_evidence("DUPLICATE_EXISTING_EXPOSURE")
+    )
+    open_order = _verdict(
+        exposure_authority_evidence=_exposure_authority_evidence("OPEN_ORDER_CONFLICT")
+    )
+    orphan = _verdict(
+        exposure_authority_evidence=_exposure_authority_evidence("ORPHAN_OPEN_ORDER")
+    )
+    reserved = _verdict(
+        exposure_authority_evidence=_exposure_authority_evidence("RESERVATION_CONFLICT")
+    )
 
     assert "DUPLICATE_EXISTING_EXPOSURE" in duplicate.reason_codes
     assert "OPEN_ORDER_CONFLICT" in open_order.reason_codes
@@ -363,7 +391,12 @@ def test_guardrail_verdict_contains_advisory_module_contribution_without_fake_ec
     assert evidence["NetEdgeGovernor"].reason_code == "NET_EDGE_MISSING_TRUTH"
     assert evidence["TradeEfficiencyGovernor"].reason_code == "TRADE_EFFICIENCY_MISSING_TRUTH"
     assert evidence["SovereignExecutionGuard"].status == "DORMANT_BY_POLICY"
-    assert evidence["StrategyAllocator / SovereignGovernor"].status == "DORMANT_BY_POLICY"
+    assert evidence["StrategyAllocator / SovereignGovernor"].status == "CONTRIBUTED_ADVISORY"
+    assert (
+        evidence["StrategyAllocator / SovereignGovernor"].reason_code
+        == "ALLOCATOR_GOVERNOR_DELEGATED_TO_EXPOSURE_MANAGER"
+    )
+    assert evidence["ExposureManager"].reason_code == "EXPOSURE_MANAGER_EVIDENCE_MISSING"
 
 
 def test_execution_engine_blocks_guardrail_denial_before_order_router_submit():

@@ -661,6 +661,7 @@ class SovereignHeartbeat:
             safety_gate=self.safety_gate,
             telemetry_store=self.telemetry_store,
             active_symbols=self._active_symbols,
+            exposure_manager=self.exposure_manager,
         )
         self._record_whole_bot_startup_attribution()
 
@@ -722,6 +723,7 @@ class SovereignHeartbeat:
         """
         reservation_lifecycle_paper_requested = bool(
             getattr(config, "reservation_lifecycle_paper_enabled", False)
+            or getattr(config, "portfolio_risk_gate_paper_enabled", False)
         )
         reservation_lifecycle_is_paper = str(getattr(config, "broker_mode", "")).lower() == "paper"
         self.reservation_lifecycle_enabled = bool(
@@ -729,6 +731,8 @@ class SovereignHeartbeat:
         )
         self.exposure_manager = ExposureManager(
             initial_equity=Decimal(str(config.initial_capital)),
+            max_utilization=Decimal(str(getattr(config, "portfolio_risk_max_utilization", "0.50"))),
+            max_asset_concentration=Decimal(str(getattr(config, "portfolio_risk_max_asset_concentration", "0.15"))),
         )
 
         active_rows = []
@@ -785,6 +789,8 @@ class SovereignHeartbeat:
             "reservation_lifecycle_paper_requested": reservation_lifecycle_paper_requested,
             "reservation_lifecycle_enabled": self.reservation_lifecycle_enabled,
             "reservation_lifecycle_scope": "paper" if self.reservation_lifecycle_enabled else "disabled",
+            "portfolio_risk_gate_policy_version": getattr(config, "portfolio_risk_gate_policy_version", "P3B_B1_V1"),
+            "portfolio_risk_gate_paper_enabled": bool(getattr(config, "portfolio_risk_gate_paper_enabled", False)),
             "reservation_lifecycle_live_blocked": bool(
                 reservation_lifecycle_paper_requested and not reservation_lifecycle_is_paper
             ),

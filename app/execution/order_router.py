@@ -3291,8 +3291,36 @@ class OrderRouter:
     # ORDER SUBMISSION WITH POST-ONLY FLAG
     # ============================================
 
+    def _portfolio_risk_gate_missing_for_order(self, order: OrderRequest) -> Optional[str]:
+        metadata = order.metadata if isinstance(order.metadata, dict) else {}
+        if metadata.get("portfolio_risk_gate_required") is not True:
+            return None
+        evidence = metadata.get("portfolio_risk_gate_evidence")
+        if not isinstance(evidence, dict):
+            guardrail = metadata.get("pre_trade_guardrail_verdict")
+            if isinstance(guardrail, dict):
+                for item in guardrail.get("module_evidence", ()):
+                    if isinstance(item, dict) and item.get("module") == "ExposureManager":
+                        evidence = item.get("details") if isinstance(item.get("details"), dict) else item
+                        break
+        if not isinstance(evidence, dict):
+            return "EXPOSURE_MANAGER_EVIDENCE_MISSING"
+        status = str(evidence.get("status") or "").strip().upper()
+        if status in {"CONTRIBUTED_BLOCK", "BLOCK", "CONTRIBUTED_MISSING_TRUTH"}:
+            return str(evidence.get("reason_code") or "EXPOSURE_MANAGER_NOT_AUTHORIZED")
+        if evidence.get("authorized") is not True or evidence.get("route_permitted") is False:
+            return str(evidence.get("reason_code") or "EXPOSURE_MANAGER_NOT_AUTHORIZED")
+        if evidence.get("policy_version") != metadata.get("portfolio_risk_gate_policy_version"):
+            return "EXPOSURE_MANAGER_POLICY_VERSION_MISMATCH"
+        return None
+
     def submit_order(self, order: OrderRequest) -> Optional[OrderFill]:
         """Submit order to exchange or sovereign paper broker."""
+        missing_risk_evidence = self._portfolio_risk_gate_missing_for_order(order)
+        if missing_risk_evidence is not None:
+            logger.error("Order blocked before broker route: %s", missing_risk_evidence)
+            self._record_rejection_telemetry(order, missing_risk_evidence)
+            return None
         self._record_order_submission_telemetry(order)
         if self.paper_mode:
             if self._order_requests_gateway_route(order):

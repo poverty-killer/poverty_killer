@@ -10,13 +10,11 @@ import app.execution.engine as engine_module
 from app.brain.data_validator import DataContinuityValidator
 from app.commander import Commander
 from app.config import Config
-from app.constants import AssetClass, SleeveType as AllocatorSleeveType
 from app.core.market_snapshot import CANDIDATE_SNAPSHOT_STALE, build_market_truth_snapshot
 from app.execution.broker_gateway import BrokerAdapterIdentity, BrokerGatewayResponse
 from app.execution.engine import ExecutionEngine
 from app.execution.order_router import OrderRouter
 from app.main_loop import MainLoop, _build_pre_trade_guardrail_verdict
-from app.meta.strategy_allocator import SovereignGovernor
 from app.models.signals import StrategySignal
 from app.operator_activation.paper_baseline import (
     BASELINE_POLICY_PROTECTED,
@@ -27,15 +25,13 @@ from app.risk.exposure_manager import EXPOSURE_AUTHORITY_STATUS, ExposureManager
 from app.risk.trade_efficiency_governor import KellyOverlayStatus, TradeEfficiencyGovernor
 from app.state.state_store import StateStore
 from app.strategies.moving_floor import TopologicalMovingFloor
-from app.utils.enums import OrderSide as ExposureOrderSide
-from app.utils.enums import RiskAction, SleeveType as ExposureSleeveType
+from app.utils.enums import RiskAction
 
 
 T0_NS = 1_779_600_000_000_000_000
 NS_PER_SECOND = 1_000_000_000
 
 LIVE_RUNTIME = "LIVE_RUNTIME"
-LOGIC_PROVEN_DORMANT = "LOGIC_PROVEN_DORMANT"
 
 
 @dataclass(frozen=True)
@@ -62,24 +58,21 @@ GATE_EXPECTATIONS = {
     ),
     "G3": GateExpectation(
         "G3",
-        LOGIC_PROVEN_DORMANT,
+        LIVE_RUNTIME,
         "GLOBAL_UTILIZATION_BREACH",
-        "ExposureManager refuses total exposure above configured utilization cap.",
-        go_live_blocker=True,
+        "ExposureManager blocks total exposure above the governed PAPER utilization cap before broker routing.",
     ),
     "G4": GateExpectation(
         "G4",
-        LOGIC_PROVEN_DORMANT,
-        "corr_slash=50%",
-        "SovereignGovernor applies a half-size correlation slash.",
-        go_live_blocker=True,
+        LIVE_RUNTIME,
+        "CORRELATION_SLASH_APPLIED",
+        "ExposureManager applies a half-size correlation slash before NetEdge and broker routing.",
     ),
     "G5": GateExpectation(
         "G5",
-        LOGIC_PROVEN_DORMANT,
+        LIVE_RUNTIME,
         "ASSET_CONCENTRATION_VETO",
-        "ExposureManager refuses single-symbol concentration above asset cap.",
-        go_live_blocker=True,
+        "ExposureManager blocks single-symbol concentration above the governed PAPER asset cap before broker routing.",
     ),
     "G6": GateExpectation(
         "G6",
@@ -130,10 +123,10 @@ def test_phase3_gate_labels_are_complete_and_truthful():
     assert set(GATE_EXPECTATIONS) == {f"G{idx}" for idx in range(1, 12)}
     assert {
         gate for gate, expectation in GATE_EXPECTATIONS.items() if expectation.go_live_blocker
-    } == {"G3", "G4", "G5"}
-    assert GATE_EXPECTATIONS["G3"].label == LOGIC_PROVEN_DORMANT
-    assert GATE_EXPECTATIONS["G4"].label == LOGIC_PROVEN_DORMANT
-    assert GATE_EXPECTATIONS["G5"].label == LOGIC_PROVEN_DORMANT
+    } == set()
+    assert GATE_EXPECTATIONS["G3"].label == LIVE_RUNTIME
+    assert GATE_EXPECTATIONS["G4"].label == LIVE_RUNTIME
+    assert GATE_EXPECTATIONS["G5"].label == LIVE_RUNTIME
 
 
 def _risk_guard() -> MagicMock:
@@ -329,67 +322,185 @@ def test_g2_live_runtime_baseline_sell_capped_to_run_acquired_quantity():
     assert result["broker_mutation_occurred"] is False
 
 
-def test_g3_dormant_heat_cap_refuses_global_utilization_breach():
-    gate = _expect_gate("G3", LOGIC_PROVEN_DORMANT)
-    assert EXPOSURE_AUTHORITY_STATUS == "DORMANT_SEAM"
-    manager = ExposureManager(initial_equity=Decimal("1000"), max_utilization=Decimal("0.80"))
+def _portfolio_risk_config(*, max_utilization: float = 0.50, max_asset_concentration: float = 0.15) -> Config:
+    return Config(
+        broker_mode="paper",
+        active_markets=["crypto"],
+        symbol_universe=["BTC/USD", "ETH/USD", "SOL/USD"],
+        portal_selection_policy="explicit_preferred_venue",
+        preferred_trading_portal="alpaca_paper",
+        portfolio_risk_gate_paper_enabled=True,
+        portfolio_risk_max_utilization=max_utilization,
+        portfolio_risk_max_asset_concentration=max_asset_concentration,
+        portfolio_risk_correlation_threshold=0.80,
+        portfolio_risk_correlation_slash_factor=0.50,
+    )
 
-    result = manager.validate_intent_detailed(
-        sleeve=ExposureSleeveType.SECTOR_ROTATION,
+
+def _exposure_evidence(verdict: dict) -> dict:
+    for item in verdict["module_evidence"]:
+        if item["module"] == "ExposureManager":
+            return item["details"]
+    raise AssertionError("ExposureManager evidence missing")
+
+
+def test_g3_live_runtime_heat_cap_blocks_before_broker_route(monkeypatch):
+    gate = _expect_gate("G3", LIVE_RUNTIME)
+    assert EXPOSURE_AUTHORITY_STATUS == LIVE_RUNTIME
+    router = MagicMock()
+    current_ns = T0_NS + 12 * NS_PER_SECOND
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+    market_truth, _, snapshot = _snapshot_payload(symbol="BTC/USD", current_ns=current_ns)
+    signal = _strategy_signal(
         symbol="BTC/USD",
-        side=ExposureOrderSide.BUY,
-        qty=Decimal("1"),
-        price=Decimal("2100"),
+        candle_id=snapshot["candle_id"],
+        expected_move_bps="200",
+        metadata=_canonical_metadata("BTC/USD", market_truth, snapshot),
     )
-
-    assert result.authorized is False
-    assert result.reason == gate.reason_code
-    assert result.risk_action == RiskAction.BLOCK_ALL_NEW
-
-
-def test_g4_dormant_correlation_slashing_halves_correlated_position_size():
-    gate = _expect_gate("G4", LOGIC_PROVEN_DORMANT)
-    governor = SovereignGovernor(
-        total_capital=20_000.0,
-        correlation_kill_threshold=0.85,
-        correlation_slash_factor=0.5,
+    signal.quantity = 1.0
+    manager = ExposureManager(
+        initial_equity=Decimal("1000"),
+        max_utilization=Decimal("0.50"),
+        max_asset_concentration=Decimal("0.95"),
     )
-    governor.update_asset_exposure("BTC/USD", AssetClass.CRYPTO, 1_000.0)
-    governor.update_correlation("ETH/USD", "BTC/USD", 0.90)
+    verdict = _build_pre_trade_guardrail_verdict(
+        config=_portfolio_risk_config(max_utilization=0.50, max_asset_concentration=0.95),
+        symbol="BTC/USD",
+        signal=signal,
+        runtime=SimpleNamespace(last_price=600.0),
+        is_attack=False,
+        exposure_manager=manager,
+    )
+    signal.metadata["pre_trade_guardrail_verdict"] = verdict
+    engine = _engine(router)
 
-    slash_factor = governor.get_correlation_slash_factor("ETH/USD", ["BTC/USD"])
-    adjusted, reason = governor.calculate_adjusted_allocation(
-        AllocatorSleeveType.SECTOR_ROTATION,
-        requested_capital=1_000.0,
+    admitted = engine.submit_signal(signal, Decimal("600.00"), is_attack=False)
+    block = engine.get_last_admission_block_result()
+    exposure = _exposure_evidence(verdict)
+
+    assert verdict["route_permitted"] is False
+    assert gate.reason_code in verdict["reason_codes"]
+    assert exposure["reason_code"] == gate.reason_code
+    assert exposure["exposure_manager_called"] is True
+    assert admitted is False
+    assert block.reason_code == gate.reason_code
+    router.submit_order.assert_not_called()
+
+
+def test_g4_live_runtime_correlation_slash_runs_before_netedge(monkeypatch):
+    gate = _expect_gate("G4", LIVE_RUNTIME)
+    router = MagicMock()
+    current_ns = T0_NS + 13 * NS_PER_SECOND
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+    market_truth, _, snapshot = _snapshot_payload(symbol="ETH/USD", current_ns=current_ns)
+    metadata = _canonical_metadata("ETH/USD", market_truth, snapshot)
+    metadata["correlation_pairs"] = {("ETH/USD", "BTC/USD"): Decimal("0.90")}
+    metadata["correlation_truth_status"] = "FRESH"
+    signal = _strategy_signal(
         symbol="ETH/USD",
-        asset_class=AssetClass.CRYPTO,
+        candle_id=snapshot["candle_id"],
+        expected_move_bps="200",
+        metadata=metadata,
     )
+    signal.quantity = 0.25
+    original_qty = Decimal(str(signal.quantity))
+    manager = ExposureManager(
+        initial_equity=Decimal("10000"),
+        max_utilization=Decimal("0.50"),
+        max_asset_concentration=Decimal("0.15"),
+    )
+    manager.force_inventory_sync("BTC/USD", Decimal("1"), Decimal("1000"))
+    verdict = _build_pre_trade_guardrail_verdict(
+        config=_portfolio_risk_config(),
+        symbol="ETH/USD",
+        signal=signal,
+        runtime=SimpleNamespace(last_price=100.0),
+        is_attack=False,
+        exposure_manager=manager,
+    )
+    signal.metadata["pre_trade_guardrail_verdict"] = verdict
+    engine = _engine(router)
 
-    assert slash_factor == 0.5
-    assert gate.reason_code in reason
-    assert adjusted <= 300.0
+    admitted = engine.submit_signal(signal, Decimal("100.00"), is_attack=False)
+    exposure = _exposure_evidence(verdict)
+
+    assert verdict["route_permitted"] is True
+    assert exposure["reason_code"] == gate.reason_code
+    assert exposure["adjusted"] is True
+    assert Decimal(exposure["adjusted_quantity"]) == original_qty * Decimal("0.50")
+    assert Decimal(str(signal.quantity)) == Decimal(exposure["adjusted_quantity"])
+    assert signal.metadata["requested_notional"] == exposure["adjusted_notional"]
+    assert admitted is True
 
 
-def test_g5_dormant_per_symbol_cap_refuses_asset_concentration_breach():
-    gate = _expect_gate("G5", LOGIC_PROVEN_DORMANT)
-    assert EXPOSURE_AUTHORITY_STATUS == "DORMANT_SEAM"
+def test_g5_live_runtime_per_symbol_cap_blocks_before_broker_route(monkeypatch):
+    gate = _expect_gate("G5", LIVE_RUNTIME)
+    assert EXPOSURE_AUTHORITY_STATUS == LIVE_RUNTIME
+    router = MagicMock()
+    current_ns = T0_NS + 14 * NS_PER_SECOND
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+    market_truth, _, snapshot = _snapshot_payload(symbol="ETH/USD", current_ns=current_ns)
+    signal = _strategy_signal(
+        symbol="ETH/USD",
+        candle_id=snapshot["candle_id"],
+        expected_move_bps="200",
+        metadata=_canonical_metadata("ETH/USD", market_truth, snapshot),
+    )
+    signal.quantity = 1.0
     manager = ExposureManager(
         initial_equity=Decimal("1000"),
         max_utilization=Decimal("0.95"),
-        sleeve_limits={ExposureSleeveType.SECTOR_ROTATION: Decimal("0.95")},
+        max_asset_concentration=Decimal("0.15"),
     )
-
-    result = manager.validate_intent_detailed(
-        sleeve=ExposureSleeveType.SECTOR_ROTATION,
+    verdict = _build_pre_trade_guardrail_verdict(
+        config=_portfolio_risk_config(max_utilization=0.95, max_asset_concentration=0.15),
         symbol="ETH/USD",
-        side=ExposureOrderSide.BUY,
-        qty=Decimal("1"),
-        price=Decimal("700"),
+        signal=signal,
+        runtime=SimpleNamespace(last_price=200.0),
+        is_attack=False,
+        exposure_manager=manager,
     )
+    signal.metadata["pre_trade_guardrail_verdict"] = verdict
+    engine = _engine(router)
 
-    assert result.authorized is False
-    assert result.reason == gate.reason_code
-    assert result.risk_action == RiskAction.BLOCK_ALL_NEW
+    admitted = engine.submit_signal(signal, Decimal("200.00"), is_attack=False)
+    block = engine.get_last_admission_block_result()
+    exposure = _exposure_evidence(verdict)
+
+    assert verdict["route_permitted"] is False
+    assert gate.reason_code in verdict["reason_codes"]
+    assert exposure["reason_code"] == gate.reason_code
+    assert exposure["exposure_manager_called"] is True
+    assert admitted is False
+    assert block.reason_code == gate.reason_code
+    router.submit_order.assert_not_called()
+
+
+def test_b1_execution_engine_fails_closed_when_exposure_evidence_missing(monkeypatch):
+    router = MagicMock()
+    current_ns = T0_NS + 15 * NS_PER_SECOND
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+    market_truth, _, snapshot = _snapshot_payload(symbol="ETH/USD", current_ns=current_ns)
+    metadata = _canonical_metadata("ETH/USD", market_truth, snapshot)
+    metadata["portfolio_risk_gate_required"] = True
+    metadata["portfolio_risk_gate_policy_version"] = "P3B_B1_V1"
+    signal = _strategy_signal(
+        symbol="ETH/USD",
+        candle_id=snapshot["candle_id"],
+        expected_move_bps="200",
+        metadata=metadata,
+    )
+    engine = _engine(router)
+
+    admitted = engine.submit_signal(signal, Decimal("150.00"), is_attack=False)
+    block = engine.get_last_admission_block_result()
+
+    assert admitted is False
+    assert block.reason_code == "EXPOSURE_MANAGER_EVIDENCE_MISSING"
+    assert block.block_evidence["portfolio_risk_gate_required"] is True
+    assert block.block_evidence["blocked_before_order_router"] is True
+    assert block.block_evidence["broker_post"] is False
+    router.submit_order.assert_not_called()
 
 
 def test_g6_live_runtime_drawdown_soft_stop_delevers_aggression():

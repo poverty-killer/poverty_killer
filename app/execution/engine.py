@@ -546,6 +546,21 @@ class ExecutionEngine:
                 block_evidence=guardrail_signal_mismatch,
             )
 
+        portfolio_risk_missing = self._portfolio_risk_gate_missing_evidence(
+            signal,
+            guardrail_verdict,
+        )
+        if portfolio_risk_missing is not None:
+            return self._record_admission_block(
+                signal=signal,
+                decision_uuid=resolved_decision_uuid,
+                reason_code=portfolio_risk_missing["reason_code"],
+                message="Portfolio risk gate evidence is required before broker-intent admission.",
+                decision_artifact=decision_artifact,
+                guardrail_verdict=guardrail_verdict,
+                block_evidence=portfolio_risk_missing,
+            )
+
         if guardrail_verdict is not None and guardrail_verdict.get("route_permitted") is not True:
             logger.info(
                 "[EXEC_DIAG] PRE_TRADE_GUARDRAIL_BLOCKED: symbol=%s verdict=%s reasons=%s",
@@ -1551,6 +1566,51 @@ class ExecutionEngine:
             return verdict
         return None
 
+    def _portfolio_risk_gate_missing_evidence(
+        self,
+        signal: StrategySignal,
+        guardrail_verdict: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        if metadata.get("portfolio_risk_gate_required") is not True:
+            return None
+
+        evidence = metadata.get("portfolio_risk_gate_evidence")
+        if not isinstance(evidence, dict) and isinstance(guardrail_verdict, dict):
+            for item in guardrail_verdict.get("module_evidence", ()):
+                if isinstance(item, dict) and item.get("module") == "ExposureManager":
+                    evidence = item.get("details") if isinstance(item.get("details"), dict) else item
+                    break
+
+        if not isinstance(evidence, dict):
+            return {
+                "reason_code": "EXPOSURE_MANAGER_EVIDENCE_MISSING",
+                "portfolio_risk_gate_required": True,
+                "blocked_before_order_router": True,
+                "broker_post": False,
+            }
+
+        status = str(evidence.get("status") or "").strip().upper()
+        authorized = evidence.get("authorized") is True and evidence.get("route_permitted") is not False
+        if status in {"CONTRIBUTED_BLOCK", "BLOCK", "CONTRIBUTED_MISSING_TRUTH"} or not authorized:
+            return {
+                "reason_code": str(evidence.get("reason_code") or "EXPOSURE_MANAGER_NOT_AUTHORIZED"),
+                "portfolio_risk_gate_required": True,
+                "blocked_before_order_router": True,
+                "broker_post": False,
+                "exposure_authority_evidence": evidence,
+            }
+        if evidence.get("policy_version") != metadata.get("portfolio_risk_gate_policy_version"):
+            return {
+                "reason_code": "EXPOSURE_MANAGER_POLICY_VERSION_MISMATCH",
+                "portfolio_risk_gate_required": True,
+                "blocked_before_order_router": True,
+                "broker_post": False,
+                "exposure_authority_evidence": evidence,
+                "metadata_policy_version": metadata.get("portfolio_risk_gate_policy_version"),
+            }
+        return None
+
     def _pre_trade_guardrail_signal_mismatch_evidence(
         self,
         signal: StrategySignal,
@@ -1683,6 +1743,24 @@ class ExecutionEngine:
                 block_evidence=guardrail_signal_mismatch,
                 candidate_lifecycle=candidate_lifecycle,
             )
+        portfolio_risk_missing = self._portfolio_risk_gate_missing_evidence(
+            signal,
+            guardrail_verdict,
+        )
+        if portfolio_risk_missing is not None:
+            return ExecutionSpineResult(
+                decision_uuid=queued.decision_uuid,
+                client_order_id=None,
+                broker_order_id=None,
+                normalized_status="blocked",
+                route="execution_engine",
+                reason_code=portfolio_risk_missing["reason_code"],
+                message="Portfolio risk gate evidence is required before OrderRouter.",
+                decision_artifact=decision_artifact,
+                pre_trade_guardrail_verdict=guardrail_verdict,
+                block_evidence=portfolio_risk_missing,
+                candidate_lifecycle=candidate_lifecycle,
+            )
         current_price = self.order_router.get_mid_price(signal.symbol)
 
         is_valid, reason = self._validate_signal_before_execution(queued, current_price)
@@ -1789,6 +1867,12 @@ class ExecutionEngine:
             "requested_notional",
             "compiled_decision_artifact",
             "pre_trade_guardrail_verdict",
+            "portfolio_risk_gate_required",
+            "portfolio_risk_gate_policy_version",
+            "portfolio_risk_gate_evidence",
+            "portfolio_risk_original_quantity",
+            "portfolio_risk_adjusted_quantity",
+            "correlation_slash_factor",
             "edge_attribution",
             "net_edge_context",
             "net_edge_evaluation",
