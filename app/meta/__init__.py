@@ -1,10 +1,11 @@
-﻿\"\"\"
-__init__
-Poverty Killer module - Under construction.
-\"\"\"
+"""
+app.meta package.
+"""
+
 
 def main():
     pass
+
 
 if __name__ == "__main__":
     main()

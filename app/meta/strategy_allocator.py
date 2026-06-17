@@ -35,7 +35,7 @@ class AllocationMode(Enum):
     EMERGENCY = "emergency"           # 0% - no new allocations
 
 
-@dataclass
+@dataclass(slots=True)
 class StrategyAllocation:
     """Allocation for a single strategy."""
     strategy: SleeveType
@@ -49,11 +49,8 @@ class StrategyAllocation:
     is_active: bool = True
     risk_score: float = 0.5
 
-    __slots__ = ("strategy", "allocated_capital", "used_capital", "max_capital",
-                 "pnl", "win_rate", "sharpe", "last_allocation", "is_active", "risk_score")
 
-
-@dataclass
+@dataclass(slots=True)
 class AssetExposure:
     """Exposure for a single asset."""
     symbol: str
@@ -63,9 +60,6 @@ class AssetExposure:
     pnl: float
     position_count: int
     strategies: List[SleeveType]
-
-    __slots__ = ("symbol", "asset_class", "current_exposure", "max_exposure",
-                 "pnl", "position_count", "strategies")
 
 
 class SovereignGovernor:
