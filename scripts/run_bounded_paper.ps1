@@ -323,6 +323,8 @@ $stdoutPath = Join-Path $LogDirectory "bounded_paper_$stamp.out.log"
 $stderrPath = Join-Path $LogDirectory "bounded_paper_$stamp.err.log"
 
 Write-Host "Starting bounded Alpaca PAPER run for $DurationSeconds seconds..."
+Write-Host "stdout: $stdoutPath"
+Write-Host "stderr: $stderrPath"
 $process = Start-Process `
     -FilePath $PythonPath `
     -ArgumentList @("main.py", "--paper", "--log-level", "INFO", "--duration-seconds", "$DurationSeconds") `

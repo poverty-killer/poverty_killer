@@ -114,8 +114,12 @@ class ExecutionState:
     recalibration_until_ns: int = 0
     last_latency_ms: float = 0.0
     last_latency_truth: Dict[str, Any] = field(default_factory=dict)
+    latency_degraded_count: int = 0
     pending_orders: Dict[str, OrderRequest] = field(default_factory=dict)
     filled_orders: List[OrderFill] = field(default_factory=list)
+    last_signal: Dict[str, Any] | None = None
+    last_order_submit_attempt: Dict[str, Any] | None = None
+    last_fill: Dict[str, Any] | None = None
     last_health_check_ns: int = 0
     last_equity: float = 0.0
     last_regime: str = "unknown"
@@ -399,6 +403,39 @@ class ExecutionEngine:
         with self._lock:
             return dict(self._shadow_broker_mutation_counts)
 
+    @staticmethod
+    def _signal_visibility_summary(signal: StrategySignal, decision_uuid: Optional[str], current_ns: int) -> Dict[str, Any]:
+        return {
+            "ts_ns": int(current_ns),
+            "decision_uuid": decision_uuid,
+            "strategy": str(getattr(signal, "strategy", "") or ""),
+            "symbol": str(getattr(signal, "symbol", "") or ""),
+            "side": str(getattr(signal, "side", "") or ""),
+            "quantity": str(getattr(signal, "quantity", "") or ""),
+        }
+
+    @staticmethod
+    def _order_visibility_summary(order: OrderRequest, fill_observed_sync: bool, current_ns: int) -> Dict[str, Any]:
+        return {
+            "ts_ns": int(current_ns),
+            "client_order_id": str(getattr(order, "id", "") or ""),
+            "symbol": str(getattr(order, "symbol", "") or ""),
+            "side": str(getattr(order, "side", "") or ""),
+            "quantity": str(getattr(order, "quantity", "") or ""),
+            "fill_observed_sync": bool(fill_observed_sync),
+        }
+
+    @staticmethod
+    def _fill_visibility_summary(order: OrderRequest, fill: OrderFill, current_ns: int) -> Dict[str, Any]:
+        return {
+            "ts_ns": int(current_ns),
+            "client_order_id": str(getattr(order, "id", "") or ""),
+            "broker_order_id": str(getattr(fill, "venue_order_id", "") or "") or None,
+            "symbol": str(getattr(fill, "symbol", getattr(order, "symbol", "")) or ""),
+            "quantity": str(getattr(fill, "quantity", "") or ""),
+            "price": str(getattr(fill, "price", "") or ""),
+        }
+
     def get_oms_shutdown_accounting(self) -> Dict[str, Any]:
         """Return execution/router OMS accounting for shutdown diagnostics."""
         router_accounting: Dict[str, Any] = {}
@@ -651,6 +688,12 @@ class ExecutionEngine:
         )
 
         self._execution_queue.put(queued_signal)
+        with self._lock:
+            self._state.last_signal = self._signal_visibility_summary(
+                signal,
+                resolved_decision_uuid,
+                current_ns,
+            )
         logger.info(
             "[EXEC_DIAG] SIGNAL_SUBMITTED: strategy=%s symbol=%s side=%s qty=%s",
             signal.strategy,
@@ -767,9 +810,14 @@ class ExecutionEngine:
                 "recalibration_until_ns": self._state.recalibration_until_ns,
                 "last_latency_ms": self._state.last_latency_ms,
                 "last_latency_truth": dict(self._state.last_latency_truth),
+                "latency_degraded_count": self._state.latency_degraded_count,
                 "pending_orders_count": len(self._state.pending_orders),
                 "pending_orders_value": sum(o.quantity * (o.limit_price or Decimal("0")) for o in self._state.pending_orders.values()),
                 "filled_orders_count": len(self._state.filled_orders),
+                "last_signal": dict(self._state.last_signal) if self._state.last_signal else None,
+                "last_order_submit_attempt": dict(self._state.last_order_submit_attempt) if self._state.last_order_submit_attempt else None,
+                "last_fill": dict(self._state.last_fill) if self._state.last_fill else None,
+                "broker_mutation_counts": dict(self._shadow_broker_mutation_counts),
                 "execution_queue_size": self._execution_queue.qsize(),
                 "last_equity": self._state.last_equity,
                 "last_regime": self._state.last_regime,
@@ -981,6 +1029,8 @@ class ExecutionEngine:
             if latency_truth.latency_ms is not None
             else 0.0
         )
+        if latency_truth.status == "MARKET_DATA_LATENCY_DEGRADED":
+            self._state.latency_degraded_count += 1
 
         if latency_truth.status == "LATENCY_OK":
             self.risk_guard.update_latency(latency_truth.latency_ms or 0.0)
@@ -1998,6 +2048,12 @@ class ExecutionEngine:
             gateway_response_getter = getattr(self.order_router, "get_gateway_response", None)
             if callable(gateway_response_getter):
                 gateway_response = gateway_response_getter(order.id)
+            with self._lock:
+                self._state.last_order_submit_attempt = self._order_visibility_summary(
+                    order,
+                    fill is not None,
+                    now_ns(),
+                )
             logger.info(
                 "[EXEC_DIAG] PAPERBROKER_REACH_COUNT: strategy=%s symbol=%s side=%s qty=%s",
                 signal.strategy,
@@ -2023,6 +2079,11 @@ class ExecutionEngine:
                 )
                 with self._lock:
                     self._state.filled_orders.append(fill)
+                    self._state.last_fill = self._fill_visibility_summary(
+                        order,
+                        fill,
+                        now_ns(),
+                    )
                 self.risk_guard.record_fees(fill.fee)
                 return ExecutionSpineResult(
                     decision_uuid=queued.decision_uuid,

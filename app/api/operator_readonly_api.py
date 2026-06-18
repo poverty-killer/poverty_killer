@@ -71,6 +71,7 @@ from app.operator_intelligence.pnl_tca import build_pnl_summary, build_tca_dashb
 from app.operator_intelligence.reports import RunReportGenerator
 from app.operator_intelligence.system_map import SYSTEM_MAP_SUMMARY, render_system_map_markdown
 from app.operator_intelligence.watchdog import AlertQueue, build_watchdog_alerts
+from app.run_visibility import read_run_visibility_snapshot, render_run_visibility_html
 
 
 ANSWER_MODE_DETERMINISTIC = "DETERMINISTIC"
@@ -249,6 +250,8 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/world-awareness/events": "read_only_external_intelligence_events",
         "/operator/world-awareness/runtime": "read_only_external_intelligence_provider_runtime",
         "/operator/paper-control-state": "canonical_run_paper_control_state",
+        "/operator/run-visibility": "read_only_local_paper_run_visibility_page",
+        "/operator/run-visibility/status": "read_only_local_paper_run_visibility_status",
         "/operator/latest-run": "read_only_supervisor_session_summary",
         "/operator/runs": "read_only_run_archive",
         "/operator/runs/{run_id}": "read_only_run_archive_detail",
@@ -1606,6 +1609,28 @@ class OperatorSnapshotProvider:
             return self.paper_control_state()
         with self._paper_control_state_lock:
             return self.paper_control_state()
+
+    def run_visibility_status(self) -> dict[str, Any]:
+        snapshot = read_run_visibility_snapshot(self.runtime_config.repo_root)
+        snapshot.update(
+            {
+                "operator_endpoint": "/operator/run-visibility/status",
+                "operator_page": "/operator/run-visibility",
+                "data_source": "LOCAL_RUNTIME_ARTIFACTS",
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "order_submission_occurred": False,
+                "cancel_occurred": False,
+                "liquidation_occurred": False,
+                "live_enabled": False,
+                "real_money_enabled": False,
+                "secrets_values_exposed": False,
+            }
+        )
+        return snapshot
+
+    def run_visibility_page(self) -> HTMLResponse:
+        return _with_no_store_headers(HTMLResponse(render_run_visibility_html(self.run_visibility_status())))
 
     def research(self) -> dict[str, Any]:
         return self.research_registry.snapshot()
@@ -3479,6 +3504,14 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
         if cached and cached.get("fresh") is True:
             return provider.paper_control_state()
         return await run_local(provider.paper_control_state_synchronized)
+
+    @router.get("/run-visibility/status")
+    def run_visibility_status() -> dict[str, Any]:
+        return provider.run_visibility_status()
+
+    @router.get("/run-visibility", include_in_schema=False)
+    def run_visibility_page() -> HTMLResponse:
+        return provider.run_visibility_page()
 
     @router.get("/events")
     async def events():

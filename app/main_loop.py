@@ -5543,6 +5543,8 @@ class MainLoop:
                 "candle_stale_rejected": self._metrics.candle_stale_rejected,
                 "invalid_books_skipped": self._metrics.invalid_books_skipped,
                 "book_processed_count": self._book_processed_count,
+                "broker_position_cache_count": len(self._broker_position_cache),
+                "broker_position_cache_source": self._broker_position_cache_source,
                 "actuation": "diagnostic_trace",
                 "actuation_limits": {
                     "signal_fusion_global": True,

@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
 from dotenv import load_dotenv
@@ -95,6 +96,12 @@ from app.risk.exposure_manager import ExposureManager
 from app.risk.guard import HybridRiskGuard
 from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
 from app.risk.safety import SafetyGate
+from app.run_visibility import (
+    DEFAULT_HEARTBEAT_PATH,
+    RunHeartbeatWriter,
+    build_runtime_heartbeat_payload,
+    utc_now_iso,
+)
 from app.state.state_store import StateStore
 from app.telemetry.event_store import TelemetryEventStore
 from app.utils.time_utils import now_ns
@@ -674,6 +681,12 @@ class SovereignHeartbeat:
         self._health_check_interval = 5.0
         self._signal_handlers_registered = False
         self._stop_event = threading.Event()
+        self._runtime_started_at = utc_now_iso()
+        self._runtime_started_monotonic = time.monotonic()
+        self._last_loop_ts: str | None = None
+        self._last_error: str | None = None
+        heartbeat_path = os.environ.get("POVERTY_KILLER_HEARTBEAT_PATH") or str(DEFAULT_HEARTBEAT_PATH)
+        self._heartbeat_writer = RunHeartbeatWriter(Path(heartbeat_path), repo_root=Path.cwd())
 
         # Temporary diagnostics preserved
         self._candle_recv_count = 0
@@ -713,6 +726,33 @@ class SovereignHeartbeat:
                 },
             )
         )
+
+    def _mark_loop_event(self) -> None:
+        self._last_loop_ts = utc_now_iso()
+
+    def _mark_runtime_error(self, exc: BaseException) -> None:
+        self._last_error = exc.__class__.__name__
+
+    def _write_runtime_heartbeat(
+        self,
+        status: Dict[str, Any] | None = None,
+        *,
+        run_state: str | None = None,
+    ) -> None:
+        try:
+            runtime_status = status if status is not None else self.get_status()
+            payload = build_runtime_heartbeat_payload(
+                runtime_status,
+                pid=os.getpid(),
+                started_at=self._runtime_started_at,
+                started_monotonic=self._runtime_started_monotonic,
+                run_state=run_state or ("RUNNING" if self._running else "STOPPED"),
+                last_loop_ts=self._last_loop_ts,
+                last_error=self._last_error,
+            )
+            self._heartbeat_writer.write(payload)
+        except Exception as exc:
+            logger.warning("Runtime heartbeat write failed: %s", exc)
 
     def _bootstrap_reservation_lifecycle_disabled(self, config: Config) -> None:
         """
@@ -870,6 +910,7 @@ class SovereignHeartbeat:
         self.main_loop.start()
         self._start_background_threads()
         self._start_bounded_duration_timer()
+        self._write_runtime_heartbeat(run_state="RUNNING")
 
         logger.info(
             "Runtime started: main.py owns lifecycle/feed shell; MainLoop owns live runtime body"
@@ -924,6 +965,7 @@ class SovereignHeartbeat:
             logger.exception("Error closing state store: %s", exc)
 
         self._join_background_threads()
+        self._write_runtime_heartbeat(run_state="STOPPED")
         self._shutdown_complete = True
         logger.info(
             "Sovereign heartbeat stopped: reason_code=%s broker_positions_preserved=true broker_flatten_called=false",
@@ -945,7 +987,7 @@ class SovereignHeartbeat:
         logger.info("Entering runtime wait state")
         try:
             while self._running and not self._stop_event.wait(timeout=1.0):
-                pass
+                self._write_runtime_heartbeat(run_state="RUNNING")
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received in runtime wait state")
             self._shutdown_reason_code = "KEYBOARD_INTERRUPT_NO_FLATTEN"
@@ -1099,8 +1141,10 @@ class SovereignHeartbeat:
                 self.insider_engine.ingest_observation(obs)
             except Exception as exc_inner:
                 logger.debug("insider ingest_observation error: %s", exc_inner)
+            self._mark_loop_event()
 
         except Exception as exc:
+            self._mark_runtime_error(exc)
             logger.exception("_on_trade error: %s", exc)
 
     def _on_candle(self, candle: Candle) -> None:
@@ -1115,7 +1159,9 @@ class SovereignHeartbeat:
             )
         try:
             self.main_loop.on_candle(candle)
+            self._mark_loop_event()
         except Exception as exc:
+            self._mark_runtime_error(exc)
             logger.exception("_on_candle error: %s", exc)
 
     def _on_feed_truth(self, feed_truth: dict) -> None:
@@ -1255,7 +1301,9 @@ class SovereignHeartbeat:
             )
         try:
             self.main_loop.on_order_book(snapshot)
+            self._mark_loop_event()
         except Exception as exc:
+            self._mark_runtime_error(exc)
             logger.exception("_on_order_book error: %s", exc)
 
     def _start_polling_client(self) -> None:
@@ -1366,6 +1414,7 @@ class SovereignHeartbeat:
             logger.warning("HEALTH ALERT: REST feed latency not ready!")
 
         logger.debug("Health check: %s", status["execution_engine"]["is_running"])
+        self._write_runtime_heartbeat(self.get_status(), run_state="RUNNING")
 
     def _log_health(self) -> None:
         """Log system health summary."""

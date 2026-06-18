@@ -61,6 +61,17 @@ def test_launcher_passes_duration_to_runtime_for_graceful_shutdown_accounting():
     assert "did not exit gracefully within 30 seconds" in text
 
 
+def test_launcher_prints_child_log_paths_before_start_for_external_supervisor():
+    text = _script_text()
+
+    start_index = text.index("Starting bounded Alpaca PAPER run")
+    process_index = text.index("Start-Process")
+    child_log_block = text[start_index:process_index]
+
+    assert 'Write-Host "stdout: $stdoutPath"' in child_log_block
+    assert 'Write-Host "stderr: $stderrPath"' in child_log_block
+
+
 def test_launcher_runs_preflight_from_temp_python_file_not_python_dash_c():
     text = _script_text()
 
