@@ -109,6 +109,7 @@ from app.market.venue_capabilities import (
     classify_quote_session,
 )
 from app.telemetry.event_store import TelemetryEventStore
+from app.monitoring.stall_watchdog import StallWatchdog
 from app.symbol_runtime import SymbolRuntime
 from app.strategies.council_metadata import (
     build_council_metadata,
@@ -1652,11 +1653,59 @@ class MainLoop:
 
         self._metrics = LoopMetrics()
         self._lock = threading.Lock()
+        self._decision_stall_watchdog = StallWatchdog.from_env(
+            component="MainLoop.decision_compile_handoff"
+        )
         self._running = False
 
         logger.info("MainLoop initialized: symbol=%s active_symbols=%s (Per-Symbol Shans Ownership)",
                    symbol, list(active_symbols))
         self._log_runtime_profile_banner()
+
+    def _arm_decision_stall_watchdog(
+        self,
+        *,
+        symbol: str,
+        exchange_ts_ns: int,
+        winning_sleeve: Any,
+        signal: Any,
+        strategy_vote: Any,
+    ) -> int:
+        """Arm a diagnostic-only watchdog for the decision-compile handoff."""
+        watchdog = getattr(self, "_decision_stall_watchdog", None)
+        arm = getattr(watchdog, "arm", None)
+        if not callable(arm):
+            return 0
+        try:
+            return int(
+                arm(
+                    "strategy_vote_ready_to_dispatch_exit",
+                    metadata={
+                        "symbol": symbol,
+                        "exchange_ts_ns": exchange_ts_ns,
+                        "winning_sleeve": repr(winning_sleeve),
+                        "signal_side": str(getattr(signal, "side", "")),
+                        "signal_strategy": str(getattr(signal, "strategy", "")),
+                        "decision_uuid": str(getattr(strategy_vote, "decision_uuid", "") or ""),
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.warning("Decision stall watchdog arm failed: %s", exc)
+            return 0
+
+    def _cancel_decision_stall_watchdog(self, token: int) -> None:
+        """Cancel the diagnostic-only decision watchdog without affecting flow."""
+        if not token:
+            return
+        watchdog = getattr(self, "_decision_stall_watchdog", None)
+        cancel = getattr(watchdog, "cancel", None)
+        if not callable(cancel):
+            return
+        try:
+            cancel(token)
+        except Exception as exc:
+            logger.warning("Decision stall watchdog cancel failed: %s", exc)
 
     def _get_runtime(self, symbol: str) -> Optional[SymbolRuntime]:
         """Get runtime container for a symbol."""
@@ -4076,6 +4125,20 @@ class MainLoop:
             return
 
         logger.info("[DISPATCH] strategy_vote_ready sleeve=%s", repr(winning_sleeve))
+        stall_watchdog_token = 0
+        arm_decision_stall_watchdog = getattr(
+            self,
+            "_arm_decision_stall_watchdog",
+            None,
+        )
+        if callable(arm_decision_stall_watchdog):
+            stall_watchdog_token = arm_decision_stall_watchdog(
+                symbol=symbol,
+                exchange_ts_ns=exchange_ts_ns,
+                winning_sleeve=winning_sleeve,
+                signal=signal,
+                strategy_vote=strategy_vote,
+            )
 
         commander = getattr(self, "commander", None)
         get_aggression_contract = getattr(
@@ -4401,6 +4464,13 @@ class MainLoop:
                 frame_output,
                 frame_status,
             )
+            cancel_decision_stall_watchdog = getattr(
+                self,
+                "_cancel_decision_stall_watchdog",
+                None,
+            )
+            if callable(cancel_decision_stall_watchdog):
+                cancel_decision_stall_watchdog(stall_watchdog_token)
             return
 
         submitted = self.execution_engine.submit_signal(
@@ -4462,6 +4532,13 @@ class MainLoop:
                 symbol,
                 getattr(decision_record, 'decision_uuid', '<missing>'),
             )
+        cancel_decision_stall_watchdog = getattr(
+            self,
+            "_cancel_decision_stall_watchdog",
+            None,
+        )
+        if callable(cancel_decision_stall_watchdog):
+            cancel_decision_stall_watchdog(stall_watchdog_token)
 
     def _update_shadow_front_overlays(self, symbol: str, runtime: SymbolRuntime, exchange_ts_ns: int) -> None:
         """
