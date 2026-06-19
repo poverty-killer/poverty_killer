@@ -332,6 +332,8 @@ class ExecutionEngine:
         self._last_admission_block_result: Optional[ExecutionSpineResult] = None
         self._cancel_attempted_order_ids: set[str] = set()
         self._cancel_already_attempted_logged_order_ids: set[str] = set()
+        self._zombie_sweep_in_progress = False
+        self._zombie_sweep_rerun_pending = False
         self._zombie_sweeper_errors: int = 0
         self._sweeper_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
@@ -2154,12 +2156,21 @@ class ExecutionEngine:
 
     def _cancel_pending_order_with_pcv(self, order_id: str) -> bool:
         """Cancel a pending order with PCV. Normal operations only."""
-        if order_id in self._cancel_attempted_order_ids:
+        with self._lock:
+            pending_order_present = order_id in self._state.pending_orders
+            cancel_already_attempted = order_id in self._cancel_attempted_order_ids
+        if not pending_order_present:
+            return False
+
+        if cancel_already_attempted:
             if self._router_order_is_terminal(order_id):
                 self._remove_pending_order(order_id)
                 return True
-            if order_id not in self._cancel_already_attempted_logged_order_ids:
-                self._cancel_already_attempted_logged_order_ids.add(order_id)
+            with self._lock:
+                should_log = order_id not in self._cancel_already_attempted_logged_order_ids
+                if should_log:
+                    self._cancel_already_attempted_logged_order_ids.add(order_id)
+            if should_log:
                 logger.info(
                     "[OMS_DIAG] CANCEL_SKIPPED fields=%s",
                     {
@@ -2176,7 +2187,15 @@ class ExecutionEngine:
             )
             return False
         try:
-            self._cancel_attempted_order_ids.add(order_id)
+            if self._router_order_is_terminal(order_id):
+                self._remove_pending_order(order_id)
+                return True
+            with self._lock:
+                if order_id not in self._state.pending_orders:
+                    return False
+                if order_id in self._cancel_attempted_order_ids:
+                    return False
+                self._cancel_attempted_order_ids.add(order_id)
             cancel_success = self.order_router.cancel_order(order_id)
             if not cancel_success:
                 return False
@@ -2480,6 +2499,34 @@ class ExecutionEngine:
 
     def _sweep_zombie_orders(self) -> None:
         """Sweep and cancel zombie orders (normal mode with PCV)."""
+        with self._lock:
+            if self._zombie_sweep_in_progress:
+                self._zombie_sweep_rerun_pending = True
+                logger.info(
+                    "[OMS_DIAG] ZOMBIE_SWEEP_REENTRY_DEFERRED fields=%s",
+                    {"rerun_pending": True},
+                )
+                return
+            self._zombie_sweep_in_progress = True
+            self._zombie_sweep_rerun_pending = False
+
+        try:
+            self._sweep_zombie_orders_once()
+            with self._lock:
+                rerun_requested = self._zombie_sweep_rerun_pending
+                self._zombie_sweep_rerun_pending = False
+            if rerun_requested:
+                logger.info("[OMS_DIAG] ZOMBIE_SWEEP_REENTRY_RERUN")
+                self._sweep_zombie_orders_once()
+                with self._lock:
+                    self._zombie_sweep_rerun_pending = False
+        finally:
+            with self._lock:
+                self._zombie_sweep_in_progress = False
+                self._zombie_sweep_rerun_pending = False
+
+    def _sweep_zombie_orders_once(self) -> None:
+        """Run one zombie sweep pass without holding engine lock across risk callouts."""
         current_ns = now_ns()
         self._prune_terminal_pending_orders()
 
@@ -2511,11 +2558,13 @@ class ExecutionEngine:
                     oldest_ts_ns = order_ts_ns
 
             total_value = sum(o.quantity * (o.limit_price or Decimal("0")) for o in self._state.pending_orders.values())
-            self.risk_guard.update_pending_orders(
-                count=len(self._state.pending_orders),
-                total_value=float(total_value),  # explicit float() at risk boundary — risk_guard is out of F4A scope
-                oldest_timestamp=self._timestamp_ns_to_utc_datetime(oldest_ts_ns),
-            )
+            pending_count = len(self._state.pending_orders)
+
+        self.risk_guard.update_pending_orders(
+            count=pending_count,
+            total_value=float(total_value),  # explicit float() at risk boundary - risk_guard is out of F4A scope
+            oldest_timestamp=self._timestamp_ns_to_utc_datetime(oldest_ts_ns),
+        )
 
     def _monitor_loop(self) -> None:
         """Background thread for latency monitoring."""

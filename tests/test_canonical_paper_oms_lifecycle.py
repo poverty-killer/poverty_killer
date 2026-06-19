@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -101,6 +102,45 @@ def _risk_guard_mock() -> MagicMock:
     risk_guard.register_vol_fuse_callback = MagicMock()
     risk_guard.update_pending_orders = MagicMock()
     return risk_guard
+
+
+class _ReentrantZombieRiskGuard:
+    def __init__(self, *, max_callbacks: int = 4) -> None:
+        self.zombie_callback = None
+        self.update_calls: list[dict[str, object]] = []
+        self.callback_calls = 0
+        self.max_callbacks = max_callbacks
+
+    def register_recalibrate_callback(self, _callback):
+        return None
+
+    def register_emergency_callback(self, _callback):
+        return None
+
+    def register_zombie_callback(self, callback):
+        self.zombie_callback = callback
+
+    def register_lag_callback(self, _callback):
+        return None
+
+    def register_vol_fuse_callback(self, _callback):
+        return None
+
+    def update_pending_orders(self, *, count: int, total_value: float, oldest_timestamp):
+        self.update_calls.append(
+            {
+                "count": count,
+                "total_value": total_value,
+                "oldest_timestamp": oldest_timestamp,
+            }
+        )
+        if count > 0 and self.zombie_callback is not None:
+            self.callback_calls += 1
+            if self.callback_calls > self.max_callbacks:
+                raise AssertionError("zombie sweep recursion storm")
+            self.zombie_callback()
+            return True
+        return False
 
 
 def _execution_engine_for_zombie_test(
@@ -316,6 +356,42 @@ def test_zombie_sweeper_defers_broker_working_order_without_cancel(monkeypatch):
     risk_guard.update_pending_orders.assert_called_once()
 
 
+def test_zombie_sweeper_reentrant_risk_callback_completes_without_recursion_storm(monkeypatch):
+    current_ns = T0_NS + 20 * 1_000_000_000
+    stale_submit_ns = current_ns - 10 * 1_000_000_000
+    router = MagicMock()
+    router.is_order_terminal.return_value = False
+    router.get_order_status.return_value = "open"
+    router.cancel_order.return_value = True
+    risk_guard = _ReentrantZombieRiskGuard(max_callbacks=3)
+    engine = ExecutionEngine(
+        commander=MagicMock(spec=Commander),
+        risk_guard=risk_guard,
+        order_router=router,
+        masking_layer=MagicMock(),
+        max_pending_age_sec=1.0,
+    )
+    engine._state.pending_orders["broker-open-order"] = SimpleNamespace(
+        exchange_ts_ns=stale_submit_ns,
+        receive_ts_ns=stale_submit_ns,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1"),
+    )
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+
+    thread = threading.Thread(target=engine._sweep_zombie_orders, daemon=True)
+    thread.start()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert len(risk_guard.update_calls) == 2
+    assert risk_guard.callback_calls == 2
+    assert "broker-open-order" in engine._state.pending_orders
+    router.cancel_order.assert_not_called()
+    assert engine._zombie_sweep_in_progress is False
+    assert engine._zombie_sweep_rerun_pending is False
+
+
 def test_zombie_sweeper_removes_terminal_broker_order_without_cancel(monkeypatch):
     current_ns = T0_NS + 20 * 1_000_000_000
     stale_submit_ns = current_ns - 10 * 1_000_000_000
@@ -336,6 +412,30 @@ def test_zombie_sweeper_removes_terminal_broker_order_without_cancel(monkeypatch
 
     router.cancel_order.assert_not_called()
     assert "broker-filled-order" not in engine._state.pending_orders
+    risk_guard.update_pending_orders.assert_called_once()
+
+
+def test_zombie_sweeper_revalidates_terminal_order_before_cancel(monkeypatch):
+    current_ns = T0_NS + 60 * 1_000_000_000
+    stale_submit_ns = current_ns - 40 * 1_000_000_000
+    router = MagicMock()
+    router.is_order_terminal.side_effect = [False, True]
+    router.get_order_status.return_value = "unknown"
+    router.cancel_order.return_value = True
+    engine, risk_guard = _execution_engine_for_zombie_test(router, max_pending_age_sec=1.0)
+    engine._state.pending_orders["filled-before-cancel"] = SimpleNamespace(
+        exchange_ts_ns=stale_submit_ns,
+        receive_ts_ns=stale_submit_ns,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1"),
+    )
+    monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
+
+    engine._sweep_zombie_orders()
+
+    router.cancel_order.assert_not_called()
+    assert "filled-before-cancel" not in engine._state.pending_orders
+    assert "filled-before-cancel" not in engine._cancel_attempted_order_ids
     risk_guard.update_pending_orders.assert_called_once()
 
 
@@ -493,6 +593,7 @@ def test_cancel_already_attempted_logs_once_and_does_not_repeat(caplog):
         masking_layer=MagicMock(),
         max_pending_age_sec=1.0,
     )
+    engine._state.pending_orders["order-1"] = _order("order-1")
 
     with caplog.at_level(logging.INFO):
         assert engine._cancel_pending_order_with_pcv("order-1") is False
