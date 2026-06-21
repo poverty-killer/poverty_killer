@@ -11,6 +11,7 @@ from app.execution.alpaca_paper_adapter import (
     AlpacaPaperCredentials,
 )
 from app.execution.broker_gateway import BrokerGatewayAdapter, BrokerGatewayError, BrokerOrderSubmitRequest
+from app.execution.broker_gateway import BrokerAdapterIdentity, BrokerGatewayResponse, NormalizedBrokerStatus
 from app.execution.order_router import OrderRouter
 from app.execution.paper_broker import PaperBroker
 from app.models import OrderRequest
@@ -33,6 +34,113 @@ class StubTransport:
         if (method, path) not in self.responses and method == "GET" and path == "/v2/orders":
             return 200, []
         return self.responses.get((method, path), (200, {}))
+
+
+class RecordingGatewayAdapter:
+    def __init__(
+        self,
+        *,
+        account_payload: dict | None = None,
+        open_orders_payload: list | dict | None = None,
+        account_error: BrokerGatewayError | None = None,
+        open_orders_error: BrokerGatewayError | None = None,
+    ) -> None:
+        self._identity = BrokerAdapterIdentity(
+            adapter_id="alpaca_paper_rest",
+            venue_id="alpaca",
+            portal_id="alpaca_paper",
+            environment="paper",
+            base_url=EXPECTED_ALPACA_PAPER_BASE_URL,
+            credential_status="configured",
+            supported_methods=frozenset({"GET", "POST"}),
+            supported_asset_classes=frozenset({"equity", "crypto"}),
+            live_blocked=True,
+        )
+        self.account_payload = account_payload if account_payload is not None else {
+            "id": "acct-test",
+            "status": "ACTIVE",
+            "cash": "100000",
+            "buying_power": "100000",
+        }
+        self.open_orders_payload = [] if open_orders_payload is None else open_orders_payload
+        self.account_error = account_error
+        self.open_orders_error = open_orders_error
+        self.submitted_orders: list[BrokerOrderSubmitRequest] = []
+        self._counts = {"GET": 0, "POST": 0, "DELETE": 0}
+
+    @property
+    def identity(self) -> BrokerAdapterIdentity:
+        return self._identity
+
+    @property
+    def request_counts(self) -> dict[str, int]:
+        return dict(self._counts)
+
+    def _response(
+        self,
+        *,
+        method: str,
+        endpoint_path: str,
+        ok: bool = True,
+        payload: object = None,
+        broker_order_id: str | None = None,
+        normalized_status: str = NormalizedBrokerStatus.UNKNOWN.value,
+        reason_code: str | None = None,
+    ) -> BrokerGatewayResponse:
+        if method in self._counts:
+            self._counts[method] += 1
+        return BrokerGatewayResponse(
+            adapter_id=self.identity.adapter_id,
+            venue_id=self.identity.venue_id,
+            portal_id=self.identity.portal_id,
+            environment=self.identity.environment,
+            request_method=method,
+            endpoint_path=endpoint_path,
+            ok=ok,
+            mutation_occurred=method == "POST" and ok,
+            live_blocked=self.identity.live_blocked,
+            broker_order_id=broker_order_id,
+            normalized_status=normalized_status,
+            reason_code=reason_code,
+            payload=payload,
+        )
+
+    def get_account(self) -> BrokerGatewayResponse:
+        if self.account_error is not None:
+            raise self.account_error
+        return self._response(method="GET", endpoint_path="/v2/account", payload=self.account_payload)
+
+    def get_positions(self) -> BrokerGatewayResponse:
+        return self._response(method="GET", endpoint_path="/v2/positions", payload=[])
+
+    def get_open_orders(self) -> BrokerGatewayResponse:
+        if self.open_orders_error is not None:
+            raise self.open_orders_error
+        return self._response(method="GET", endpoint_path="/v2/orders", payload=self.open_orders_payload)
+
+    def get_order_status(self, order_id: str) -> BrokerGatewayResponse:
+        return self._response(
+            method="GET",
+            endpoint_path=f"/v2/orders/{order_id}",
+            payload={"id": order_id, "status": "open", "symbol": "AAPL"},
+            broker_order_id=order_id,
+            normalized_status=NormalizedBrokerStatus.OPEN.value,
+        )
+
+    def submit_order(self, order: BrokerOrderSubmitRequest) -> BrokerGatewayResponse:
+        self.submitted_orders.append(order)
+        return self._response(
+            method="POST",
+            endpoint_path="/v2/orders",
+            payload={
+                "id": "broker-recorded-1",
+                "client_order_id": order.client_order_id,
+                "status": "open",
+                "symbol": order.symbol,
+            },
+            broker_order_id="broker-recorded-1",
+            normalized_status=NormalizedBrokerStatus.OPEN.value,
+        )
 
 
 def _creds(**overrides: str) -> AlpacaPaperCredentials:
@@ -379,6 +487,143 @@ def test_order_router_gateway_subtracts_open_buy_reservations_before_post():
     assert response.reconciliation_metadata["reserved_open_buy_notional"] == "50.00"
     assert response.reconciliation_metadata["available_after_open_buy_reservations"] == "75.00"
     assert [call["method"] for call in transport.calls] == ["GET", "GET"]
+
+
+def test_order_router_gateway_buying_power_gate_exempts_sell_exit_when_cash_exhausted():
+    adapter = RecordingGatewayAdapter(
+        account_payload={
+            "id": "acct-exhausted",
+            "status": "ACTIVE",
+            "cash": "-11",
+            "buying_power": "0",
+            "non_marginable_buying_power": "0",
+        }
+    )
+    router = OrderRouter(primary_exchange="alpaca", paper_mode=True, broker_gateway_adapter=adapter)
+    sell_order = _order(order_id="client-sell-exit", side=OrderSide.SELL, quantity=Decimal("1"), limit_price=Decimal("100"))
+
+    fill = router.submit_order(sell_order)
+    response = router.get_gateway_response(sell_order.id)
+    accounting = router.get_oms_shutdown_accounting()
+
+    assert fill is None
+    assert response is not None
+    assert response.ok is True
+    assert response.broker_order_id == "broker-recorded-1"
+    assert adapter.submitted_orders == [
+        BrokerOrderSubmitRequest(
+            symbol="AAPL",
+            side="sell",
+            order_type="limit",
+            time_in_force="day",
+            quantity=Decimal("1"),
+            limit_price=Decimal("100"),
+            client_order_id="client-sell-exit",
+            asset_class="equity",
+            metadata={
+                "decision_uuid": "decision-client-sell-exit",
+                "strategy": "sector_rotation",
+                "execution_adapter": "alpaca_paper_rest",
+                "portal_name": "alpaca_paper",
+                "venue_id": "alpaca",
+                "environment": "paper",
+            },
+        )
+    ]
+    assert accounting["buying_power_pre_post_gate_event_count"] == 0
+    assert all(
+        "BUYING_POWER" not in str(event.get("reason_code", ""))
+        for event in accounting["broker_boundary_events"]
+    )
+    assert accounting["broker_boundary_events"][-1]["broker_post_attempted"] is True
+    assert accounting["broker_boundary_events"][-1]["broker_post_authorized"] is True
+    assert adapter.request_counts["POST"] == 1
+
+
+def test_order_router_gateway_buying_power_gate_fails_closed_before_submit_for_unknown_buy_truth():
+    scenarios = [
+        (
+            "account_read_error",
+            RecordingGatewayAdapter(account_error=BrokerGatewayError("account_read_failed", message="read failed")),
+            _order(order_id="client-account-read-error", quantity=Decimal("1"), limit_price=Decimal("100")),
+            None,
+            "BUYING_POWER_TRUTH_UNAVAILABLE_PRE_POST",
+        ),
+        (
+            "missing_buying_power_basis",
+            RecordingGatewayAdapter(account_payload={"id": "acct-missing", "status": "ACTIVE"}),
+            _order(order_id="client-missing-basis", quantity=Decimal("1"), limit_price=Decimal("100")),
+            None,
+            "BUYING_POWER_TRUTH_UNAVAILABLE_PRE_POST",
+        ),
+        (
+            "market_order_notional_unknown",
+            RecordingGatewayAdapter(),
+            _order(
+                order_id="client-market-notional-unknown",
+                order_type=OrderType.MARKET,
+                limit_price=None,
+            ),
+            None,
+            "BUYING_POWER_NOTIONAL_UNKNOWN_PRE_POST",
+        ),
+        (
+            "zero_notional",
+            RecordingGatewayAdapter(),
+            _order(order_id="client-zero-notional", quantity=Decimal("1"), limit_price=Decimal("100")),
+            BrokerOrderSubmitRequest(
+                symbol="AAPL",
+                side="buy",
+                order_type="limit",
+                time_in_force="day",
+                quantity=Decimal("0"),
+                limit_price=Decimal("100"),
+                client_order_id="client-zero-notional",
+                asset_class="equity",
+            ),
+            "BUYING_POWER_NOTIONAL_UNKNOWN_PRE_POST",
+        ),
+        (
+            "account_not_active",
+            RecordingGatewayAdapter(
+                account_payload={
+                    "id": "acct-inactive",
+                    "status": "INACTIVE",
+                    "cash": "100000",
+                    "buying_power": "100000",
+                }
+            ),
+            _order(order_id="client-inactive-account", quantity=Decimal("1"), limit_price=Decimal("100")),
+            None,
+            "ACCOUNT_NOT_ACTIVE_PRE_POST",
+        ),
+        (
+            "open_order_read_error",
+            RecordingGatewayAdapter(
+                open_orders_error=BrokerGatewayError("open_orders_read_failed", message="open order read failed")
+            ),
+            _order(order_id="client-open-order-read-error", quantity=Decimal("1"), limit_price=Decimal("100")),
+            None,
+            "BUYING_POWER_TRUTH_UNAVAILABLE_PRE_POST",
+        ),
+    ]
+
+    for name, adapter, order, request_override, expected_reason in scenarios:
+        router = OrderRouter(primary_exchange="alpaca", paper_mode=True, broker_gateway_adapter=adapter)
+
+        if request_override is None:
+            router.submit_order(order)
+            response = router.get_gateway_response(order.id)
+        else:
+            response = router._gateway_buying_power_pre_post_response(order, request_override)
+
+        assert response is not None, name
+        assert response.ok is False, name
+        assert response.reason_code == expected_reason, name
+        assert response.reconciliation_metadata["blocked_before_submit"] is True, name
+        assert response.reconciliation_metadata["broker_post_attempted"] is False, name
+        assert adapter.submitted_orders == [], name
+        assert adapter.request_counts["POST"] == 0, name
 
 
 def test_order_router_gateway_blocks_sell_cancel_replace_without_gateway_mutation():
