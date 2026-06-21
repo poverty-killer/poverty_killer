@@ -540,6 +540,25 @@ def test_risk_guard_accepts_pending_order_ns_timestamp_without_datetime_math_err
     assert guard._state.oldest_pending_order_ts == datetime.fromtimestamp(T0_NS / 1_000_000_000, tz=timezone.utc)
 
 
+def test_risk_guard_assessment_uses_aware_pending_order_timestamp(tmp_path):
+    guard = HybridRiskGuard(
+        state_file=str(tmp_path / "risk_state.json"),
+        backup_file=str(tmp_path / "risk_state.backup"),
+        zombie_order_timeout_sec=999999,
+    )
+    fresh_pending_ts = datetime.now(timezone.utc)
+    guard.update_pending_orders(
+        count=1,
+        total_value=1.0,
+        oldest_timestamp=fresh_pending_ts,
+    )
+
+    assessment = guard.assess_state(current_equity=20_000.0)
+
+    assert assessment["zombie_detected"] is False
+    assert guard._state.oldest_pending_order_ts == fresh_pending_ts
+
+
 def test_cancel_ack_terminal_order_is_removed_from_engine_pending_orders(tmp_path):
     adapter, _transport = _adapter_with_ack()
     router = OrderRouter(

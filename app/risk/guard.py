@@ -919,9 +919,14 @@ class HybridRiskGuard:
                 action = "AGGRESSIVE"
                 reason = "Near peak - full aggression"
 
-            # Check for zombie orders
-            zombie_detected = self._state.oldest_pending_order_ts and \
-                (datetime.utcnow() - self._state.oldest_pending_order_ts).total_seconds() > self.zombie_order_timeout_sec
+            # Check for zombie orders using the same UTC-aware timestamp path as update_pending_orders().
+            oldest_pending_order_ts = self._normalize_pending_order_timestamp(self._state.oldest_pending_order_ts)
+            self._state.oldest_pending_order_ts = oldest_pending_order_ts
+            zombie_detected = bool(
+                oldest_pending_order_ts
+                and (datetime.now(timezone.utc) - oldest_pending_order_ts).total_seconds()
+                > self.zombie_order_timeout_sec
+            )
 
             result = {
                 "action": action,
