@@ -69,11 +69,26 @@ def test_commercial_navigation_groups_keep_all_pages_accessible():
     text = _app_text()
 
     assert "NAV_GROUPS" in text
-    for group in ["Operate", "Understand", "Setup", "Research / Proof", "System"]:
+    for group in ["Watch", "Intelligence", "Operate", "Proof"]:
         assert group in text
     for page_id in [
-        "positions",
+        "overview",
+        "performance",
+        "trades",
+        "markets",
+        "advisor",
+        "health",
+        "controls",
+        "log",
+        "connections",
         "command",
+        "positions",
+        "providers",
+        "diagnostics",
+    ]:
+        assert f'"{page_id}"' in text
+    assert '"Activation Proof"' not in text
+    for page_id in [
         "action",
         "activity",
         "runs",
@@ -97,6 +112,34 @@ def test_commercial_navigation_groups_keep_all_pages_accessible():
     assert "main.innerHTML = screens.map" not in text
     assert "group.items.map" in text
     assert "showScreen(button.dataset.screen)" in text
+
+
+def test_operator_cockpit_is_default_and_has_server_gated_selector_controls():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    index = Path("ui/operator-control-panel/index.html").read_text(encoding="utf-8")
+
+    assert "Poverty Killer Operator Cockpit" in index
+    assert 'let activeScreenId = "overview"' in text
+    assert 'renderScreens("overview")' in text
+    assert "/operator/cockpit/capabilities" in text
+    assert "/operator/cockpit/asset-mandate" in text
+    assert "/operator/cockpit/day-trader-mode" in text
+    assert "renderAssetClassSelector" in text
+    assert "data-cockpit-asset" in text
+    assert "data-cockpit-day-trader" in text
+    assert "NEXT_CAPITAL_ONLY_EXISTING_POSITIONS_RIDE" in text
+    assert "existingPositionsLiquidated" in text
+    assert "brokerMutationOccurred" in text
+    assert "strategyMutationOccurred" in text
+    assert "liquidation=${result.liquidation_occurred === true}" in text
+    assert "Live Alpaca credentials are deliberately not accepted on this screen." in text
+    assert "renderConnections" in text
+    assert "No manual buy/sell, close, cancel, force-trade, flatten, or liquidation controls exist in this cockpit." in text
+    assert ".asset-selector" in css
+    assert ".cockpit-truth-banner" in css
+    assert ".scan-strip" in css
+    assert ".market-chip-grid" in css
 
 
 def test_ai_advisor_is_docked_and_resizes_layout_not_overlay_first():

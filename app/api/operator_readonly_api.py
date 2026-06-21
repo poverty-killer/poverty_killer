@@ -122,6 +122,7 @@ from app.world_awareness.scheduler import WorldAwarenessProviderRuntime
 
 API_VERSION = "operator-backend-v1"
 OPERATOR_ACTIVATION_VERSION = "operator-activation-e2e-truth6-20260602"
+OPERATOR_UI_ASSET_VERSION = "ui1-cockpit"
 
 
 def _utc_now() -> str:
@@ -162,13 +163,14 @@ def _with_no_store_headers(response: HTMLResponse) -> HTMLResponse:
 
 def _render_operator_ui_index(ui_dir: Path, version: str) -> str:
     html = (ui_dir / "index.html").read_text(encoding="utf-8")
-    safe_version = re.sub(r"[^A-Za-z0-9._-]", "", version or "") or "UNKNOWN_NOT_AVAILABLE"
+    safe_build_version = re.sub(r"[^A-Za-z0-9._-]", "", version or "") or "UNKNOWN_NOT_AVAILABLE"
+    safe_asset_version = f"{safe_build_version}-{OPERATOR_UI_ASSET_VERSION}"
     for asset in ("styles.css", "mock-data.js", "app.js"):
-        html = re.sub(rf'{re.escape(asset)}\?v=[^"]+', f"{asset}?v={safe_version}", html)
-        html = html.replace(f'{asset}"', f'{asset}?v={safe_version}"')
+        html = re.sub(rf'{re.escape(asset)}\?v=[^"]+', f"{asset}?v={safe_asset_version}", html)
+        html = html.replace(f'{asset}"', f'{asset}?v={safe_asset_version}"')
     build_script = (
-        f'<script>window.PK_OPERATOR_UI_BUILD_COMMIT = "{safe_version}";'
-        f'window.PK_OPERATOR_UI_ASSET_VERSION = "{safe_version}";</script>'
+        f'<script>window.PK_OPERATOR_UI_BUILD_COMMIT = "{safe_build_version}";'
+        f'window.PK_OPERATOR_UI_ASSET_VERSION = "{safe_asset_version}";</script>'
     )
     if "window.PK_OPERATOR_UI_BUILD_COMMIT" not in html:
         html = html.replace("    <script src=", f"    {build_script}\n    <script src=", 1)
@@ -249,6 +251,9 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/world-awareness/providers": "read_only_external_intelligence_provider_health",
         "/operator/world-awareness/events": "read_only_external_intelligence_events",
         "/operator/world-awareness/runtime": "read_only_external_intelligence_provider_runtime",
+        "/operator/cockpit/capabilities": "read_only_operator_cockpit_feature_gates",
+        "/operator/cockpit/asset-mandate": "local_operator_mandate_view_gate_no_trading_mutation",
+        "/operator/cockpit/day-trader-mode": "local_operator_day_trader_gate_no_strategy_mutation",
         "/operator/paper-control-state": "canonical_run_paper_control_state",
         "/operator/run-visibility": "read_only_local_paper_run_visibility_page",
         "/operator/run-visibility/status": "read_only_local_paper_run_visibility_status",
@@ -963,6 +968,155 @@ class OperatorSnapshotProvider:
                 "broker boundary authority",
             ],
             "last_live_readiness_audit": None,
+        }
+
+    def cockpit_capabilities(self) -> dict[str, Any]:
+        endpoint_authority = alpaca_endpoint_authority(self._paper_process_env(self._refresh_provider_env()))
+        return {
+            "source": "OPERATOR_COCKPIT_CAPABILITIES",
+            "schema_version": "operator-cockpit-capabilities-v1",
+            "active_asset_class": "crypto",
+            "mandate_policy": {
+                "switch_semantics": "NEXT_CAPITAL_ONLY_EXISTING_POSITIONS_RIDE",
+                "existing_positions_liquidated": False,
+                "manual_trade_controls_available": False,
+                "server_authority_required": True,
+                "detail": "Changing the cockpit mandate can only affect future capital allocation after a server-side feature gate allows it. Existing positions ride under governed exits; no liquidation, close, cancel, flatten, or manual order path is exposed.",
+            },
+            "asset_classes": [
+                {
+                    "id": "crypto",
+                    "label": "Crypto",
+                    "enabled": True,
+                    "status": "ACTIVE",
+                    "reason_code": "CRYPTO_MANDATE_ACTIVE",
+                    "server_rejected": False,
+                },
+                {
+                    "id": "equities",
+                    "label": "Equities",
+                    "enabled": False,
+                    "status": "GATED",
+                    "reason_code": "EQUITIES_FEATURE_FLAG_OFF",
+                    "server_rejected": True,
+                },
+                {
+                    "id": "auto",
+                    "label": "Auto",
+                    "enabled": False,
+                    "status": "GATED",
+                    "reason_code": "AUTO_MANDATE_FEATURE_FLAG_OFF",
+                    "server_rejected": True,
+                },
+            ],
+            "day_trader_mode": {
+                "enabled": False,
+                "status": "GATED",
+                "reason_code": "DAY_TRADER_MODE_FEATURE_FLAG_OFF",
+                "server_rejected": True,
+                "strategy_wiring_active": False,
+                "detail": "Day-trader mode is visible for operator planning only. The server rejects activation until a future Board packet turns on the feature flag and strategy authority.",
+            },
+            "control_policy": {
+                "ui_is_trading_engine": False,
+                "manual_trading_available": False,
+                "force_trade_available": False,
+                "live_operation_available": False,
+                "broker_mutation_available": False,
+                "strategy_mutation_available": False,
+            },
+            "endpoint": {
+                "paper_endpoint_only": endpoint_authority["paper_endpoint_only"],
+                "paper_endpoint_status": endpoint_authority["status"],
+                "paper_endpoint_display": endpoint_authority["alpaca_endpoint_display"],
+                "paper_endpoint_family": endpoint_authority["alpaca_trading_endpoint_family"],
+                "paper_endpoint_host": endpoint_authority["alpaca_trading_endpoint_host"],
+                "alpaca_live_endpoint_blocked": endpoint_authority["alpaca_live_endpoint_blocked"],
+            },
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "runtime_mutation_occurred": False,
+            "strategy_mutation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+
+    def cockpit_asset_mandate(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        raw_asset_class = str((payload or {}).get("asset_class") or "").strip().lower().replace("-", "_")
+        aliases = {
+            "crypto": "crypto",
+            "cryptocurrency": "crypto",
+            "equity": "equities",
+            "equities": "equities",
+            "stocks": "equities",
+            "auto": "auto",
+            "automatic": "auto",
+        }
+        asset_class = aliases.get(raw_asset_class, raw_asset_class or "unknown")
+        common = {
+            "source": "OPERATOR_COCKPIT_MANDATE_GATE",
+            "schema_version": "operator-cockpit-mandate-result-v1",
+            "requested_asset_class": asset_class,
+            "active_asset_class": "crypto",
+            "switch_semantics": "NEXT_CAPITAL_ONLY_EXISTING_POSITIONS_RIDE",
+            "existing_positions_liquidated": False,
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "runtime_mutation_occurred": False,
+            "strategy_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "liquidation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+        if asset_class == "crypto":
+            return {
+                **common,
+                "status": "ACCEPTED",
+                "accepted": True,
+                "reason_code": "CRYPTO_MANDATE_ALREADY_ACTIVE",
+                "detail": "Crypto is the only active cockpit mandate. No broker, runtime, or strategy mutation was needed.",
+            }
+        if asset_class in {"equities", "auto"}:
+            return {
+                **common,
+                "status": "REFUSED",
+                "accepted": False,
+                "reason_code": f"{asset_class.upper()}_FEATURE_FLAG_OFF",
+                "detail": "This asset-class mandate is visible but server-gated. Existing positions remain untouched and future capital stays on the active crypto mandate.",
+            }
+        return {
+            **common,
+            "status": "REFUSED",
+            "accepted": False,
+            "reason_code": "UNKNOWN_ASSET_CLASS",
+            "detail": "Unknown cockpit mandate. Allowed visible values are crypto, equities, and auto; only crypto is active.",
+        }
+
+    def cockpit_day_trader_mode(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        requested = bool((payload or {}).get("enabled"))
+        return {
+            "source": "OPERATOR_COCKPIT_DAY_TRADER_GATE",
+            "schema_version": "operator-cockpit-day-trader-result-v1",
+            "requested_enabled": requested,
+            "enabled": False,
+            "status": "REFUSED",
+            "accepted": False,
+            "reason_code": "DAY_TRADER_MODE_FEATURE_FLAG_OFF",
+            "detail": "Day-trader mode is not wired to strategy authority. The server rejects activation until a future Board packet explicitly enables it.",
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "runtime_mutation_occurred": False,
+            "strategy_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "liquidation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
         }
 
     def orders_summary(self) -> dict[str, Any]:
@@ -3500,6 +3654,18 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.get("/world-awareness/runtime")
     def world_awareness_runtime_status() -> dict[str, Any]:
         return provider.world_awareness_runtime_status()
+
+    @router.get("/cockpit/capabilities")
+    def cockpit_capabilities() -> dict[str, Any]:
+        return provider.cockpit_capabilities()
+
+    @router.post("/cockpit/asset-mandate")
+    def cockpit_asset_mandate(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.cockpit_asset_mandate(payload)
+
+    @router.post("/cockpit/day-trader-mode")
+    def cockpit_day_trader_mode(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.cockpit_day_trader_mode(payload)
 
     @router.get("/paper-control-state")
     async def paper_control_state() -> dict[str, Any]:

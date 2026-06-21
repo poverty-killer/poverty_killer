@@ -149,6 +149,9 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/operator/positions" in paths
     assert "/operator/orders/open" in paths
     assert "/operator/positions/intelligence" in paths
+    assert "/operator/cockpit/capabilities" in paths
+    assert "/operator/cockpit/asset-mandate" in paths
+    assert "/operator/cockpit/day-trader-mode" in paths
     assert "/operator/paper-control-state" in paths
     assert "/operator/paper-baseline" in paths
     assert "/operator/paper-baseline/accept" in paths
@@ -178,6 +181,42 @@ def test_operator_intents_are_refused_without_mutation(tmp_path):
     assert paper["reason_code"] == "AUTONOMOUS_PAPER_APPROVAL_REQUIRED"
     assert live["reason_code"] == "LIVE_NOT_APPROVED"
     assert emergency["reason_code"] == "EMERGENCY_STOP_NOT_EXPOSED_IN_OPERATOR_UI"
+
+
+def test_operator_cockpit_capabilities_gate_future_modes_without_mutation(tmp_path):
+    app = _app(tmp_path)
+
+    caps = _endpoint(app, "/operator/cockpit/capabilities")()
+    crypto = _endpoint(app, "/operator/cockpit/asset-mandate", "POST")({"asset_class": "crypto"})
+    equities = _endpoint(app, "/operator/cockpit/asset-mandate", "POST")({"asset_class": "equities"})
+    auto = _endpoint(app, "/operator/cockpit/asset-mandate", "POST")({"asset_class": "auto"})
+    day = _endpoint(app, "/operator/cockpit/day-trader-mode", "POST")({"enabled": True})
+
+    assert caps["source"] == "OPERATOR_COCKPIT_CAPABILITIES"
+    assert caps["active_asset_class"] == "crypto"
+    assert caps["mandate_policy"]["switch_semantics"] == "NEXT_CAPITAL_ONLY_EXISTING_POSITIONS_RIDE"
+    assert caps["mandate_policy"]["existing_positions_liquidated"] is False
+    assert caps["control_policy"]["manual_trading_available"] is False
+    assert caps["control_policy"]["broker_mutation_available"] is False
+    assert caps["day_trader_mode"]["server_rejected"] is True
+
+    assert crypto["status"] == "ACCEPTED"
+    assert crypto["accepted"] is True
+    assert crypto["broker_mutation_occurred"] is False
+    assert crypto["strategy_mutation_occurred"] is False
+    assert crypto["liquidation_occurred"] is False
+
+    for result in (equities, auto, day):
+        assert result["status"] == "REFUSED"
+        assert result["accepted"] is False
+        assert result["broker_call_occurred"] is False
+        assert result["broker_mutation_occurred"] is False
+        assert result["runtime_mutation_occurred"] is False
+        assert result["strategy_mutation_occurred"] is False
+        assert result["liquidation_occurred"] is False
+        assert result["live_enabled"] is False
+        assert result["real_money_enabled"] is False
+        assert result["secrets_values_exposed"] is False
 
 
 def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
@@ -495,14 +534,16 @@ def test_operator_ui_index_is_no_store_and_commit_cache_busted(tmp_path):
     response = _endpoint(app, "/operator-ui/")()
     html = response.body.decode("utf-8")
     version = health["loaded_commit"]
+    asset_version = f"{version}-ui1-cockpit"
 
     assert response.headers["Cache-Control"] == "no-store, max-age=0, must-revalidate"
     assert response.headers["Pragma"] == "no-cache"
     assert response.headers["Expires"] == "0"
-    assert f"styles.css?v={version}" in html
-    assert f"mock-data.js?v={version}" in html
-    assert f"app.js?v={version}" in html
+    assert f"styles.css?v={asset_version}" in html
+    assert f"mock-data.js?v={asset_version}" in html
+    assert f"app.js?v={asset_version}" in html
     assert f'window.PK_OPERATOR_UI_BUILD_COMMIT = "{version}"' in html
+    assert f'window.PK_OPERATOR_UI_ASSET_VERSION = "{asset_version}"' in html
     assert "operator-ui-build" not in html
     assert "operator-activation-e2e-truth6-20260602" not in html
 
@@ -644,6 +685,7 @@ def test_operator_endpoint_smoke_matrix_is_safe(tmp_path):
         "/operator/world-awareness/providers",
         "/operator/world-awareness/events",
         "/operator/world-awareness/runtime",
+        "/operator/cockpit/capabilities",
         "/operator/readiness/live",
         "/operator/health",
         "/operator/readiness",
@@ -665,15 +707,21 @@ def test_operator_endpoint_smoke_matrix_is_safe(tmp_path):
     )
     credential_validate = _endpoint(app, "/operator/credentials/validate-readonly", "POST")({"provider_id": "openai"})
     paper_start = _endpoint(app, "/operator/intent/paper/start", "POST")({})
+    cockpit_equities = _endpoint(app, "/operator/cockpit/asset-mandate", "POST")({"asset_class": "equities"})
+    cockpit_day_trader = _endpoint(app, "/operator/cockpit/day-trader-mode", "POST")({"enabled": True})
     ai_ask = _endpoint(app, "/operator/ai/ask", "POST")({"question": "Review provider/data readiness."})
     historical = _endpoint(app, "/operator/historical-tests/run", "POST")({"date_range_preset": "last_4_months"})
-    text = str((credential_save, credential_validate, paper_start, ai_ask, historical))
+    text = str((credential_save, credential_validate, paper_start, cockpit_equities, cockpit_day_trader, ai_ask, historical))
 
     assert "sk-smoke-secret" not in text
     assert credential_save["broker_call_occurred"] is False
     assert credential_validate["broker_call_occurred"] is False
     assert paper_start["broker_call_occurred"] is False
     assert paper_start["runtime_mutation_occurred"] is False
+    assert cockpit_equities["broker_mutation_occurred"] is False
+    assert cockpit_equities["strategy_mutation_occurred"] is False
+    assert cockpit_day_trader["broker_mutation_occurred"] is False
+    assert cockpit_day_trader["strategy_mutation_occurred"] is False
     assert ai_ask["can_execute"] is False
     assert historical["broker_trading_call_occurred"] is False
     assert historical["paper_started"] is False

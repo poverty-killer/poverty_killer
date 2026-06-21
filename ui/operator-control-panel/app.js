@@ -4,6 +4,16 @@
   const mockData = window.PK_MOCK_DATA;
   let data = buildProductionUnavailableState("operator backend has not connected yet");
   const screens = [
+    ["overview", "Overview"],
+    ["performance", "My Money"],
+    ["risk", "Risk & Exposure"],
+    ["trades", "Trades & Positions"],
+    ["markets", "Markets"],
+    ["advisor", "AI Advisor"],
+    ["health", "Bot Health"],
+    ["controls", "Controls & Settings"],
+    ["log", "Activity Log"],
+    ["connections", "Connections"],
     ["positions", "Portfolio Home"],
     ["command", "Run PAPER"],
     ["providers", "Keys & Providers"],
@@ -15,7 +25,6 @@
     ["pnl", "P&L Truth"],
     ["decision", "Decision Reasons"],
     ["market", "Market Data"],
-    ["risk", "Risk Checks"],
     ["alerts", "Alerts"],
     ["research", "Research Proof"],
     ["world", "News & Events"],
@@ -25,11 +34,10 @@
     ["live", "Live Locked"]
   ];
   const NAV_GROUPS = [
-    { title: "Operate", summary: "Portfolio and PAPER runtime", items: ["positions", "command", "action", "activity", "runs"] },
-    { title: "Understand", summary: "P&L, decisions, risk, alerts", items: ["pnl", "decision", "market", "risk", "alerts"] },
-    { title: "Setup", summary: "Keys, AI routing, historical test", items: ["providers", "ai", "historical"] },
-    { title: "Research / Proof", summary: "Evidence and outside events", items: ["research", "world"] },
-    { title: "System", summary: "Diagnostics, maps, audit, locks", items: ["diagnostics", "system", "audit", "live"] }
+    { title: "Watch", summary: "Cockpit command surface", items: ["overview", "performance", "risk", "trades", "markets"] },
+    { title: "Intelligence", summary: "Advisor and module health", items: ["advisor", "health"] },
+    { title: "Operate", summary: "Gated controls and connections", items: ["controls", "connections", "log"] },
+    { title: "Proof", summary: "Legacy proof pages kept behind cockpit", items: ["command", "positions", "providers", "diagnostics"] }
   ];
   const DEFAULT_BACKEND_FETCH_TIMEOUT_MS = 10000;
   const PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS = 3000;
@@ -226,7 +234,7 @@
     ["broker_fees_unavailable_unknown", "Broker fees unavailable / unknown"],
     ["conservative_estimate_not_broker_truth", "Conservative estimate - not broker truth"]
   ];
-  let activeScreenId = "positions";
+  let activeScreenId = "overview";
   let aiOverlayOpen = false;
   let aiWideMode = false;
   let aiSelectedQuestion = AI_QUICK_PROMPTS[0];
@@ -246,6 +254,7 @@
   let homeAiBusy = false;
   let homeAiAnswerMode = AI_ANSWER_MODES.DETERMINISTIC;
   let credentialActionStatus = {};
+  let cockpitActionStatus = "";
 
   function softBreakToken(value) {
     return escapeHtml(String(value))
@@ -630,10 +639,15 @@
 
   function navBadge(id) {
     const badges = {
+      overview: "Home",
+      controls: "Gated",
+      connections: "Keys",
       command: "Primary",
-      positions: "Home",
+      positions: "Proof",
       providers: "Setup",
+      health: "Ops",
       ai: "Advisor",
+      advisor: "Advisor",
       diagnostics: "Advanced",
       live: "Locked"
     };
@@ -672,10 +686,171 @@
   }
 
   function sourceSubtext() {
-    if (data.meta.dataSource === "OPERATOR_BACKEND") return "operator panel / backend OK";
-    if (data.meta.dataSource === "PARTIAL_BACKEND") return `operator panel / ${backendDegradedCount()} degraded check${backendDegradedCount() === 1 ? "" : "s"}`;
-    if (data.meta.dataSource === "BACKEND_UNAVAILABLE") return "operator panel / backend unavailable";
-    return "operator panel / backend not connected";
+    if (data.meta.dataSource === "OPERATOR_BACKEND") return "operator cockpit / backend OK";
+    if (data.meta.dataSource === "PARTIAL_BACKEND") return `operator cockpit / ${backendDegradedCount()} degraded check${backendDegradedCount() === 1 ? "" : "s"}`;
+    if (data.meta.dataSource === "BACKEND_UNAVAILABLE") return "operator cockpit / backend unavailable";
+    return "operator cockpit / backend not connected";
+  }
+
+  function defaultCockpitCapabilities(reason) {
+    const detail = reason || "Backend cockpit capability contract unavailable.";
+    return {
+      source: "BACKEND_UNAVAILABLE",
+      schemaVersion: "operator-cockpit-capabilities-v1",
+      activeAssetClass: "crypto",
+      mandatePolicy: {
+        switchSemantics: "NEXT_CAPITAL_ONLY_EXISTING_POSITIONS_RIDE",
+        existingPositionsLiquidated: false,
+        manualTradeControlsAvailable: false,
+        serverAuthorityRequired: true,
+        detail
+      },
+      assetClasses: [
+        { id: "crypto", label: "Crypto", enabled: false, status: "UNKNOWN", reasonCode: "BACKEND_UNAVAILABLE", serverRejected: true },
+        { id: "equities", label: "Equities", enabled: false, status: "GATED", reasonCode: "EQUITIES_FEATURE_FLAG_OFF", serverRejected: true },
+        { id: "auto", label: "Auto", enabled: false, status: "GATED", reasonCode: "AUTO_MANDATE_FEATURE_FLAG_OFF", serverRejected: true }
+      ],
+      dayTraderMode: {
+        enabled: false,
+        status: "GATED",
+        reasonCode: "DAY_TRADER_MODE_FEATURE_FLAG_OFF",
+        serverRejected: true,
+        strategyWiringActive: false,
+        detail: "Day-trader mode is gated and not wired to strategy authority."
+      },
+      controlPolicy: {
+        uiIsTradingEngine: false,
+        manualTradingAvailable: false,
+        forceTradeAvailable: false,
+        liveOperationAvailable: false,
+        brokerMutationAvailable: false,
+        strategyMutationAvailable: false
+      },
+      endpoint: {
+        paperEndpointOnly: false,
+        paperEndpointStatus: "BACKEND_UNAVAILABLE",
+        paperEndpointDisplay: "unavailable",
+        paperEndpointFamily: "unknown",
+        paperEndpointHost: "",
+        alpacaLiveEndpointBlocked: true
+      },
+      brokerCallOccurred: false,
+      brokerMutationOccurred: false,
+      runtimeMutationOccurred: false,
+      strategyMutationOccurred: false,
+      liveEnabled: false,
+      realMoneyEnabled: false,
+      secretsValuesExposed: false
+    };
+  }
+
+  function normalizeCockpitCapabilities(payload) {
+    const fallback = defaultCockpitCapabilities("Backend cockpit capability contract unavailable.");
+    const source = pick(payload && payload.source, fallback.source);
+    const rows = Array.isArray(payload && payload.asset_classes) ? payload.asset_classes : [];
+    const byId = new Map(fallback.assetClasses.map((row) => [row.id, row]));
+    rows.forEach((row) => {
+      const id = String(row.id || "").trim() || "unknown";
+      byId.set(id, {
+        id,
+        label: pick(row.label, id),
+        enabled: row.enabled === true,
+        status: pick(row.status, row.enabled === true ? "ACTIVE" : "GATED"),
+        reasonCode: pick(row.reason_code, row.enabled === true ? "ACTIVE" : "FEATURE_FLAG_OFF"),
+        serverRejected: row.server_rejected === true
+      });
+    });
+    const mandate = (payload && payload.mandate_policy) || {};
+    const dayTrader = (payload && payload.day_trader_mode) || {};
+    const endpoint = (payload && payload.endpoint) || {};
+    const control = (payload && payload.control_policy) || {};
+    return {
+      ...fallback,
+      source,
+      schemaVersion: pick(payload && payload.schema_version, fallback.schemaVersion),
+      activeAssetClass: pick(payload && payload.active_asset_class, fallback.activeAssetClass),
+      mandatePolicy: {
+        switchSemantics: pick(mandate.switch_semantics, fallback.mandatePolicy.switchSemantics),
+        existingPositionsLiquidated: mandate.existing_positions_liquidated === true,
+        manualTradeControlsAvailable: mandate.manual_trade_controls_available === true,
+        serverAuthorityRequired: mandate.server_authority_required !== false,
+        detail: pick(mandate.detail, fallback.mandatePolicy.detail)
+      },
+      assetClasses: ["crypto", "equities", "auto"].map((id) => byId.get(id) || fallback.assetClasses.find((row) => row.id === id)),
+      dayTraderMode: {
+        enabled: dayTrader.enabled === true,
+        status: pick(dayTrader.status, fallback.dayTraderMode.status),
+        reasonCode: pick(dayTrader.reason_code, fallback.dayTraderMode.reasonCode),
+        serverRejected: dayTrader.server_rejected !== false,
+        strategyWiringActive: dayTrader.strategy_wiring_active === true,
+        detail: pick(dayTrader.detail, fallback.dayTraderMode.detail)
+      },
+      controlPolicy: {
+        uiIsTradingEngine: control.ui_is_trading_engine === true,
+        manualTradingAvailable: control.manual_trading_available === true,
+        forceTradeAvailable: control.force_trade_available === true,
+        liveOperationAvailable: control.live_operation_available === true,
+        brokerMutationAvailable: control.broker_mutation_available === true,
+        strategyMutationAvailable: control.strategy_mutation_available === true
+      },
+      endpoint: {
+        paperEndpointOnly: endpoint.paper_endpoint_only === true,
+        paperEndpointStatus: pick(endpoint.paper_endpoint_status, fallback.endpoint.paperEndpointStatus),
+        paperEndpointDisplay: pick(endpoint.paper_endpoint_display, fallback.endpoint.paperEndpointDisplay),
+        paperEndpointFamily: pick(endpoint.paper_endpoint_family, fallback.endpoint.paperEndpointFamily),
+        paperEndpointHost: pick(endpoint.paper_endpoint_host, fallback.endpoint.paperEndpointHost),
+        alpacaLiveEndpointBlocked: endpoint.alpaca_live_endpoint_blocked !== false
+      },
+      brokerCallOccurred: payload && payload.broker_call_occurred === true,
+      brokerMutationOccurred: payload && payload.broker_mutation_occurred === true,
+      runtimeMutationOccurred: payload && payload.runtime_mutation_occurred === true,
+      strategyMutationOccurred: payload && payload.strategy_mutation_occurred === true,
+      liveEnabled: payload && payload.live_enabled === true,
+      realMoneyEnabled: payload && payload.real_money_enabled === true,
+      secretsValuesExposed: payload && payload.secrets_values_exposed === true
+    };
+  }
+
+  function currentCockpitCapabilities() {
+    return data.cockpitCapabilities || defaultCockpitCapabilities("Cockpit capability state not loaded.");
+  }
+
+  function cockpitAssetClass(id) {
+    return (currentCockpitCapabilities().assetClasses || []).find((row) => row.id === id) || null;
+  }
+
+  function renderAssetClassSelector() {
+    const caps = currentCockpitCapabilities();
+    const backendReady = backendConnected();
+    const day = caps.dayTraderMode || {};
+    const buttons = (caps.assetClasses || []).map((row) => {
+      const active = row.id === caps.activeAssetClass;
+      const disabled = !backendReady || row.enabled !== true;
+      const title = row.enabled === true
+        ? `${row.label} mandate active for future capital.`
+        : `${row.label} is feature-gated and server-rejected: ${row.reasonCode}.`;
+      return `
+        <button
+          class="asset-choice ${active ? "active" : "gated"}"
+          type="button"
+          data-cockpit-asset="${escapeHtml(row.id)}"
+          title="${escapeHtml(title)}"
+          ${disabled ? "disabled" : ""}
+        >
+          <span>${escapeHtml(row.label)}</span>
+          <small>${escapeHtml(active ? "active" : row.status)}</small>
+        </button>
+      `;
+    }).join("");
+    return `
+      <div class="asset-selector" aria-label="Asset class mandate selector">
+        ${buttons}
+      </div>
+      <button class="intent-button paper compact-action" type="button" data-screen-shortcut="connections">Connections</button>
+      <button class="intent-button paper compact-action gated-action" type="button" data-cockpit-day-trader ${backendReady && day.enabled === true ? "" : "disabled"} title="${escapeHtml(day.detail || "Day-trader mode is gated.")}">
+        Day Trader ${day.enabled === true ? "On" : "Gated"}
+      </button>
+    `;
   }
 
   function formatDuration(seconds) {
@@ -1681,6 +1856,7 @@
       missingCredentialsCount: 0,
       notImplementedCount: 0
     };
+    state.cockpitCapabilities = defaultCockpitCapabilities(detail);
     state.portfolio = {
       source: "BACKEND_UNAVAILABLE",
       dataSource: "BACKEND_UNAVAILABLE",
@@ -1780,6 +1956,46 @@
     return found ? found[1] : "Portfolio Home";
   }
 
+  function screenCrumb(id) {
+    const copy = {
+      overview: "Everything that matters, in one glance",
+      performance: "Balance, exposure, P&L truth, and honesty gaps",
+      risk: "Distance to limits, stale truth, and safety gates",
+      trades: "Broker-confirmed holdings, orders, fills, and decisions",
+      markets: "Executable market truth separated from advisory context",
+      advisor: "Advisory-only AI route truth and operator help",
+      health: "Runtime, modules, diagnostics, and blockers",
+      controls: "Server-gated PAPER controls and future modes",
+      log: "Activity timeline and audit trail",
+      connections: "Masked PAPER credential and broker connection state"
+    };
+    return copy[id] || "Activation proof retained behind the cockpit";
+  }
+
+  function prettyMoney(value) {
+    if (value === undefined || value === null || value === "") return "unknown";
+    const numeric = Number(String(value).replace(/[^0-9.-]/g, ""));
+    if (!Number.isFinite(numeric)) return String(value);
+    return numeric.toLocaleString("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+  }
+
+  function compactMoney(value) {
+    if (value === undefined || value === null || value === "") return "unknown";
+    const numeric = Number(String(value).replace(/[^0-9.-]/g, ""));
+    if (!Number.isFinite(numeric)) return String(value);
+    return numeric.toLocaleString("en-US", {
+      style: "currency",
+      currency: "USD",
+      notation: Math.abs(numeric) >= 1000000 ? "compact" : "standard",
+      maximumFractionDigits: Math.abs(numeric) >= 1000000 ? 2 : 0
+    });
+  }
+
   function table(headers, rows) {
     return `
       <div class="table-wrap" tabindex="0">
@@ -1832,6 +2048,7 @@
       brandSubtext.textContent = sourceSubtext();
     }
     document.querySelector(".status-strip").innerHTML = [
+      `<div class="topbar-title"><h2>${escapeHtml(screenTitle(activeScreenId || "overview"))}</h2><div class="crumb">${escapeHtml(screenCrumb(activeScreenId || "overview"))}</div></div>`,
       badge(sourceLabel(), dataSourceColor()),
       badge(s.runtimeMode, "green"),
       badge(s.activeProfile, "cyan"),
@@ -1844,6 +2061,10 @@
         ? `<button class="status-detail-link" type="button" data-screen-shortcut="diagnostics">View details</button>`
         : ""
     ].filter(Boolean).join("");
+    const actions = document.querySelector(".top-actions");
+    if (actions) {
+      actions.innerHTML = renderAssetClassSelector();
+    }
   }
 
   function legacyPaperLaunchDisabledReason() {
@@ -2447,29 +2668,586 @@
     `;
   }
 
+  function cockpitTruthBanner() {
+    const stale = data.meta.dataSource !== "OPERATOR_BACKEND";
+    const text = stale
+      ? `${sourceLabel()}: stale or partial data is not executable truth.`
+      : `Live operator truth from ${data.status.broker || "operator backend"}; broker-confirmed portfolio status is ${(data.portfolio || {}).status || "UNKNOWN"}.`;
+    return `<div class="cockpit-truth-banner ${stale ? "warning" : "ok"}">${escapeHtml(text)}</div>`;
+  }
+
+  function renderScanStrip() {
+    const universe = (data.status.universe || data.supervisor.allowedWatchlist || []).slice(0, 8);
+    const symbols = universe.length ? universe : ["BTC/USD", "ETH/USD", "SOL/USD"];
+    return `
+      <div class="scan-strip" aria-label="bot scanning strip">
+        <span class="scan-pulse"></span>
+        <span>Scanning ${escapeHtml(symbols.join(" / "))}</span>
+        <span class="muted">Last heartbeat: ${escapeHtml(data.status.lastHeartbeat || "unknown")}</span>
+      </div>
+    `;
+  }
+
+  function renderGettingStartedChecklist() {
+    const launch = data.launchReadiness || {};
+    const portfolio = data.portfolio || {};
+    const checks = [
+      ["Broker account truth", portfolio.status === "BROKER_CONFIRMED" || portfolio.status === "BROKER_CONFIRMED_EMPTY", portfolio.status || "UNKNOWN"],
+      ["PAPER endpoint only", launch.paperEndpointOnly === true, launch.paperEndpointStatus || "UNKNOWN"],
+      ["Credentials ready", launch.alpacaPaperCredentialsConfigured === true, launch.alpacaPaperCredentialsConfigured ? "configured" : "missing"],
+      ["Run control authority", launch.paperStartAllowed === true, launch.paperStartAllowed ? "allowed" : "blocked"],
+      ["Live/real money lock", data.status.liveBlocked !== false && data.status.realMoneyBlocked !== false, "locked"]
+    ];
+    return `
+      <div class="card span-5 cockpit-checklist" data-cockpit-beginner-checklist>
+        <div class="split"><h3>Getting Started Checklist</h3>${badge(`${checks.filter((row) => row[1]).length}/${checks.length}`, "cyan")}</div>
+        <div class="checklist-rows">
+          ${checks.map(([label, ok, detail]) => `
+            <div class="checklist-row">
+              ${badge(ok ? "done" : "blocked", ok ? "green" : "yellow")}
+              <span>${escapeHtml(label)}</span>
+              <small>${escapeHtml(detail)}</small>
+            </div>
+          `).join("")}
+        </div>
+        <div class="button-row">
+          <button class="intent-button paper" type="button" data-screen-shortcut="connections">Open Connections</button>
+          <button class="intent-button paper" type="button" data-ai-chief-open>Ask Advisor</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCockpitOverview() {
+    const portfolio = data.portfolio || {};
+    const summary = portfolio.summary || {};
+    const launch = data.launchReadiness || {};
+    const op = runPaperState();
+    const caps = currentCockpitCapabilities();
+    const positions = portfolio.positions || [];
+    const openOrders = portfolio.openOrders || [];
+    const blockers = (data.actionCenter.items || []).filter((item) => item.type === "BLOCKER" || item.type === "SAFETY_CRITICAL").slice(0, 4);
+    const runtimeState = data.supervisor.processState || data.status.botStatus || "UNKNOWN";
+    const endpointStatus = (caps.endpoint && caps.endpoint.paperEndpointStatus) || portfolio.paperEndpointStatus || "UNKNOWN";
+    const endpointDisplay = (caps.endpoint && caps.endpoint.paperEndpointDisplay) || data.status.endpoint || "endpoint unknown";
+    const brokerTruth = portfolio.status || portfolio.dataSource || sourceLabel();
+    const heartbeat = data.status.lastHeartbeat || data.supervisor.lastHeartbeat || "unknown";
+    const cash = summary.cash;
+    const equity = summary.totalEquity;
+    const grossExposure = summary.grossExposure || summary.totalMarketValue || "unknown";
+    const unrealized = summary.totalUnrealizedPnl || "unknown";
+    const positionCount = Number(summary.positionCount || positions.length || 0);
+    const openOrderCount = Number(summary.openOrderCount || openOrders.length || 0);
+    return `
+      <div class="cockpit-page-intro">
+        <div>
+          <div class="eyebrow">Operator cockpit</div>
+          <h1 class="cockpit-page-title">Your bot, right now</h1>
+          <p>${escapeHtml(data.supervisor.runtimeAttachmentDetail || "Broker, runtime, risk, and launch truth in one PAPER-first command surface.")}</p>
+        </div>
+        <div class="cockpit-mode-stack">
+          ${badge("PAPER", "green")}
+          ${badge("Live locked", "red")}
+          ${badge(caps.activeAssetClass === "crypto" ? "Crypto mandate" : `Mandate ${caps.activeAssetClass}`, "cyan")}
+        </div>
+      </div>
+      ${cockpitTruthBanner()}
+      <div class="cockpit-hero-row">
+        <div class="card vitals-card">
+          <span class="eyebrow">Runtime vitals</span>
+          <div class="status-row">
+            <div class="heart" aria-hidden="true">PK</div>
+            <div>
+              <div class="big">${escapeHtml(runtimeState)}</div>
+              <div class="sub">Last heartbeat ${escapeHtml(heartbeat)} - ${escapeHtml(endpointStatus)}</div>
+            </div>
+          </div>
+          <div class="vrow">
+            <div><div class="k">Run authority</div><div class="v">${escapeHtml(launch.finalLaunchReadiness || "UNKNOWN")}</div></div>
+            <div><div class="k">Positions</div><div class="v mono">${escapeHtml(positionCount)}</div></div>
+            <div><div class="k">Open orders</div><div class="v mono">${escapeHtml(openOrderCount)}</div></div>
+            <div><div class="k">Endpoint</div><div class="v">${escapeHtml(endpointDisplay)}</div></div>
+          </div>
+          <svg class="ecg-line" viewBox="0 0 600 74" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="cockpit-ecg" x1="0" x2="1"><stop offset="0" stop-color="#46C28E" stop-opacity="0"/><stop offset=".5" stop-color="#46C28E" stop-opacity=".9"/><stop offset="1" stop-color="#46C28E" stop-opacity="0"/></linearGradient></defs>
+            <path d="M0,58 L28,58 L36,52 L42,58 L58,58 L64,62 L70,18 L76,70 L84,54 L96,58 L132,58 L140,52 L146,58 L164,58 L170,62 L176,18 L182,70 L190,54 L202,58 L238,58 L246,52 L252,58 L270,58 L276,62 L282,18 L288,70 L296,54 L308,58 L344,58 L352,52 L358,58 L376,58 L382,62 L388,18 L394,70 L402,54 L414,58 L450,58 L458,52 L464,58 L482,58 L488,62 L494,18 L500,70 L508,54 L520,58 L600,58" fill="none" stroke="url(#cockpit-ecg)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="card money-card">
+          <div class="label">What your PAPER money is doing</div>
+          <div class="equity-value mono">${escapeHtml(prettyMoney(equity))}</div>
+          <div class="money-delta">
+            ${badge(`Cash ${prettyMoney(cash)}`, cash ? "green" : "yellow")}
+            ${badge(`Unrealized ${prettyMoney(unrealized)}`, statusColor(unrealized))}
+          </div>
+          <svg class="sparkline" viewBox="0 0 360 60" preserveAspectRatio="none" aria-hidden="true">
+            <polyline points="0,48 28,43 56,46 84,36 112,39 140,30 168,34 196,25 224,29 252,20 280,24 308,17 336,19 360,14" fill="none" stroke="#EBBA6A" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+          <div class="since">${escapeHtml(brokerTruth)} - gross exposure ${escapeHtml(compactMoney(grossExposure))} - account ${escapeHtml(summary.accountId || "broker account hidden")}</div>
+        </div>
+      </div>
+      <div class="cockpit-command-strip">
+        <div>
+          <b>Can I run PAPER?</b>
+          <span>${escapeHtml((op.canRunPaper || {}).reason || (op.overallStatus || {}).detail || "Backend authority has not allowed start.")}</span>
+        </div>
+        <button class="intent-button paper primary-action" type="button" data-screen-shortcut="controls">Open Controls</button>
+        <button class="intent-button paper" type="button" data-screen-shortcut="trades">Trades & Positions</button>
+        <button class="intent-button paper" type="button" data-screen-shortcut="connections">Connections</button>
+      </div>
+      <div class="grid cockpit-grid">
+        ${metric("Total Equity", prettyMoney(equity), equity ? "green" : "yellow")}
+        ${metric("Cash", prettyMoney(cash), cash ? "green" : "yellow")}
+        ${metric("Positions", positionCount, positionCount ? "green" : "gray")}
+        ${metric("Open Orders", openOrderCount, openOrderCount ? "yellow" : "gray")}
+        ${renderGettingStartedChecklist()}
+        <div class="card span-4 safety-card">
+          <h3>Protected By</h3>
+          <div class="safety">
+            ${["MarketTruthSnapshot", "NetEdge", "Risk gates", "BrokerBoundary", "OMS", "Read-only portfolio"].map((item) => `<span class="s">${escapeHtml(item)}</span>`).join("")}
+          </div>
+          <div class="notice">No manual buy/sell, close, cancel, force-trade, flatten, or liquidation controls exist in this cockpit.</div>
+        </div>
+        <div class="card span-4">
+          <h3>Notifications</h3>
+          ${(blockers.length ? blockers : [{ title: "No current blocker items loaded", detail: "Action Center has no safety-critical item in this view.", type: "INFO" }]).map((item) => `
+            <div class="mini-feed-row">
+              ${badge(item.type || "INFO", statusColor(item.type || "INFO"))}
+              <span>${escapeHtml(item.title || "operator item")}</span>
+              <small>${escapeHtml(item.detail || "")}</small>
+            </div>
+          `).join("")}
+        </div>
+        <div class="card span-12 positions-panel">
+          <div class="split"><h3>Allocation Snapshot</h3>${badge(portfolio.status || "UNKNOWN", statusColor(portfolio.status || "UNKNOWN"))}</div>
+          ${positions.length ? table(
+            ["Symbol", "Qty", "Value", "Unrealized", "Exposure", "Truth"],
+            positions.slice(0, 8).map((p) => [
+              escapeHtml(p.symbol || "unknown"),
+              escapeHtml(p.quantity || "unknown"),
+              escapeHtml(p.marketValue || "unknown"),
+              escapeHtml(p.unrealizedPnl || "unknown"),
+              escapeHtml(p.exposurePercentOfPortfolio || "unknown"),
+              p.brokerConfirmed ? badge("broker-confirmed", "green") : badge(p.source || portfolio.dataSource || "unknown", statusColor(p.source || portfolio.dataSource || "unknown"))
+            ])
+          ) : `<p class="muted">${escapeHtml(portfolio.message || "No broker-confirmed positions loaded.")}</p>`}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCockpitPerformance() {
+    const summary = (data.portfolio && data.portfolio.summary) || {};
+    const p = data.pnl || {};
+    const runs = (data.runArchive && data.runArchive.runs) || [];
+    const tradeCount = Number(p.trades || 0);
+    return `
+      ${header("Performance", "P&L, benchmark honesty, fees, and sample-size warnings.", "BROKER TRUTH REQUIRED")}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        ${metric("Account Equity", summary.totalEquity || "unknown", summary.totalEquity ? "green" : "yellow")}
+        ${metric("Realized P&L", (p.realizedPnl && p.realizedPnl.source) || "unknown", "yellow")}
+        ${metric("Unrealized P&L", summary.totalUnrealizedPnl || ((p.unrealizedPnl || {}).source) || "unknown", summary.totalUnrealizedPnl ? statusColor(summary.totalUnrealizedPnl) : "yellow")}
+        ${metric("Trades", tradeCount, tradeCount >= 30 ? "green" : "yellow")}
+        <div class="card span-6">
+          <h3>Honest Scorecard</h3>${kv([
+            ["Benchmark vs BTC", badge("unknown until broker-confirmed history", "yellow")],
+            ["Sharpe", badge(tradeCount >= 30 ? "available when backend computes it" : "need 30+ trades", tradeCount >= 30 ? "green" : "yellow")],
+            ["Fees", badge((p.fees && p.fees.source) || "UNKNOWN", statusColor((p.fees && p.fees.source) || "UNKNOWN"))],
+            ["TCA", badge(data.tcaDashboard.status || "UNKNOWN", statusColor(data.tcaDashboard.status || "UNKNOWN"))],
+            ["Fake P&L", badge("forbidden", "red")]
+          ])}</div>
+        <div class="card span-6">
+          <h3>Recent Run Evidence</h3>
+          ${runs.length ? table(
+            ["Run", "Verdict", "Posts", "Fills", "TCA", "Report"],
+            runs.slice(0, 5).map((run) => [
+              escapeHtml(run.runId),
+              badge(run.finalVerdict, statusColor(run.finalVerdict)),
+              escapeHtml(`${run.orderPostAcknowledged}/${run.orderPostAttempted}`),
+              escapeHtml(`${run.runtimeFills}`),
+              badge(run.feeTcaStatus || run.tcaStatus, statusColor(run.feeTcaStatus || run.tcaStatus)),
+              escapeHtml(run.reportPath || "not generated")
+            ])
+          ) : `<p class="muted">No run archive rows loaded. Performance remains unproven.</p>`}
+        </div>
+        <div class="card span-12">
+          <h3>Performance Truth Gaps</h3>
+          <div class="notice">The cockpit does not display profitability, Sharpe, fees, slippage, TCA, or benchmark victory unless the backend provides broker-confirmed or explicitly labeled evidence. Unknown stays unknown.</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCockpitRisk() {
+    const portfolio = data.portfolio || {};
+    const summary = portfolio.summary || {};
+    const launch = data.launchReadiness || {};
+    const positions = portfolio.positionIntelligence || [];
+    return `
+      ${header("Risk & Exposure", "Distance to limits, stale truth, concentration, and safety gates.", launch.finalLaunchReadiness || "UNKNOWN")}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        ${metric("Gross Exposure", summary.grossExposure || "unknown", summary.grossExposure ? "yellow" : "gray")}
+        ${metric("Net Exposure", summary.netExposure || "unknown", summary.netExposure ? "yellow" : "gray")}
+        ${metric("Daily Loss Gate", launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))}
+        ${metric("Open Orders", summary.openOrderCount || 0, summary.openOrderCount ? "red" : "gray")}
+        <div class="card span-6">
+          <h3>Safety Gate Stack</h3>${kv([
+            ["MarketTruthSnapshot", badge("canonical executable data authority", "green")],
+            ["NetEdge", badge("hard economic gate", "green")],
+            ["Risk", badge("server-side", "green")],
+            ["BrokerBoundary", badge("PAPER only", "green")],
+            ["Conflicts", badge("fail closed", "green")]
+          ])}</div>
+        <div class="card span-6">
+          <h3>Readiness Blockers</h3>
+          ${(launch.checks || []).filter((check) => check.blocker || String(check.status || "").includes("BLOCK")).slice(0, 6).map((check) => `
+            <div class="mini-feed-row">
+              ${badge(check.status || "UNKNOWN", statusColor(check.status || "UNKNOWN"))}
+              <span>${escapeHtml(check.title || check.checkId || "check")}</span>
+              <small>${escapeHtml(check.detail || "")}</small>
+            </div>
+          `).join("") || `<p class="muted">No explicit launch blockers loaded in this view.</p>`}
+        </div>
+        <div class="card span-12">
+          <h3>Position Risk Details</h3>
+          ${positions.length ? table(
+            ["Symbol", "Exposure", "Concentration", "Fee Drag", "Slippage", "Freshness", "Exit Logic", "Blockers"],
+            positions.map((item) => [
+              escapeHtml(item.symbol),
+              escapeHtml(item.exposurePercentOfPortfolio || "unknown"),
+              badge(item.concentrationWarning ? "warning" : "ok/unknown", item.concentrationWarning ? "yellow" : "gray"),
+              badge(item.feeDragWarning || "UNKNOWN", statusColor(item.feeDragWarning || "UNKNOWN")),
+              badge(item.slippageWarning || "UNKNOWN", statusColor(item.slippageWarning || "UNKNOWN")),
+              badge(item.staleDataWarning ? "stale" : "fresh/read", item.staleDataWarning ? "yellow" : "green"),
+              escapeHtml(item.exitLogicStatus || "UNKNOWN"),
+              escapeHtml((item.blockersConflicts || []).join(", ") || "none")
+            ])
+          ) : `<p class="muted">No position-risk rows loaded. This page will not invent VaR, drawdown, or risk-of-ruin.</p>`}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCockpitTrades() {
+    const portfolio = data.portfolio || {};
+    const positions = portfolio.positions || [];
+    const orders = portfolio.openOrders || data.orders || [];
+    const fills = data.fills || [];
+    const explain = data.explanation || {};
+    return `
+      ${header("Trades & Positions", "Broker-confirmed holdings, open orders, fills, and why-trade evidence.", portfolio.status || "UNKNOWN")}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        ${metric("Positions", positions.length, positions.length ? "green" : "gray")}
+        ${metric("Open Orders", orders.length, orders.length ? "yellow" : "gray")}
+        ${metric("Fills", fills.length, fills.length ? "yellow" : "gray")}
+        ${metric("Decision", explain.output || "UNKNOWN", statusColor(explain.output || "UNKNOWN"))}
+        <div class="card span-12">
+          <h3>Every Position</h3>
+          ${positions.length ? table(
+            ["Symbol", "Asset", "Qty", "Side", "Avg Entry", "Current", "Value", "P&L", "Truth", "Risk"],
+            positions.map((p) => [
+              escapeHtml(p.symbol),
+              escapeHtml(p.assetClass || "unknown"),
+              escapeHtml(p.quantity || "unknown"),
+              escapeHtml(p.side || "unknown"),
+              escapeHtml(p.averageEntryPrice || "unknown"),
+              escapeHtml(p.currentMarketPrice || "unknown"),
+              escapeHtml(p.marketValue || "unknown"),
+              escapeHtml(p.unrealizedPnl || "unknown"),
+              badge(p.source || "UNAVAILABLE", statusColor(p.source || "UNAVAILABLE")),
+              badge(p.riskStatus || "UNKNOWN", statusColor(p.riskStatus || "UNKNOWN"))
+            ])
+          ) : `<p class="muted">${escapeHtml(portfolio.message || "No broker-confirmed positions loaded.")}</p>`}
+        </div>
+        <div class="card span-6">
+          <h3>Open Orders</h3>
+          ${orders.length ? table(
+            ["Symbol", "Side", "Type", "Qty", "Filled", "Status", "Cancel"],
+            orders.map((o) => [
+              escapeHtml(o.symbol || "unknown"),
+              escapeHtml(o.side || "unknown"),
+              escapeHtml(o.type || o.action || "unknown"),
+              escapeHtml(o.qty || o.quantity || "unknown"),
+              escapeHtml(o.filledQty || "0"),
+              badge(o.status || o.state || "UNKNOWN", statusColor(o.status || o.state || "UNKNOWN")),
+              badge("not available", "gray")
+            ])
+          ) : `<p class="muted">No open broker-confirmed orders.</p>`}
+        </div>
+        <div class="card span-6">
+          <h3>Why Trade / Why Not</h3>${kv([
+            ["Headline", escapeHtml(explain.headline || "DecisionFrame summary not loaded.")],
+            ["Output", badge(explain.output || "UNKNOWN", statusColor(explain.output || "UNKNOWN"))],
+            ["NetEdge", badge(explain.netEdge || "UNKNOWN", statusColor(explain.netEdge || "UNKNOWN"))],
+            ["Missing truth", escapeHtml((explain.missingTruth || []).join(", ") || "none loaded")]
+          ])}</div>
+      </div>
+    `;
+  }
+
+  function renderCockpitMarkets() {
+    const universe = data.status.universe || [];
+    const events = data.worldAwarenessEvents || [];
+    return `
+      ${header("Markets", "Executable market truth stays separate from advisory news and stale data.", data.status.marketData || "UNKNOWN")}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        ${metric("Market Data", data.status.marketData || "UNKNOWN", statusColor(data.status.marketData || "UNKNOWN"))}
+        ${metric("Watched Symbols", universe.length || "unknown", universe.length ? "green" : "yellow")}
+        ${metric("Advisory Events", events.length, events.length ? "cyan" : "gray")}
+        ${metric("Executable Truth", "MarketTruthSnapshot", "green")}
+        <div class="card span-12">
+          <h3>Watchlist</h3>
+          <div class="market-chip-grid">
+            ${(universe.length ? universe : ["BTC/USD", "ETH/USD", "SOL/USD"]).map((symbol) => `
+              <div class="market-chip">
+                <b>${escapeHtml(symbol)}</b>
+                <span>${escapeHtml(data.status.marketData || "waiting for runtime")}</span>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+        <div class="card span-12">
+          <h3>News & Events Advisory Feed</h3>
+          ${events.length ? table(
+            ["Provider", "Symbols", "Title", "Freshness", "Verification", "Rule"],
+            events.slice(0, 8).map((event) => [
+              escapeHtml(event.provider),
+              escapeHtml((event.symbols || []).join(", ") || "market-wide"),
+              escapeHtml(event.title),
+              escapeHtml(event.freshness),
+              badge(event.verification || "UNVERIFIED", statusColor(event.verification || "UNVERIFIED")),
+              escapeHtml(event.rule || "advisory only")
+            ])
+          ) : `<p class="muted">No advisory market events loaded. This is not executable market truth.</p>`}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCockpitAdvisor() {
+    return `
+      ${header("AI Advisor", "Provider-truthful, advisory-only help grounded in the current bot state.", data.ai.providerMode || "AI")}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        <div class="card span-5">
+          <h3>Route Truth</h3>${kv([
+            ["Active provider", badge(data.ai.routingSettings.activeProvider || data.ai.provider || "deterministic_local", "cyan")],
+            ["Active model", escapeHtml(data.ai.routingSettings.activeModel || data.ai.modelName || "deterministic-local-guide")],
+            ["Mode", badge(data.ai.providerMode || "LOCAL_GUIDE", statusColor(data.ai.providerMode || "LOCAL_GUIDE"))],
+            ["Model quality", badge(data.ai.modelQuality || "FALLBACK_ONLY", modelQualityColor(data.ai.modelQuality || "FALLBACK_ONLY"))],
+            ["Broker execution", badge("unavailable to AI", "red")],
+            ["Secrets exposed", badge(String(data.ai.secretsValuesExposed === true), data.ai.secretsValuesExposed ? "red" : "green")]
+          ])}</div>
+        <div class="card span-7">
+          <h3>Ask Your Bot</h3>
+          <div class="ai-ask-box">
+            <label for="cockpit-ai-question">Ask a grounded operator question</label>
+            <textarea id="cockpit-ai-question" data-home-ai-question rows="4" placeholder="Ask whether PAPER is blocked, what you own, or what proof is missing.">${escapeHtml(homeAiQuestionText || "")}</textarea>
+            <div class="ai-question-bank compact" aria-label="Cockpit AI Advisor suggestions">
+              ${primaryAiPrompts("advisor").map((prompt) => `<button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
+            </div>
+            <div class="button-row">
+              <button class="intent-button paper" type="button" data-home-ai-clear ${homeAiBusy ? "disabled" : ""}>Clear</button>
+              <button class="intent-button paper" type="button" data-ai-chief-open>Open Docked Advisor</button>
+            </div>
+            ${renderAiAnswerModeButtons("home", homeAiAnswerMode, homeAiBusy)}
+          </div>
+          ${homeAiError ? `<div class="notice error">Error: ${escapeHtml(homeAiError)}</div>` : ""}
+          <div class="ai-response"><h3>Advisor Response</h3><pre>${escapeHtml(homeAiResponse || "No advisor question asked yet.")}</pre></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCockpitHealth() {
+    const failures = data.meta.fetchFailures || [];
+    return `
+      ${header("Bot Health", "Runtime, diagnostics, modules, and backend degradations.", data.diagnostics.healthStatus || sourceLabel())}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        ${metric("Backend", sourceLabel(), dataSourceColor())}
+        ${metric("Runtime", data.supervisor.processState || "UNKNOWN", statusColor(data.supervisor.processState || "UNKNOWN"))}
+        ${metric("Session Store", data.diagnostics.sessionStoreStatus || "UNKNOWN", statusColor(data.diagnostics.sessionStoreStatus || "UNKNOWN"))}
+        ${metric("Alerts", data.alerts.length || 0, data.alerts.length ? "yellow" : "gray")}
+        <div class="card span-6">
+          <h3>Backend Endpoint Details</h3>
+          ${failures.length ? failures.map((failure) => `<div class="notice error">${escapeHtml(failure)}</div>`).join("") : `<p class="muted">No degraded backend endpoint in the current normalized view.</p>`}
+        </div>
+        <div class="card span-6">
+          <h3>Module Verdict</h3>${kv([
+            ["Active profile", badge(data.status.activeProfile || "UNKNOWN", "cyan")],
+            ["Capability state", badge(data.status.capabilityState || "UNKNOWN", statusColor(data.status.capabilityState || "UNKNOWN"))],
+            ["Broker route", escapeHtml(data.status.broker || "unknown")],
+            ["Endpoint", escapeHtml(data.status.endpoint || "unknown")],
+            ["Manual trading", badge("not available", "gray")]
+          ])}</div>
+      </div>
+    `;
+  }
+
+  function renderCockpitControls() {
+    const caps = currentCockpitCapabilities();
+    return `
+      ${header("Controls & Settings", "Governed PAPER controls and gated future-mode selectors.", caps.activeAssetClass || "crypto")}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        <div class="card span-12 cockpit-control-panel" data-cockpit-mandate-panel>
+          <div class="split"><h3>Asset Class Mandate</h3>${badge(caps.activeAssetClass || "crypto", "cyan")}</div>
+          <div class="asset-selector large">
+            ${(caps.assetClasses || []).map((row) => `
+              <button class="asset-choice ${row.id === caps.activeAssetClass ? "active" : "gated"}" type="button" data-cockpit-asset="${escapeHtml(row.id)}" ${row.enabled ? "" : "disabled"}>
+                <span>${escapeHtml(row.label)}</span>
+                <small>${escapeHtml(row.id === caps.activeAssetClass ? "active now" : `${row.status}: ${row.reasonCode}`)}</small>
+              </button>
+            `).join("")}
+          </div>
+          <div class="notice">${escapeHtml(caps.mandatePolicy.detail || "Mandate switches affect future capital only. Existing positions ride under governed exits.")}</div>
+          <div class="notice mono">Last cockpit action: ${escapeHtml(cockpitActionStatus || "none")}</div>
+        </div>
+        <div class="card span-12" data-cockpit-day-trader-panel>
+          <div class="split"><h3>Day Trader Mode</h3>${badge(caps.dayTraderMode.status || "GATED", "yellow")}</div>
+          <p class="muted">${escapeHtml(caps.dayTraderMode.detail || "Day-trader mode is gated and not wired to strategy authority.")}</p>
+          <button class="intent-button paper" type="button" data-cockpit-day-trader ${caps.dayTraderMode.enabled ? "" : "disabled"}>Enable Day Trader Mode</button>
+        </div>
+        ${renderPaperLaunchControl("controls")}
+      </div>
+    `;
+  }
+
+  function renderCockpitLog() {
+    const rows = ((data.runArchive && data.runArchive.runs) || []).slice(0, 8);
+    const alerts = data.alerts || [];
+    return `
+      ${header("Activity Log", "What the bot did, what it refused, and what still needs proof.", sourceLabel())}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        <div class="card span-12">
+          <h3>Recent Run Activity</h3>
+          ${rows.length ? table(
+            ["Run", "Status", "Verdict", "Duration", "Posts/Fills", "Reason Codes", "Report"],
+            rows.map((run) => [
+              escapeHtml(run.runId),
+              badge(run.status, statusColor(run.status)),
+              badge(run.finalVerdict, statusColor(run.finalVerdict)),
+              escapeHtml(run.durationSeconds || "unknown"),
+              escapeHtml(`posts ${run.orderPostAcknowledged}/${run.orderPostAttempted}; fills ${run.runtimeFills}`),
+              escapeHtml((run.reasonCodes || []).join(", ") || "none"),
+              escapeHtml(run.reportPath || "not generated")
+            ])
+          ) : `<p class="muted">No run archive loaded.</p>`}
+        </div>
+        <div class="card span-12">
+          <h3>Alerts</h3>
+          ${alerts.length ? table(
+            ["Severity", "Title", "Detail", "Source", "Executable"],
+            alerts.map((alert) => [
+              badge(alert.severity, statusColor(alert.severity)),
+              escapeHtml(alert.title),
+              escapeHtml(alert.detail),
+              escapeHtml(alert.source),
+              badge(alert.canExecute ? "yes" : "no", alert.canExecute ? "red" : "gray")
+            ])
+          ) : `<p class="muted">No current alerts loaded.</p>`}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderConnections() {
+    const credentials = data.credentials || {};
+    const readiness = data.providerReadiness || {};
+    const form = CREDENTIAL_FORMS.alpaca_paper;
+    return `
+      ${header("Connections", "Alpaca PAPER credentials and provider route truth. Secrets are write-only and masked.", "NO LIVE CREDS")}
+      ${cockpitTruthBanner()}
+      <div class="grid cockpit-grid">
+        <div class="card span-6 credential-box connection-primary" data-connection-alpaca-paper>
+          <div class="split"><h3>Alpaca PAPER Broker/Data</h3>${badge("PAPER only", "green")}</div>
+          <div class="muted">${escapeHtml(credentialSummaryLine(credentials.providers || [], "alpaca_paper"))}</div>
+          ${form.fields.map(([name, label, type, placeholder]) => `
+            <label>${escapeHtml(label)}
+              <input type="${escapeHtml(type)}" placeholder="${escapeHtml(placeholder || "enter value")}" data-credential-provider="alpaca_paper" data-credential-field="${escapeHtml(name)}" autocomplete="off">
+            </label>
+          `).join("")}
+          <div class="button-row">
+            <button class="intent-button paper" data-credential-save="alpaca_paper" ${backendConnected() ? "" : "disabled"}>Save local credentials</button>
+            <button class="intent-button paper" data-credential-validate="alpaca_paper" ${backendConnected() ? "" : "disabled"}>Validate read-only</button>
+            <button class="intent-button danger" data-credential-delete="alpaca_paper" ${backendConnected() ? "" : "disabled"}>Delete local</button>
+          </div>
+          <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus.alpaca_paper || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed"))}</div>
+        </div>
+        <div class="card span-6">
+          <h3>Connection Safety</h3>${kv([
+            ["Local credential vault", badge(credentials.storeExists ? "stored on this computer only" : "not created yet", credentials.storeExists ? "green" : "yellow")],
+            ["Precedence", badge(credentials.precedence || "ENV_PRESENT_OVERRIDES_LOCAL_SECRET", "gray")],
+            ["Raw secrets in browser", badge("not returned", "green")],
+            ["Live credentials", badge("not accepted here", "red")],
+            ["Broker mutation", badge("none", "green")],
+            ["Real money", badge("blocked", "red")]
+          ])}
+          <div class="notice">Live Alpaca credentials are deliberately not accepted on this screen. The current operator API is PAPER-only.</div>
+        </div>
+        <div class="card span-12 provider-table-card">
+          <h3>Provider Table</h3>
+          ${table(
+            ["Provider", "Status", "Configured", "Source", "Can Trade", "Validation"],
+            (readiness.providers || []).map((provider) => [
+              escapeHtml(provider.displayName || provider.providerId),
+              badge(normalizeStatusText(provider.status || "UNKNOWN"), statusColor(provider.status || "UNKNOWN")),
+              badge(String(provider.configured === true), provider.configured ? "green" : "yellow"),
+              badge(providerDisplaySource(provider), statusColor(providerDisplaySource(provider))),
+              badge(String(provider.canTrade === true), provider.canTrade ? "red" : "gray"),
+              escapeHtml(provider.lastValidationStatus || "NOT_RUN")
+            ])
+          )}
+        </div>
+      </div>
+    `;
+  }
+
   function renderNav() {
     const nav = document.querySelector(".nav");
-    nav.innerHTML = NAV_GROUPS.map((group) => `
+    const selectedNav = activeScreenId || "overview";
+    nav.innerHTML = `
+      <div class="nav-brand">
+        <div class="nav-brand-mark">PK</div>
+        <div>
+          <div class="nav-brand-name">Poverty Killer</div>
+          <div class="nav-brand-sub">Command</div>
+        </div>
+      </div>
+      ${NAV_GROUPS.map((group) => `
       <div class="nav-group" data-nav-group="${escapeHtml(group.title)}">
         <div class="nav-group-title">${escapeHtml(group.title)}</div>
-        <div class="nav-group-summary">${escapeHtml(group.summary)}</div>
         <div class="nav-group-items">
           ${group.items.map((id) => {
             const label = screenTitle(id);
             const badgeText = navBadge(id);
             return `
-              <button class="nav-button ${id === "positions" ? "active" : ""}" data-screen="${id}">
+              <button class="nav-button ${id === selectedNav ? "active" : ""}" data-screen="${id}">
+                <span class="nav-icon" aria-hidden="true"></span>
                 <span class="nav-label">${escapeHtml(label)}</span>
                 <span class="nav-meta">
                   ${badgeText ? `<span class="nav-badge">${escapeHtml(badgeText)}</span>` : ""}
-                  <span class="nav-page-number">${navPageNumber(id)}</span>
                 </span>
               </button>
             `;
           }).join("")}
         </div>
       </div>
-    `).join("");
+    `).join("")}
+      <div class="nav-foot">
+        <div class="operator-avatar">S</div>
+        <div>
+          <b>Shan</b>
+          <small>Paper account</small>
+        </div>
+      </div>
+    `;
     nav.addEventListener("click", (event) => {
       const button = event.target.closest("[data-screen]");
       if (!button) return;
@@ -3482,6 +4260,9 @@
       ["command", "home_ai_answer_modes", "Home AI answer modes", "button group", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; local fallback labeled", "POST", "/operator/ai/ask"],
       ["command", "home_ai_clear", "Clear home AI question", "button", "WIRED", "read_only", "", null, "local_clear"],
       ["command", "home_ui_wiring_summary", "Buttons / Controls Status", "summary", "WIRED", "read_only", "", null, "local_inventory_summary"],
+      ["overview", "cockpit_asset_selector", "Top-bar asset class selector", "button group", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_operator_gate", backendConnected() ? "" : "backend unavailable", "POST", "/operator/cockpit/asset-mandate"],
+      ["controls", "cockpit_day_trader_gate", "Day Trader Mode gated control", "button", "DISABLED_WITH_REASON", "forbidden", "DAY_TRADER_MODE_FEATURE_FLAG_OFF", "POST", "/operator/cockpit/day-trader-mode"],
+      ["connections", "alpaca_paper_connection_save", "Save Alpaca PAPER credentials", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_secret_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/credentials/save"],
       ["positions", "open_run_paper", "Open Run PAPER", "button", "WIRED", "read_only", "", null, "local_navigation"],
       ["positions", "open_keys_providers", "Add / Validate Keys", "button", "WIRED", "read_only", "", null, "local_navigation"],
       ["positions", "ask_ai_advisor", "Ask AI Advisor", "button", "WIRED", "read_only", "", null, "open_ai_drawer"],
@@ -5420,8 +6201,18 @@
 
   function renderScreens(selectedId) {
     const main = document.querySelector(".main");
-    const selected = selectedId || activeScreenId || "positions";
+    const selected = selectedId || activeScreenId || "overview";
     const renderers = {
+      overview: renderCockpitOverview,
+      performance: renderCockpitPerformance,
+      risk: renderCockpitRisk,
+      trades: renderCockpitTrades,
+      markets: renderCockpitMarkets,
+      advisor: renderCockpitAdvisor,
+      health: renderCockpitHealth,
+      controls: renderCockpitControls,
+      log: renderCockpitLog,
+      connections: renderConnections,
       command: renderCommand,
       action: renderActionCenter,
       runs: renderRuns,
@@ -5431,7 +6222,6 @@
       activity: renderActivity,
       decision: renderDecision,
       market: renderMarket,
-      risk: renderRisk,
       alerts: renderAlerts,
       ai: renderAI,
       providers: renderProviders,
@@ -5443,6 +6233,7 @@
       live: renderLive
     };
     const renderer = renderers[selected] || renderPositions;
+    document.body.dataset.screen = selected;
     main.innerHTML = `<section class="screen active" id="screen-${selected}">${renderer()}</section>`;
     window.PK_OPERATOR_UI_CONTROL_INVENTORY = buildUiControlInventory();
     activeScreenId = selected;
@@ -6326,6 +7117,7 @@
     const providers = payload.providers || {};
     const providerReadiness = payload.providerReadiness || {};
     const credentialsProviders = payload.credentialsProviders || {};
+    const cockpitCapabilities = payload.cockpitCapabilities || {};
     const portfolio = payload.portfolio || {};
     const paperBaseline = payload.paperBaseline || {};
     const paperControlState = payload.paperControlState || {};
@@ -6690,6 +7482,9 @@
         })) : []
       };
     }
+    if (cockpitCapabilities.source) {
+      next.cockpitCapabilities = normalizeCockpitCapabilities(cockpitCapabilities);
+    }
     if (portfolio.source) {
       next.portfolio = normalizePortfolio(portfolio);
       next.positions = next.portfolio.positions;
@@ -6990,7 +7785,7 @@
   }
 
   function endpointTasksForScreen(screenId) {
-    const active = screenId || "positions";
+    const active = screenId || "overview";
     const common = [
       { key: "version", path: "/operator/version", priority: 0, lane: "critical" },
       { key: "health", path: "/operator/health", priority: 0, lane: "critical" },
@@ -6999,11 +7794,64 @@
       { key: "status", path: "/operator/status", priority: 0, lane: "critical" },
       { key: "latestRun", path: "/operator/latest-run", priority: 1, lane: "normal" },
       { key: "credentialsProviders", path: "/operator/credentials/providers", priority: 1, lane: "normal" },
+      { key: "cockpitCapabilities", path: "/operator/cockpit/capabilities", priority: 1, lane: "normal" },
       { key: "paperBaseline", path: "/operator/paper-baseline", priority: 1, lane: "normal" },
       { key: "launchReadiness", path: "/operator/launch-readiness", priority: 1, lane: "normal" },
       { key: "contracts", path: "/operator/contracts", priority: 2, lane: "normal", optional: true }
     ];
     const byScreen = {
+      overview: [
+        { key: "portfolio", path: "/operator/portfolio", priority: 2, lane: "normal" },
+        { key: "pnlDashboard", path: "/operator/pnl", priority: 3, lane: "optional", optional: true },
+        { key: "actionCenter", path: "/operator/action-center", priority: 3, lane: "optional", optional: true },
+        { key: "alerts", path: "/operator/alerts", priority: 3, lane: "optional", optional: true }
+      ],
+      performance: [
+        { key: "portfolio", path: "/operator/portfolio", priority: 2, lane: "normal" },
+        { key: "pnlDashboard", path: "/operator/pnl", priority: 3, lane: "optional", optional: true },
+        { key: "tcaDashboard", path: "/operator/tca", priority: 3, lane: "optional", optional: true },
+        { key: "fills", path: "/operator/fills-summary", priority: 3, lane: "optional", optional: true },
+        { key: "runs", path: "/operator/runs", priority: 3, lane: "optional", optional: true }
+      ],
+      trades: [
+        { key: "portfolio", path: "/operator/portfolio", priority: 2, lane: "normal" },
+        { key: "orders", path: "/operator/orders-summary", priority: 2, lane: "normal", optional: true },
+        { key: "fills", path: "/operator/fills-summary", priority: 3, lane: "optional", optional: true },
+        { key: "explain", path: "/operator/explain/latest", priority: 3, lane: "optional", optional: true }
+      ],
+      markets: [
+        { key: "universe", path: "/operator/universe", priority: 2, lane: "normal", optional: true },
+        { key: "world", path: "/operator/world-awareness", priority: 3, lane: "optional", optional: true },
+        { key: "worldRuntime", path: "/operator/world-awareness/runtime", priority: 3, lane: "optional", optional: true }
+      ],
+      advisor: [
+        { key: "aiStatus", path: "/operator/ai/status", priority: 2, lane: "normal", optional: true },
+        { key: "aiRouterSettings", path: "/operator/ai/router/settings", priority: 2, lane: "normal", optional: true },
+        { key: "aiRecommendations", path: "/operator/ai/recommendations", priority: 3, lane: "optional", optional: true },
+        { key: "world", path: "/operator/world-awareness", priority: 3, lane: "optional", optional: true }
+      ],
+      health: [
+        { key: "diagnostics", path: "/operator/diagnostics", priority: 3, lane: "optional", optional: true },
+        { key: "perfRecent", path: "/operator/perf/recent", priority: 3, lane: "optional", optional: true },
+        { key: "systemMap", path: "/operator/system-map", priority: 3, lane: "optional", optional: true },
+        { key: "alerts", path: "/operator/alerts", priority: 3, lane: "optional", optional: true }
+      ],
+      controls: [
+        { key: "portfolio", path: "/operator/portfolio", priority: 2, lane: "normal" },
+        { key: "runtime", path: "/operator/runtime-minimal", priority: 1, lane: "normal" },
+        { key: "actionCenter", path: "/operator/action-center", priority: 3, lane: "optional", optional: true }
+      ],
+      log: [
+        { key: "runtime", path: "/operator/runtime", priority: 2, lane: "normal" },
+        { key: "runs", path: "/operator/runs", priority: 3, lane: "optional", optional: true },
+        { key: "audit", path: "/operator/audit-summary", priority: 3, lane: "optional", optional: true }
+      ],
+      connections: [
+        { key: "providers", path: "/operator/providers", priority: 2, lane: "normal" },
+        { key: "providerReadiness", path: "/operator/providers/readiness", priority: 2, lane: "normal" },
+        { key: "aiStatus", path: "/operator/ai/status", priority: 2, lane: "normal", optional: true },
+        { key: "aiRouterSettings", path: "/operator/ai/router/settings", priority: 2, lane: "normal", optional: true }
+      ],
       positions: [
         { key: "portfolio", path: "/operator/portfolio", priority: 2, lane: "normal" },
         { key: "orders", path: "/operator/orders-summary", priority: 2, lane: "normal", optional: true }
@@ -7159,20 +8007,20 @@
   let activeScreenRefreshToken = 0;
 
   async function boot() {
-    data = await loadData({ activeScreen: "positions" });
+    data = await loadData({ activeScreen: "overview" });
     aiOverlayOpen = shouldOpenAiDockFromUrl();
     aiWideMode = aiOverlayOpen && shouldUseWideAiDockFromUrl();
     syncAiDockedState();
     renderTopBar();
     renderNav();
-    renderScreens("positions");
+    renderScreens("overview");
     renderRail();
     renderAiChiefOverlay();
     startRuntimeLifecycleObservers();
   }
 
   async function refreshActiveScreenData(screenId) {
-    const selected = screenId || activeScreenId || "positions";
+    const selected = screenId || activeScreenId || "overview";
     const refreshToken = ++activeScreenRefreshToken;
     try {
       const nextData = await loadData({ activeScreen: selected });
@@ -7579,6 +8427,55 @@
     }
   }
 
+  async function handleCockpitAssetClass(assetClass) {
+    if (!backendConnected()) {
+      cockpitActionStatus = `${assetClass}: refused; backend unavailable`;
+      renderTopBar();
+      renderScreens(activeScreenId);
+      return;
+    }
+    const row = cockpitAssetClass(assetClass) || {};
+    cockpitActionStatus = `${assetClass}: checking server gate...`;
+    renderScreens(activeScreenId);
+    try {
+      const result = await postIntent("/operator/cockpit/asset-mandate", { asset_class: assetClass });
+      cockpitActionStatus = `${assetClass}: ${result.status || "UNKNOWN"}; reason=${result.reason_code || "UNKNOWN"}; broker_mutation=${result.broker_mutation_occurred === true}; strategy_mutation=${result.strategy_mutation_occurred === true}; liquidation=${result.liquidation_occurred === true}`;
+      if (row.enabled !== true && result.accepted === true) {
+        cockpitActionStatus = `${assetClass}: unsafe mismatch - UI gate disabled but server accepted. Stop and inspect.`;
+      }
+      data.cockpitCapabilities = normalizeCockpitCapabilities(await fetchJson("/operator/cockpit/capabilities"));
+      renderTopBar();
+      renderScreens(activeScreenId);
+      renderRail();
+    } catch (error) {
+      cockpitActionStatus = `${assetClass}: FAILED ${error.message || error.name || "cockpit_gate_error"}`;
+      renderTopBar();
+      renderScreens(activeScreenId);
+    }
+  }
+
+  async function handleCockpitDayTraderMode() {
+    if (!backendConnected()) {
+      cockpitActionStatus = "day_trader_mode: refused; backend unavailable";
+      renderScreens(activeScreenId);
+      return;
+    }
+    cockpitActionStatus = "day_trader_mode: checking server gate...";
+    renderScreens(activeScreenId);
+    try {
+      const result = await postIntent("/operator/cockpit/day-trader-mode", { enabled: true });
+      cockpitActionStatus = `day_trader_mode: ${result.status || "UNKNOWN"}; reason=${result.reason_code || "UNKNOWN"}; strategy_mutation=${result.strategy_mutation_occurred === true}; broker_mutation=${result.broker_mutation_occurred === true}`;
+      data.cockpitCapabilities = normalizeCockpitCapabilities(await fetchJson("/operator/cockpit/capabilities"));
+      renderTopBar();
+      renderScreens(activeScreenId);
+      renderRail();
+    } catch (error) {
+      cockpitActionStatus = `day_trader_mode: FAILED ${error.message || error.name || "cockpit_gate_error"}`;
+      renderTopBar();
+      renderScreens(activeScreenId);
+    }
+  }
+
   document.addEventListener("input", (event) => {
     const paperCard = event.target.closest("[data-paper-form-card]");
     if (paperCard && (
@@ -7762,6 +8659,16 @@
       settings.default_mode = "LOCAL_MODEL";
       applyRoutingToLocalState(settings);
       saveAiRoutingSettings();
+      return;
+    }
+    const cockpitAsset = event.target.closest("[data-cockpit-asset]");
+    if (cockpitAsset && !cockpitAsset.disabled) {
+      handleCockpitAssetClass(cockpitAsset.dataset.cockpitAsset);
+      return;
+    }
+    const cockpitDayTrader = event.target.closest("[data-cockpit-day-trader]");
+    if (cockpitDayTrader && !cockpitDayTrader.disabled) {
+      handleCockpitDayTraderMode();
       return;
     }
     const credentialSave = event.target.closest("[data-credential-save]");
