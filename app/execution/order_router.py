@@ -92,6 +92,7 @@ from app.config import ExecutionConfig
 logger = logging.getLogger(__name__)
 
 INTERNAL_PAPER_EXECUTION_BROKER = "internal_paper"
+ALPACA_PAPER_MIN_ORDER_NOTIONAL = _Decimal("10")
 
 
 _STATUS_EVIDENCE_OPEN_OR_PENDING = {
@@ -230,6 +231,7 @@ class OrderRouter:
         self._broker_fee_activity_fetch_error: Optional[str] = None
         self._broker_fee_hydration_skipped: bool = False
         self._broker_fee_hydration_skip_reason: Optional[str] = None
+        self._gateway_buying_power_pre_post_events: List[Dict[str, Any]] = []
         self._cancel_denials_by_order_id: Dict[str, str] = {}
         self._oms_lifecycle_counts: Dict[str, int] = {
             "submitted": 0,
@@ -3723,6 +3725,10 @@ class OrderRouter:
                 "POST": int(request_counts.get("POST", 0) or 0),
                 "DELETE": int(request_counts.get("DELETE", 0) or 0),
             },
+            "buying_power_pre_post_gate_event_count": len(self._gateway_buying_power_pre_post_events),
+            "buying_power_pre_post_gate_events": tuple(
+                dict(event) for event in self._gateway_buying_power_pre_post_events[-20:]
+            ),
             "broker_boundary_event_history_replayed_in_shutdown": True,
             "broker_boundary_event_history_count": len(self._broker_boundary_events),
             "broker_boundary_events": tuple(dict(event) for event in self._broker_boundary_events[-20:]),
@@ -3790,6 +3796,7 @@ class OrderRouter:
             "endpoint_path": getattr(response, "endpoint_path", None) if response is not None else None,
             "normalized_status": getattr(response, "normalized_status", None) if response is not None else None,
             "mutation_occurred": bool(getattr(response, "mutation_occurred", False)) if response is not None else False,
+            "broker_message": self._safe_broker_message(getattr(response, "message", None)) if response is not None else None,
             "mutation_method_counts": {
                 "GET": int(request_counts.get("GET", 0) or 0),
                 "POST": int(request_counts.get("POST", 0) or 0),
@@ -3886,6 +3893,261 @@ class OrderRouter:
         for key in keys:
             if key in payload and payload.get(key) not in (None, ""):
                 return payload.get(key)
+        return None
+
+    def _safe_broker_message(self, value: Any, *, max_len: int = 240) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+        if not text:
+            return None
+        lower = text.lower()
+        for marker in ("secret", "api-key", "apikey", "api key", "token", "password"):
+            if marker in lower:
+                return "[redacted]"
+        return text[:max_len]
+
+    def _gateway_order_consumes_buying_power(self, request: _GatewayOrderSubmitRequest) -> bool:
+        return str(getattr(request, "side", "") or "").strip().lower() == "buy"
+
+    def _gateway_open_order_rows(self, payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if isinstance(payload, dict):
+            for key in ("orders", "open_orders", "data"):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    return [row for row in rows if isinstance(row, dict)]
+        return []
+
+    def _gateway_open_buy_reserved_notional(self, rows: List[Dict[str, Any]]) -> _Decimal:
+        reserved = _Decimal("0")
+        for row in rows:
+            side = str(row.get("side") or "").strip().lower()
+            status = str(row.get("status") or "").strip().lower()
+            if side and side != "buy":
+                continue
+            if status in _STATUS_EVIDENCE_TERMINAL:
+                continue
+            notional = self._decimal_from_payload(row, ("notional", "order_notional"))
+            if notional is None:
+                quantity = self._decimal_from_payload(row, ("qty", "quantity"))
+                price = self._decimal_from_payload(row, ("limit_price", "price", "stop_price"))
+                if quantity is not None and price is not None:
+                    notional = quantity * price
+            if notional is not None and notional > 0:
+                reserved += notional
+        return reserved
+
+    def _gateway_account_buying_power_basis(
+        self,
+        account_payload: Dict[str, Any],
+        request: _GatewayOrderSubmitRequest,
+    ) -> Tuple[Optional[_Decimal], Optional[str]]:
+        asset_class = str(getattr(request, "asset_class", "") or "").strip().lower()
+        symbol = str(getattr(request, "symbol", "") or "")
+        cash = self._decimal_from_payload(account_payload, ("cash",))
+        non_marginable = self._decimal_from_payload(account_payload, ("non_marginable_buying_power",))
+        buying_power = self._decimal_from_payload(account_payload, ("buying_power",))
+
+        candidates: List[Tuple[str, _Decimal]] = []
+        if asset_class == "crypto" or "/" in symbol:
+            if non_marginable is not None:
+                candidates.append(("non_marginable_buying_power", non_marginable))
+            if cash is not None:
+                candidates.append(("cash", cash))
+        else:
+            if buying_power is not None:
+                candidates.append(("buying_power", buying_power))
+            if cash is not None:
+                candidates.append(("cash", cash))
+            if non_marginable is not None:
+                candidates.append(("non_marginable_buying_power", non_marginable))
+
+        candidates = [(key, value) for key, value in candidates if value is not None]
+        if not candidates:
+            return None, None
+        field, amount = min(candidates, key=lambda item: item[1])
+        return amount, field
+
+    def _gateway_pre_post_block_response(
+        self,
+        order: OrderRequest,
+        *,
+        reason_code: str,
+        message: str,
+        gate_metadata: Dict[str, Any],
+    ) -> BrokerGatewayResponse:
+        identity = self._broker_gateway_adapter.identity
+        metadata = {
+            "source": identity.adapter_id,
+            "blocked_before_submit": True,
+            "broker_post_attempted": False,
+            "broker_post_authorized": False,
+            "pre_post_gate": "BUYING_POWER",
+            **gate_metadata,
+        }
+        self._gateway_buying_power_pre_post_events.append(dict(metadata))
+        return BrokerGatewayResponse(
+            adapter_id=identity.adapter_id,
+            venue_id=identity.venue_id,
+            portal_id=identity.portal_id,
+            environment=identity.environment,
+            request_method="POST",
+            endpoint_path="/v2/orders",
+            ok=False,
+            mutation_occurred=False,
+            live_blocked=identity.live_blocked,
+            client_order_id=order.id,
+            normalized_status=_GatewayStatus.REJECTED.value,
+            reason_code=reason_code,
+            message=message,
+            reconciliation_metadata=metadata,
+        )
+
+    def _gateway_buying_power_pre_post_response(
+        self,
+        order: OrderRequest,
+        request: _GatewayOrderSubmitRequest,
+    ) -> Optional[BrokerGatewayResponse]:
+        if not self._gateway_order_consumes_buying_power(request):
+            return None
+
+        notional = request.notional_cap_basis
+        if notional is None or notional <= 0:
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="BUYING_POWER_NOTIONAL_UNKNOWN_PRE_POST",
+                message="buy/add order notional is unknown before broker POST",
+                gate_metadata={
+                    "order_notional": None,
+                    "exit_lifecycle_exempt": False,
+                },
+            )
+        if notional < ALPACA_PAPER_MIN_ORDER_NOTIONAL:
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="MIN_NOTIONAL_NOT_MET_PRE_POST",
+                message="buy/add order notional is below Alpaca paper minimum before broker POST",
+                gate_metadata={
+                    "order_notional": format(notional, "f"),
+                    "minimum_notional": format(ALPACA_PAPER_MIN_ORDER_NOTIONAL, "f"),
+                    "exit_lifecycle_exempt": False,
+                },
+            )
+
+        account_response = None
+        open_orders_response = None
+        try:
+            account_response = self._broker_gateway_adapter.get_account()
+            open_orders_response = self._broker_gateway_adapter.get_open_orders()
+        except BrokerGatewayError as exc:
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="BUYING_POWER_TRUTH_UNAVAILABLE_PRE_POST",
+                message="read-only account/open-order truth unavailable before broker POST",
+                gate_metadata={
+                    "order_notional": format(notional, "f"),
+                    "read_error_reason": exc.reason_code,
+                    "read_error_message": self._safe_broker_message(exc.message),
+                    "exit_lifecycle_exempt": False,
+                },
+            )
+
+        if account_response is None or not account_response.ok or not isinstance(account_response.payload, dict):
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="BUYING_POWER_TRUTH_UNAVAILABLE_PRE_POST",
+                message="read-only account truth unavailable before broker POST",
+                gate_metadata={
+                    "order_notional": format(notional, "f"),
+                    "account_read_ok": bool(account_response is not None and account_response.ok),
+                    "account_reason_code": getattr(account_response, "reason_code", None),
+                    "account_message": self._safe_broker_message(getattr(account_response, "message", None)),
+                    "exit_lifecycle_exempt": False,
+                },
+            )
+        if open_orders_response is None or not open_orders_response.ok:
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="BUYING_POWER_TRUTH_UNAVAILABLE_PRE_POST",
+                message="read-only open-order truth unavailable before broker POST",
+                gate_metadata={
+                    "order_notional": format(notional, "f"),
+                    "open_orders_read_ok": bool(open_orders_response is not None and open_orders_response.ok),
+                    "open_orders_reason_code": getattr(open_orders_response, "reason_code", None),
+                    "open_orders_message": self._safe_broker_message(getattr(open_orders_response, "message", None)),
+                    "exit_lifecycle_exempt": False,
+                },
+            )
+
+        account_payload = account_response.payload
+        account_status = str(account_payload.get("status") or "").strip().upper()
+        if account_status and account_status not in {"ACTIVE"}:
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="ACCOUNT_NOT_ACTIVE_PRE_POST",
+                message="Alpaca paper account is not active before broker POST",
+                gate_metadata={
+                    "order_notional": format(notional, "f"),
+                    "account_status": account_status,
+                    "exit_lifecycle_exempt": False,
+                },
+            )
+        for flag in ("trading_blocked", "account_blocked", "trade_suspended_by_user"):
+            if bool(account_payload.get(flag)):
+                return self._gateway_pre_post_block_response(
+                    order,
+                    reason_code="ACCOUNT_TRADING_BLOCKED_PRE_POST",
+                    message="Alpaca paper account trading is blocked before broker POST",
+                    gate_metadata={
+                        "order_notional": format(notional, "f"),
+                        "account_block_flag": flag,
+                        "exit_lifecycle_exempt": False,
+                    },
+                )
+
+        account_available, available_field = self._gateway_account_buying_power_basis(account_payload, request)
+        if account_available is None:
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="BUYING_POWER_TRUTH_UNAVAILABLE_PRE_POST",
+                message="cash/buying-power field missing before broker POST",
+                gate_metadata={
+                    "order_notional": format(notional, "f"),
+                    "available_field": None,
+                    "exit_lifecycle_exempt": False,
+                },
+            )
+
+        open_order_rows = self._gateway_open_order_rows(open_orders_response.payload)
+        reserved_open_buy_notional = self._gateway_open_buy_reserved_notional(open_order_rows)
+        available_after_reservations = account_available - reserved_open_buy_notional
+        gate_metadata = {
+            "order_notional": format(notional, "f"),
+            "available_field": available_field,
+            "account_available": format(account_available, "f"),
+            "reserved_open_buy_notional": format(reserved_open_buy_notional, "f"),
+            "available_after_open_buy_reservations": format(available_after_reservations, "f"),
+            "open_orders_count": len(open_order_rows),
+            "exit_lifecycle_exempt": False,
+        }
+        if available_after_reservations < notional:
+            return self._gateway_pre_post_block_response(
+                order,
+                reason_code="BUYING_POWER_INSUFFICIENT_PRE_POST",
+                message="buy/add order exceeds cash/buying-power truth before broker POST",
+                gate_metadata=gate_metadata,
+            )
+
+        pass_event = {
+            "source": getattr(getattr(self._broker_gateway_adapter, "identity", None), "adapter_id", "broker_gateway"),
+            "blocked_before_submit": False,
+            "broker_post_authorized": True,
+            "pre_post_gate": "BUYING_POWER",
+            **gate_metadata,
+        }
+        self._gateway_buying_power_pre_post_events.append(pass_event)
         return None
 
     def _broker_read_allowed(self, family: str, activity_type: Any | None = None) -> bool:
@@ -5384,7 +5646,11 @@ class OrderRouter:
         self._record_oms_state(OmsOrderState.ROUTER_SUBMITTED.value)
         broker_post_authorized = self._broker_gateway_identity_error() is None
         try:
-            response = self._broker_gateway_adapter.submit_order(request)
+            response = self._gateway_buying_power_pre_post_response(order, request)
+            if response is not None:
+                broker_post_authorized = False
+            else:
+                response = self._broker_gateway_adapter.submit_order(request)
         except BrokerGatewayError as exc:
             identity = self._broker_gateway_adapter.identity
             response = BrokerGatewayResponse(

@@ -28,6 +28,10 @@ class StubTransport:
     def request(self, *, method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float):
         self.calls.append({"method": method, "url": url, "headers": headers, "body": body, "timeout": timeout})
         path = url.removeprefix(EXPECTED_ALPACA_PAPER_BASE_URL).split("?", 1)[0]
+        if (method, path) not in self.responses and method == "GET" and path == "/v2/account":
+            return 200, {"id": "acct-1", "status": "ACTIVE", "cash": "100000", "buying_power": "100000"}
+        if (method, path) not in self.responses and method == "GET" and path == "/v2/orders":
+            return 200, []
         return self.responses.get((method, path), (200, {}))
 
 
@@ -248,7 +252,7 @@ def test_order_router_routes_alpaca_paper_order_to_gateway_adapter_with_stub_tra
     )
     adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport)
     router = OrderRouter(primary_exchange="alpaca", paper_mode=True, broker_gateway_adapter=adapter)
-    order = _order(order_id="client-open-1")
+    order = _order(order_id="client-open-1", quantity=Decimal("1"))
 
     fill = router.submit_order(order)
     response = router.get_gateway_response(order.id)
@@ -262,7 +266,11 @@ def test_order_router_routes_alpaca_paper_order_to_gateway_adapter_with_stub_tra
     assert router._pending_orders[order.id] == order
     assert router._paper_broker is not None
     assert order.id not in router._paper_broker.open_orders
-    assert transport.calls[0]["method"] == "POST"
+    assert [call["method"] for call in transport.calls[:3]] == ["GET", "GET", "POST"]
+    assert [call["method"] for call in transport.calls].count("POST") == 1
+    accounting = router.get_oms_shutdown_accounting()
+    assert accounting["buying_power_pre_post_gate_event_count"] == 1
+    assert accounting["buying_power_pre_post_gate_events"][0]["blocked_before_submit"] is False
 
 
 def test_order_router_gateway_rejection_flows_back_without_fake_fill():
@@ -298,10 +306,79 @@ def test_order_router_gateway_rejection_flows_back_without_fake_fill():
     assert response is not None
     assert response.ok is False
     assert response.normalized_status == "rejected"
-    assert response.reason_code == "MIN_NOTIONAL_NOT_MET"
+    assert response.reason_code == "MIN_NOTIONAL_NOT_MET_PRE_POST"
     assert response.mutation_occurred is False
     assert response.broker_order_id is None
+    assert response.reconciliation_metadata["blocked_before_submit"] is True
+    assert transport.calls == []
     assert order.id not in router._pending_orders
+
+
+def test_order_router_gateway_blocks_unfunded_buy_before_broker_post():
+    transport = StubTransport(
+        {
+            ("GET", "/v2/account"): (
+                200,
+                {
+                    "id": "acct-1",
+                    "status": "ACTIVE",
+                    "cash": "50",
+                    "buying_power": "50",
+                    "non_marginable_buying_power": "50",
+                },
+            ),
+            ("GET", "/v2/orders"): (200, []),
+            ("POST", "/v2/orders"): (200, {"id": "should-not-post", "status": "open"}),
+        }
+    )
+    adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport)
+    router = OrderRouter(primary_exchange="alpaca", paper_mode=True, broker_gateway_adapter=adapter)
+    order = _order(order_id="client-unfunded", quantity=Decimal("1"), limit_price=Decimal("100"))
+
+    fill = router.submit_order(order)
+    response = router.get_gateway_response(order.id)
+
+    assert fill is None
+    assert response is not None
+    assert response.ok is False
+    assert response.reason_code == "BUYING_POWER_INSUFFICIENT_PRE_POST"
+    assert response.reconciliation_metadata["blocked_before_submit"] is True
+    assert response.reconciliation_metadata["available_after_open_buy_reservations"] == "50"
+    assert [call["method"] for call in transport.calls] == ["GET", "GET"]
+    accounting = router.get_oms_shutdown_accounting()
+    boundary = accounting["broker_boundary_events"][-1]
+    assert boundary["broker_post_attempted"] is False
+    assert boundary["broker_post_authorized"] is False
+    assert boundary["broker_boundary_result"] == "BROKER_POST_BLOCKED_BEFORE_SUBMIT"
+    assert accounting["mutation_method_counts"]["POST"] == 0
+
+
+def test_order_router_gateway_subtracts_open_buy_reservations_before_post():
+    transport = StubTransport(
+        {
+            ("GET", "/v2/account"): (200, {"id": "acct-1", "status": "ACTIVE", "cash": "125", "buying_power": "125"}),
+            ("GET", "/v2/orders"): (
+                200,
+                [
+                    {"id": "reserved-buy", "side": "buy", "status": "open", "qty": "0.50", "limit_price": "100"},
+                    {"id": "sell-exit", "side": "sell", "status": "open", "qty": "0.10", "limit_price": "100"},
+                ],
+            ),
+            ("POST", "/v2/orders"): (200, {"id": "should-not-post", "status": "open"}),
+        }
+    )
+    adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport)
+    router = OrderRouter(primary_exchange="alpaca", paper_mode=True, broker_gateway_adapter=adapter)
+    order = _order(order_id="client-reserved", quantity=Decimal("1"), limit_price=Decimal("100"))
+
+    router.submit_order(order)
+    response = router.get_gateway_response(order.id)
+
+    assert response is not None
+    assert response.reason_code == "BUYING_POWER_INSUFFICIENT_PRE_POST"
+    assert response.reconciliation_metadata["reserved_open_buy_notional"] == "50.00"
+    assert response.reconciliation_metadata["available_after_open_buy_reservations"] == "75.00"
+    assert [call["method"] for call in transport.calls] == ["GET", "GET"]
 
 
 def test_order_router_gateway_blocks_sell_cancel_replace_without_gateway_mutation():

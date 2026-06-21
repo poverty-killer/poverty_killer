@@ -180,7 +180,7 @@ def _adapter_with_ack(status_payload: dict | None = None, *, delete_status: int 
             ("GET", "/v2/orders/broker-1"): (200, status_payload),
             ("GET", "/v2/orders"): (200, [status_payload]),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
             ("DELETE", "/v2/orders/broker-1"): (delete_status, {}),
         }
     )
@@ -669,7 +669,7 @@ def test_shutdown_final_reconciliation_explains_broker_open_order_truth(tmp_path
             ("GET", "/v2/orders/broker-1"): (200, status_payload),
             ("GET", "/v2/orders"): (200, [status_payload, {"id": "external-open", "symbol": "ETHUSD"}]),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS)
@@ -712,7 +712,7 @@ def test_shutdown_reconciliation_terminalizes_filled_local_open_without_broker_o
             ("GET", "/v2/orders/broker-filled"): (200, filled_payload),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -766,7 +766,7 @@ def test_shutdown_hydrates_existing_terminal_filled_mapping_without_local_fill(t
             ("GET", "/v2/orders/old-broker-filled"): (200, filled_payload),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.02"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -802,7 +802,7 @@ def test_shutdown_reconciliation_terminalizes_canceled_local_open_without_broker
             ),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, []),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -841,7 +841,7 @@ def test_shutdown_reconciliation_conflicts_unexplained_local_open(tmp_path):
             ),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, []),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -892,7 +892,7 @@ def test_missing_broker_fill_details_reports_unavailable_without_fake_fill(tmp_p
             ),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -938,7 +938,7 @@ def test_order_status_fill_without_fee_hydrates_partial_broker_ledger_without_fa
             ("GET", "/v2/account/activities"): (200, []),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -1001,7 +1001,7 @@ def test_account_activity_hydrates_fee_and_realized_netedge_tca(tmp_path):
             ("GET", "/v2/account/activities"): (200, [activity_payload]),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -1062,7 +1062,7 @@ def test_repeated_fill_hydration_is_idempotent(tmp_path):
             ("GET", "/v2/account/activities"): (200, []),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -1102,7 +1102,7 @@ def test_canceled_order_with_filled_qty_records_partial_fill_then_cancel(tmp_pat
             ("GET", "/v2/account/activities"): (200, []),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.005"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     router = OrderRouter(
@@ -1190,7 +1190,7 @@ def test_startup_reconciles_persisted_ack_mapping_with_broker_truth_without_muta
             ("GET", "/v2/orders/broker-missing"): (404, {"message": "order not found"}),
             ("GET", "/v2/orders"): (200, []),
             ("GET", "/v2/positions"): (200, [{"symbol": "BTCUSD", "qty": "0.01"}]),
-            ("GET", "/v2/account"): (200, {"status": "ACTIVE"}),
+            ("GET", "/v2/account"): (200, {"status": "ACTIVE", "cash": "100000", "buying_power": "100000"}),
         }
     )
     adapter = AlpacaPaperBrokerAdapter(_creds(), transport=transport, read_profile=PAPER_TCA_EXTENDED_READS)

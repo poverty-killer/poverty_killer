@@ -36,14 +36,19 @@ class StubTransport:
         self.calls = []
 
     def request(self, *, method, url, headers, body=None, timeout=10.0):
+        path = urlparse(url).path
         self.calls.append(
             {
                 "method": method,
-                "path": urlparse(url).path,
+                "path": path,
                 "body": json.loads(body.decode("utf-8")) if body else None,
                 "timeout": timeout,
             }
         )
+        if method == "GET" and path == "/v2/account":
+            return 200, {"id": "acct-1", "status": "ACTIVE", "cash": "100000", "buying_power": "100000"}
+        if method == "GET" and path == "/v2/orders":
+            return 200, []
         return self.response
 
 
@@ -279,8 +284,8 @@ def test_normal_paper_mode_still_posts_to_alpaca_paper_gateway_when_shadow_disab
 
     assert result.normalized_status == "open"
     assert result.broker_order_id == "broker-open-shadow-control"
-    assert transport.calls[0]["method"] == "POST"
-    assert transport.calls[0]["path"] == "/v2/orders"
+    post_call = next(call for call in transport.calls if call["method"] == "POST")
+    assert post_call["path"] == "/v2/orders"
     assert engine.get_shadow_read_only_events() == ()
 
 

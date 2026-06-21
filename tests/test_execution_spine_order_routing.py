@@ -33,15 +33,20 @@ class StubTransport:
         self.calls = []
 
     def request(self, *, method, url, headers, body=None, timeout=10.0):
+        path = urlparse(url).path
         self.calls.append(
             {
                 "method": method,
-                "path": urlparse(url).path,
+                "path": path,
                 "headers": dict(headers),
                 "body": json.loads(body.decode("utf-8")) if body else None,
                 "timeout": timeout,
             }
         )
+        if method == "GET" and path == "/v2/account":
+            return 200, {"id": "acct-1", "status": "ACTIVE", "cash": "100000", "buying_power": "100000"}
+        if method == "GET" and path == "/v2/orders":
+            return 200, []
         return self.response
 
 
@@ -248,11 +253,11 @@ def test_full_spine_routes_open_alpaca_paper_gateway_response_without_fake_fill(
     assert result.client_order_id == "sector_rotation_AAPL_1777948800000000000"
     assert result.client_order_id in engine._state.pending_orders
     assert result.client_order_id not in router._paper_broker.open_orders
-    assert transport.calls[0]["method"] == "POST"
-    assert transport.calls[0]["path"] == "/v2/orders"
-    assert transport.calls[0]["body"]["type"] == "limit"
-    assert transport.calls[0]["body"]["time_in_force"] == "day"
-    assert transport.calls[0]["body"]["client_order_id"] == result.client_order_id
+    post_call = next(call for call in transport.calls if call["method"] == "POST")
+    assert post_call["path"] == "/v2/orders"
+    assert post_call["body"]["type"] == "limit"
+    assert post_call["body"]["time_in_force"] == "day"
+    assert post_call["body"]["client_order_id"] == result.client_order_id
 
     order = engine._state.pending_orders[result.client_order_id]
     assert order.decision_uuid == decision.decision_uuid
