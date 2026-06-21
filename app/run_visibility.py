@@ -10,6 +10,7 @@ import html
 import json
 import os
 import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ RUN_VISIBILITY_SCHEMA_VERSION = "paper-run-visibility-v1"
 DEFAULT_RUNTIME_DIR = Path("logs") / "runtime"
 DEFAULT_HEARTBEAT_PATH = DEFAULT_RUNTIME_DIR / "paper_heartbeat.json"
 DEFAULT_SUPERVISOR_STATUS_PATH = DEFAULT_RUNTIME_DIR / "paper_supervisor_status.json"
+DEFAULT_STATE_DB_PATH = Path("data") / "state.db"
 DEFAULT_STATUS_STALE_AFTER_SECONDS = 15.0
 LOG_TIMESTAMP_RE = re.compile(
     r"(?P<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{3,6})?(?:Z|[+-]\d{2}:?\d{2})?)"
@@ -115,6 +117,109 @@ def _safe_count(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _sqlite_readonly_uri(path: Path) -> str:
+    return f"file:{path.resolve().as_posix()}?mode=ro"
+
+
+def read_reconciled_fill_ledger_visibility(
+    repo_root: str | Path,
+    *,
+    state_db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    root = Path(repo_root)
+    db_file = _coerce_path(root, state_db_path, DEFAULT_STATE_DB_PATH)
+    unavailable = {
+        "source": "RECONCILED_BROKER_FILL_LEDGER",
+        "authority": "broker_fill_ledger",
+        "available": False,
+        "read_only": True,
+        "state_db_path": str(db_file),
+        "broker_confirmed": False,
+        "broker_fill_ledger_rows": 0,
+        "local_fills": 0,
+        "last_fill": None,
+    }
+    if not db_file.exists():
+        return {**unavailable, "reason": "STATE_DB_NOT_FOUND"}
+    try:
+        connection = sqlite3.connect(_sqlite_readonly_uri(db_file), uri=True, timeout=2.0)
+        connection.row_factory = sqlite3.Row
+        try:
+            table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='broker_fill_ledger'"
+            ).fetchone()
+            if table is None:
+                return {**unavailable, "reason": "BROKER_FILL_LEDGER_TABLE_NOT_FOUND"}
+            count_row = connection.execute("SELECT COUNT(*) AS count FROM broker_fill_ledger").fetchone()
+            count = _safe_count(count_row["count"] if count_row else 0)
+            last_row = connection.execute(
+                """
+                SELECT
+                    fill_id,
+                    broker_order_id,
+                    client_order_id,
+                    broker_activity_id,
+                    decision_uuid,
+                    symbol,
+                    side,
+                    quantity,
+                    price,
+                    notional,
+                    fill_timestamp,
+                    fill_ts_ns,
+                    fee,
+                    fee_currency,
+                    hydration_status,
+                    tca_status,
+                    execution_quality_verdict,
+                    source,
+                    observed_at_ns,
+                    created_at_ns
+                FROM broker_fill_ledger
+                ORDER BY COALESCE(fill_ts_ns, observed_at_ns, created_at_ns, 0) DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        return {**unavailable, "reason": "STATE_DB_READ_FAILED", "error": type(exc).__name__}
+
+    last_fill = None
+    if last_row is not None:
+        last_fill = {
+            "fill_id": last_row["fill_id"],
+            "broker_order_id": last_row["broker_order_id"],
+            "client_order_id": last_row["client_order_id"],
+            "broker_activity_id": last_row["broker_activity_id"],
+            "decision_uuid": last_row["decision_uuid"],
+            "symbol": last_row["symbol"],
+            "side": last_row["side"],
+            "quantity": last_row["quantity"],
+            "price": last_row["price"],
+            "notional": last_row["notional"],
+            "fill_timestamp": last_row["fill_timestamp"],
+            "fill_ts_ns": last_row["fill_ts_ns"],
+            "fee": last_row["fee"],
+            "fee_currency": last_row["fee_currency"],
+            "hydration_status": last_row["hydration_status"],
+            "tca_status": last_row["tca_status"],
+            "execution_quality_verdict": last_row["execution_quality_verdict"],
+            "source": last_row["source"],
+            "observed_at_ns": last_row["observed_at_ns"],
+            "created_at_ns": last_row["created_at_ns"],
+        }
+    return {
+        **unavailable,
+        "available": True,
+        "reason": None,
+        "broker_confirmed": count > 0,
+        "broker_fill_ledger_rows": count,
+        "local_fills": count,
+        "last_fill": last_fill,
+    }
 
 
 def build_runtime_heartbeat_payload(
@@ -260,6 +365,7 @@ def read_run_visibility_snapshot(
     *,
     heartbeat_path: str | Path | None = None,
     supervisor_status_path: str | Path | None = None,
+    state_db_path: str | Path | None = None,
     stale_after_seconds: float = DEFAULT_STATUS_STALE_AFTER_SECONDS,
 ) -> dict[str, Any]:
     root = Path(repo_root)
@@ -288,6 +394,22 @@ def read_run_visibility_snapshot(
 
     heartbeat_open_orders = _safe_mapping((heartbeat or {}).get("open_orders"))
     heartbeat_positions = _safe_mapping((heartbeat or {}).get("positions"))
+    heartbeat_runtime = _safe_mapping((heartbeat or {}).get("runtime"))
+    heartbeat_filled_orders_count = _safe_count(heartbeat_runtime.get("filled_orders_count"))
+    reconciled_fills = read_reconciled_fill_ledger_visibility(root, state_db_path=state_db_path)
+    reconciled_available = bool(reconciled_fills.get("available"))
+    reconciled_count = _safe_count(reconciled_fills.get("broker_fill_ledger_rows"))
+    last_reconciled_fill = reconciled_fills.get("last_fill") if reconciled_count > 0 else None
+    fills = {
+        "count": reconciled_count if reconciled_available else heartbeat_filled_orders_count,
+        "source": "broker_fill_ledger" if reconciled_available else "execution_heartbeat",
+        "broker_confirmed": bool(reconciled_available and reconciled_count > 0),
+        "heartbeat_filled_orders_count": heartbeat_filled_orders_count,
+        "broker_fill_ledger_rows": reconciled_count,
+        "reconciled_broker_ledger_available": reconciled_available,
+        "ledger_reason": reconciled_fills.get("reason"),
+        "last_fill": last_reconciled_fill or (heartbeat or {}).get("last_fill"),
+    }
     return {
         "source": "POVERTY_KILLER_RUN_VISIBILITY",
         "schema_version": RUN_VISIBILITY_SCHEMA_VERSION,
@@ -310,11 +432,13 @@ def read_run_visibility_snapshot(
         "log_progress_stale": log_stale,
         "pid": (supervisor or {}).get("pid") or (heartbeat or {}).get("pid"),
         "uptime_seconds": (heartbeat or {}).get("uptime_seconds") or (supervisor or {}).get("uptime_seconds"),
-        "last_fill": (heartbeat or {}).get("last_fill"),
+        "last_fill": fills["last_fill"],
         "last_signal": (heartbeat or {}).get("last_signal"),
         "last_post": (heartbeat or {}).get("last_post"),
         "open_orders": heartbeat_open_orders,
         "positions": heartbeat_positions,
+        "fills": fills,
+        "reconciled_fills": reconciled_fills,
         "latency_degraded_count": _safe_count((heartbeat or {}).get("latency_degraded_count")),
         "last_error": (heartbeat or {}).get("last_error") or (supervisor or {}).get("last_error"),
         "watchlist": _safe_sequence((heartbeat or {}).get("watchlist")),
@@ -368,6 +492,7 @@ def render_run_visibility_html(snapshot: dict[str, Any]) -> str:
       <div class="metric"><div class="label">Uptime</div><div class="value" id="uptime">{html.escape(str(snapshot.get("uptime_seconds")))}s</div></div>
       <div class="metric"><div class="label">Open Orders</div><div class="value" id="openOrders">{html.escape(str(_safe_mapping(snapshot.get("open_orders")).get("count")))}</div></div>
       <div class="metric"><div class="label">Positions</div><div class="value" id="positions">{html.escape(str(_safe_mapping(snapshot.get("positions")).get("count")))}</div></div>
+      <div class="metric"><div class="label">Fills</div><div class="value" id="fills">{html.escape(str(_safe_mapping(snapshot.get("fills")).get("count", 0)))}</div></div>
       <div class="metric"><div class="label">Latency Degraded</div><div class="value" id="latency">{html.escape(str(snapshot.get("latency_degraded_count")))}</div></div>
       <div class="metric"><div class="label">Last Error</div><div class="value" id="lastError">{html.escape(str(snapshot.get("last_error") or "none"))}</div></div>
     </section>
@@ -385,6 +510,7 @@ def render_run_visibility_html(snapshot: dict[str, Any]) -> str:
       document.getElementById('uptime').textContent = (data.uptime_seconds ?? 'none') + 's';
       document.getElementById('openOrders').textContent = (data.open_orders || {{}}).count ?? 0;
       document.getElementById('positions').textContent = (data.positions || {{}}).count ?? 0;
+      document.getElementById('fills').textContent = (data.fills || {{}}).count ?? 0;
       document.getElementById('latency').textContent = data.latency_degraded_count ?? 0;
       document.getElementById('lastError').textContent = data.last_error || 'none';
       document.getElementById('payload').textContent = JSON.stringify(data, null, 2);

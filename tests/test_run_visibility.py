@@ -14,9 +14,11 @@ from app.run_visibility import (
     atomic_write_json,
     build_runtime_heartbeat_payload,
     build_supervisor_status_payload,
+    read_reconciled_fill_ledger_visibility,
     read_run_visibility_snapshot,
     utc_now_iso,
 )
+from app.state.state_store import StateStore
 
 
 def _endpoint(app, path: str, method: str = "GET"):
@@ -126,9 +128,55 @@ def test_run_visibility_snapshot_combines_fresh_heartbeat_and_supervisor(tmp_pat
     assert snapshot["controls_available"] is False
     assert snapshot["open_orders"]["count"] == 1
     assert snapshot["positions"]["count"] == 4
+    assert snapshot["fills"]["count"] == 2
+    assert snapshot["fills"]["source"] == "execution_heartbeat"
     assert snapshot["latency_degraded_count"] == 3
     assert snapshot["broker_mutation_occurred"] is False
     assert snapshot["secrets_values_exposed"] is False
+
+
+def test_run_visibility_prefers_reconciled_broker_fill_ledger(tmp_path):
+    _write_running_artifacts(tmp_path)
+    store = StateStore(str(tmp_path / "data" / "state.db"))
+    try:
+        for index, symbol in enumerate(("BTC/USD", "ETH/USD", "SOL/USD"), start=1):
+            status = store.upsert_broker_fill_ledger(
+                {
+                    "fill_id": f"fill-{index}",
+                    "broker_order_id": f"broker-{index}",
+                    "client_order_id": f"client-{index}",
+                    "broker_activity_id": f"activity-{index}",
+                    "decision_uuid": f"decision-{index}",
+                    "symbol": symbol,
+                    "side": "buy",
+                    "quantity": "0.01",
+                    "price": "100.00",
+                    "notional": "1.00",
+                    "fill_timestamp": f"2026-06-18T00:00:0{index}Z",
+                    "fill_ts_ns": 1_779_600_000_000_000_000 + index,
+                    "fee": "0.01",
+                    "fee_currency": "USD",
+                    "source": "broker_activity_reconciliation",
+                    "hydration_status": "COMPLETE",
+                    "tca_status": "COMPLETE",
+                    "execution_quality_verdict": "KNOWN",
+                }
+            )
+            assert status == "inserted"
+    finally:
+        store.close()
+
+    ledger = read_reconciled_fill_ledger_visibility(tmp_path)
+    snapshot = read_run_visibility_snapshot(tmp_path)
+
+    assert ledger["available"] is True
+    assert ledger["broker_fill_ledger_rows"] == 3
+    assert snapshot["fills"]["source"] == "broker_fill_ledger"
+    assert snapshot["fills"]["count"] == 3
+    assert snapshot["fills"]["heartbeat_filled_orders_count"] == 2
+    assert snapshot["last_fill"]["client_order_id"] == "client-3"
+    assert snapshot["last_fill"]["symbol"] == "SOL/USD"
+    assert snapshot["reconciled_fills"]["read_only"] is True
 
 
 def test_supervisor_status_flips_after_process_death(tmp_path):

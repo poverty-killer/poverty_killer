@@ -1611,7 +1611,10 @@ class OperatorSnapshotProvider:
             return self.paper_control_state()
 
     def run_visibility_status(self) -> dict[str, Any]:
-        snapshot = read_run_visibility_snapshot(self.runtime_config.repo_root)
+        snapshot = read_run_visibility_snapshot(
+            self.runtime_config.repo_root,
+            state_db_path=self.runtime_config.data_dir / "state.db",
+        )
         snapshot.update(
             {
                 "operator_endpoint": "/operator/run-visibility/status",
