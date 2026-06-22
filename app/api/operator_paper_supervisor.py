@@ -352,6 +352,15 @@ class OperatorPaperSupervisor:
             "paper_endpoint_refusal_reason": endpoint_authority["reason_code"],
             "paper_endpoint_operator_action": endpoint_authority["operator_action"],
             "paper_endpoint_authority": endpoint_authority,
+            "stale_reconciliation": self._stale_reconciliation_status() if stale_after_restart else {
+                "available": False,
+                "reason_code": "NO_STALE_SESSION_TO_RECONCILE",
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "order_submission_occurred": False,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+            },
             "broker_read_permission_profile": broker_read_profile,
             "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
             "allowed_profile": self.config.allowed_profile,
@@ -495,6 +504,89 @@ class OperatorPaperSupervisor:
             session=self._session,
             runtime_mutation_occurred=True,
         )
+
+    def reconcile_stale_session(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        request = payload or {}
+        self._refresh_process_state()
+        session_id = self._session.session_id if self._session else None
+        if self._session is None or self._session.status != "PROCESS_STATE_UNKNOWN_AFTER_RESTART":
+            event = self._record_event("paper_stale_reconcile", False, "NO_STALE_SESSION_TO_RECONCILE", session_id, False)
+            response = self._intent_response(
+                intent="paper_stale_reconcile",
+                allowed=False,
+                reason_code="NO_STALE_SESSION_TO_RECONCILE",
+                audit_event=event,
+                session=self._session,
+                runtime_mutation_occurred=False,
+            )
+            response["stale_reconciliation"] = self._stale_reconciliation_status()
+            return response
+
+        required_confirmations = {
+            "confirm_stale_session_reviewed": "MISSING_STALE_SESSION_REVIEW_CONFIRMATION",
+            "confirm_previous_process_not_running": "MISSING_PREVIOUS_PROCESS_CONFIRMATION",
+            "confirm_runtime_visibility_stopped": "MISSING_RUNTIME_VISIBILITY_STOPPED_CONFIRMATION",
+            "confirm_no_broker_cleanup_requested": "MISSING_NO_BROKER_CLEANUP_CONFIRMATION",
+        }
+        for field, reason in required_confirmations.items():
+            if request.get(field) is not True:
+                event = self._record_event("paper_stale_reconcile", False, reason, self._session.session_id, False)
+                response = self._intent_response(
+                    intent="paper_stale_reconcile",
+                    allowed=False,
+                    reason_code=reason,
+                    audit_event=event,
+                    session=self._session,
+                    runtime_mutation_occurred=False,
+                )
+                response["stale_reconciliation"] = self._stale_reconciliation_status()
+                response["missing_confirmation"] = field
+                return response
+
+        reconciliation = self._stale_reconciliation_status()
+        if reconciliation.get("available") is not True:
+            reason = str(reconciliation.get("reason_code") or "STALE_SESSION_RECONCILE_BLOCKED")
+            event = self._record_event("paper_stale_reconcile", False, reason, self._session.session_id, False)
+            response = self._intent_response(
+                intent="paper_stale_reconcile",
+                allowed=False,
+                reason_code=reason,
+                audit_event=event,
+                session=self._session,
+                runtime_mutation_occurred=False,
+            )
+            response["stale_reconciliation"] = reconciliation
+            return response
+
+        self._session.status = "STALE_RECONCILED"
+        self._session.ended_at = self._session.ended_at or utc_now_iso()
+        self._session.last_status_check_at = utc_now_iso()
+        self._session.stop_reason = "OPERATOR_RECONCILED_AFTER_RESTART_PID_NOT_RUNNING"
+        self._process = None
+        event = self._record_event(
+            "paper_stale_reconcile",
+            True,
+            "STALE_SESSION_RECONCILED_PID_NOT_RUNNING",
+            self._session.session_id,
+            True,
+        )
+        self._session.audit_event_ids.append(event.audit_event_id)
+        self._persist_session(self._session)
+        response = self._intent_response(
+            intent="paper_stale_reconcile",
+            allowed=True,
+            reason_code="STALE_SESSION_RECONCILED_PID_NOT_RUNNING",
+            audit_event=event,
+            session=self._session,
+            runtime_mutation_occurred=True,
+        )
+        response["stale_reconciliation"] = {
+            **reconciliation,
+            "available": False,
+            "reason_code": "STALE_SESSION_RECONCILED_PID_NOT_RUNNING",
+            "reconciled_session_id": self._session.session_id,
+        }
+        return response
 
     def live_refusal(self, intent_name: str) -> dict[str, Any]:
         event = self._record_event(intent_name, False, "LIVE_NOT_APPROVED", None, False)
@@ -702,6 +794,84 @@ class OperatorPaperSupervisor:
         self._update_child_log_paths(self._session)
         self._persist_session(self._session)
 
+    def _stale_reconciliation_status(self) -> dict[str, Any]:
+        if self._session is None or self._session.status != "PROCESS_STATE_UNKNOWN_AFTER_RESTART":
+            return {
+                "available": False,
+                "reason_code": "NO_STALE_SESSION_TO_RECONCILE",
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "order_submission_occurred": False,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+            }
+        pid = self._session.pid
+        running, reason_code = self._is_pid_running(pid)
+        available = running is False
+        return {
+            "available": available,
+            "reason_code": "STALE_SESSION_PROCESS_NOT_RUNNING" if available else reason_code,
+            "session_id": self._session.session_id,
+            "pid": pid,
+            "pid_running": running,
+            "requires_confirmations": [
+                "confirm_stale_session_reviewed",
+                "confirm_previous_process_not_running",
+                "confirm_runtime_visibility_stopped",
+                "confirm_no_broker_cleanup_requested",
+            ],
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+            "close_position_occurred": False,
+            "live_endpoint_touched": False,
+            "real_money_touched": False,
+            "safe_detail": (
+                "The prior PAPER session process is not observable; operator can reconcile local session metadata only."
+                if available
+                else "The prior PAPER session cannot be reconciled until the old process is proven stopped."
+            ),
+        }
+
+    def _is_pid_running(self, pid: int | None) -> tuple[bool | None, str]:
+        try:
+            pid_int = int(pid or 0)
+        except (TypeError, ValueError):
+            return None, "STALE_SESSION_PID_NOT_AVAILABLE"
+        if pid_int <= 0:
+            return None, "STALE_SESSION_PID_NOT_AVAILABLE"
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid_int}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None, "STALE_SESSION_PID_CHECK_FAILED"
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            if result.returncode != 0:
+                return None, "STALE_SESSION_PID_CHECK_FAILED"
+            if not output or output.upper().startswith("INFO:"):
+                return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
+            if re.search(rf'(^|,)"?{pid_int}"?(,|$)', output):
+                return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
+            return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
+        try:
+            os.kill(pid_int, 0)
+        except ProcessLookupError:
+            return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
+        except PermissionError:
+            return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
+        except OSError:
+            return None, "STALE_SESSION_PID_CHECK_FAILED"
+        return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
+
     def _record_event(
         self,
         intent: str,
@@ -746,6 +916,12 @@ class OperatorPaperSupervisor:
             "mutation_occurred": runtime_mutation_occurred,
             "runtime_mutation_occurred": runtime_mutation_occurred,
             "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+            "close_position_occurred": False,
             "live_endpoint_touched": False,
             "real_money_touched": False,
             "broker_read_permission_profile": self._broker_read_profile().to_dict(),

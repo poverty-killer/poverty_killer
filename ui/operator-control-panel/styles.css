@@ -839,6 +839,27 @@ body.ai-docked-open.ai-docked-wide .shell {
   background: rgba(10, 28, 20, 0.5);
 }
 
+.stale-reconcile-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid rgba(234, 179, 8, 0.44);
+  border-radius: 8px;
+  background: rgba(37, 31, 14, 0.5);
+}
+
+.stale-reconcile-panel.blocked {
+  border-color: rgba(239, 68, 68, 0.42);
+  background: rgba(43, 18, 20, 0.46);
+}
+
+.stale-reconcile-panel.available {
+  border-color: rgba(234, 179, 8, 0.55);
+  background: rgba(37, 31, 14, 0.62);
+}
+
 .runtime-session-inline {
   display: grid;
   gap: 10px;

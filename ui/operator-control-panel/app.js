@@ -41,8 +41,25 @@
     { title: "Operate", summary: "Gated controls, connections, and activity", items: ["controls", "connections", "log"] }
   ];
   const DEFAULT_BACKEND_FETCH_TIMEOUT_MS = 10000;
-  const PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS = 3000;
+  const CANONICAL_OPERATOR_TRUTH_FETCH_TIMEOUT_MS = 30000;
+  const PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS = CANONICAL_OPERATOR_TRUTH_FETCH_TIMEOUT_MS;
+  const SECONDARY_OPERATOR_CONTEXT_FETCH_TIMEOUT_MS = 5000;
   const HEAVY_BACKEND_FETCH_TIMEOUT_MS = 30000;
+  const CANONICAL_OPERATOR_TRUTH_ENDPOINTS = new Set([
+    "/operator/paper-control-state",
+    "/operator/run-visibility/status",
+    "/operator/latest-run",
+    "/operator/status",
+    "/operator/launch-readiness",
+    "/operator/paper-baseline",
+    "/operator/credentials/providers",
+    "/operator/contracts"
+  ]);
+  const SECONDARY_OPERATOR_CONTEXT_ENDPOINTS = new Set([
+    "/operator/launch-readiness",
+    "/operator/action-center",
+    "/operator/alerts"
+  ]);
   const HEAVY_BACKEND_ENDPOINTS = new Set([
     "/operator/runs",
     "/operator/action-center",
@@ -1848,6 +1865,17 @@
       dominantBlocker: "BACKEND_UNAVAILABLE",
       reasonCodes: ["BACKEND_UNAVAILABLE"]
     };
+    state.runVisibility = {
+      source: "BACKEND_UNAVAILABLE",
+      status: "BACKEND_UNAVAILABLE",
+      prominentState: "BACKEND_UNAVAILABLE",
+      brokerMutationOccurred: false,
+      orderSubmissionOccurred: false,
+      cancelOccurred: false,
+      liveEnabled: false,
+      realMoneyEnabled: false,
+      secretsValuesExposed: false
+    };
     state.paperBaseline = state.launchReadiness.runPaperOperatorState.paperBaseline;
     state.credentials = {
       source: "BACKEND_UNAVAILABLE",
@@ -2218,6 +2246,87 @@
     `;
   }
 
+  function renderStaleSessionReconcilePanel(op) {
+    const stale = normalizeStaleReconciliation((op && op.staleReconciliation) || {});
+    const runtimeState = String((op && op.runtime && op.runtime.state) || data.supervisor.state || "").toUpperCase();
+    const shouldShow = runtimeState === "STALE_ACTIVE_SESSION" || stale.reasonCode !== "NO_STALE_SESSION_TO_RECONCILE";
+    if (!shouldShow) return "";
+    const available = stale.available === true && stale.pidRunning === false;
+    const blockedReason = stale.reasonCode || "STALE_SESSION_RECONCILE_BLOCKED";
+    const detail = stale.safeDetail || (available
+      ? "The old PAPER process is not observable. You may reconcile local session metadata before rechecking start readiness."
+      : "The stale session remains blocked until the prior process is proven stopped.");
+    return `
+      <section class="stale-reconcile-panel ${available ? "available" : "blocked"}" data-stale-reconcile-panel>
+        <div class="split">
+          <h4>Stale PAPER Session Reconciliation</h4>
+          ${badge(available ? "reconcile available" : "reconcile blocked", available ? "yellow" : "red")}
+        </div>
+        <div class="notice ${available ? "" : "error"}">${escapeHtml(detail)}</div>
+        <div class="run-paper-proof-grid compact-proof-grid">
+          ${renderRunPaperProofTile("Prior session", stale.sessionId || data.supervisor.sessionId || "unknown", "Latest supervisor session after backend restart.", "yellow")}
+          ${renderRunPaperProofTile("Prior PID", stale.pid || data.supervisor.pid || "unknown", `PID running: ${stale.pidRunning === false ? "false" : (stale.pidRunning === true ? "true" : "unknown")}.`, stale.pidRunning === false ? "green" : "red")}
+          ${renderRunPaperProofTile("Runtime visibility", data.runVisibility && data.runVisibility.status ? data.runVisibility.status : "checked separately", "Reconcile requires operator confirmation that visible runtime state is stopped.", available ? "yellow" : "red")}
+          ${renderRunPaperProofTile("Broker boundary", "no cleanup", "No cancel, replace, close, liquidate, order submit, live enablement, or real-money action is exposed.", "green")}
+        </div>
+        <div class="button-row">
+          <button class="intent-button secondary" data-intent="paper-reconcile-stale" data-paper-reconcile-stale-control ${available ? "" : "disabled"}>
+            Reconcile stale session metadata
+          </button>
+          <span class="badge yellow">Local supervisor/audit write only</span>
+        </div>
+        <div class="notice ${available ? "" : "error"}" data-paper-reconcile-stale-state>${escapeHtml(available ? "Available after confirmations. Start remains governed by backend readiness after reconciliation." : `Blocked: ${blockedReason}.`)}</div>
+        <details class="ai-context-details" data-paper-reconcile-stale-advanced>
+          <summary>Advanced stale-session proof</summary>
+          ${kv([
+            ["reason_code", tokenText(blockedReason)],
+            ["requires_confirmations", tokenText((stale.requiresConfirmations || []).join(", ") || "confirmations encoded in UI request")],
+            ["broker_call_occurred", badge(stale.brokerCallOccurred === true ? "true" : "false", stale.brokerCallOccurred === true ? "red" : "green")],
+            ["broker_mutation_occurred", badge(stale.brokerMutationOccurred === true ? "true" : "false", stale.brokerMutationOccurred === true ? "red" : "green")],
+            ["order_submission_occurred", badge(stale.orderSubmissionOccurred === true ? "true" : "false", stale.orderSubmissionOccurred === true ? "red" : "green")],
+            ["cancel_occurred", badge(stale.cancelOccurred === true ? "true" : "false", stale.cancelOccurred === true ? "red" : "green")],
+            ["replace_occurred", badge(stale.replaceOccurred === true ? "true" : "false", stale.replaceOccurred === true ? "red" : "green")],
+            ["liquidation_occurred", badge(stale.liquidationOccurred === true ? "true" : "false", stale.liquidationOccurred === true ? "red" : "green")],
+            ["close_position_occurred", badge(stale.closePositionOccurred === true ? "true" : "false", stale.closePositionOccurred === true ? "red" : "green")],
+            ["live_endpoint_touched", badge(stale.liveEndpointTouched === true ? "true" : "false", stale.liveEndpointTouched === true ? "red" : "green")],
+            ["real_money_touched", badge(stale.realMoneyTouched === true ? "true" : "false", stale.realMoneyTouched === true ? "red" : "green")]
+          ])}
+        </details>
+      </section>
+    `;
+  }
+
+  function renderRunVisibilityCard() {
+    const visibility = data.runVisibility || {};
+    const overlay = visibility.operatorSupervisor || {};
+    const artifactMatch = overlay.artifactSessionMatch === true;
+    const status = visibility.prominentState || visibility.status || "UNKNOWN";
+    const brokerSafe = visibility.brokerMutationOccurred !== true
+      && visibility.orderSubmissionOccurred !== true
+      && visibility.cancelOccurred !== true
+      && visibility.liveEnabled !== true
+      && visibility.realMoneyEnabled !== true;
+    return `
+      <div class="card span-6" data-run-visibility-card>
+        <h3>Run Visibility</h3>
+        ${kv([
+          ["Visible state", badge(status, statusColor(status))],
+          ["Data source", tokenText(visibility.dataSource || "UNKNOWN")],
+          ["Supervisor", badge(overlay.state || "UNKNOWN", statusColor(overlay.state || "UNKNOWN"))],
+          ["Session", escapeHtml(overlay.activeSessionId || overlay.latestSessionId || "none")],
+          ["PID", escapeHtml(visibility.pid || overlay.pid || "none")],
+          ["Artifact match", badge(artifactMatch ? "matched" : "separate artifact", artifactMatch ? "green" : "yellow")],
+          ["Heartbeat age", escapeHtml(visibility.heartbeatAgeSeconds === null || visibility.heartbeatAgeSeconds === undefined ? "not available" : `${visibility.heartbeatAgeSeconds}s`)],
+          ["Open orders artifact", escapeHtml(`${visibility.openOrdersCount || 0} (${visibility.openOrdersBrokerConfirmed ? "broker-confirmed" : "runtime artifact"})`)],
+          ["Positions artifact", escapeHtml(`${visibility.positionsCount || 0} (${visibility.positionsBrokerConfirmed ? "broker-confirmed" : "runtime artifact"})`)],
+          ["Fill ledger rows", escapeHtml(`${visibility.fillsCount || 0}`)],
+          ["Broker boundary", badge(brokerSafe ? "safe" : "unsafe flag", brokerSafe ? "green" : "red")]
+        ])}
+        ${visibility.runtimeArtifactNote ? `<div class="notice">${escapeHtml(visibility.runtimeArtifactNote)}</div>` : ""}
+      </div>
+    `;
+  }
+
   function renderPaperCredentialSetup(setup) {
     const overall = setup.overallStatus || {};
     const endpoint = setup.endpoint || {};
@@ -2334,7 +2443,7 @@
         ${accepted ? `<div class="notice" data-paper-baseline-accepted-text>Position-aware PAPER baseline accepted. Snapshot ${escapeHtml(baseline.baselineSnapshotId || "unknown")} at ${escapeHtml(baseline.acceptedAt || "unknown")}.</div>` : ""}
         ${hasExistingPositions && !accepted ? `<div class="notice" data-paper-baseline-required-text>Existing positions require baseline adoption. Reset is not required.</div>` : ""}
         <div class="button-row">
-          <button class="intent-button paper" data-intent="paper-baseline-accept" ${acceptDisabled}>Accept current positions as PAPER baseline</button>
+          <button class="intent-button paper" data-intent="paper-baseline-accept" aria-label="Accept current positions as PAPER baseline" title="${escapeHtml(acceptReason)}" ${acceptDisabled}>Accept current positions as PAPER baseline</button>
           <span class="badge red">No liquidation / close / cancel controls</span>
         </div>
         <div class="notice ${acceptDisabled && !accepted ? "error" : ""}" data-paper-baseline-action-state>${escapeHtml(acceptReason)}</div>
@@ -2497,6 +2606,7 @@
           <summary>Advanced session detail</summary>
           ${renderSessionLifecycleCard("Active / Latest PAPER Session", "inline")}
         </details>
+        ${renderStaleSessionReconcilePanel(op)}
         <div class="launch-control-layout">
           <div class="launch-input-panel">
             <div class="form-grid">
@@ -2814,7 +2924,19 @@
     const caps = currentCockpitCapabilities();
     const positions = portfolio.positions || [];
     const openOrders = portfolio.openOrders || [];
-    const blockers = (data.actionCenter.items || []).filter((item) => item.type === "BLOCKER" || item.type === "SAFETY_CRITICAL").slice(0, 4);
+    const actionNotifications = (data.actionCenter.items || [])
+      .filter((item) => ["BLOCKER", "SAFETY_CRITICAL", "WARNING", "NEEDS_APPROVAL"].includes(item.type))
+      .slice(0, 4);
+    const alertNotifications = (data.alerts || [])
+      .filter((alert) => ["SAFETY_CRITICAL", "WARNING"].includes(alert.severity))
+      .slice(0, 4)
+      .map((alert) => ({
+        type: alert.severity,
+        title: alert.title,
+        detail: alert.detail,
+        source: alert.source
+      }));
+    const notifications = actionNotifications.length ? actionNotifications : alertNotifications;
     const runtimeState = data.supervisor.processState || data.status.botStatus || "UNKNOWN";
     const endpointStatus = (caps.endpoint && caps.endpoint.paperEndpointStatus) || portfolio.paperEndpointStatus || "UNKNOWN";
     const endpointDisplay = (caps.endpoint && caps.endpoint.paperEndpointDisplay) || data.status.endpoint || "endpoint unknown";
@@ -2898,7 +3020,7 @@
         </div>
         <div class="card span-4">
           <h3>Notifications</h3>
-          ${(blockers.length ? blockers : [{ title: "No current blocker items loaded", detail: "Action Center has no safety-critical item in this view.", type: "INFO" }]).map((item) => `
+          ${(notifications.length ? notifications : [{ title: "No current blocker items loaded", detail: "Action Center has no safety-critical item in this view.", type: "INFO" }]).map((item) => `
             <div class="mini-feed-row">
               ${badge(item.type || "INFO", statusColor(item.type || "INFO"))}
               <span>${escapeHtml(item.title || "operator item")}</span>
@@ -3986,6 +4108,7 @@
           ["Preflight", badge("PAPER_READ_ONLY_PREFLIGHT_REQUIRED", "yellow")],
           ["Credential status", "present/not present only; no secrets"]
         ])}</div>
+        ${renderRunVisibilityCard()}
         ${renderSessionLifecycleCard("Active / Latest PAPER Session")}
         <div class="card span-6"><h3>Supervisor Session</h3>${kv([
           ["Supervisor", badge(sup.state, statusColor(sup.state))],
@@ -4003,8 +4126,8 @@
         ${renderPaperLaunchControl("activity")}
         <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
-            <button class="intent-button paper" data-intent="paper-start" data-paper-form="activity" ${paperLaunchDisabledReason() ? "disabled" : ""}>
-              Start governed PAPER - ${paperLaunchDisabledReason() ? escapeHtml(paperLaunchDisabledReason()) : "server-authorized intent"}
+            <button class="intent-button secondary" type="button" data-screen-shortcut="controls">
+              Use Run PAPER Command Center above
             </button>
             <button class="intent-button paper" data-intent="paper-stop" ${sup.paperStopAllowed ? "" : "disabled"}>
               Stop PAPER - ${sup.paperStopAllowed ? "graceful supervisor request" : escapeHtml(sup.paperStopRefusalReason || "disabled")}
@@ -6586,6 +6709,8 @@
 
   function backendFetchTimeoutMs(path) {
     if (path === "/operator/paper-control-state") return PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS;
+    if (SECONDARY_OPERATOR_CONTEXT_ENDPOINTS.has(path)) return SECONDARY_OPERATOR_CONTEXT_FETCH_TIMEOUT_MS;
+    if (CANONICAL_OPERATOR_TRUTH_ENDPOINTS.has(path)) return CANONICAL_OPERATOR_TRUTH_FETCH_TIMEOUT_MS;
     return HEAVY_BACKEND_ENDPOINTS.has(path) ? HEAVY_BACKEND_FETCH_TIMEOUT_MS : DEFAULT_BACKEND_FETCH_TIMEOUT_MS;
   }
 
@@ -6950,6 +7075,29 @@
     };
   }
 
+  function normalizeStaleReconciliation(payload) {
+    const item = payload || {};
+    const pidRunning = item.pid_running !== undefined ? item.pid_running : item.pidRunning;
+    return {
+      available: item.available === true,
+      reasonCode: pick(item.reason_code || item.reasonCode, "NO_STALE_SESSION_TO_RECONCILE"),
+      sessionId: pick(item.session_id || item.reconciled_session_id || item.sessionId, null),
+      pid: pick(item.pid, null),
+      pidRunning: pidRunning === true ? true : (pidRunning === false ? false : null),
+      requiresConfirmations: Array.isArray(item.requires_confirmations) ? item.requires_confirmations : (Array.isArray(item.requiresConfirmations) ? item.requiresConfirmations : []),
+      safeDetail: pick(item.safe_detail || item.safeDetail, ""),
+      brokerCallOccurred: item.broker_call_occurred === true || item.brokerCallOccurred === true,
+      brokerMutationOccurred: item.broker_mutation_occurred === true || item.brokerMutationOccurred === true,
+      orderSubmissionOccurred: item.order_submission_occurred === true || item.orderSubmissionOccurred === true,
+      cancelOccurred: item.cancel_occurred === true || item.cancelOccurred === true,
+      replaceOccurred: item.replace_occurred === true || item.replaceOccurred === true,
+      liquidationOccurred: item.liquidation_occurred === true || item.liquidationOccurred === true,
+      closePositionOccurred: item.close_position_occurred === true || item.closePositionOccurred === true,
+      liveEndpointTouched: item.live_endpoint_touched === true || item.liveEndpointTouched === true,
+      realMoneyTouched: item.real_money_touched === true || item.realMoneyTouched === true
+    };
+  }
+
   function normalizeRunPaperOperatorState(state) {
     const payload = state || {};
     const overall = payload.overall_status || {};
@@ -7002,6 +7150,7 @@
       },
       paperCredentialSetup: normalizePaperCredentialSetup(payload.paper_credential_setup || {}),
       paperBaseline: normalizePaperBaseline(payload.paper_baseline || (payload.paper_credential_setup && payload.paper_credential_setup.baseline_adoption) || {}),
+      staleReconciliation: normalizeStaleReconciliation(payload.stale_reconciliation || {}),
       runtime: {
         label: pick(runtime.label, ""),
         state: pick(runtime.state, "UNKNOWN"),
@@ -7126,6 +7275,7 @@
       nextSafeAction: pick(control.next_safe_action, ""),
       launchReadiness: control.launch_readiness || {},
       latestRun: control.latest_run || {},
+      staleReconciliation: normalizeStaleReconciliation(control.stale_reconciliation || {}),
       paperBaseline: control.paper_baseline || {},
       portfolioSummary: control.portfolio_summary || {},
       runtimeAttachmentDetail: pick(control.runtime_attachment_detail, ""),
@@ -7139,6 +7289,61 @@
       closePositionOccurred: control.close_position_occurred === true,
       liveEnabled: control.live_enabled === true,
       realMoneyEnabled: control.real_money_enabled === true
+    };
+  }
+
+  function normalizeRunVisibilityStatus(payload) {
+    const item = payload || {};
+    const heartbeat = item.heartbeat || {};
+    const operatorSupervisor = item.operator_supervisor || {};
+    const openOrders = item.open_orders || heartbeat.open_orders || {};
+    const positions = item.positions || heartbeat.positions || {};
+    const fills = item.fills || {};
+    return {
+      source: pick(item.source, ""),
+      status: pick(item.status || item.prominent_state || heartbeat.run_state, "UNKNOWN"),
+      prominentState: pick(item.prominent_state || item.status || heartbeat.run_state, "UNKNOWN"),
+      dataSource: pick(item.data_source, "LOCAL_RUNTIME_ARTIFACTS"),
+      pid: pick(item.pid || heartbeat.pid, null),
+      uptimeSeconds: pick(item.uptime_seconds || (heartbeat && heartbeat.uptime_seconds), null),
+      heartbeatAgeSeconds: pick(item.heartbeat_age_seconds, null),
+      heartbeatPresent: item.heartbeat_present === true,
+      heartbeatStale: item.heartbeat_stale === true,
+      logProgressStale: item.log_progress_stale === true,
+      openOrdersCount: pick(openOrders.count, 0),
+      openOrdersBrokerConfirmed: openOrders.broker_confirmed === true,
+      positionsCount: pick(positions.count, 0),
+      positionsBrokerConfirmed: positions.broker_confirmed === true,
+      fillsCount: pick(fills.count || fills.broker_fill_ledger_rows, 0),
+      lastError: pick(item.last_error || (heartbeat && heartbeat.last_error), null),
+      lastSignal: item.last_signal || heartbeat.last_signal || null,
+      lastPost: item.last_post || heartbeat.last_post || null,
+      lastFill: item.last_fill || null,
+      runtimeArtifactNote: pick(item.runtime_artifact_note, ""),
+      operatorSupervisor: {
+        state: pick(operatorSupervisor.state, "UNKNOWN"),
+        activeSessionId: pick(operatorSupervisor.active_session_id, null),
+        latestSessionId: pick(operatorSupervisor.latest_session_id, null),
+        latestStatus: pick(operatorSupervisor.latest_status, null),
+        pid: pick(operatorSupervisor.pid, null),
+        artifactSessionMatch: operatorSupervisor.artifact_session_match === true,
+        paperStartAllowed: operatorSupervisor.paper_start_allowed === true,
+        paperStopAllowed: operatorSupervisor.paper_stop_allowed === true,
+        paperStartRefusalReason: pick(operatorSupervisor.paper_start_refusal_reason, null),
+        paperStopRefusalReason: pick(operatorSupervisor.paper_stop_refusal_reason, null),
+        brokerCallOccurred: operatorSupervisor.broker_call_occurred === true,
+        brokerMutationOccurred: operatorSupervisor.broker_mutation_occurred === true,
+        secretsValuesExposed: operatorSupervisor.secrets_values_exposed === true
+      },
+      readOnly: item.read_only !== false,
+      brokerCallOccurred: item.broker_call_occurred === true,
+      brokerMutationOccurred: item.broker_mutation_occurred === true,
+      orderSubmissionOccurred: item.order_submission_occurred === true,
+      cancelOccurred: item.cancel_occurred === true,
+      liquidationOccurred: item.liquidation_occurred === true,
+      liveEnabled: item.live_enabled === true,
+      realMoneyEnabled: item.real_money_enabled === true,
+      secretsValuesExposed: item.secrets_values_exposed === true
     };
   }
 
@@ -7234,6 +7439,7 @@
       },
       paperCredentialSetup: buildCredentialSetupFromBackendState(state || data),
       paperBaseline: baseline,
+      staleReconciliation: normalizeStaleReconciliation(c.staleReconciliation || {}),
       runtime: {
         label: activeRuntime ? "PAPER supervisor process is attached" : "No active PAPER run",
         state: c.supervisorState || "UNKNOWN",
@@ -7446,6 +7652,7 @@
     const fills = payload.fills || {};
     const tca = payload.tca || {};
     const latestRun = payload.latestRun || {};
+    const runVisibility = payload.runVisibility || {};
     const world = payload.world || {};
     const worldRuntime = payload.worldRuntime || {};
     const runs = payload.runs || {};
@@ -8013,6 +8220,9 @@
         reason: Array.isArray(event.reason_codes) ? event.reason_codes.join(", ") : "ADVISORY_ONLY"
       }));
     }
+    if (runVisibility.source) {
+      next.runVisibility = normalizeRunVisibilityStatus(runVisibility);
+    }
 
     if (!portfolio.source) {
       next.orders = [
@@ -8135,6 +8345,7 @@
       { key: "health", path: "/operator/health", priority: 0, lane: "critical" },
       { key: "launcherStatus", path: "/operator/launcher-status", priority: 0, lane: "critical" },
       { key: "paperControlState", path: "/operator/paper-control-state", priority: 0, lane: "critical" },
+      { key: "runVisibility", path: "/operator/run-visibility/status", priority: 0, lane: "critical" },
       { key: "status", path: "/operator/status", priority: 0, lane: "critical" },
       { key: "latestRun", path: "/operator/latest-run", priority: 1, lane: "normal" },
       { key: "credentialsProviders", path: "/operator/credentials/providers", priority: 1, lane: "normal" },
@@ -8568,6 +8779,30 @@
           const draft = resetPaperRunDraft(formId, PAPER_DRAFT_RESET_REASONS.RUN_STARTED);
           draft.startedSessionId = result.session_id || (result.session && result.session.session_id) || null;
         }
+      }
+      if (intent === "paper-reconcile-stale") {
+        const op = runPaperState();
+        const stale = normalizeStaleReconciliation((op && op.staleReconciliation) || {});
+        const visibilityState = String((data.runVisibility && (data.runVisibility.prominentState || data.runVisibility.status)) || "UNKNOWN").toUpperCase();
+        if (stale.available !== true || stale.pidRunning !== false) {
+          window.alert(`Stale-session reconciliation is blocked: ${stale.reasonCode || "STALE_SESSION_RECONCILE_BLOCKED"}.`);
+          return;
+        }
+        if (visibilityState !== "STOPPED") {
+          window.alert(`Run visibility must show STOPPED before stale reconciliation. Current state: ${visibilityState}.`);
+          return;
+        }
+        const confirmed = window.confirm(
+          `Reconcile stale PAPER session metadata?\n\nSession: ${stale.sessionId || data.supervisor.sessionId || "unknown"}\nPrior PID: ${stale.pid || data.supervisor.pid || "unknown"}\nRun visibility: ${visibilityState}\n\nThis writes only local supervisor/audit metadata. It will not call Alpaca, start PAPER, submit, cancel, replace, close, liquidate, enable live, or enable real money.`
+        );
+        if (!confirmed) return;
+        const result = await postIntent("/operator/intent/paper/reconcile-stale", {
+          confirm_stale_session_reviewed: true,
+          confirm_previous_process_not_running: true,
+          confirm_runtime_visibility_stopped: true,
+          confirm_no_broker_cleanup_requested: true
+        });
+        message = `${result.status}: ${result.reason_code}`;
       }
       if (intent === "paper-stop") {
         const confirmed = window.confirm("Request governed PAPER stop? This sends only the supervisor stop intent and preserves broker positions.");

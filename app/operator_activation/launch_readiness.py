@@ -471,6 +471,7 @@ def _build_run_paper_operator_state(
         },
         "paper_credential_setup": credential_setup,
         "paper_baseline": paper_baseline_state or credential_setup["baseline_adoption"],
+        "stale_reconciliation": supervisor.get("stale_reconciliation") or {},
         "paper_baseline_runtime_context": baseline_runtime_context,
         "runtime": {
             "label": "No active PAPER run" if runtime_state == "IDLE" else runtime_state,

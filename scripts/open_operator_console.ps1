@@ -38,6 +38,63 @@ function Write-LauncherLog {
     Add-Content -Path $LaunchLog -Value "$((Get-Date).ToString("o")) $(ConvertTo-SafeLauncherText $Message)"
 }
 
+function Get-OperatorPaperEnvFile {
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:PK_OPERATOR_PAPER_ENV_FILE)) {
+        $candidates += $env:PK_OPERATOR_PAPER_ENV_FILE
+    }
+    $candidates += (Join-Path $RepoRoot ".poverty_killer_alpaca_paper_env")
+    $userProfile = [Environment]::GetFolderPath("UserProfile")
+    if (-not [string]::IsNullOrWhiteSpace($userProfile)) {
+        $candidates += (Join-Path $userProfile ".poverty_killer_alpaca_paper_env")
+    }
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Import-OperatorPaperEnvFile {
+    $envFile = Get-OperatorPaperEnvFile
+    if ([string]::IsNullOrWhiteSpace($envFile)) {
+        Write-LauncherLog "operator_paper_env_file=not_found"
+        return @()
+    }
+    $loadedKeys = @()
+    $approvedPattern = '^APCA_API_(KEY_ID|SECRET_KEY|BASE_URL)$'
+    foreach ($line in (Get-Content -LiteralPath $envFile -ErrorAction Stop)) {
+        $trimmed = ([string]$line).Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
+            continue
+        }
+        if ($trimmed.StartsWith("export ")) {
+            $trimmed = $trimmed.Substring(7).Trim()
+        }
+        $parts = $trimmed -split "=", 2
+        if ($parts.Count -ne 2) {
+            continue
+        }
+        $key = $parts[0].Trim()
+        if ($key -notmatch $approvedPattern) {
+            continue
+        }
+        $value = $parts[1].Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        [Environment]::SetEnvironmentVariable($key, $value, "Process")
+        $loadedKeys += $key
+    }
+    if ($loadedKeys.Count -gt 0) {
+        Write-LauncherLog "operator_paper_env_loaded keys=$($loadedKeys -join ',') values=REDACTED"
+    } else {
+        Write-LauncherLog "operator_paper_env_loaded keys=none values=REDACTED"
+    }
+    return $loadedKeys
+}
+
 $LauncherVersion = "operator-launcher-reliability-v1"
 $script:LauncherStateOverride = $null
 $script:LastStartAttemptTime = "none"
@@ -459,6 +516,7 @@ function Start-Backend {
     }
     try {
         New-Item -Path $LogRoot -ItemType Directory -Force | Out-Null
+        Import-OperatorPaperEnvFile | Out-Null
         $plan = New-BackendLaunchPlan
         $script:LastCmdLauncher = $plan.CmdLauncher
         $script:LastStdoutLog = $plan.StdoutLog

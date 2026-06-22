@@ -480,3 +480,90 @@ def test_supervisor_refuses_paper_start_before_runner_when_credentials_missing()
     assert snapshot["paper_credentials_configured"] is False
     assert snapshot["paper_start_allowed"] is False
     assert runner.started_specs == []
+
+
+def test_supervisor_reconciles_stale_session_after_pid_proof_and_confirmations():
+    runner = FakeRunner()
+    store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
+    store.write_session(
+        {
+            "session_id": "paper_stale_for_reconcile",
+            "requested_at": "2026-06-14T04:17:12+00:00",
+            "status": "RUNNING",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "duration_seconds": 300,
+            "pid": 987654,
+            "started_at": "2026-06-14T04:17:12+00:00",
+        }
+    )
+    supervisor = OperatorPaperSupervisor(
+        config=_supervisor_config(runner, session_store_path=str(store.path)),
+        runner=runner,
+        session_store=store,
+    )
+    supervisor._is_pid_running = lambda pid: (False, "STALE_SESSION_PROCESS_NOT_RUNNING")  # type: ignore[method-assign]
+
+    missing = supervisor.reconcile_stale_session({})
+    reconciled = supervisor.reconcile_stale_session(
+        {
+            "confirm_stale_session_reviewed": True,
+            "confirm_previous_process_not_running": True,
+            "confirm_runtime_visibility_stopped": True,
+            "confirm_no_broker_cleanup_requested": True,
+        }
+    )
+    snapshot = supervisor.status_snapshot()
+    start = supervisor.start_paper(_valid_request())
+
+    assert missing["allowed"] is False
+    assert missing["reason_code"] == "MISSING_STALE_SESSION_REVIEW_CONFIRMATION"
+    assert reconciled["allowed"] is True
+    assert reconciled["reason_code"] == "STALE_SESSION_RECONCILED_PID_NOT_RUNNING"
+    assert reconciled["broker_call_occurred"] is False
+    assert reconciled["runtime_mutation_occurred"] is True
+    assert reconciled["session"]["status"] == "STALE_RECONCILED"
+    assert snapshot["state"] == "IDLE"
+    assert snapshot["paper_start_allowed"] is True
+    assert start["allowed"] is True
+    assert start["reason_code"] == "PAPER_RUN_STARTED"
+
+
+def test_supervisor_refuses_stale_reconcile_when_previous_pid_is_running():
+    runner = FakeRunner()
+    store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
+    store.write_session(
+        {
+            "session_id": "paper_stale_pid_running",
+            "requested_at": "2026-06-14T04:17:12+00:00",
+            "status": "RUNNING",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "duration_seconds": 300,
+            "pid": 12345,
+            "started_at": "2026-06-14T04:17:12+00:00",
+        }
+    )
+    supervisor = OperatorPaperSupervisor(
+        config=_supervisor_config(runner, session_store_path=str(store.path)),
+        runner=runner,
+        session_store=store,
+    )
+    supervisor._is_pid_running = lambda pid: (True, "STALE_SESSION_PROCESS_STILL_RUNNING")  # type: ignore[method-assign]
+
+    result = supervisor.reconcile_stale_session(
+        {
+            "confirm_stale_session_reviewed": True,
+            "confirm_previous_process_not_running": True,
+            "confirm_runtime_visibility_stopped": True,
+            "confirm_no_broker_cleanup_requested": True,
+        }
+    )
+    snapshot = supervisor.status_snapshot()
+
+    assert result["allowed"] is False
+    assert result["reason_code"] == "STALE_SESSION_PROCESS_STILL_RUNNING"
+    assert result["broker_call_occurred"] is False
+    assert result["runtime_mutation_occurred"] is False
+    assert snapshot["state"] == "STALE_ACTIVE_SESSION"
+    assert snapshot["paper_start_allowed"] is False

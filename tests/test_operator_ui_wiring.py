@@ -407,10 +407,21 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "requires explicit approval before Alpaca is called" in text
     assert "account, open orders, and positions" in text
     assert "will not place, cancel, replace, liquidate, enable live, enable real money, or start PAPER" in text
+    assert "Stale PAPER Session Reconciliation" in text
+    assert "data-stale-reconcile-panel" in text
+    assert "data-paper-reconcile-stale-control" in text
+    assert "data-paper-reconcile-stale-state" in text
+    assert "data-paper-reconcile-stale-advanced" in text
+    assert "/operator/intent/paper/reconcile-stale" in text
+    assert "confirm_stale_session_reviewed" in text
+    assert "confirm_no_broker_cleanup_requested" in text
+    assert "Run visibility must show STOPPED" in text
     assert "Baseline adoption required - existing PAPER positions detected." in text
     assert "Reset is not required" in text
     assert "Position-aware PAPER baseline accepted." in text
     assert "Accept current positions as PAPER baseline" in text
+    assert 'aria-label="Accept current positions as PAPER baseline"' in text
+    assert 'title="${escapeHtml(acceptReason)}"' in text
     assert "No liquidation / close / cancel controls" in text
     assert "/operator/paper-baseline/accept" in text
     assert "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING" in text
@@ -485,6 +496,7 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert ".run-paper-proof-tile" in css
     assert ".credential-preflight-panel" in css
     assert ".credential-preflight-field" in css
+    assert ".stale-reconcile-panel" in css
 
 
 def test_backend_connected_run_paper_never_keeps_mock_authority():
@@ -510,6 +522,13 @@ def test_backend_connected_run_paper_never_keeps_mock_authority():
     assert "Backend source" in text
     assert "canonical_source_order" in text
     assert "paper-control-state > launch-readiness" in text
+    assert 'path: "/operator/run-visibility/status", priority: 0, lane: "critical"' in text
+    assert "normalizeRunVisibilityStatus" in text
+    assert "normalizeStaleReconciliation" in text
+    assert "renderRunVisibilityCard" in text
+    assert "data-run-visibility-card" in text
+    assert "runtimeArtifactNote" in text
+    assert "artifactSessionMatch" in text
     assert "function createRequestScheduler" in text
     assert 'path: "/operator/paper-control-state", priority: 0, lane: "critical"' in text
     assert 'path: "/operator/launcher-status", priority: 0, lane: "critical"' in text
@@ -674,8 +693,19 @@ def test_run_paper_start_payload_uses_preserved_draft_values():
 def test_paper_control_state_timeout_is_precise_fail_closed_authority():
     text = _app_text()
 
-    assert "PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS = 3000" in text
+    assert "CANONICAL_OPERATOR_TRUTH_FETCH_TIMEOUT_MS = 30000" in text
+    assert "PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS = CANONICAL_OPERATOR_TRUTH_FETCH_TIMEOUT_MS" in text
+    assert "SECONDARY_OPERATOR_CONTEXT_FETCH_TIMEOUT_MS = 5000" in text
+    assert "const CANONICAL_OPERATOR_TRUTH_ENDPOINTS = new Set" in text
+    assert "const SECONDARY_OPERATOR_CONTEXT_ENDPOINTS = new Set" in text
     assert 'if (path === "/operator/paper-control-state") return PAPER_CONTROL_STATE_FETCH_TIMEOUT_MS' in text
+    assert "if (SECONDARY_OPERATOR_CONTEXT_ENDPOINTS.has(path)) return SECONDARY_OPERATOR_CONTEXT_FETCH_TIMEOUT_MS" in text
+    assert "if (CANONICAL_OPERATOR_TRUTH_ENDPOINTS.has(path)) return CANONICAL_OPERATOR_TRUTH_FETCH_TIMEOUT_MS" in text
+    assert '"/operator/run-visibility/status"' in text
+    assert '"/operator/latest-run"' in text
+    assert '"/operator/launch-readiness"' in text
+    assert '"/operator/action-center"' in text
+    assert '"/operator/alerts"' in text
     assert "function paperControlStateFailureCode" in text
     assert "PAPER_CONTROL_STATE_TIMEOUT" in text
     assert "Backend is running, but PAPER control-state endpoint timed out. Fix /operator/paper-control-state before starting PAPER." in text
@@ -687,6 +717,17 @@ def test_paper_control_state_timeout_is_precise_fail_closed_authority():
     assert "Portfolio read may be available separately, but PAPER start authority cannot use baseline state until control-state returns." in text
     assert "Start remains disabled until canonical PAPER control state returns." in text
     assert "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE" not in text
+
+
+def test_overview_notifications_surface_degraded_optional_feeds():
+    text = _app_text()
+
+    assert "const actionNotifications = (data.actionCenter.items || [])" in text
+    assert '["BLOCKER", "SAFETY_CRITICAL", "WARNING", "NEEDS_APPROVAL"].includes(item.type)' in text
+    assert "const alertNotifications = (data.alerts || [])" in text
+    assert '["SAFETY_CRITICAL", "WARNING"].includes(alert.severity)' in text
+    assert "const notifications = actionNotifications.length ? actionNotifications : alertNotifications" in text
+    assert "notifications.length ? notifications" in text
 
 
 def test_operator_launcher_cache_busts_ui_with_loaded_commit():

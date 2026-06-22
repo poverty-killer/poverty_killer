@@ -41,6 +41,73 @@ function Write-LaunchLog {
     Add-Content -Path $LaunchLog -Value "$((Get-Date).ToString("o")) $Message"
 }
 
+function ConvertTo-SafeLaunchText {
+    param([object]$Value)
+    $text = [string]$Value
+    $text = $text -replace '(?i)Bearer\s+[A-Za-z0-9._\-]+', 'Bearer REDACTED'
+    $text = $text -replace 'sk-[A-Za-z0-9_-]{10,}', 'sk-REDACTED'
+    $text = $text -replace 'AKIA[0-9A-Z]{12,}', 'AKIA-REDACTED'
+    $text = $text -replace '(?i)(api[_-]?key|secret|token|password|credential|authorization)\s*=\s*[^;\s]+', '$1=REDACTED'
+    return $text
+}
+
+function Get-OperatorPaperEnvFile {
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:PK_OPERATOR_PAPER_ENV_FILE)) {
+        $candidates += $env:PK_OPERATOR_PAPER_ENV_FILE
+    }
+    $candidates += (Join-Path $RepoRoot ".poverty_killer_alpaca_paper_env")
+    $userProfile = [Environment]::GetFolderPath("UserProfile")
+    if (-not [string]::IsNullOrWhiteSpace($userProfile)) {
+        $candidates += (Join-Path $userProfile ".poverty_killer_alpaca_paper_env")
+    }
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Import-OperatorPaperEnvFile {
+    $envFile = Get-OperatorPaperEnvFile
+    if ([string]::IsNullOrWhiteSpace($envFile)) {
+        Write-LaunchLog "operator_paper_env_file=not_found"
+        return @()
+    }
+    $loadedKeys = @()
+    $approvedPattern = '^APCA_API_(KEY_ID|SECRET_KEY|BASE_URL)$'
+    foreach ($line in (Get-Content -LiteralPath $envFile -ErrorAction Stop)) {
+        $trimmed = ([string]$line).Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
+            continue
+        }
+        if ($trimmed.StartsWith("export ")) {
+            $trimmed = $trimmed.Substring(7).Trim()
+        }
+        $parts = $trimmed -split "=", 2
+        if ($parts.Count -ne 2) {
+            continue
+        }
+        $key = $parts[0].Trim()
+        if ($key -notmatch $approvedPattern) {
+            continue
+        }
+        $value = $parts[1].Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        [Environment]::SetEnvironmentVariable($key, $value, "Process")
+        $loadedKeys += $key
+    }
+    if ($loadedKeys.Count -gt 0) {
+        Write-LaunchLog (ConvertTo-SafeLaunchText "operator_paper_env_loaded keys=$($loadedKeys -join ',') values=REDACTED")
+    } else {
+        Write-LaunchLog "operator_paper_env_loaded keys=none values=REDACTED"
+    }
+    return $loadedKeys
+}
+
 function Show-LauncherFailure {
     param([string]$Message)
     Write-LaunchLog "ERROR $Message"
@@ -152,6 +219,7 @@ if (-not $operatorReady) {
     Stop-StaleOperatorBackend
     Write-LaunchLog "Starting operator backend on $BaseUrl"
     Write-LaunchLog "stdout=$StdoutLog stderr=$StderrLog"
+    Import-OperatorPaperEnvFile | Out-Null
 
     $backendCommand = '"{0}" -m uvicorn app.api.operator_readonly_api:create_operator_app --factory --host {1} --port {2} > "{3}" 2> "{4}"' -f $Python, $HostAddress, $Port, $StdoutLog, $StderrLog
     Set-Content -Path $CmdLauncher -Value @(

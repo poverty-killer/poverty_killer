@@ -307,6 +307,7 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
     "disabled_intents": {
         "/operator/intent/paper/start": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
         "/operator/intent/paper/stop": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
+        "/operator/intent/paper/reconcile-stale": "SERVER_AUTHORIZED_STALE_SESSION_RECONCILIATION",
         "/operator/intent/snapshot/export": "SNAPSHOT_EXPORT_NOT_EXPOSED_IN_OPERATOR_UI",
         "/operator/intent/live/request-enable": "LIVE_NOT_APPROVED",
         "/operator/intent/live/start": "LIVE_NOT_APPROVED",
@@ -1701,6 +1702,7 @@ class OperatorSnapshotProvider:
             "active_pid": active.get("pid") or session.get("pid"),
             "paper_start_allowed": local_start_ready,
             "paper_stop_allowed": supervisor.get("paper_stop_allowed") is True,
+            "stale_reconciliation": supervisor.get("stale_reconciliation") or {},
             "dominant_blocker": dominant_blocker,
             "reason_codes": reason_codes,
             "max_lease_seconds": supervisor.get("max_paper_duration_seconds") or 432000,
@@ -1769,11 +1771,52 @@ class OperatorSnapshotProvider:
             self.runtime_config.repo_root,
             state_db_path=self.runtime_config.data_dir / "state.db",
         )
+        supervisor = self.supervisor.status_snapshot()
+        active_session = supervisor.get("active_session") if isinstance(supervisor.get("active_session"), dict) else None
+        latest_session = supervisor.get("latest_session") if isinstance(supervisor.get("latest_session"), dict) else None
+        session = active_session or latest_session or {}
+        session_pid = session.get("pid")
+        artifact_pid = snapshot.get("pid")
+        artifact_session_match = bool(session_pid and artifact_pid and str(session_pid) == str(artifact_pid))
+        supervisor_overlay = {
+            "state": supervisor.get("state"),
+            "active_session_id": supervisor.get("active_session_id"),
+            "latest_session_id": session.get("session_id"),
+            "latest_status": session.get("status"),
+            "pid": session_pid,
+            "artifact_session_match": artifact_session_match,
+            "paper_start_allowed": supervisor.get("paper_start_allowed") is True,
+            "paper_stop_allowed": supervisor.get("paper_stop_allowed") is True,
+            "paper_start_refusal_reason": supervisor.get("paper_start_refusal_reason"),
+            "paper_stop_refusal_reason": supervisor.get("paper_stop_refusal_reason"),
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+        if active_session:
+            snapshot.update(
+                {
+                    "status": "RUNNING",
+                    "prominent_state": "RUNNING",
+                    "pid": session_pid or artifact_pid,
+                    "data_source": "OPERATOR_SUPERVISOR_AND_LOCAL_RUNTIME_ARTIFACTS",
+                    "runtime_artifact_note": (
+                        "Operator supervisor has an attached PAPER session. Heartbeat, fills, positions, and open-order "
+                        "counts remain local/runtime artifact evidence unless separately broker-confirmed."
+                    ),
+                }
+            )
+        elif latest_session and not artifact_session_match:
+            snapshot["runtime_artifact_note"] = (
+                "Latest supervisor session and local heartbeat artifact do not have the same PID; use broker portfolio "
+                "and supervisor session state for final truth."
+            )
         snapshot.update(
             {
                 "operator_endpoint": "/operator/run-visibility/status",
                 "operator_page": "/operator/run-visibility",
-                "data_source": "LOCAL_RUNTIME_ARTIFACTS",
+                "data_source": snapshot.get("data_source") or "LOCAL_RUNTIME_ARTIFACTS",
+                "operator_supervisor": supervisor_overlay,
                 "broker_call_occurred": False,
                 "broker_mutation_occurred": False,
                 "order_submission_occurred": False,
@@ -3552,6 +3595,16 @@ class OperatorSnapshotProvider:
     def paper_stop_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.supervisor.stop_paper(payload or {})
 
+    def paper_reconcile_stale_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = self.supervisor.reconcile_stale_session(payload or {})
+        self.snapshot_store.set(
+            "paper_control_snapshot",
+            {},
+            ttl_seconds=-1,
+            source="PAPER_STALE_RECONCILIATION_INVALIDATED_CONTROL_STATE",
+        )
+        return result
+
     def live_refusal_intent(self, intent_name: str) -> dict[str, Any]:
         return self.supervisor.live_refusal(intent_name)
 
@@ -3907,6 +3960,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.post("/intent/paper/stop")
     def paper_stop_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return provider.paper_stop_intent(payload)
+
+    @router.post("/intent/paper/reconcile-stale")
+    def paper_reconcile_stale_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.paper_reconcile_stale_intent(payload)
 
     @router.post("/intent/snapshot/export")
     def snapshot_export_intent() -> dict[str, Any]:

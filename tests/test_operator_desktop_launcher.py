@@ -30,6 +30,25 @@ def test_hidden_launcher_uses_logged_python_backend_not_silent_pythonw():
     assert "$env:LOCALAPPDATA" in text
 
 
+def test_operator_launchers_import_paper_env_without_logging_secret_values():
+    hidden = _launcher_text()
+    visible = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    for text in (hidden, visible):
+        assert "Get-OperatorPaperEnvFile" in text
+        assert "Import-OperatorPaperEnvFile" in text
+        assert ".poverty_killer_alpaca_paper_env" in text
+        assert "PK_OPERATOR_PAPER_ENV_FILE" in text
+        assert "APCA_API_(KEY_ID|SECRET_KEY|BASE_URL)" in text
+        assert "SetEnvironmentVariable($key, $value, \"Process\")" in text
+        assert "values=REDACTED" in text
+        assert "APCA_API_SECRET_KEY=" not in text
+
+    assert "Import-OperatorPaperEnvFile | Out-Null" in hidden
+    start_backend = visible[visible.index("function Start-Backend") : visible.index("function Stop-Backend")]
+    assert "Import-OperatorPaperEnvFile | Out-Null" in start_backend
+
+
 def test_hidden_launcher_requires_operator_health_before_browser_open():
     text = _launcher_text()
 
@@ -266,9 +285,10 @@ def test_visible_launcher_creates_stable_taskbar_pin_shortcut_identity():
 def test_operator_ui_assets_are_cache_busted_for_desktop_launcher():
     text = Path("ui/operator-control-panel/index.html").read_text(encoding="utf-8")
 
-    assert f"styles.css?v={OPERATOR_UI_BUILD_PLACEHOLDER}" in text
-    assert f"mock-data.js?v={OPERATOR_UI_BUILD_PLACEHOLDER}" in text
-    assert f"app.js?v={OPERATOR_UI_BUILD_PLACEHOLDER}" in text
+    assert "styles.css?v=operator-ui-build-ui3-design-system-hardening" in text
+    assert "mock-data.js?v=operator-ui-build-ui3-design-system-hardening" in text
+    assert "app.js?v=operator-ui-build-ui3-design-system-hardening" in text
+    assert OPERATOR_UI_BUILD_PLACEHOLDER in text
     assert STALE_OPERATOR_UI_VERSION not in text
     assert "operator-credential-hotfix-20260531" not in text
 

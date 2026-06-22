@@ -308,6 +308,7 @@
     ],
     "home_ai_endpoint": "/operator/ai/ask",
     "paper_start_endpoint": "/operator/intent/paper/start",
+    "paper_stale_reconcile_endpoint": "/operator/intent/paper/reconcile-stale",
     "live_enabled": false,
     "real_money_enabled": false,
     "manual_trading_available": false,
@@ -700,11 +701,34 @@
       "supervisor_state": "IDLE | RUNNING | STALE_ACTIVE_SESSION",
       "paper_start_allowed": false,
       "paper_stop_allowed": false,
+      "stale_reconciliation": {
+        "available": false,
+        "reason_code": "NO_STALE_SESSION_TO_RECONCILE | STALE_SESSION_PROCESS_NOT_RUNNING | STALE_SESSION_PROCESS_STILL_RUNNING",
+        "pid_running": false,
+        "broker_call_occurred": false,
+        "broker_mutation_occurred": false,
+        "order_submission_occurred": false,
+        "live_endpoint_touched": false,
+        "real_money_touched": false
+      },
       "dominant_blocker": "READY_FOR_GOVERNED_PAPER | SUPERVISOR_PROCESS_RUNNING_OR_RECENT | PAPER_START_BLOCKED",
       "reason_codes": [],
       "max_lease_seconds": 432000,
       "allowed_durations": [180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400, 86400, 259200, 432000],
       "broker_mutation_occurred": false,
+      "secrets_values_exposed": false
+    },
+    "/operator/run-visibility/status": {
+      "source": "POVERTY_KILLER_RUN_VISIBILITY",
+      "status": "RUNNING | STOPPED | STALE | NO_STATUS",
+      "data_source": "LOCAL_RUNTIME_ARTIFACTS",
+      "read_only": true,
+      "broker_call_occurred": false,
+      "broker_mutation_occurred": false,
+      "order_submission_occurred": false,
+      "cancel_occurred": false,
+      "live_enabled": false,
+      "real_money_enabled": false,
       "secrets_values_exposed": false
     },
     "/operator/latest-run": {
@@ -1383,6 +1407,28 @@
         "NO_ACTIVE_RUN",
         "SAFE_STOP_UNAVAILABLE_NON_WINDOWS",
         "GRACEFUL_STOP_SIGNAL_FAILED"
+      ]
+    },
+    "/operator/intent/paper/reconcile-stale": {
+      "status": "server_authorized_stale_session_metadata_reconciliation",
+      "required_body": {
+        "confirm_stale_session_reviewed": true,
+        "confirm_previous_process_not_running": true,
+        "confirm_runtime_visibility_stopped": true,
+        "confirm_no_broker_cleanup_requested": true
+      },
+      "does_not_call_broker": true,
+      "does_not_submit_cancel_replace_close_or_liquidate_orders": true,
+      "does_not_enable_live_or_real_money": true,
+      "runtime_metadata_write_only": true,
+      "refusals": [
+        "NO_STALE_SESSION_TO_RECONCILE",
+        "MISSING_STALE_SESSION_REVIEW_CONFIRMATION",
+        "MISSING_PREVIOUS_PROCESS_CONFIRMATION",
+        "MISSING_RUNTIME_VISIBILITY_STOPPED_CONFIRMATION",
+        "MISSING_NO_BROKER_CLEANUP_CONFIRMATION",
+        "STALE_SESSION_PROCESS_STILL_RUNNING",
+        "STALE_SESSION_PID_CHECK_FAILED"
       ]
     },
     "/operator/intent/snapshot/export": "refused/not exposed in production operator UI",

@@ -488,6 +488,91 @@ def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoin
     assert launch["broker_mutation_occurred"] is False
 
 
+def test_operator_api_exposes_stale_reconcile_intent_without_broker_call(tmp_path):
+    runner = FakeRunner()
+    store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
+    store.write_session(
+        {
+            "session_id": "paper_stale_route",
+            "requested_at": "2026-06-14T04:17:12+00:00",
+            "status": "RUNNING",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "duration_seconds": 300,
+            "pid": 987654,
+            "started_at": "2026-06-14T04:17:12+00:00",
+        }
+    )
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=runner.repo_root,
+            process_env=dict(PAPER_ENV),
+            session_store_path=str(store.path),
+        ),
+        runner=runner,
+        session_store=store,
+    )
+    supervisor._is_pid_running = lambda pid: (False, "STALE_SESSION_PROCESS_NOT_RUNNING")  # type: ignore[method-assign]
+    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=supervisor, provider_env=dict(PAPER_ENV)))
+
+    before = _endpoint(app, "/operator/paper-control-state")()
+    result = _endpoint(app, "/operator/intent/paper/reconcile-stale", "POST")(
+        {
+            "confirm_stale_session_reviewed": True,
+            "confirm_previous_process_not_running": True,
+            "confirm_runtime_visibility_stopped": True,
+            "confirm_no_broker_cleanup_requested": True,
+        }
+    )
+    latest = _endpoint(app, "/operator/latest-run")()
+    contracts = _endpoint(app, "/operator/contracts")()
+
+    assert before["stale_reconciliation"]["available"] is True
+    assert before["stale_reconciliation"]["broker_mutation_occurred"] is False
+    assert result["allowed"] is True
+    assert result["reason_code"] == "STALE_SESSION_RECONCILED_PID_NOT_RUNNING"
+    assert result["broker_call_occurred"] is False
+    assert result["broker_mutation_occurred"] is False
+    assert result["runtime_mutation_occurred"] is True
+    assert latest["state"] == "IDLE"
+    assert latest["paper_start_allowed"] is True
+    assert "/operator/intent/paper/reconcile-stale" in contracts["disabled_intents"]
+
+
+def test_operator_run_visibility_uses_supervisor_overlay_for_active_session(tmp_path):
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
+        runner=runner,
+    )
+    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=supervisor, provider_env=dict(PAPER_ENV)))
+
+    started = _endpoint(app, "/operator/intent/paper/start", "POST")(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD"],
+            "approve_autonomous_paper": True,
+            "real_money": False,
+            "live": False,
+        }
+    )
+    visibility = _endpoint(app, "/operator/run-visibility/status")()
+
+    assert started["allowed"] is True
+    assert visibility["status"] == "RUNNING"
+    assert visibility["prominent_state"] == "RUNNING"
+    assert visibility["data_source"] == "OPERATOR_SUPERVISOR_AND_LOCAL_RUNTIME_ARTIFACTS"
+    assert visibility["operator_supervisor"]["active_session_id"] == started["session_id"]
+    assert visibility["operator_supervisor"]["paper_stop_allowed"] is True
+    assert visibility["broker_call_occurred"] is False
+    assert visibility["broker_mutation_occurred"] is False
+    assert visibility["order_submission_occurred"] is False
+    assert visibility["live_enabled"] is False
+    assert visibility["real_money_enabled"] is False
+
+
 def test_operator_health_readiness_and_storage_are_safe(tmp_path):
     app = _app(tmp_path)
 
