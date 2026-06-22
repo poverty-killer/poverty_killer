@@ -67,13 +67,18 @@ def test_ask_quant_chief_drawer_has_visible_question_flow():
 
 def test_commercial_navigation_groups_keep_all_pages_accessible():
     text = _app_text()
+    nav_block = text[text.index("const NAV_GROUPS"):text.index("const DEFAULT_BACKEND_FETCH_TIMEOUT_MS")]
+    screens_block = text[text.index("const screens"):text.index("const LEGACY_SCREEN_ALIASES")]
+    aliases_block = text[text.index("const LEGACY_SCREEN_ALIASES"):text.index("const NAV_GROUPS")]
 
     assert "NAV_GROUPS" in text
-    for group in ["Watch", "Intelligence", "Operate", "Proof"]:
-        assert group in text
+    for group in ["Watch", "Intelligence", "Operate"]:
+        assert group in nav_block
+    assert "Proof" not in nav_block
     for page_id in [
         "overview",
         "performance",
+        "risk",
         "trades",
         "markets",
         "advisor",
@@ -81,34 +86,23 @@ def test_commercial_navigation_groups_keep_all_pages_accessible():
         "controls",
         "log",
         "connections",
-        "command",
-        "positions",
-        "providers",
-        "diagnostics",
     ]:
-        assert f'"{page_id}"' in text
+        assert f'"{page_id}"' in screens_block
     assert '"Activation Proof"' not in text
-    for page_id in [
-        "action",
-        "activity",
-        "runs",
-        "pnl",
-        "decision",
-        "market",
-        "risk",
-        "alerts",
-        "providers",
-        "ai",
-        "historical",
-        "research",
-        "world",
-        "diagnostics",
-        "system",
-        "audit",
-        "live",
+    for legacy_id, cockpit_id in [
+        ("command", "controls"),
+        ("positions", "trades"),
+        ("providers", "connections"),
+        ("diagnostics", "health"),
+        ("activity", "log"),
+        ("runs", "log"),
+        ("pnl", "performance"),
+        ("historical", "performance"),
+        ("world", "markets"),
+        ("live", "controls"),
     ]:
-        assert f'"{page_id}"' in text
-    assert "const renderer = renderers[selected] || renderPositions" in text
+        assert f"{legacy_id}: \"{cockpit_id}\"" in aliases_block
+    assert "const renderer = renderers[selected] || renderCockpitOverview" in text
     assert "main.innerHTML = screens.map" not in text
     assert "group.items.map" in text
     assert "showScreen(button.dataset.screen)" in text
@@ -140,6 +134,79 @@ def test_operator_cockpit_is_default_and_has_server_gated_selector_controls():
     assert ".cockpit-truth-banner" in css
     assert ".scan-strip" in css
     assert ".market-chip-grid" in css
+    assert css.count(":root {") == 1
+    for component in ["DataTable", "MetricCard", "DetailCard", "SectionHeader", "TruthBanner"]:
+        assert f"function {component}" in text
+    assert 'data-component="DataTable"' in text
+    assert ".data-table-shell" in css
+    assert ".detail-card" in css
+    assert ".metric-card" in css
+    assert ".section-header" in css
+
+
+def test_ui3_design_system_tokens_button_hierarchy_and_mobile_targets_exist():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    for token in [
+        "--button-sm-height: 32px",
+        "--button-md-height: 40px",
+        "--button-touch-height: 44px",
+        "--button-min-width: 96px",
+        "--button-max-width: 360px",
+    ]:
+        assert token in css
+    for hierarchy in [
+        ".intent-button.primary",
+        ".intent-button.secondary",
+        ".intent-button.tertiary",
+        ".intent-button.danger",
+    ]:
+        assert hierarchy in css
+    assert "white-space: nowrap" in css
+    assert "min-height: var(--button-touch-height)" in css
+    assert "@media (max-width: 1023px)" in css
+    assert "@media (max-width: 639px)" in css
+    assert "primaryAiPrompts(\"advisor\").slice(0, 3)" in text
+    assert "intent-button primary primary-action" in text
+    assert "intent-button secondary" in text
+    assert "intent-button tertiary" in text
+
+
+def test_ui3_mobile_tables_and_overflow_primitives_are_encoded():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert 'data-label="${escapeHtml(safeHeaders[index] || "")}"' in text
+    assert ".data-table-shell td::before" in css
+    assert "content: attr(data-label)" in css
+    assert "grid-template-columns: minmax(86px, 34%) minmax(0, 1fr)" in css
+    assert ".badge.token-long" in css
+    assert ".progressive-summary span" in css
+    assert "overflow-wrap: anywhere" in css
+    assert "overflow-x: hidden" in css
+
+
+def test_ui3_progressive_disclosure_keeps_dense_features_reachable():
+    text = _app_text()
+
+    for marker in [
+        "data-controls-credential-preflight-advanced",
+        "data-controls-baseline-advanced",
+        "data-controls-session-advanced",
+        "data-ai-routing-advanced",
+        "data-health-control-inventory-advanced",
+        "data-historical-advanced",
+        "data-provider-credential-disclosure",
+        "name=\"provider-credentials\"",
+    ]:
+        assert marker in text
+    assert "Advanced routing: AI Routing Settings" in text
+    assert "Advanced - control inventory: UI Wiring Audit" in text
+    assert "Advanced - historical replay: Historical Alpaca Test" in text
+    assert "Advanced credential setup / preflight proof" in text
+    assert "Advanced baseline proof" in text
+    assert "Advanced session detail" in text
 
 
 def test_ai_advisor_is_docked_and_resizes_layout_not_overlay_first():
@@ -280,20 +347,20 @@ def test_portfolio_home_has_commercial_cockpit_lane_and_primary_actions():
     assert ".confirmation-grid" in css
 
 
-def test_header_compacts_backend_degraded_status_and_keeps_details_in_diagnostics():
+def test_header_compacts_backend_degraded_status_and_keeps_details_in_bot_health():
     text = _app_text()
 
     render_topbar = text[text.index("function renderTopBar"):text.index("function paperLaunchDisabledReason")]
-    diagnostics = text[text.index("function renderDiagnostics"):text.index("function renderLive")]
+    health = text[text.index("function renderCockpitHealth"):text.index("function renderCockpitControls")]
 
     assert "Backend: OK" in text
     assert "Backend: Degraded -" in text
     assert "View details" in render_topbar
-    assert "data-screen-shortcut=\"diagnostics\"" in render_topbar
+    assert "data-screen-shortcut=\"health\"" in render_topbar
     assert "backendDegradedSummary()" not in render_topbar
-    assert "Backend endpoint details" in diagnostics
+    assert "Backend Endpoint Details" in health
     assert "backendFailureRows" in text
-    assert "Failed endpoints" in diagnostics
+    assert "Failed endpoints" in health
 
 
 def test_responsive_css_wraps_header_tables_cards_and_ai_drawer():
@@ -474,10 +541,10 @@ def test_operator_ui_uses_scheduler_and_active_screen_rendering():
     assert "optional: 2" in text
     assert "activeLoadAbortController.abort()" in text
     assert "stale backend response ignored" in text
-    assert "const renderer = renderers[selected] || renderPositions" in text
+    assert "const renderer = renderers[selected] || renderCockpitOverview" in text
     assert 'main.innerHTML = `<section class="screen active" id="screen-${selected}">${renderer()}</section>`' in text
     assert 'screens.map(([id]) => `<section class="screen"' not in text
-    assert "refreshActiveScreenData(id)" in text
+    assert "refreshActiveScreenData(selected)" in text
     assert 'path: "/operator/ai/recommendations", priority: 3, lane: "optional", optional: true' in text
 
 
@@ -577,9 +644,9 @@ def test_run_paper_form_draft_survives_lifecycle_reconciliation():
 def test_lifecycle_refresh_patches_run_paper_without_remounting_form_controls():
     text = _app_text()
 
-    assert 'if (activeScreenId === "command" || activeScreenId === "activity")' in text
+    assert 'if (selected === "controls")' in text
     assert "refreshRunPaperControlDom();" in text
-    assert 'renderScreens(activeScreenId || "positions")' in text
+    assert 'renderScreens(selected);' in text
     assert "syncPaperRunDraftFromDom(formId, { markDirty: false })" in text
     assert '["paperControlState", "/operator/paper-control-state"]' in text
     assert '["latestRun", "/operator/latest-run"]' in text
@@ -592,14 +659,14 @@ def test_lifecycle_refresh_patches_run_paper_without_remounting_form_controls():
 def test_run_paper_start_payload_uses_preserved_draft_values():
     text = _app_text()
 
-    assert "const draft = syncPaperRunDraftFromDom(formId || \"command\", { markDirty: false })" in text
+    assert "const draft = syncPaperRunDraftFromDom(formId || \"controls\", { markDirty: false })" in text
     assert "durationSeconds = paperDraftDurationSeconds(draft)" in text
     assert "watchlist: normalizePaperWatchlist(draft.watchlistRaw)" in text
     assert "validation," in text
     assert "if (form.validation && form.validation.valid !== true)" in text
     assert "duration_seconds: form.durationSeconds" in text
     assert "watchlist: form.watchlist" in text
-    assert "syncPaperRunDraftFromDom(paperCard.dataset.paperFormCard || \"command\", { markDirty: true, dirtyFields: [field] })" in text
+    assert "syncPaperRunDraftFromDom(paperCard.dataset.paperFormCard || \"controls\", { markDirty: true, dirtyFields: [field] })" in text
     assert "event.target.matches(\"[data-paper-duration]\")" in text
     assert "event.target.matches(\"[data-paper-watchlist]\")" in text
 
@@ -664,7 +731,8 @@ def test_top_banner_treats_safety_locks_and_idle_as_good_states():
 def test_historical_test_control_is_visible_and_honest():
     text = _app_text()
 
-    assert "[\"historical\", \"4-Month Test\"]" in text
+    aliases_block = text[text.index("const LEGACY_SCREEN_ALIASES"):text.index("const NAV_GROUPS")]
+    assert 'historical: "performance"' in aliases_block
     assert "Historical Alpaca Test" in text
     assert "data-historical-preset" in text
     assert "last_4_months" in text
@@ -682,9 +750,9 @@ def test_ui_control_inventory_declares_statuses_and_no_broken_defaults():
     assert "future server-authorized intent" not in text
     assert "NO_BROKEN_CONTROLS_DECLARED" in text
     assert '["global", "ask_quant_chief"' in text
-    assert '["command", "home_ai_answer_modes"' in text
-    assert '["positions", "open_run_paper"' in text
-    assert '["positions", "open_orders_preview_table"' in text
+    assert '["advisor", "home_ai_answer_modes"' in text
+    assert '["trades", "open_run_paper"' in text
+    assert '["trades", "open_orders_preview_table"' in text
 
 
 def test_provider_setup_uses_beginner_safe_credential_labels():

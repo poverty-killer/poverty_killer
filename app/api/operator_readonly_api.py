@@ -122,7 +122,7 @@ from app.world_awareness.scheduler import WorldAwarenessProviderRuntime
 
 API_VERSION = "operator-backend-v1"
 OPERATOR_ACTIVATION_VERSION = "operator-activation-e2e-truth6-20260602"
-OPERATOR_UI_ASSET_VERSION = "ui1-cockpit"
+OPERATOR_UI_ASSET_VERSION = "ui3-design-system-hardening"
 
 
 def _utc_now() -> str:
