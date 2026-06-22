@@ -150,6 +150,24 @@ body.ai-docked-open.ai-docked-wide .shell {
   overflow: hidden;
 }
 
+.loading-control-status {
+  min-height: 36px;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #10141d;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .nav {
   grid-area: nav;
   background: #0b0e14;
@@ -244,6 +262,7 @@ body.ai-docked-open.ai-docked-wide .shell {
   background: transparent;
   color: var(--muted);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   min-width: 0;
 }
@@ -1248,15 +1267,16 @@ body.ai-docked-open.ai-docked-wide .shell {
 .ai-chief-global {
   position: relative;
   z-index: 50;
+  --ai-chief-safe-bottom: max(18px, env(safe-area-inset-bottom));
+  --ai-chief-safe-right: max(18px, env(safe-area-inset-right));
 }
 
 .ai-chief-fab {
   position: fixed;
-  right: 18px;
-  bottom: 18px;
+  right: var(--ai-chief-safe-right);
+  bottom: var(--ai-chief-safe-bottom);
   z-index: 62;
-  display: grid;
-  gap: 2px;
+  display: inline-flex;
   max-width: min(300px, calc(100vw - 36px));
   min-height: 48px;
   padding: 9px 13px;
@@ -1276,15 +1296,6 @@ body.ai-docked-open.ai-docked-wide .shell {
 
 .ai-chief-fab.open {
   display: none;
-}
-
-.ai-chief-fab-sub {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .ai-chief-backdrop {
@@ -2118,8 +2129,8 @@ body.ai-docked-open.ai-docked-wide .shell {
   }
 
   .ai-chief-fab {
-    right: 10px;
-    bottom: 10px;
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
     max-width: calc(100vw - 20px);
   }
 
@@ -2367,8 +2378,9 @@ body.ai-docked-open.ai-docked-wide .shell {
 
 .main {
   grid-area: main;
-  padding: 26px 30px 60px;
+  padding: 26px 30px 110px;
   overflow: auto;
+  scroll-padding-bottom: 120px;
 }
 
 .rail {
@@ -2894,6 +2906,26 @@ body.ai-docked-open.ai-docked-wide .shell {
   white-space: nowrap;
 }
 
+.pk-button {
+  appearance: none;
+  border-style: solid;
+  text-decoration: none;
+}
+
+.pk-button .button-label {
+  min-width: 0;
+  max-width: 100%;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pk-button.full-width {
+  width: 100%;
+  max-width: 100%;
+}
+
 .intent-button.sm,
 .compact-action,
 .ai-copy-answer,
@@ -2961,6 +2993,17 @@ body.ai-docked-open.ai-docked-wide .shell {
 .ai-question {
   justify-content: flex-start;
   text-align: left;
+}
+
+.asset-choice .button-label,
+.ai-mode-button .button-label {
+  color: var(--text);
+  font-weight: 750;
+}
+
+.ai-chief-fab .button-label,
+.status-detail-link .button-label {
+  max-width: 100%;
 }
 
 .ai-answer-mode-group {

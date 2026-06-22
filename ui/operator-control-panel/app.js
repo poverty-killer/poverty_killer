@@ -315,6 +315,74 @@
       .replaceAll("'", "&#039;");
   }
 
+  function htmlAttrs(attrs) {
+    return Object.entries(attrs || {})
+      .filter(([, value]) => value !== false && value !== null && value !== undefined && value !== "")
+      .map(([key, value]) => value === true ? escapeHtml(key) : `${escapeHtml(key)}="${escapeHtml(value)}"`)
+      .join(" ");
+  }
+
+  function buttonVariant(value) {
+    const variant = String(value || "secondary").toLowerCase();
+    return ["primary", "secondary", "tertiary", "danger"].includes(variant) ? variant : "secondary";
+  }
+
+  function buttonSize(value) {
+    const size = String(value || "md").toLowerCase();
+    return size === "sm" ? "sm" : "md";
+  }
+
+  function makeButton(options) {
+    const opts = options || {};
+    const label = String(opts.label || "");
+    const variant = buttonVariant(opts.variant);
+    const size = buttonSize(opts.size);
+    const disabled = opts.disabled === true;
+    const disabledReason = disabled ? String(opts.reason || opts.title || "Disabled with reason unavailable.") : "";
+    const title = String(opts.title || disabledReason || label);
+    const classes = [
+      "intent-button",
+      "pk-button",
+      variant,
+      size,
+      opts.className || "",
+      opts.active ? "active" : "",
+      opts.fullWidth ? "full-width" : ""
+    ].filter(Boolean).join(" ");
+    const attrs = htmlAttrs({
+      type: opts.type || "button",
+      "data-component": "Button",
+      "data-button-variant": variant,
+      "data-button-size": size,
+      "aria-label": opts.ariaLabel || label,
+      title,
+      "aria-disabled": disabled ? "true" : false,
+      "data-disabled-reason": disabledReason || false,
+      disabled,
+      ...(opts.attrs || {})
+    });
+    return `<button class="${escapeHtml(classes)}" ${attrs}><span class="button-label">${opts.htmlLabel === true ? label : escapeHtml(label)}</span></button>`;
+  }
+
+  const Button = makeButton;
+
+  function makeNavLink(options) {
+    const opts = options || {};
+    const id = String(opts.id || "overview");
+    const label = String(opts.label || screenTitle(id));
+    const badgeText = String(opts.badge || "");
+    return `
+      <a class="nav-button ${opts.active ? "active" : ""}" data-screen="${escapeHtml(id)}" href="#${escapeHtml(id)}">
+        <span class="nav-icon" aria-hidden="true"></span>
+        <span class="nav-label">${escapeHtml(label)}</span>
+        <span class="nav-meta">
+          ${badgeText ? `<span class="nav-badge">${escapeHtml(badgeText)}</span>` : ""}
+          <span class="nav-index mono">${escapeHtml(navPageNumber(id))}</span>
+        </span>
+      </a>
+    `;
+  }
+
   function statusColor(value) {
     const v = normalizeStatusText(value).toUpperCase();
     if (["EXITED", "COMPLETED", "BOUNDED_RUNTIME_COMPLETED"].includes(v)) return "green";
@@ -505,12 +573,16 @@
     ];
     return `
       <div class="ai-answer-mode-group" role="group" aria-label="${escapeHtml(scope === "home" ? "Home AI answer source" : "AI answer source")}">
-        ${modes.map(([mode, label]) => `
-          <button class="intent-button ai-mode-button ${normalizeAiAnswerMode(selectedMode) === mode ? "active" : ""}" type="button" data-ai-answer-mode-ask="${escapeHtml(scope)}:${escapeHtml(mode)}" ${busy ? "disabled" : ""}>
-            <span>${escapeHtml(label)}</span>
-            <small>${escapeHtml(aiAnswerModeDescription(mode))}</small>
-          </button>
-        `).join("")}
+        ${modes.map(([mode, label]) => Button({
+          label,
+          variant: normalizeAiAnswerMode(selectedMode) === mode ? "primary" : "tertiary",
+          className: "ai-mode-button",
+          active: normalizeAiAnswerMode(selectedMode) === mode,
+          disabled: busy,
+          reason: "Advisor is already answering.",
+          title: aiAnswerModeDescription(mode),
+          attrs: { "data-ai-answer-mode-ask": `${scope}:${mode}` }
+        })).join("")}
       </div>
     `;
   }
@@ -855,27 +927,31 @@
       const title = row.enabled === true
         ? `${row.label} mandate active for future capital.`
         : `${row.label} is feature-gated and server-rejected: ${row.reasonCode}.`;
-      return `
-        <button
-          class="asset-choice ${active ? "active" : "gated"}"
-          type="button"
-          data-cockpit-asset="${escapeHtml(row.id)}"
-          title="${escapeHtml(title)}"
-          ${disabled ? "disabled" : ""}
-        >
-          <span>${escapeHtml(row.label)}</span>
-          <small>${escapeHtml(active ? "active" : row.status)}</small>
-        </button>
-      `;
+      return Button({
+        label: `${row.label} ${active ? "ACTIVE NOW" : row.status}`,
+        variant: active ? "primary" : "tertiary",
+        className: `asset-choice ${active ? "active" : "gated"}`,
+        disabled,
+        reason: title,
+        title,
+        attrs: { "data-cockpit-asset": row.id }
+      });
     }).join("");
     return `
       <div class="asset-selector" aria-label="Asset class mandate selector">
         ${buttons}
       </div>
-      <button class="intent-button paper compact-action" type="button" data-screen-shortcut="connections">Connections</button>
-      <button class="intent-button paper compact-action gated-action" type="button" data-cockpit-day-trader ${backendReady && day.enabled === true ? "" : "disabled"} title="${escapeHtml(day.detail || "Day-trader mode is gated.")}">
-        Day Trader ${day.enabled === true ? "On" : "Gated"}
-      </button>
+      ${Button({ label: "Connections", variant: "secondary", size: "sm", className: "compact-action", attrs: { "data-screen-shortcut": "connections" } })}
+      ${Button({
+        label: `Day Trader ${day.enabled === true ? "On" : "Gated"}`,
+        variant: "tertiary",
+        size: "sm",
+        className: "compact-action gated-action",
+        disabled: !(backendReady && day.enabled === true),
+        reason: day.detail || "Day-trader mode is gated.",
+        title: day.detail || "Day-trader mode is gated.",
+        attrs: { "data-cockpit-day-trader": true }
+      })}
     `;
   }
 
@@ -2056,10 +2132,6 @@
     `;
   }
 
-  function table(headers, rows, options) {
-    return DataTable("", "", headers, rows, options);
-  }
-
   function MetricCard(label, value, color, detail) {
     return `
       <div class="card metric metric-card" data-component="MetricCard">
@@ -2134,7 +2206,13 @@
       badge("Live locked", "green"),
       badge("Real-money blocked", "green"),
       backendDegradedCount()
-        ? `<button class="status-detail-link" type="button" data-screen-shortcut="health">View details</button>`
+        ? Button({
+          label: "View details",
+          variant: "tertiary",
+          size: "sm",
+          className: "status-detail-link",
+          attrs: { "data-screen-shortcut": "health" }
+        })
         : ""
     ].filter(Boolean).join("");
     const actions = document.querySelector(".top-actions");
@@ -2262,6 +2340,7 @@
           <h4>Stale PAPER Session Reconciliation</h4>
           ${badge(available ? "reconcile available" : "reconcile blocked", available ? "yellow" : "red")}
         </div>
+        <p class="muted">Start is blocked because a previous PAPER session did not shut down cleanly. Reconcile only clears local supervisor/audit session metadata after the prior process is proven stopped; it never cancels orders, closes positions, liquidates, submits orders, enables live, or touches real money.</p>
         <div class="notice ${available ? "" : "error"}">${escapeHtml(detail)}</div>
         <div class="run-paper-proof-grid compact-proof-grid">
           ${renderRunPaperProofTile("Prior session", stale.sessionId || data.supervisor.sessionId || "unknown", "Latest supervisor session after backend restart.", "yellow")}
@@ -2270,9 +2349,16 @@
           ${renderRunPaperProofTile("Broker boundary", "no cleanup", "No cancel, replace, close, liquidate, order submit, live enablement, or real-money action is exposed.", "green")}
         </div>
         <div class="button-row">
-          <button class="intent-button secondary" data-intent="paper-reconcile-stale" data-paper-reconcile-stale-control ${available ? "" : "disabled"}>
-            Reconcile stale session metadata
-          </button>
+          ${Button({
+            label: "Reconcile stale session metadata",
+            variant: "secondary",
+            disabled: !available,
+            reason: available ? "" : `Blocked: ${blockedReason}.`,
+            attrs: {
+              "data-intent": "paper-reconcile-stale",
+              "data-paper-reconcile-stale-control": true
+            }
+          })}
           <span class="badge yellow">Local supervisor/audit write only</span>
         </div>
         <div class="notice ${available ? "" : "error"}" data-paper-reconcile-stale-state>${escapeHtml(available ? "Available after confirmations. Start remains governed by backend readiness after reconciliation." : `Blocked: ${blockedReason}.`)}</div>
@@ -2443,7 +2529,16 @@
         ${accepted ? `<div class="notice" data-paper-baseline-accepted-text>Position-aware PAPER baseline accepted. Snapshot ${escapeHtml(baseline.baselineSnapshotId || "unknown")} at ${escapeHtml(baseline.acceptedAt || "unknown")}.</div>` : ""}
         ${hasExistingPositions && !accepted ? `<div class="notice" data-paper-baseline-required-text>Existing positions require baseline adoption. Reset is not required.</div>` : ""}
         <div class="button-row">
-          <button class="intent-button paper" data-intent="paper-baseline-accept" aria-label="Accept current positions as PAPER baseline" title="${escapeHtml(acceptReason)}" ${acceptDisabled}>Accept current positions as PAPER baseline</button>
+          ${Button({
+            label: "Accept current positions as PAPER baseline",
+            variant: "secondary",
+            className: "paper",
+            disabled: Boolean(acceptDisabled),
+            reason: acceptReason,
+            title: acceptReason,
+            ariaLabel: "Accept current positions as PAPER baseline",
+            attrs: { "data-intent": "paper-baseline-accept" }
+          })}
           <span class="badge red">No liquidation / close / cancel controls</span>
         </div>
         <div class="notice ${acceptDisabled && !accepted ? "error" : ""}" data-paper-baseline-action-state>${escapeHtml(acceptReason)}</div>
@@ -2644,10 +2739,23 @@
           </div>
         </div>
         <div class="button-row">
-          <button class="intent-button primary primary-action" data-intent="paper-start" data-paper-form="${escapeHtml(formId)}" data-run-paper-start-control ${startDisabled}>
-            Start Governed PAPER Run
-          </button>
-          <button class="intent-button secondary" data-paper-draft-reset="${escapeHtml(formId)}" type="button">Reset draft</button>
+          ${Button({
+            label: "Start Governed PAPER Run",
+            variant: "primary",
+            className: "primary-action",
+            disabled: Boolean(startDisabled),
+            reason: disabledReason || "",
+            attrs: {
+              "data-intent": "paper-start",
+              "data-paper-form": formId,
+              "data-run-paper-start-control": true
+            }
+          })}
+          ${Button({
+            label: "Reset draft",
+            variant: "secondary",
+            attrs: { "data-paper-draft-reset": formId }
+          })}
           <span class="badge red">No manual trades / force trade unavailable</span>
         </div>
         <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
@@ -2706,7 +2814,7 @@
         ${blockerChecks.length ? `<div class="notice error">Current blocker detail: ${escapeHtml(canRun.reason || overall.detail || "See advanced readiness checks.")}</div>` : ""}
         <details class="ai-context-details">
           <summary>Advanced readiness checks</summary>
-          ${table(
+          ${DataTable("", "",
             ["Check", "Status", "Detail", "Blocker"],
             (launch.checks || []).map((check) => [
               escapeHtml(check.title || check.checkId || "unknown"),
@@ -2747,7 +2855,7 @@
     const positions = (portfolio.positions || []).slice(0, 5);
     const unavailable = isPortfolioUnavailableStatus(portfolio.status);
     return `
-      <div class="card span-12" data-home-section="positions-preview"><h3>Current Assets / Positions Preview</h3>${positions.length ? table(
+      <div class="card span-12" data-home-section="positions-preview"><h3>Current Assets / Positions Preview</h3>${positions.length ? DataTable("", "",
         ["Symbol", "Quantity", "Average Entry", "Current Price", "Market Value", "Unrealized P&L", "Daily Change", "Exposure", "Truth"],
         positions.map((p) => [
           escapeHtml(p.symbol || "unknown"),
@@ -2767,7 +2875,7 @@
   function renderHomeOpenOrdersPreview() {
     const orders = ((data.portfolio && data.portfolio.openOrders) || data.orders || []).slice(0, 5);
     return `
-      <div class="card span-12" data-home-section="open-orders-preview"><h3>Open Orders Preview</h3>${orders.length ? table(
+      <div class="card span-12" data-home-section="open-orders-preview"><h3>Open Orders Preview</h3>${orders.length ? DataTable("", "",
         ["Symbol", "Side", "Quantity", "Order Type", "Status", "Submitted", "Read-only"],
         orders.map((o) => [
           escapeHtml(o.symbol || "unknown"),
@@ -2823,21 +2931,43 @@
           <label for="home-ai-question">Ask a question from the home page</label>
           <textarea id="home-ai-question" data-home-ai-question rows="4" placeholder="Ask what blocks PAPER, what we own, what risk matters, or what proof is needed next.">${escapeHtml(homeAiQuestionText || "")}</textarea>
           <div class="ai-question-bank compact" aria-label="Home AI Advisor suggestions">
-            ${primaryPrompts.map((prompt) => `
-              <button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>
-            `).join("")}
+            ${primaryPrompts.map((prompt) => Button({
+              label: prompt,
+              variant: "tertiary",
+              size: "sm",
+              className: "ai-question",
+              attrs: { "data-home-ai-prompt": prompt }
+            })).join("")}
           </div>
           ${extraPrompts.length ? `
             <details class="ai-context-details ai-more-prompts">
               <summary>More prompts</summary>
               <div class="ai-question-bank compact">
-                ${extraPrompts.map((prompt) => `<button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
+                ${extraPrompts.map((prompt) => Button({
+                  label: prompt,
+                  variant: "tertiary",
+                  size: "sm",
+                  className: "ai-question",
+                  attrs: { "data-home-ai-prompt": prompt }
+                })).join("")}
               </div>
             </details>
           ` : ""}
           <div class="button-row">
-            <button class="intent-button paper" type="button" data-home-ai-clear ${homeAiBusy ? "disabled" : ""}>Clear</button>
-            <button class="intent-button paper" type="button" data-ai-chief-open>Open Docked Advisor</button>
+            ${Button({
+              label: "Clear",
+              variant: "secondary",
+              className: "paper",
+              disabled: homeAiBusy,
+              reason: "Advisor is already answering.",
+              attrs: { "data-home-ai-clear": true }
+            })}
+            ${Button({
+              label: "Open Docked Advisor",
+              variant: "secondary",
+              className: "paper",
+              attrs: { "data-ai-chief-open": true }
+            })}
           </div>
           ${renderAiAnswerModeButtons("home", homeAiAnswerMode, homeAiBusy)}
           ${homeAiError ? `<div class="notice error">Error: ${escapeHtml(homeAiError)}</div>` : ""}
@@ -2909,8 +3039,18 @@
           `).join("")}
         </div>
         <div class="button-row">
-          <button class="intent-button paper" type="button" data-screen-shortcut="connections">Open Connections</button>
-          <button class="intent-button paper" type="button" data-ai-chief-open>Ask Advisor</button>
+          ${Button({
+            label: "Open Connections",
+            variant: "secondary",
+            className: "paper",
+            attrs: { "data-screen-shortcut": "connections" }
+          })}
+          ${Button({
+            label: "Ask Advisor",
+            variant: "secondary",
+            className: "paper",
+            attrs: { "data-ai-chief-open": true }
+          })}
         </div>
       </div>
     `;
@@ -3001,9 +3141,24 @@
           <b>Can I run PAPER?</b>
           <span>${escapeHtml((op.canRunPaper || {}).reason || (op.overallStatus || {}).detail || "Backend authority has not allowed start.")}</span>
         </div>
-        <button class="intent-button paper primary-action" type="button" data-screen-shortcut="controls">Open Controls</button>
-        <button class="intent-button paper" type="button" data-screen-shortcut="trades">Trades & Positions</button>
-        <button class="intent-button paper" type="button" data-screen-shortcut="connections">Connections</button>
+        ${Button({
+          label: "Open Controls",
+          variant: "primary",
+          className: "paper primary-action",
+          attrs: { "data-screen-shortcut": "controls" }
+        })}
+        ${Button({
+          label: "Trades & Positions",
+          variant: "secondary",
+          className: "paper",
+          attrs: { "data-screen-shortcut": "trades" }
+        })}
+        ${Button({
+          label: "Connections",
+          variant: "secondary",
+          className: "paper",
+          attrs: { "data-screen-shortcut": "connections" }
+        })}
       </div>
       <div class="grid cockpit-grid">
         ${metric("Total Equity", prettyMoney(equity), equity ? "green" : "yellow")}
@@ -3030,7 +3185,7 @@
         </div>
         <div class="card span-12 positions-panel">
           <div class="split"><h3>Allocation Snapshot</h3>${badge(portfolio.status || "UNKNOWN", statusColor(portfolio.status || "UNKNOWN"))}</div>
-          ${positions.length ? table(
+          ${positions.length ? DataTable("", "",
             ["Symbol", "Qty", "Value", "Unrealized", "Exposure", "Truth"],
             positions.slice(0, 8).map((p) => [
               escapeHtml(p.symbol || "unknown"),
@@ -3069,7 +3224,7 @@
           ])}</div>
         <div class="card span-6">
           <h3>Recent Run Evidence</h3>
-          ${runs.length ? table(
+          ${runs.length ? DataTable("", "",
             ["Run", "Verdict", "Posts", "Fills", "TCA", "Report"],
             runs.slice(0, 5).map((run) => [
               escapeHtml(run.runId),
@@ -3122,7 +3277,14 @@
             </label>
           </div>
           <div class="button-row">
-            <button class="intent-button paper" data-intent="historical-run" ${backendConnected() ? "" : "disabled"}>Run Historical Test</button>
+            ${Button({
+              label: "Run Historical Test",
+              variant: "secondary",
+              className: "paper",
+              disabled: !backendConnected(),
+              reason: "Backend unavailable; historical request cannot run.",
+              attrs: { "data-intent": "historical-run" }
+            })}
             <span class="badge red">Does not start PAPER / does not trade</span>
           </div>
           <div class="notice">Historical test output is advisory only. If no governed replay result exists, fields stay unknown - no simulation evidence.</div>
@@ -3165,7 +3327,7 @@
         </div>
         <div class="card span-12">
           <h3>Position Risk Details</h3>
-          ${positions.length ? table(
+          ${positions.length ? DataTable("", "",
             ["Symbol", "Exposure", "Concentration", "Fee Drag", "Slippage", "Freshness", "Exit Logic", "Blockers"],
             positions.map((item) => [
               escapeHtml(item.symbol),
@@ -3199,7 +3361,7 @@
         ${metric("Decision", explain.output || "UNKNOWN", statusColor(explain.output || "UNKNOWN"))}
         <div class="card span-12">
           <h3>Every Position</h3>
-          ${positions.length ? table(
+          ${positions.length ? DataTable("", "",
             ["Symbol", "Asset", "Qty", "Side", "Avg Entry", "Current", "Value", "P&L", "Truth", "Risk"],
             positions.map((p) => [
               escapeHtml(p.symbol),
@@ -3217,7 +3379,7 @@
         </div>
         <div class="card span-6">
           <h3>Open Orders</h3>
-          ${orders.length ? table(
+          ${orders.length ? DataTable("", "",
             ["Symbol", "Side", "Type", "Qty", "Filled", "Status", "Cancel"],
             orders.map((o) => [
               escapeHtml(o.symbol || "unknown"),
@@ -3265,7 +3427,7 @@
         </div>
         <div class="card span-12">
           <h3>News & Events Advisory Feed</h3>
-          ${events.length ? table(
+          ${events.length ? DataTable("", "",
             ["Provider", "Symbols", "Title", "Freshness", "Verification", "Rule"],
             events.slice(0, 8).map((event) => [
               escapeHtml(event.provider),
@@ -3310,11 +3472,28 @@
             <label for="cockpit-ai-question">Ask a grounded operator question</label>
             <textarea id="cockpit-ai-question" data-home-ai-question rows="4" placeholder="Ask whether PAPER is blocked, what you own, or what proof is missing.">${escapeHtml(homeAiQuestionText || "")}</textarea>
             <div class="ai-question-bank compact" aria-label="Cockpit AI Advisor suggestions">
-              ${primaryAiPrompts("advisor").slice(0, 3).map((prompt) => `<button class="ai-question" type="button" data-home-ai-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
+              ${primaryAiPrompts("advisor").slice(0, 3).map((prompt) => Button({
+                label: prompt,
+                variant: "tertiary",
+                size: "sm",
+                className: "ai-question",
+                attrs: { "data-home-ai-prompt": prompt }
+              })).join("")}
             </div>
             <div class="button-row">
-              <button class="intent-button tertiary" type="button" data-home-ai-clear ${homeAiBusy ? "disabled" : ""}>Clear</button>
-              <button class="intent-button primary primary-action" type="button" data-ai-chief-open>Open Docked Advisor</button>
+              ${Button({
+                label: "Clear",
+                variant: "tertiary",
+                disabled: homeAiBusy,
+                reason: "Advisor is already answering.",
+                attrs: { "data-home-ai-clear": true }
+              })}
+              ${Button({
+                label: "Open Docked Advisor",
+                variant: "primary",
+                className: "primary-action",
+                attrs: { "data-ai-chief-open": true }
+              })}
             </div>
             ${renderAiAnswerModeButtons("home", homeAiAnswerMode, homeAiBusy)}
           </div>
@@ -3364,16 +3543,16 @@
             </label>
           </div>
           <div class="button-row">
-            <button class="intent-button primary primary-action" type="button" data-ai-save-routing ${backendConnected() ? "" : "disabled"}>Save AI routing settings</button>
-            <button class="intent-button secondary" type="button" data-ai-provider-test ${backendConnected() ? "" : "disabled"}>Test provider connection</button>
-            <button class="intent-button secondary" type="button" data-ai-generate-packet ${backendConnected() ? "" : "disabled"}>Generate Supreme Board Packet</button>
-            <button class="intent-button secondary" type="button" data-ai-use-provider-now="deepseek" ${backendConnected() ? "" : "disabled"}>Use DeepSeek now</button>
-            <button class="intent-button secondary" type="button" data-ai-use-provider-now="openai" ${backendConnected() ? "" : "disabled"}>Use OpenAI now</button>
-            <button class="intent-button secondary" type="button" data-ai-use-supreme-board>Use Supreme Board packet mode</button>
-            <button class="intent-button secondary" type="button" data-ai-approve-high-call ${backendConnected() ? "" : "disabled"}>Approve one high-reasoning call</button>
-            <button class="intent-button tertiary" type="button" data-ai-use-local-guide>Use local guide only</button>
-            <button class="intent-button secondary" type="button" data-ai-use-light-model ${backendConnected() ? "" : "disabled"}>Use selected light model</button>
-            <button class="intent-button secondary" type="button" data-ai-use-local-model ${backendConnected() ? "" : "disabled"}>Use selected local model</button>
+            ${Button({ label: "Save AI routing settings", variant: "primary", className: "primary-action", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-save-routing": true } })}
+            ${Button({ label: "Test provider connection", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-provider-test": true } })}
+            ${Button({ label: "Generate Supreme Board Packet", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-generate-packet": true } })}
+            ${Button({ label: "Use DeepSeek now", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-provider-now": "deepseek" } })}
+            ${Button({ label: "Use OpenAI now", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-provider-now": "openai" } })}
+            ${Button({ label: "Use Supreme Board packet mode", variant: "secondary", attrs: { "data-ai-use-supreme-board": true } })}
+            ${Button({ label: "Approve one high-reasoning call", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-approve-high-call": true } })}
+            ${Button({ label: "Use local guide only", variant: "tertiary", attrs: { "data-ai-use-local-guide": true } })}
+            ${Button({ label: "Use selected light model", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-light-model": true } })}
+            ${Button({ label: "Use selected local model", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-local-model": true } })}
           </div>
           <div class="notice mono">Advisory only: saving router preferences cannot trade, call broker execution, enable live, enable real money, or mutate strategy/risk thresholds.</div>
         </details>
@@ -3461,10 +3640,15 @@
           <div class="split"><h3>Asset Class Mandate</h3>${badge(caps.activeAssetClass || "crypto", "cyan")}</div>
           <div class="asset-selector large">
             ${(caps.assetClasses || []).map((row) => `
-              <button class="asset-choice ${row.id === caps.activeAssetClass ? "active" : "gated"}" type="button" data-cockpit-asset="${escapeHtml(row.id)}" ${row.enabled ? "" : "disabled"}>
-                <span>${escapeHtml(row.label)}</span>
-                <small>${escapeHtml(row.id === caps.activeAssetClass ? "active now" : `${row.status}: ${row.reasonCode}`)}</small>
-              </button>
+              ${Button({
+                label: `${row.label} ${row.id === caps.activeAssetClass ? "ACTIVE NOW" : `${row.status}: ${row.reasonCode}`}`,
+                variant: row.id === caps.activeAssetClass ? "primary" : "tertiary",
+                className: `asset-choice ${row.id === caps.activeAssetClass ? "active" : "gated"}`,
+                active: row.id === caps.activeAssetClass,
+                disabled: !row.enabled,
+                reason: row.reasonCode || "Mandate switch gated.",
+                attrs: { "data-cockpit-asset": row.id }
+              })}
             `).join("")}
           </div>
           <div class="notice">${escapeHtml(caps.mandatePolicy.detail || "Mandate switches affect future capital only. Existing positions ride under governed exits.")}</div>
@@ -3473,7 +3657,13 @@
         <div class="card span-12" data-cockpit-day-trader-panel>
           <div class="split"><h3>Day Trader Mode</h3>${badge(caps.dayTraderMode.status || "GATED", "yellow")}</div>
           <p class="muted">${escapeHtml(caps.dayTraderMode.detail || "Day-trader mode is gated and not wired to strategy authority.")}</p>
-          <button class="intent-button secondary" type="button" data-cockpit-day-trader ${caps.dayTraderMode.enabled ? "" : "disabled"}>Enable Day Trader Mode</button>
+          ${Button({
+            label: "Enable Day Trader Mode",
+            variant: "secondary",
+            disabled: !caps.dayTraderMode.enabled,
+            reason: caps.dayTraderMode.detail || "Day-trader mode is gated and not wired to strategy authority.",
+            attrs: { "data-cockpit-day-trader": true }
+          })}
         </div>
         ${renderPaperLaunchControl("controls")}
       </div>
@@ -3489,7 +3679,7 @@
       <div class="grid cockpit-grid">
         <div class="card span-12">
           <h3>Recent Run Activity</h3>
-          ${rows.length ? table(
+          ${rows.length ? DataTable("", "",
             ["Run", "Status", "Verdict", "Duration", "Posts/Fills", "Reason Codes", "Report"],
             rows.map((run) => [
               escapeHtml(run.runId),
@@ -3504,7 +3694,7 @@
         </div>
         <div class="card span-12">
           <h3>Alerts</h3>
-          ${alerts.length ? table(
+          ${alerts.length ? DataTable("", "",
             ["Severity", "Title", "Detail", "Source", "Executable"],
             alerts.map((alert) => [
               badge(alert.severity, statusColor(alert.severity)),
@@ -3540,9 +3730,9 @@
               </label>
             `).join("")}
             <div class="button-row">
-              <button class="intent-button primary primary-action" data-credential-save="alpaca_paper" ${backendConnected() ? "" : "disabled"}>Save local credentials</button>
-              <button class="intent-button secondary" data-credential-validate="alpaca_paper" ${backendConnected() ? "" : "disabled"}>Validate read-only</button>
-              <button class="intent-button danger" data-credential-delete="alpaca_paper" ${backendConnected() ? "" : "disabled"}>Delete local</button>
+              ${Button({ label: "Save local credentials", variant: "primary", className: "primary-action", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-save": "alpaca_paper" } })}
+              ${Button({ label: "Validate read-only", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable; read-only validation cannot run.", attrs: { "data-credential-validate": "alpaca_paper" } })}
+              ${Button({ label: "Delete local", variant: "danger", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-delete": "alpaca_paper" } })}
             </div>
             <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus.alpaca_paper || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed"))}</div>
           </details>
@@ -3587,9 +3777,9 @@
                             </label>
                           `).join("")}
                           <div class="button-row">
-                            <button class="intent-button primary primary-action" data-credential-save="${escapeHtml(providerId)}" ${disabled}>Save local credentials</button>
-                            <button class="intent-button secondary" data-credential-validate="${escapeHtml(providerId)}" ${disabled}>Validate read-only</button>
-                            <button class="intent-button danger" data-credential-delete="${escapeHtml(providerId)}" ${disabled}>Delete local</button>
+                            ${Button({ label: "Save local credentials", variant: "primary", className: "primary-action", disabled: Boolean(disabled), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-save": providerId } })}
+                            ${Button({ label: "Validate read-only", variant: "secondary", disabled: Boolean(disabled), reason: "Backend unavailable; read-only validation cannot run.", attrs: { "data-credential-validate": providerId } })}
+                            ${Button({ label: "Delete local", variant: "danger", disabled: Boolean(disabled), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-delete": providerId } })}
                           </div>
                         </details>
                       ` : `<div class="notice">No browser-secret form is needed for this provider mode.</div>`}
@@ -3603,7 +3793,7 @@
         </div>
         <div class="card span-12 provider-table-card">
           <h3>Provider Table</h3>
-          ${table(
+          ${DataTable("", "",
             ["Provider", "Status", "Configured", "Source", "Can Trade", "Validation"],
             providerRows.map((provider) => [
               escapeHtml(provider.displayName || provider.providerId),
@@ -3634,19 +3824,12 @@
       <div class="nav-group" data-nav-group="${escapeHtml(group.title)}">
         <div class="nav-group-title">${escapeHtml(group.title)}</div>
         <div class="nav-group-items">
-          ${group.items.map((id) => {
-            const label = screenTitle(id);
-            const badgeText = navBadge(id);
-            return `
-              <button class="nav-button ${id === selectedNav ? "active" : ""}" data-screen="${id}">
-                <span class="nav-icon" aria-hidden="true"></span>
-                <span class="nav-label">${escapeHtml(label)}</span>
-                <span class="nav-meta">
-                  ${badgeText ? `<span class="nav-badge">${escapeHtml(badgeText)}</span>` : ""}
-                </span>
-              </button>
-            `;
-          }).join("")}
+          ${group.items.map((id) => makeNavLink({
+            id,
+            label: screenTitle(id),
+            badge: navBadge(id),
+            active: id === selectedNav
+          })).join("")}
         </div>
       </div>
     `).join("")}
@@ -3661,6 +3844,7 @@
     nav.addEventListener("click", (event) => {
       const button = event.target.closest("[data-screen]");
       if (!button) return;
+      event.preventDefault();
       showScreen(button.dataset.screen);
     });
   }
@@ -3742,7 +3926,7 @@
         ${metric("Warnings", center.counts.WARNING || 0, center.counts.WARNING ? "yellow" : "gray")}
         ${metric("Needs Approval", center.counts.NEEDS_APPROVAL || 0, center.counts.NEEDS_APPROVAL ? "yellow" : "gray")}
         ${metric("Safety Critical", center.counts.SAFETY_CRITICAL || 0, center.counts.SAFETY_CRITICAL ? "red" : "gray")}
-        <div class="card span-12"><h3>Current Items</h3>${table(
+        <div class="card span-12"><h3>Current Items</h3>${DataTable("", "",
           ["Type", "Title", "Detail", "Source", "Executable"],
           center.items.map((item) => [
             badge(item.type, statusColor(item.type)),
@@ -3764,7 +3948,7 @@
         ${metric("Archived Runs", archive.runCount || 0, archive.runCount ? "green" : "gray")}
         ${metric("Latest Verdict", archive.latestVerdict || "UNKNOWN", statusColor(archive.latestVerdict || "UNKNOWN"))}
         ${metric("Report Status", archive.reportStatus || "on demand", "gray")}
-        <div class="card span-12"><h3>Runs</h3>${table(
+        <div class="card span-12"><h3>Runs</h3>${DataTable("", "",
           ["Run", "Status", "Verdict", "Profile", "Duration", "Runtime New", "Historical", "POST/DELETE", "Open", "Fee/TCA", "72h", "Report"],
           archive.runs.map((run) => [
             escapeHtml(run.runId),
@@ -3783,7 +3967,12 @@
         )}</div>
         <div class="card span-12"><h3>Historical Alpaca Test Link</h3>
           <p class="muted">Use the 4-Month Test page for the Alpaca historical control. It is advisory only and cannot start PAPER or trade.</p>
-          <button class="intent-button paper" data-screen-shortcut="historical">Open 4-Month Test</button>
+          ${Button({
+            label: "Open 4-Month Test",
+            variant: "secondary",
+            className: "paper",
+            attrs: { "data-screen-shortcut": "historical" }
+          })}
         </div>
       </div>
     `;
@@ -3840,7 +4029,14 @@
             </label>
           </div>
           <div class="button-row">
-            <button class="intent-button paper" data-intent="historical-run" ${backendConnected() ? "" : "disabled"}>Run Historical Test</button>
+            ${Button({
+              label: "Run Historical Test",
+              variant: "secondary",
+              className: "paper",
+              disabled: !backendConnected(),
+              reason: "Backend unavailable; historical request cannot run.",
+              attrs: { "data-intent": "historical-run" }
+            })}
             <span class="badge red">Does not start PAPER / does not trade</span>
           </div>
           <div class="notice">If the governed replay/backtest harness is not attached, this returns an honest unavailable status instead of fake P&L.</div>
@@ -3936,9 +4132,24 @@
             </div>
           </div>
           <div class="cockpit-hero-actions">
-            <button class="intent-button paper primary-action" type="button" data-screen-shortcut="command">Open Run PAPER</button>
-            <button class="intent-button paper" type="button" data-screen-shortcut="providers">Keys & Providers</button>
-            <button class="intent-button paper" type="button" data-ai-chief-open>Ask Docked Advisor</button>
+            ${Button({
+              label: "Open Run PAPER",
+              variant: "primary",
+              className: "paper primary-action",
+              attrs: { "data-screen-shortcut": "command" }
+            })}
+            ${Button({
+              label: "Keys & Providers",
+              variant: "secondary",
+              className: "paper",
+              attrs: { "data-screen-shortcut": "providers" }
+            })}
+            ${Button({
+              label: "Ask Docked Advisor",
+              variant: "secondary",
+              className: "paper",
+              attrs: { "data-ai-chief-open": true }
+            })}
           </div>
         </div>
         ${metric("Total Equity", summary.totalEquity || "unknown", summary.totalEquity ? "green" : "yellow")}
@@ -3955,7 +4166,7 @@
             <h3>What You Own Right Now</h3>
             ${badge(portfolio.status || "UNKNOWN", statusColor(portfolio.status || "UNKNOWN"))}
           </div>
-          ${positions.length ? table(
+          ${positions.length ? DataTable("", "",
             ["Symbol", "Qty", "Side", "Avg Entry", "Current", "Market Value", "Unrealized", "P&L %", "Exposure", "Truth", "Risk"],
             positions.map((p) => [
               escapeHtml(p.symbol),
@@ -3985,14 +4196,29 @@
         <div class="card span-6">
           <h3>Operator Shortcuts</h3>
           <div class="button-row operator-flow-actions">
-            <button class="intent-button paper" type="button" data-screen-shortcut="command">Open Run PAPER</button>
-            <button class="intent-button paper" type="button" data-screen-shortcut="providers">Add / Validate Keys</button>
-            <button class="intent-button paper" type="button" data-ai-chief-open>Ask Docked Advisor</button>
+            ${Button({
+              label: "Open Run PAPER",
+              variant: "secondary",
+              className: "paper",
+              attrs: { "data-screen-shortcut": "command" }
+            })}
+            ${Button({
+              label: "Add / Validate Keys",
+              variant: "secondary",
+              className: "paper",
+              attrs: { "data-screen-shortcut": "providers" }
+            })}
+            ${Button({
+              label: "Ask Docked Advisor",
+              variant: "secondary",
+              className: "paper",
+              attrs: { "data-ai-chief-open": true }
+            })}
             <span class="badge red">Live trading locked</span>
           </div>
         </div>
 
-        <div class="card span-12"><h3>Open Orders</h3>${orders.length ? table(
+        <div class="card span-12"><h3>Open Orders</h3>${orders.length ? DataTable("", "",
           ["Order ID", "Client ID", "Symbol", "Side", "Type", "Qty", "Filled", "Limit", "Status", "Source", "Cancel"],
           orders.map((o) => [
             escapeHtml(o.orderId || o.clientOrderId || "unknown"),
@@ -4033,7 +4259,7 @@
         <div class="card span-12"><h3>Current PAPER Positions</h3>
           <details class="ai-context-details">
             <summary>Detailed position columns: fees, TCA, asset class, and risk labels</summary>
-            ${positions.length ? table(
+            ${positions.length ? DataTable("", "",
               ["Symbol", "Asset", "Qty", "Side", "Avg Entry", "Current", "Market Value", "Unrealized", "P&L %", "Exposure", "Fees", "TCA", "Source", "Risk"],
               positions.map((p) => [
                 escapeHtml(p.symbol),
@@ -4057,7 +4283,7 @@
         <div class="card span-12"><h3>Position Intelligence</h3>
           <details class="ai-context-details">
             <summary>Risk, staleness, fees, slippage, and exit-logic details</summary>
-            ${intelligence.length ? table(
+            ${intelligence.length ? DataTable("", "",
               ["Symbol", "Exposure", "Concentration", "Fee Drag", "Slippage", "Freshness", "Exit Logic", "Blockers"],
               intelligence.map((item) => [
                 escapeHtml(item.symbol),
@@ -4126,12 +4352,19 @@
         ${renderPaperLaunchControl("activity")}
         <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
-            <button class="intent-button secondary" type="button" data-screen-shortcut="controls">
-              Use Run PAPER Command Center above
-            </button>
-            <button class="intent-button paper" data-intent="paper-stop" ${sup.paperStopAllowed ? "" : "disabled"}>
-              Stop PAPER - ${sup.paperStopAllowed ? "graceful supervisor request" : escapeHtml(sup.paperStopRefusalReason || "disabled")}
-            </button>
+            ${Button({
+              label: "Use Run PAPER Command Center above",
+              variant: "secondary",
+              attrs: { "data-screen-shortcut": "controls" }
+            })}
+            ${Button({
+              label: `Stop PAPER - ${sup.paperStopAllowed ? "graceful supervisor request" : (sup.paperStopRefusalReason || "disabled")}`,
+              variant: "secondary",
+              className: "paper",
+              disabled: !sup.paperStopAllowed,
+              reason: sup.paperStopRefusalReason || "No active PAPER process can be stopped.",
+              attrs: { "data-intent": "paper-stop" }
+            })}
             <div class="notice mono">Live start locked: LIVE_NOT_APPROVED</div>
             <div class="notice mono">Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
             <div class="notice mono">Last historical refusal: ${sup.lastHistoricalRefusal ? tokenText(sup.lastHistoricalRefusal) : "none"}</div>
@@ -4160,11 +4393,11 @@
             ${(explain.missingTruth || []).map((x) => badge(x, "yellow")).join("")}
           </div>
         </div>
-        <div class="card span-12"><h3>DecisionFrames</h3>${table(
+        <div class="card span-12"><h3>DecisionFrames</h3>${DataTable("", "",
           ["Frame", "Symbol", "Output", "Opportunity", "Raw", "Final", "NetEdge", "Compiler", "Submit"],
           data.decisionFrames.map((d) => [d.frameId, d.symbol, badge(d.output, statusColor(d.output)), d.opportunityVerdict, d.rawScore, d.finalScore, badge(d.netEdge, statusColor(d.netEdge)), d.compiler, d.submitSignal])
         )}</div>
-        <div class="card span-12"><h3>Module Evidence</h3>${table(
+        <div class="card span-12"><h3>Module Evidence</h3>${DataTable("", "",
           ["Module", "Authority", "Status", "Direction", "Reason"],
           data.moduleEvidence.map((m) => [m[0], m[1], badge(m[2], statusColor(m[2])), m[3], m[4]])
         )}</div>
@@ -4180,7 +4413,7 @@
   function renderMarket() {
     return `
       ${header("Market Data Truth", "Executable market truth vs stale, backfill, replay, or synthetic evidence.", "SNAPSHOT AUTHORITY")}
-      <div class="card"><h3>MarketTruthSnapshot</h3>${table(
+      <div class="card"><h3>MarketTruthSnapshot</h3>${DataTable("", "",
         ["Symbol", "Provider", "Snapshot", "Book", "Candle", "Executable", "Source"],
         data.marketTruth.map((m) => [m[0], m[1], badge(m[2], statusColor(m[2])), m[3], m[4], badge(String(m[5]), m[5] ? "green" : "red"), m[6]])
       )}</div>
@@ -4191,7 +4424,7 @@
   function renderRisk() {
     return `
       ${header("Risk & Governor", "Hard gates, economic gates, and authority classes.", "FAIL CLOSED")}
-      <div class="card">${table(
+      <div class="card">${DataTable("", "",
         ["Gate", "Category", "Decision", "Reason"],
         data.risk.map((r) => [r[0], r[1], badge(r[2], statusColor(r[2])), r[3]])
       )}</div>
@@ -4203,7 +4436,7 @@
       ${header("Watchdog Alerts", "Local queue only. No SMS, email, Discord, or broker mutation.", "LOCAL ONLY")}
       <div class="grid">
         ${metric("Alert Count", data.alerts.length, data.alerts.length ? "yellow" : "gray")}
-        <div class="card span-12"><h3>Alerts</h3>${table(
+        <div class="card span-12"><h3>Alerts</h3>${DataTable("", "",
           ["Severity", "Title", "Detail", "Source", "Acknowledged", "Executable"],
           data.alerts.map((alert) => [
             badge(alert.severity, statusColor(alert.severity)),
@@ -4290,23 +4523,23 @@
             </label>
           </div>
           <div class="button-row">
-            <button class="intent-button paper" type="button" data-ai-save-routing ${backendConnected() ? "" : "disabled"}>Save AI routing settings</button>
-            <button class="intent-button paper" type="button" data-ai-provider-test ${backendConnected() ? "" : "disabled"}>Test provider connection</button>
-            <button class="intent-button paper" type="button" data-ai-generate-packet ${backendConnected() ? "" : "disabled"}>Generate Supreme Board Packet</button>
-            <button class="intent-button paper" type="button" data-ai-use-provider-now="deepseek" ${backendConnected() ? "" : "disabled"}>Use DeepSeek now</button>
-            <button class="intent-button paper" type="button" data-ai-use-provider-now="openai" ${backendConnected() ? "" : "disabled"}>Use OpenAI now</button>
-            <button class="intent-button paper" type="button" data-ai-use-supreme-board>Use Supreme Board packet mode</button>
-            <button class="intent-button paper" type="button" data-ai-approve-high-call ${backendConnected() ? "" : "disabled"}>Approve one high-reasoning call</button>
-            <button class="intent-button paper" type="button" data-ai-use-local-guide>Use local guide only</button>
-            <button class="intent-button paper" type="button" data-ai-use-light-model ${backendConnected() ? "" : "disabled"}>Use selected light model</button>
-            <button class="intent-button paper" type="button" data-ai-use-local-model ${backendConnected() ? "" : "disabled"}>Use selected local model</button>
+            ${Button({ label: "Save AI routing settings", variant: "primary", className: "paper primary-action", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-save-routing": true } })}
+            ${Button({ label: "Test provider connection", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-provider-test": true } })}
+            ${Button({ label: "Generate Supreme Board Packet", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-generate-packet": true } })}
+            ${Button({ label: "Use DeepSeek now", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-provider-now": "deepseek" } })}
+            ${Button({ label: "Use OpenAI now", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-provider-now": "openai" } })}
+            ${Button({ label: "Use Supreme Board packet mode", variant: "secondary", className: "paper", attrs: { "data-ai-use-supreme-board": true } })}
+            ${Button({ label: "Approve one high-reasoning call", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-approve-high-call": true } })}
+            ${Button({ label: "Use local guide only", variant: "tertiary", className: "paper", attrs: { "data-ai-use-local-guide": true } })}
+            ${Button({ label: "Use selected light model", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-light-model": true } })}
+            ${Button({ label: "Use selected local model", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable.", attrs: { "data-ai-use-local-model": true } })}
           </div>
           <div class="notice mono">Last AI result: ${escapeHtml(ai.lastAnalyzeResult || "none")}</div>
         </div>
         <div class="card span-12"><h3>Provider / Model Registry</h3>
           <details class="ai-context-details">
             <summary>Show provider registry, model quality, cost, and validation details</summary>
-            ${table(
+            ${DataTable("", "",
               ["Provider", "Status", "Configured", "Model", "Quality", "Cost", "Reasoning", "Persona", "Validation / Error"],
               providerCards.map((provider) => [
                 escapeHtml(provider.displayName || provider.display_name || provider.providerId || provider.provider_id),
@@ -4343,10 +4576,22 @@
           </details>
         </div>
         <div class="card span-12"><h3>Focused Quant Prompts</h3>
-          <div class="ai-question-bank compact">${AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT).map((prompt) => `<button class="ai-question" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}</div>
+          <div class="ai-question-bank compact">${AI_QUICK_PROMPTS.slice(0, AI_PRIMARY_PROMPT_LIMIT).map((prompt) => Button({
+            label: prompt,
+            variant: "tertiary",
+            size: "sm",
+            className: "ai-question",
+            attrs: { "data-ai-chief-prompt": prompt }
+          })).join("")}</div>
           <details class="ai-context-details ai-more-prompts">
             <summary>More prompts</summary>
-            <div class="ai-question-bank compact">${AI_QUICK_PROMPTS.slice(AI_PRIMARY_PROMPT_LIMIT).map((prompt) => `<button class="ai-question" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}</div>
+            <div class="ai-question-bank compact">${AI_QUICK_PROMPTS.slice(AI_PRIMARY_PROMPT_LIMIT).map((prompt) => Button({
+              label: prompt,
+              variant: "tertiary",
+              size: "sm",
+              className: "ai-question",
+              attrs: { "data-ai-chief-prompt": prompt }
+            })).join("")}</div>
           </details>
         </div>
         <div class="card span-12"><h3>Advisory Boundary</h3>${kv([
@@ -4355,7 +4600,7 @@
           ["Live enable", badge("separate approval required", "red")],
           ["Secrets exposed", badge(String(ai.secretsValuesExposed === true), ai.secretsValuesExposed ? "red" : "green")]
         ])}</div>
-        <div class="card span-12"><h3>Governance Queue</h3>${table(
+        <div class="card span-12"><h3>Governance Queue</h3>${DataTable("", "",
           ["ID", "Type", "Status", "Summary", "Action", "Executable"],
           ai.recommendations.map((rec) => [
             escapeHtml(rec.recommendationId),
@@ -4368,12 +4613,22 @@
         )}</div>
         <div class="card span-12"><h3>Advisory Analyze</h3>
           <div class="stack">
-            <button class="intent-button paper" data-intent="ai-analyze" ${backendConnected() ? "" : "disabled"}>
-              Run advisory AI analysis
-            </button>
-            <button class="intent-button paper" data-intent="ai-quant-review" ${backendConnected() ? "" : "disabled"}>
-              Queue Quant Chief review
-            </button>
+            ${Button({
+              label: "Run advisory AI analysis",
+              variant: "secondary",
+              className: "paper",
+              disabled: !backendConnected(),
+              reason: "Backend unavailable; advisory analysis cannot run.",
+              attrs: { "data-intent": "ai-analyze" }
+            })}
+            ${Button({
+              label: "Queue Quant Chief review",
+              variant: "secondary",
+              className: "paper",
+              disabled: !backendConnected(),
+              reason: "Backend unavailable; advisory review cannot be queued.",
+              attrs: { "data-intent": "ai-quant-review" }
+            })}
             <div class="notice mono">Last AI result: ${escapeHtml(ai.lastAnalyzeResult || "none")}</div>
           </div>
         </div>
@@ -4450,9 +4705,9 @@
                           </label>
                         `).join("")}
                         <div class="button-row">
-                          <button class="intent-button paper" data-credential-save="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Save local credentials</button>
-                          <button class="intent-button paper" data-credential-validate="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Validate read-only</button>
-                          <button class="intent-button danger" data-credential-delete="${escapeHtml(providerId)}" ${backendConnected() ? "" : "disabled"}>Delete local</button>
+                          ${Button({ label: "Save local credentials", variant: "primary", className: "paper primary-action", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-save": providerId } })}
+                          ${Button({ label: "Validate read-only", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable; read-only validation cannot run.", attrs: { "data-credential-validate": providerId } })}
+                          ${Button({ label: "Delete local", variant: "danger", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-delete": providerId } })}
                         </div>
                         <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus[providerId] || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed from static mock mode"))}</div>
                       </div>
@@ -4464,7 +4719,7 @@
           </div>
           <div class="notice mono">Last credential action: ${escapeHtml(readiness.lastCredentialResult || "none")}</div>
         </div>
-        <div class="card span-12 provider-table-card"><h3>Provider Table</h3>${table(
+        <div class="card span-12 provider-table-card"><h3>Provider Table</h3>${DataTable("", "",
           ["Provider", "Category", "Status", "Configured", "Required Env", "Source", "Fingerprint", "Can Trade", "Setup"],
           providerRows.map((provider) => [
             escapeHtml(provider.displayName || provider.providerId),
@@ -4541,7 +4796,7 @@
         ${metric("Experiments", research.counts.experiments || 0, research.counts.experiments ? "yellow" : "gray")}
         ${metric("Promotion Gates", research.counts.promotionGates || 0, "yellow")}
         ${metric("Can Execute", "false", "gray")}
-        <div class="card span-12"><h3>Promotion Gates</h3>${table(
+        <div class="card span-12"><h3>Promotion Gates</h3>${DataTable("", "",
           ["Gate", "Stage", "Status", "Blocks", "Required Evidence"],
           research.promotionGates.map((gate) => [
             escapeHtml(gate.gateId),
@@ -4551,7 +4806,7 @@
             escapeHtml((gate.requiredEvidence || []).join(", "))
           ])
         )}</div>
-        <div class="card span-12"><h3>Research Recommendations</h3>${table(
+        <div class="card span-12"><h3>Research Recommendations</h3>${DataTable("", "",
           ["ID", "Title", "Stage", "Status", "Summary", "Executable"],
           research.recommendations.map((rec) => [
             escapeHtml(rec.id),
@@ -4562,7 +4817,7 @@
             badge(rec.canExecute ? "yes" : "no", rec.canExecute ? "red" : "gray")
           ])
         )}</div>
-        <div class="card span-12"><h3>Evidence Graph</h3>${table(
+        <div class="card span-12"><h3>Evidence Graph</h3>${DataTable("", "",
           ["Node", "Truth Label", "Summary", "Run/Path"],
           graph.nodes.map((node) => [
             escapeHtml(node.label || node.nodeId),
@@ -4602,7 +4857,7 @@
   function renderAudit() {
     return `
       ${header("Audit Log", "Operator-facing evidence timeline.", "READ ONLY")}
-      <div class="card">${table(
+      <div class="card">${DataTable("", "",
         ["Time", "Type", "Severity", "Event", "Result"],
         data.auditLog.map((a) => [a[0], a[1], a[2], a[3], badge(a[4], statusColor(a[4]))])
       )}</div>
@@ -4613,7 +4868,7 @@
     return `
       ${header("World Awareness", "External intelligence is advisory evidence only.", "NO EXECUTION AUTHORITY")}
       <div class="grid">
-        <div class="card span-12"><h3>Provider Health</h3>${table(
+        <div class="card span-12"><h3>Provider Health</h3>${DataTable("", "",
           ["Provider", "Type", "Enabled", "Status", "Events", "Next Poll", "Backoff", "Errors", "Rule"],
           data.worldAwareness.map((w) => [
             w.source,
@@ -4629,13 +4884,18 @@
         )}</div>
         <div class="card span-12"><h3>Manual Read-only Poll</h3>
           <div class="stack">
-            <button class="intent-button paper" data-intent="world-poll" ${backendConnected() ? "" : "disabled"}>
-              Poll Alpaca News - read-only provider intent
-            </button>
+            ${Button({
+              label: "Poll Alpaca News - read-only provider intent",
+              variant: "secondary",
+              className: "paper",
+              disabled: !backendConnected(),
+              reason: "Backend unavailable; read-only world poll cannot run.",
+              attrs: { "data-intent": "world-poll" }
+            })}
             <div class="notice mono">Runtime: ${escapeHtml(data.worldRuntime.manualPollOnly ? "manual poll only" : "unknown")} | Active polling: ${escapeHtml(String(data.worldRuntime.providerPollingActive))} | Last poll: ${escapeHtml(data.worldRuntime.lastPollResult || "none")}</div>
           </div>
         </div>
-        <div class="card span-12"><h3>Latest Advisory Events</h3>${table(
+        <div class="card span-12"><h3>Latest Advisory Events</h3>${DataTable("", "",
           ["Provider", "Symbols", "Title", "Event Time", "Freshness", "Verification", "Advisory"],
           data.worldAwarenessEvents.map((event) => [
             escapeHtml(event.provider),
@@ -4763,7 +5023,7 @@
       ])}
         <details class="ai-context-details">
           <summary>Backend endpoint details</summary>
-          ${failures.length ? table(
+          ${failures.length ? DataTable("", "",
             ["Endpoint", "Reason"],
             failures.map((failure) => [
               tokenText(failure.endpoint),
@@ -4780,7 +5040,7 @@
         ["Not implemented visible", badge(wiring.notImplemented, wiring.notImplemented ? "yellow" : "gray")],
         ["Last audit result", badge(wiring.lastAuditResult, statusColor(wiring.lastAuditResult))]
       ])}
-      ${table(
+      ${DataTable("", "",
         ["Page", "Control", "Type", "Status", "Safety", "Method", "Endpoint/Action", "Reason"],
         wiring.inventory.map((item) => [
           escapeHtml(item.pageId),
@@ -5716,7 +5976,12 @@
       <details class="ai-context-details ai-packet-details">
         <summary>View packet</summary>
         <div class="button-row compact-actions">
-          <button class="intent-button paper" type="button" data-ai-copy-packet>Copy packet</button>
+          ${Button({
+            label: "Copy packet",
+            variant: "secondary",
+            className: "paper",
+            attrs: { "data-ai-copy-packet": true }
+          })}
         </div>
         <pre class="ai-context-json">${escapeHtml(packet)}</pre>
       </details>
@@ -5834,7 +6099,13 @@
         <div class="ai-answer-card ${error ? "provider-error" : ""}" data-ai-answer-card>
           <div class="split ai-answer-toolbar">
             <h3>Answer</h3>
-            <button class="ai-copy-answer" type="button" data-ai-copy-answer="${escapeHtml(message.id)}">Copy answer</button>
+            ${Button({
+              label: "Copy answer",
+              variant: "tertiary",
+              size: "sm",
+              className: "ai-copy-answer",
+              attrs: { "data-ai-copy-answer": message.id }
+            })}
           </div>
           <div class="ai-answer-text">${escapeHtml(answer)}</div>
           <div class="ai-answer-meta">
@@ -5919,10 +6190,15 @@
     const providerError = aiProviderErrorText(lastResult);
     const answerSource = lastResult && lastResult.answerSource ? lastResult.answerSource : "none yet";
     host.innerHTML = `
-      <button class="ai-chief-fab ${aiOverlayOpen ? "open" : ""}" type="button" data-ai-chief-open aria-expanded="${aiOverlayOpen ? "true" : "false"}">
-        <span>Chief Quant Advisor</span>
-        <span class="ai-chief-fab-sub">${escapeHtml(screenTitle(activeScreenId))}</span>
-      </button>
+      ${Button({
+        label: "Chief Quant Advisor",
+        variant: "secondary",
+        className: `ai-chief-fab ${aiOverlayOpen ? "open" : ""}`,
+        attrs: {
+          "data-ai-chief-open": true,
+          "aria-expanded": aiOverlayOpen ? "true" : "false"
+        }
+      })}
       <div class="ai-chief-backdrop ${aiOverlayOpen ? "open" : ""}" data-ai-chief-close></div>
       <section class="ai-chief-drawer ai-chief-dock ${aiOverlayOpen ? "open" : ""} ${aiWideMode ? "wide" : ""}" aria-hidden="${aiOverlayOpen ? "false" : "true"}" aria-label="Global AI Chief advisory drawer">
         <div class="ai-chief-panel">
@@ -5934,8 +6210,22 @@
               ${providerError ? `<div class="ai-provider-error-line">Last provider error: ${escapeHtml(providerError)}</div>` : ""}
             </div>
             <div class="ai-chief-header-actions">
-              <button class="ai-chief-close" type="button" data-ai-chief-wide aria-label="${aiWideMode ? "Use normal advisor width" : "Use wide advisor width"}">${aiWideMode ? "Normal" : "Wide"}</button>
-              <button class="ai-chief-close" type="button" data-ai-chief-close aria-label="Close AI Chief">Collapse</button>
+              ${Button({
+                label: aiWideMode ? "Normal" : "Wide",
+                variant: "tertiary",
+                size: "sm",
+                className: "ai-chief-close",
+                ariaLabel: aiWideMode ? "Use normal advisor width" : "Use wide advisor width",
+                attrs: { "data-ai-chief-wide": true }
+              })}
+              ${Button({
+                label: "Collapse",
+                variant: "tertiary",
+                size: "sm",
+                className: "ai-chief-close",
+                ariaLabel: "Close AI Chief",
+                attrs: { "data-ai-chief-close": true }
+              })}
             </div>
           </div>
           <div class="ai-route-state">
@@ -5948,9 +6238,9 @@
               <div><span>Last provider error</span><strong>${escapeHtml(providerError || "none")}</strong></div>
             </div>
             <div class="button-row compact-actions">
-              <button class="intent-button paper" type="button" data-ai-use-provider-now="deepseek" ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>Use DeepSeek now</button>
-              <button class="intent-button paper" type="button" data-ai-use-provider-now="openai" ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>Use OpenAI now</button>
-              <button class="intent-button paper" type="button" data-ai-use-supreme-board ${aiOverlayBusy ? "disabled" : ""}>Use Supreme Board packet mode</button>
+              ${Button({ label: "Use DeepSeek now", variant: "secondary", className: "paper", disabled: !backendConnected() || aiOverlayBusy, reason: aiOverlayBusy ? "Advisor is already answering." : "Backend unavailable.", attrs: { "data-ai-use-provider-now": "deepseek" } })}
+              ${Button({ label: "Use OpenAI now", variant: "secondary", className: "paper", disabled: !backendConnected() || aiOverlayBusy, reason: aiOverlayBusy ? "Advisor is already answering." : "Backend unavailable.", attrs: { "data-ai-use-provider-now": "openai" } })}
+              ${Button({ label: "Use Supreme Board packet mode", variant: "secondary", className: "paper", disabled: aiOverlayBusy, reason: "Advisor is already answering.", attrs: { "data-ai-use-supreme-board": true } })}
             </div>
           </div>
           <div class="ai-boundary">
@@ -5968,28 +6258,46 @@
               <textarea id="ai-chief-question" data-ai-chief-question rows="3" placeholder="Ask what is blocking PAPER, whether the bot is ready, or what to do next...">${escapeHtml(aiQuestionText || "")}</textarea>
               ${renderAiAnswerModeButtons("overlay", aiSelectedAnswerMode, aiOverlayBusy)}
               <div class="button-row ai-composer-actions">
-                <button class="intent-button paper" type="button" data-ai-chief-clear ${aiOverlayBusy ? "disabled" : ""}>Clear</button>
-                ${aiUserPinnedScroll ? `<button class="intent-button paper" type="button" data-ai-jump-latest>Jump to latest</button>` : ""}
+                ${Button({
+                  label: "Clear",
+                  variant: "secondary",
+                  className: "paper",
+                  disabled: aiOverlayBusy,
+                  reason: "Advisor is already answering.",
+                  attrs: { "data-ai-chief-clear": true }
+                })}
+                ${aiUserPinnedScroll ? Button({
+                  label: "Jump to latest",
+                  variant: "secondary",
+                  className: "paper",
+                  attrs: { "data-ai-jump-latest": true }
+                }) : ""}
               </div>
               ${aiOverlayError ? `<div class="notice error">Error: ${escapeHtml(aiOverlayError)}</div>` : ""}
             </div>
             <div class="ai-prompt-section">
               <div class="ai-question-bank compact" aria-label="AI Chief quick questions">
-                ${primaryPrompts.map((prompt) => `
-                  <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
-                    ${escapeHtml(prompt)}
-                  </button>
-                `).join("")}
+                ${primaryPrompts.map((prompt) => Button({
+                  label: prompt,
+                  variant: "tertiary",
+                  size: "sm",
+                  className: "ai-question",
+                  active: prompt === aiSelectedQuestion,
+                  attrs: { "data-ai-chief-prompt": prompt }
+                })).join("")}
               </div>
               ${extraPrompts.length ? `
                 <details class="ai-context-details ai-more-prompts">
                   <summary>More prompts</summary>
                   <div class="ai-question-bank compact">
-                    ${extraPrompts.map((prompt) => `
-                      <button class="ai-question ${prompt === aiSelectedQuestion ? "active" : ""}" type="button" data-ai-chief-prompt="${escapeHtml(prompt)}">
-                        ${escapeHtml(prompt)}
-                      </button>
-                    `).join("")}
+                    ${extraPrompts.map((prompt) => Button({
+                      label: prompt,
+                      variant: "tertiary",
+                      size: "sm",
+                      className: "ai-question",
+                      active: prompt === aiSelectedQuestion,
+                      attrs: { "data-ai-chief-prompt": prompt }
+                    })).join("")}
                   </div>
                 </details>
               ` : ""}
@@ -5997,9 +6305,14 @@
             <details class="ai-context-details ai-advisory-queue-details">
               <summary>Governed advisory queue</summary>
               <div class="ai-chief-actions">
-                <button class="intent-button paper" type="button" data-ai-chief-analyze ${backendConnected() && !aiOverlayBusy ? "" : "disabled"}>
-                  ${aiOverlayBusy ? "Queueing governed review..." : "Queue governed advisory review"}
-                </button>
+                ${Button({
+                  label: aiOverlayBusy ? "Queueing governed review..." : "Queue governed advisory review",
+                  variant: "secondary",
+                  className: "paper",
+                  disabled: !backendConnected() || aiOverlayBusy,
+                  reason: aiOverlayBusy ? "Advisor is already answering." : "Backend unavailable; governed advisory review cannot be queued.",
+                  attrs: { "data-ai-chief-analyze": true }
+                })}
                 <span class="badge red">Broker execution unavailable to AI</span>
               </div>
               <div class="notice mono">

@@ -619,7 +619,7 @@ def test_operator_ui_index_is_no_store_and_commit_cache_busted(tmp_path):
     response = _endpoint(app, "/operator-ui/")()
     html = response.body.decode("utf-8")
     version = health["loaded_commit"]
-    asset_version = f"{version}-ui3-design-system-hardening"
+    asset_version = f"{version}-ui4-enforce-unblock"
 
     assert response.headers["Cache-Control"] == "no-store, max-age=0, must-revalidate"
     assert response.headers["Pragma"] == "no-cache"

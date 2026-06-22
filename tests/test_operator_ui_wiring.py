@@ -135,7 +135,7 @@ def test_operator_cockpit_is_default_and_has_server_gated_selector_controls():
     assert ".scan-strip" in css
     assert ".market-chip-grid" in css
     assert css.count(":root {") == 1
-    for component in ["DataTable", "MetricCard", "DetailCard", "SectionHeader", "TruthBanner"]:
+    for component in ["DataTable", "MetricCard", "DetailCard", "SectionHeader", "TruthBanner", "makeButton"]:
         assert f"function {component}" in text
     assert 'data-component="DataTable"' in text
     assert ".data-table-shell" in css
@@ -168,9 +168,38 @@ def test_ui3_design_system_tokens_button_hierarchy_and_mobile_targets_exist():
     assert "@media (max-width: 1023px)" in css
     assert "@media (max-width: 639px)" in css
     assert "primaryAiPrompts(\"advisor\").slice(0, 3)" in text
-    assert "intent-button primary primary-action" in text
-    assert "intent-button secondary" in text
-    assert "intent-button tertiary" in text
+    assert 'className: "primary-action"' in text
+    assert 'variant: "secondary"' in text
+    assert 'variant: "tertiary"' in text
+
+
+def test_ui4_enforces_button_factory_and_single_datatable_authority():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    index = Path("ui/operator-control-panel/index.html").read_text(encoding="utf-8")
+
+    assert "function makeButton" in text
+    assert "const Button = makeButton" in text
+    assert '"data-component": "Button"' in text
+    assert "buttonVariant" in text
+    assert "buttonSize" in text
+    assert "htmlAttrs" in text
+    assert text.count("<button") == 1
+    assert text.count("</button>") == 1
+    assert "createElement(\"button\"" not in text
+    assert "createElement('button'" not in text
+    assert "<button" not in index.lower()
+    assert "loading-control-status" in index
+    assert "function table(" not in text
+    assert " table(" not in text
+    assert "DataTable(\"\", \"\"," in text
+    assert text.count("<table") == 1
+    assert text.count("</table>") == 1
+    assert ".pk-button" in css
+    assert ".button-label" in css
+    assert "ai-chief-fab-sub" not in text
+    assert "ai-chief-fab-sub" not in css
+    assert "Start is blocked because a previous PAPER session did not shut down cleanly." in text
 
 
 def test_ui3_mobile_tables_and_overflow_primitives_are_encoded():
@@ -264,8 +293,8 @@ def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
     assert "Use DeepSeek now" in text
     assert "Use OpenAI now" in text
     assert "Use Supreme Board packet mode" in text
-    assert "data-ai-use-provider-now=\"deepseek\"" in text
-    assert "data-ai-use-provider-now=\"openai\"" in text
+    assert '"data-ai-use-provider-now": "deepseek"' in text
+    assert '"data-ai-use-provider-now": "openai"' in text
     assert "data-ai-use-supreme-board" in text
     assert "active_provider: id" in text
     assert "no paid call occurred" in text
@@ -356,7 +385,7 @@ def test_header_compacts_backend_degraded_status_and_keeps_details_in_bot_health
     assert "Backend: OK" in text
     assert "Backend: Degraded -" in text
     assert "View details" in render_topbar
-    assert "data-screen-shortcut=\"health\"" in render_topbar
+    assert '"data-screen-shortcut": "health"' in render_topbar
     assert "backendDegradedSummary()" not in render_topbar
     assert "Backend Endpoint Details" in health
     assert "backendFailureRows" in text
@@ -420,8 +449,8 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "Reset is not required" in text
     assert "Position-aware PAPER baseline accepted." in text
     assert "Accept current positions as PAPER baseline" in text
-    assert 'aria-label="Accept current positions as PAPER baseline"' in text
-    assert 'title="${escapeHtml(acceptReason)}"' in text
+    assert 'ariaLabel: "Accept current positions as PAPER baseline"' in text
+    assert "title: acceptReason" in text
     assert "No liquidation / close / cancel controls" in text
     assert "/operator/paper-baseline/accept" in text
     assert "BLOCK_BASELINE_SYMBOL_TRADES_UNTIL_RUN_LOT_TRACKING" in text
@@ -919,7 +948,8 @@ def test_ai_three_answer_mode_buttons_send_explicit_answer_mode():
     css = STYLES_CSS.read_text(encoding="utf-8")
 
     assert "renderAiAnswerModeButtons" in text
-    assert 'data-ai-answer-mode-ask="${escapeHtml(scope)}:${escapeHtml(mode)}"' in text
+    assert '"data-ai-answer-mode-ask": `${scope}:${mode}`' in text
+    assert "<small>${escapeHtml(aiAnswerModeDescription(mode))}</small>" not in text
     assert "AI_ANSWER_MODES.DETERMINISTIC" in text
     assert "AI_ANSWER_MODES.CHAT" in text
     assert "AI_ANSWER_MODES.REASONING" in text

@@ -285,9 +285,9 @@ def test_visible_launcher_creates_stable_taskbar_pin_shortcut_identity():
 def test_operator_ui_assets_are_cache_busted_for_desktop_launcher():
     text = Path("ui/operator-control-panel/index.html").read_text(encoding="utf-8")
 
-    assert "styles.css?v=operator-ui-build-ui3-design-system-hardening" in text
-    assert "mock-data.js?v=operator-ui-build-ui3-design-system-hardening" in text
-    assert "app.js?v=operator-ui-build-ui3-design-system-hardening" in text
+    assert "styles.css?v=operator-ui-build-ui4-enforce-unblock" in text
+    assert "mock-data.js?v=operator-ui-build-ui4-enforce-unblock" in text
+    assert "app.js?v=operator-ui-build-ui4-enforce-unblock" in text
     assert OPERATOR_UI_BUILD_PLACEHOLDER in text
     assert STALE_OPERATOR_UI_VERSION not in text
     assert "operator-credential-hotfix-20260531" not in text
