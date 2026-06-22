@@ -8,11 +8,13 @@ engine or direct broker control surface.
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import threading
 import time
@@ -21,7 +23,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import anyio.to_thread
 from fastapi import APIRouter, FastAPI
@@ -303,11 +305,13 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/historical-tests/run": "advisory_historical_test_request_no_trading",
         "/operator/historical-tests/{test_id}": "read_only_historical_test_detail",
         "/operator/historical-tests/{test_id}/report": "read_only_historical_test_report",
+        "/operator/intent/stack/shutdown": "server_authorized_process_only_stack_shutdown",
     },
     "disabled_intents": {
         "/operator/intent/paper/start": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
         "/operator/intent/paper/stop": "SERVER_AUTHORIZED_PAPER_SUPERVISOR",
         "/operator/intent/paper/reconcile-stale": "SERVER_AUTHORIZED_STALE_SESSION_RECONCILIATION",
+        "/operator/intent/stack/shutdown": "SERVER_AUTHORIZED_PROCESS_ONLY_STACK_SHUTDOWN",
         "/operator/intent/snapshot/export": "SNAPSHOT_EXPORT_NOT_EXPOSED_IN_OPERATOR_UI",
         "/operator/intent/live/request-enable": "LIVE_NOT_APPROVED",
         "/operator/intent/live/start": "LIVE_NOT_APPROVED",
@@ -348,6 +352,7 @@ class OperatorSnapshotProvider:
         credential_store: LocalCredentialStore | None = None,
         portfolio_client: ReadOnlyBrokerClient | None = None,
         historical_tests: HistoricalTestService | None = None,
+        stack_exit_callback: Callable[[], None] | None = None,
     ) -> None:
         if runtime_config is not None:
             self.runtime_config = runtime_config
@@ -422,6 +427,11 @@ class OperatorSnapshotProvider:
         self.research_registry = research_registry or ResearchRegistry()
         self.historical_tests_service = historical_tests or HistoricalTestService()
         self.last_credential_save_diagnostic: dict[str, Any] | None = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_requested = False
+        self._shutdown_hook_installed = False
+        self._previous_signal_handlers: dict[int, Any] = {}
+        self._stack_exit_callback = stack_exit_callback or self._default_stack_exit_callback
 
     def _backend_process_identity(self) -> dict[str, Any]:
         return {
@@ -434,6 +444,65 @@ class OperatorSnapshotProvider:
             "backend_repo_root": str(self.runtime_config.repo_root),
             "secrets_values_exposed": False,
         }
+
+    def install_process_shutdown_hooks(self) -> dict[str, Any]:
+        if self._shutdown_hook_installed:
+            return {
+                "status": "ALREADY_INSTALLED",
+                "signals": sorted(self._previous_signal_handlers.keys()),
+                "atexit_registered": True,
+            }
+        atexit.register(self.shutdown_runtime, "ATEXIT")
+        installed_signals: list[int] = []
+        for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+            if sig is None:
+                continue
+            try:
+                previous = signal.getsignal(sig)
+                self._previous_signal_handlers[int(sig)] = previous
+
+                def _handler(signum, frame, _previous=previous):
+                    self.shutdown_runtime(f"SIGNAL_{signal.Signals(signum).name}")
+                    if callable(_previous):
+                        return _previous(signum, frame)
+                    if _previous == signal.SIG_DFL:
+                        raise SystemExit(128 + int(signum))
+                    return None
+
+                signal.signal(sig, _handler)
+                installed_signals.append(int(sig))
+            except (ValueError, OSError, RuntimeError):
+                continue
+        self._shutdown_hook_installed = True
+        return {
+            "status": "INSTALLED",
+            "signals": installed_signals,
+            "atexit_registered": True,
+        }
+
+    def shutdown_runtime(self, reason: str = "API_SHUTDOWN") -> dict[str, Any]:
+        with self._shutdown_lock:
+            if self._shutdown_requested:
+                return {
+                    "intent": "process_lifecycle_shutdown",
+                    "allowed": True,
+                    "status": "ALREADY_REQUESTED",
+                    "reason_code": "SHUTDOWN_ALREADY_REQUESTED",
+                    "broker_call_occurred": False,
+                    "broker_mutation_occurred": False,
+                    "live_endpoint_touched": False,
+                    "real_money_touched": False,
+                    "secrets_values_exposed": False,
+                }
+            self._shutdown_requested = True
+        return self.supervisor.shutdown_active_processes(reason)
+
+    def _default_stack_exit_callback(self) -> None:
+        def _exit_after_response() -> None:
+            time.sleep(0.35)
+            os._exit(0)
+
+        threading.Thread(target=_exit_after_response, name="operator-stack-shutdown", daemon=True).start()
 
     def _default_ai_router_settings(self, gateway_summary: dict[str, Any] | None = None) -> dict[str, Any]:
         summary = gateway_summary or self.ai_gateway.status().get("router") or {}
@@ -3605,6 +3674,45 @@ class OperatorSnapshotProvider:
         )
         return result
 
+    def stack_shutdown_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        required_confirmations = {
+            "confirm_shutdown_stack": "MISSING_STACK_SHUTDOWN_CONFIRMATION",
+            "confirm_api_process_exit": "MISSING_API_PROCESS_EXIT_CONFIRMATION",
+            "confirm_preserve_broker_positions": "MISSING_PRESERVE_BROKER_POSITIONS_CONFIRMATION",
+            "confirm_no_broker_cleanup_requested": "MISSING_NO_BROKER_CLEANUP_CONFIRMATION",
+        }
+        for field, reason in required_confirmations.items():
+            if body.get(field) is not True:
+                response = self.refused_intent("stack_shutdown", reason)
+                response["missing_confirmation"] = field
+                response["api_exit_scheduled"] = False
+                response["process_only_shutdown"] = True
+                return response
+        shutdown = self.shutdown_runtime("STACK_SHUTDOWN_INTENT")
+        api_exit_scheduled = shutdown.get("allowed") is True
+        if api_exit_scheduled and body.get("dry_run") is not True:
+            self._stack_exit_callback()
+        shutdown.update(
+            {
+                "intent": "stack_shutdown",
+                "stack_shutdown_requested": True,
+                "api_exit_scheduled": api_exit_scheduled and body.get("dry_run") is not True,
+                "process_only_shutdown": True,
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "order_submission_occurred": False,
+                "cancel_occurred": False,
+                "replace_occurred": False,
+                "liquidation_occurred": False,
+                "close_position_occurred": False,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+                "secrets_values_exposed": False,
+            }
+        )
+        return shutdown
+
     def live_refusal_intent(self, intent_name: str) -> dict[str, Any]:
         return self.supervisor.live_refusal(intent_name)
 
@@ -3965,6 +4073,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     def paper_reconcile_stale_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return provider.paper_reconcile_stale_intent(payload)
 
+    @router.post("/intent/stack/shutdown")
+    def stack_shutdown_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.stack_shutdown_intent(payload)
+
     @router.post("/intent/snapshot/export")
     def snapshot_export_intent() -> dict[str, Any]:
         return provider.refused_intent("snapshot_export", "SNAPSHOT_EXPORT_NOT_EXPOSED_IN_OPERATOR_UI")
@@ -3993,10 +4105,14 @@ def create_operator_app(provider: OperatorSnapshotProvider | None = None) -> Fas
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        provider.install_process_shutdown_hooks()
         limiter = anyio.to_thread.current_default_thread_limiter()
         if limiter.total_tokens < 120:
             limiter.total_tokens = 120
-        yield
+        try:
+            yield
+        finally:
+            await anyio.to_thread.run_sync(lambda: provider.shutdown_runtime("FASTAPI_LIFESPAN_SHUTDOWN"))
 
     app = FastAPI(title="Poverty Killer Operator Read-Only API", version=API_VERSION, lifespan=lifespan)
 

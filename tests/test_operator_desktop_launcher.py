@@ -188,6 +188,13 @@ def test_visible_launcher_stop_backend_is_port_and_operator_process_scoped():
     text = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
 
     assert "function Stop-Backend" in text
+    assert "function Request-OperatorStackShutdown" in text
+    assert "/operator/intent/stack/shutdown" in text
+    assert "confirm_shutdown_stack" in text
+    assert "confirm_api_process_exit" in text
+    assert "confirm_preserve_broker_positions" in text
+    assert "confirm_no_broker_cleanup_requested" in text
+    assert "stack_shutdown_port_still_listening_fallback_to_scoped_process_stop" in text
     assert "Get-OperatorBackendProcesses" in text
     assert "app.api.operator_readonly_api:create_operator_app" in text
     assert 'Set-LauncherFailure "stop_failed"' in text
@@ -205,6 +212,19 @@ def test_visible_launcher_restart_reports_stop_port_and_spawn_phases():
     assert 'Set-LauncherFailure "port_not_released"' in text
     assert 'Set-LauncherFailure "spawn_failed"' in text
     assert "Restart-Backend" in text[text.index("$restartButton.Add_Click") :]
+
+
+def test_hidden_launcher_uses_stack_shutdown_before_stale_backend_force_stop():
+    text = _launcher_text()
+
+    assert "function Request-OperatorStackShutdown" in text
+    assert "/operator/intent/stack/shutdown" in text
+    assert "confirm_shutdown_stack" in text
+    assert "confirm_api_process_exit" in text
+    assert "confirm_preserve_broker_positions" in text
+    assert "confirm_no_broker_cleanup_requested" in text
+    assert "hidden_launcher_stale_backend" in text
+    assert text.index("Request-OperatorStackShutdown \"hidden_launcher_stale_backend\"") < text.index("Stop-Process -Id $processId -Force")
 
 
 def test_visible_launcher_diagnostics_include_launch_artifacts_and_redacted_log_tails():
@@ -307,3 +327,16 @@ def test_operator_latency_diagnostic_script_measures_control_lane_without_paper_
     assert "/operator/intent/paper/start" not in text
     assert "ConvertTo-Json" in text
     assert "p95_ms" in text
+
+
+def test_systemd_operator_unit_supervises_full_process_lifecycle():
+    text = Path("docs/cloud/systemd_operator_api.example.service").read_text(encoding="utf-8")
+
+    assert "Type=exec" in text
+    assert "User=poverty-killer" in text
+    assert "Restart=always" in text
+    assert "RestartSec=3" in text
+    assert "StartLimitIntervalSec=0" in text
+    assert "KillMode=control-group" in text
+    assert "TimeoutStopSec=20" in text
+    assert "EnvironmentFile=-/etc/poverty_killer/operator.env" in text

@@ -309,6 +309,7 @@
     "home_ai_endpoint": "/operator/ai/ask",
     "paper_start_endpoint": "/operator/intent/paper/start",
     "paper_stale_reconcile_endpoint": "/operator/intent/paper/reconcile-stale",
+    "paper_stack_shutdown_endpoint": "/operator/intent/stack/shutdown",
     "live_enabled": false,
     "real_money_enabled": false,
     "manual_trading_available": false,
@@ -1429,6 +1430,27 @@
         "MISSING_NO_BROKER_CLEANUP_CONFIRMATION",
         "STALE_SESSION_PROCESS_STILL_RUNNING",
         "STALE_SESSION_PID_CHECK_FAILED"
+      ]
+    },
+    "/operator/intent/stack/shutdown": {
+      "status": "server_authorized_process_only_stack_shutdown",
+      "required_body": {
+        "confirm_shutdown_stack": true,
+        "confirm_api_process_exit": true,
+        "confirm_preserve_broker_positions": true,
+        "confirm_no_broker_cleanup_requested": true
+      },
+      "does_not_call_broker": true,
+      "does_not_submit_cancel_replace_close_or_liquidate_orders": true,
+      "does_not_enable_live_or_real_money": true,
+      "process_lifecycle_only": true,
+      "stops_operator_api_process": true,
+      "stops_attached_paper_process_group": true,
+      "refusals": [
+        "MISSING_STACK_SHUTDOWN_CONFIRMATION",
+        "MISSING_API_PROCESS_EXIT_CONFIRMATION",
+        "MISSING_PRESERVE_BROKER_POSITIONS_CONFIRMATION",
+        "MISSING_NO_BROKER_CLEANUP_CONFIRMATION"
       ]
     },
     "/operator/intent/snapshot/export": "refused/not exposed in production operator UI",

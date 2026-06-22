@@ -1,14 +1,18 @@
 [Unit]
 Description=POVERTY_KILLER Operator API PAPER-only
-After=network-online.target
+After=network.target
 
 [Service]
-Type=simple
+Type=exec
+User=poverty-killer
 WorkingDirectory=/opt/poverty_killer
-EnvironmentFile=/etc/poverty_killer/operator.env
+EnvironmentFile=-/etc/poverty_killer/operator.env
 ExecStart=/opt/poverty_killer/venv/bin/python -m uvicorn app.api.operator_readonly_api:create_operator_app --factory --host 127.0.0.1 --port 8765
-Restart=on-failure
-RestartSec=10
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+KillMode=control-group
+TimeoutStopSec=20
 NoNewPrivileges=true
 
 [Install]

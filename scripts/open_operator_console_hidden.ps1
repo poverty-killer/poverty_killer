@@ -188,6 +188,25 @@ function Test-OperatorApi {
     }
 }
 
+function Request-OperatorStackShutdown {
+    param([string]$RequestedBy = "hidden_launcher_stale_backend")
+    try {
+        $payload = @{
+            confirm_shutdown_stack = $true
+            confirm_api_process_exit = $true
+            confirm_preserve_broker_positions = $true
+            confirm_no_broker_cleanup_requested = $true
+            requested_by = $RequestedBy
+        } | ConvertTo-Json -Compress
+        Invoke-WebRequest -Uri "$BaseUrl/operator/intent/stack/shutdown" -Method POST -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 2 | Out-Null
+        Write-LaunchLog "stack_shutdown_intent_sent endpoint=/operator/intent/stack/shutdown requested_by=$RequestedBy"
+        return $true
+    } catch {
+        Write-LaunchLog "stack_shutdown_intent_failed=$($_.Exception.GetType().Name):$($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Stop-StaleOperatorBackend {
     try {
         $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -200,7 +219,13 @@ function Stop-StaleOperatorBackend {
             $commandLine = [string]$process.CommandLine
             if ($commandLine -like "*app.api.operator_readonly_api:create_operator_app*") {
                 Write-LaunchLog "Stopping stale operator backend pid=$processId"
-                Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+                $graceful = Request-OperatorStackShutdown "hidden_launcher_stale_backend"
+                if ($graceful) {
+                    Start-Sleep -Milliseconds 1000
+                }
+                if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+                    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+                }
             } else {
                 Write-LaunchLog "Port $Port is occupied by non-operator process pid=$processId"
             }

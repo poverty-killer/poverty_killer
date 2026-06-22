@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from app.api.operator_paper_supervisor import (
     OperatorPaperSupervisor,
     PaperSupervisorConfig,
     ProcessStartSpec,
+    SubprocessPaperRunner,
     classify_bounded_runtime_monitor_state,
 )
 from app.api.operator_session_store import OperatorSessionStore
@@ -50,6 +53,8 @@ class FakeRunner:
         self.repo_root = Path(tempfile.mkdtemp(prefix="pk-operator-supervisor-test-"))
         self.started_specs: list[ProcessStartSpec] = []
         self.stop_requests = 0
+        self.shutdown_requests = 0
+        self.stop_request_pids: list[int] = []
         self.process = FakeProcess()
 
     def is_available(self, repo_root: Path):
@@ -61,9 +66,15 @@ class FakeRunner:
         return self.process
 
     def request_graceful_stop(self, handle: FakeProcess):
-        assert handle is self.process
         self.stop_requests += 1
+        self.stop_request_pids.append(int(handle.pid))
         return True, "CTRL_BREAK_EVENT_SENT"
+
+    def shutdown_process_group(self, handle: FakeProcess, *, timeout_seconds: float = 5.0):
+        del timeout_seconds
+        self.shutdown_requests += 1
+        self.stop_request_pids.append(int(handle.pid))
+        return True, "PROCESS_GROUP_SHUTDOWN_SENT"
 
 
 def _valid_request() -> dict:
@@ -482,6 +493,138 @@ def test_supervisor_refuses_paper_start_before_runner_when_credentials_missing()
     assert runner.started_specs == []
 
 
+def test_supervisor_auto_reconciles_dead_prior_pid_on_startup_without_broker_call():
+    runner = FakeRunner()
+    store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
+    store.write_session(
+        {
+            "session_id": "paper_dead_on_startup",
+            "requested_at": "2026-06-14T04:17:12+00:00",
+            "status": "RUNNING",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "duration_seconds": 300,
+            "pid": 987654,
+            "started_at": "2026-06-14T04:17:12+00:00",
+        }
+    )
+
+    supervisor = OperatorPaperSupervisor(
+        config=_supervisor_config(runner, session_store_path=str(store.path)),
+        runner=runner,
+        session_store=store,
+        pid_liveness_probe=lambda pid: (False, "STALE_SESSION_PROCESS_NOT_RUNNING"),
+    )
+    snapshot = supervisor.status_snapshot()
+    start = supervisor.start_paper(_valid_request())
+
+    assert snapshot["state"] == "IDLE"
+    assert snapshot["latest_session"]["status"] == "STALE_RECONCILED"
+    assert snapshot["latest_session"]["stop_reason"] == "AUTO_RECONCILED_ON_API_STARTUP_PID_NOT_RUNNING"
+    assert snapshot["startup_lifecycle_reconciliation"]["status"] == "AUTO_RECONCILED_DEAD_PID"
+    assert snapshot["startup_lifecycle_reconciliation"]["broker_call_occurred"] is False
+    assert snapshot["paper_start_allowed"] is True
+    assert start["allowed"] is True
+
+
+def test_supervisor_adopts_running_prior_pid_on_startup_and_allows_governed_stop():
+    runner = FakeRunner()
+    store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
+    store.write_session(
+        {
+            "session_id": "paper_running_on_startup",
+            "requested_at": "2026-06-14T04:17:12+00:00",
+            "status": "RUNNING",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "duration_seconds": 300,
+            "pid": 24680,
+            "started_at": "2026-06-14T04:17:12+00:00",
+        }
+    )
+
+    supervisor = OperatorPaperSupervisor(
+        config=_supervisor_config(runner, session_store_path=str(store.path)),
+        runner=runner,
+        session_store=store,
+        pid_liveness_probe=lambda pid: (True, "STALE_SESSION_PROCESS_STILL_RUNNING"),
+    )
+    snapshot = supervisor.status_snapshot()
+    stopped = supervisor.stop_paper({})
+
+    assert snapshot["state"] == "RUNNING"
+    assert snapshot["active_session_id"] == "paper_running_on_startup"
+    assert snapshot["paper_start_allowed"] is False
+    assert snapshot["paper_stop_allowed"] is True
+    assert snapshot["startup_lifecycle_reconciliation"]["status"] == "ADOPTED_RUNNING_PID"
+    assert stopped["allowed"] is True
+    assert runner.stop_requests == 1
+    assert runner.stop_request_pids[-1] == 24680
+    assert stopped["broker_call_occurred"] is False
+
+
+def test_supervisor_fails_closed_when_prior_pid_liveness_is_ambiguous():
+    runner = FakeRunner()
+    store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
+    store.write_session(
+        {
+            "session_id": "paper_ambiguous_on_startup",
+            "requested_at": "2026-06-14T04:17:12+00:00",
+            "status": "RUNNING",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "duration_seconds": 300,
+            "pid": 13579,
+            "started_at": "2026-06-14T04:17:12+00:00",
+        }
+    )
+
+    supervisor = OperatorPaperSupervisor(
+        config=_supervisor_config(runner, session_store_path=str(store.path)),
+        runner=runner,
+        session_store=store,
+        pid_liveness_probe=lambda pid: (None, "STALE_SESSION_PID_CHECK_FAILED"),
+    )
+    snapshot = supervisor.status_snapshot()
+    start = supervisor.start_paper(_valid_request())
+
+    assert snapshot["state"] == "STALE_ACTIVE_SESSION"
+    assert snapshot["paper_start_allowed"] is False
+    assert snapshot["paper_start_refusal_reason"] == "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART"
+    assert snapshot["startup_lifecycle_reconciliation"]["status"] == "FAILED_CLOSED_AMBIGUOUS_PID"
+    assert snapshot["stale_reconciliation"]["available"] is False
+    assert start["allowed"] is False
+    assert start["reason_code"] == "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART"
+
+
+def test_supervisor_shutdown_active_process_group_without_broker_call():
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor.start_paper(_valid_request())
+
+    shutdown = supervisor.shutdown_active_processes("TEST_API_SHUTDOWN")
+    snapshot = supervisor.status_snapshot()
+
+    assert shutdown["allowed"] is True
+    assert shutdown["reason_code"] == "PROCESS_GROUP_SHUTDOWN_SENT"
+    assert shutdown["broker_call_occurred"] is False
+    assert shutdown["broker_mutation_occurred"] is False
+    assert runner.shutdown_requests == 1
+    assert snapshot["latest_session"]["stop_reason"] == "TEST_API_SHUTDOWN"
+
+
+def test_subprocess_runner_declares_parent_death_lifecycle_on_linux():
+    runner = SubprocessPaperRunner()
+    kwargs = runner._popen_lifecycle_kwargs()
+
+    if sys.platform.startswith("linux"):
+        assert kwargs["preexec_fn"].__name__ == "_linux_child_preexec"
+    elif os.name == "nt":
+        assert "creationflags" in kwargs
+    else:
+        assert kwargs["start_new_session"] is True
+
+
 def test_supervisor_reconciles_stale_session_after_pid_proof_and_confirmations():
     runner = FakeRunner()
     store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
@@ -498,7 +641,7 @@ def test_supervisor_reconciles_stale_session_after_pid_proof_and_confirmations()
         }
     )
     supervisor = OperatorPaperSupervisor(
-        config=_supervisor_config(runner, session_store_path=str(store.path)),
+        config=_supervisor_config(runner, session_store_path=str(store.path), startup_lifecycle_reconcile=False),
         runner=runner,
         session_store=store,
     )
@@ -545,7 +688,7 @@ def test_supervisor_refuses_stale_reconcile_when_previous_pid_is_running():
         }
     )
     supervisor = OperatorPaperSupervisor(
-        config=_supervisor_config(runner, session_store_path=str(store.path)),
+        config=_supervisor_config(runner, session_store_path=str(store.path), startup_lifecycle_reconcile=False),
         runner=runner,
         session_store=store,
     )

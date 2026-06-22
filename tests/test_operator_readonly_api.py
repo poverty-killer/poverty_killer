@@ -508,6 +508,7 @@ def test_operator_api_exposes_stale_reconcile_intent_without_broker_call(tmp_pat
             repo_root=runner.repo_root,
             process_env=dict(PAPER_ENV),
             session_store_path=str(store.path),
+            startup_lifecycle_reconcile=False,
         ),
         runner=runner,
         session_store=store,
@@ -537,6 +538,61 @@ def test_operator_api_exposes_stale_reconcile_intent_without_broker_call(tmp_pat
     assert latest["state"] == "IDLE"
     assert latest["paper_start_allowed"] is True
     assert "/operator/intent/paper/reconcile-stale" in contracts["disabled_intents"]
+
+
+def test_operator_api_stack_shutdown_is_confirmed_process_only_lifecycle_intent(tmp_path):
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
+        runner=runner,
+    )
+    exit_calls = []
+    app = create_operator_app(
+        provider=OperatorSnapshotProvider(
+            supervisor=supervisor,
+            provider_env=dict(PAPER_ENV),
+            stack_exit_callback=lambda: exit_calls.append("scheduled"),
+        )
+    )
+    started = _endpoint(app, "/operator/intent/paper/start", "POST")(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD"],
+            "approve_autonomous_paper": True,
+            "real_money": False,
+            "live": False,
+        }
+    )
+
+    refused = _endpoint(app, "/operator/intent/stack/shutdown", "POST")({})
+    shutdown = _endpoint(app, "/operator/intent/stack/shutdown", "POST")(
+        {
+            "confirm_shutdown_stack": True,
+            "confirm_api_process_exit": True,
+            "confirm_preserve_broker_positions": True,
+            "confirm_no_broker_cleanup_requested": True,
+        }
+    )
+    latest = _endpoint(app, "/operator/latest-run")()
+    contracts = _endpoint(app, "/operator/contracts")()
+
+    assert started["allowed"] is True
+    assert refused["allowed"] is False
+    assert refused["reason_code"] == "MISSING_STACK_SHUTDOWN_CONFIRMATION"
+    assert shutdown["allowed"] is True
+    assert shutdown["intent"] == "stack_shutdown"
+    assert shutdown["api_exit_scheduled"] is True
+    assert shutdown["process_only_shutdown"] is True
+    assert shutdown["broker_call_occurred"] is False
+    assert shutdown["broker_mutation_occurred"] is False
+    assert shutdown["order_submission_occurred"] is False
+    assert shutdown["liquidation_occurred"] is False
+    assert runner.shutdown_requests == 1
+    assert exit_calls == ["scheduled"]
+    assert latest["latest_session"]["status"] == "STOP_REQUESTED"
+    assert "/operator/intent/stack/shutdown" in contracts["disabled_intents"]
 
 
 def test_operator_run_visibility_uses_supervisor_overlay_for_active_session(tmp_path):

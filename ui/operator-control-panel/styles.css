@@ -858,6 +858,14 @@ body.ai-docked-open.ai-docked-wide .shell {
   background: rgba(10, 28, 20, 0.5);
 }
 
+.stack-shutdown-panel {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.stack-shutdown-panel .intent-button.danger:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+}
+
 .stale-reconcile-panel {
   display: grid;
   gap: 10px;

@@ -2770,6 +2770,34 @@
     `;
   }
 
+  function renderStackShutdownPanel() {
+    const connected = backendConnected();
+    const sup = data.supervisor || {};
+    const activeRun = sup.paperStopAllowed === true || String(sup.state || "").toUpperCase() === "RUNNING";
+    return `
+      <div class="card span-12 stack-shutdown-panel" data-stack-shutdown-panel>
+        <div class="split"><h3>Stack Lifecycle</h3>${badge(connected ? "backend connected" : "backend unavailable", connected ? "green" : "red")}</div>
+        <p class="muted">Shuts down the local operator API and any attached PAPER process group. It never submits, cancels, replaces, closes, liquidates, enables live, or touches real money.</p>
+        ${kv([
+          ["Attached PAPER run", badge(activeRun ? "yes" : "none", activeRun ? "yellow" : "gray")],
+          ["Broker cleanup", badge("not requested", "green")],
+          ["Positions", "preserved; broker portfolio truth remains canonical after next launch"],
+          ["Endpoint", "/operator/intent/stack/shutdown"]
+        ])}
+        <div class="button-row">
+          ${Button({
+            label: "Shut Down Stack",
+            variant: "danger",
+            disabled: !connected,
+            reason: connected ? "" : "Backend is unavailable; there is no stack endpoint to call.",
+            attrs: { "data-intent": "stack-shutdown", "data-stack-shutdown-control": true }
+          })}
+        </div>
+        <div class="notice mono">This is process lifecycle only. For normal PAPER stop while keeping the API open, use Stop PAPER.</div>
+      </div>
+    `;
+  }
+
   function renderHomeLaunchReadiness() {
     const launch = data.launchReadiness || {};
     const op = runPaperState();
@@ -3666,6 +3694,7 @@
           })}
         </div>
         ${renderPaperLaunchControl("controls")}
+        ${renderStackShutdownPanel()}
       </div>
     `;
   }
@@ -4350,6 +4379,7 @@
           ["Child stderr", escapeHtml(sup.childStderrPath || "not available")]
         ])}</div>
         ${renderPaperLaunchControl("activity")}
+        ${renderStackShutdownPanel()}
         <div class="card span-12"><h3>Governed PAPER Intents</h3>
           <div class="stack">
             ${Button({
@@ -4364,6 +4394,11 @@
               disabled: !sup.paperStopAllowed,
               reason: sup.paperStopRefusalReason || "No active PAPER process can be stopped.",
               attrs: { "data-intent": "paper-stop" }
+            })}
+            ${Button({
+              label: "Shut Down Stack - process lifecycle only",
+              variant: "danger",
+              attrs: { "data-intent": "stack-shutdown" }
             })}
             <div class="notice mono">Live start locked: LIVE_NOT_APPROVED</div>
             <div class="notice mono">Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
@@ -4939,6 +4974,7 @@
       ["connections", "open_keys_providers", "Add / Validate Keys", "button", "WIRED", "read_only", "", null, "local_navigation"],
       ["advisor", "ask_ai_advisor", "Ask AI Advisor", "button", "WIRED", "read_only", "", null, "open_ai_drawer"],
       ["log", "paper_stop", "Stop PAPER", "button", data.supervisor.paperStopAllowed ? "WIRED" : "DISABLED_WITH_REASON", "governed_paper_start", data.supervisor.paperStopAllowed ? "" : (data.supervisor.paperStopRefusalReason || "no active PAPER runtime"), "POST", "/operator/intent/paper/stop"],
+      ["controls", "stack_shutdown", "Shut Down Stack", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "process_lifecycle_only", backendConnected() ? "" : "backend unavailable", "POST", "/operator/intent/stack/shutdown"],
       ["controls", "live_start_locked", "Live start locked - LIVE_NOT_APPROVED", "status", "DISABLED_WITH_REASON", "forbidden", "LIVE_NOT_APPROVED", null, null],
       ["trades", "positions_preview_table", "Current PAPER Positions", "table", "WIRED", "read_only", "", "GET", "/operator/positions"],
       ["trades", "open_orders_preview_table", "Open Orders", "table", "WIRED", "read_only", "cancel/replace unavailable in operator UI", "GET", "/operator/orders/open"],
@@ -9038,6 +9074,7 @@
     if (!backendConnected()) return;
     try {
       let message = "none";
+      let skipReload = false;
       if (intent === "paper-baseline-accept") {
         const payload = paperBaselineAcceptancePayload();
         const snapshot = payload.preflight_snapshot || {};
@@ -9123,6 +9160,20 @@
         const result = await postIntent("/operator/intent/paper/stop", {});
         message = `${result.status}: ${result.reason_code}`;
       }
+      if (intent === "stack-shutdown") {
+        const confirmed = window.confirm(
+          "Shut down the operator stack?\n\nThis stops the local operator API and any attached PAPER process group. It preserves broker positions and will not submit, cancel, replace, close, liquidate, enable live, or touch real money."
+        );
+        if (!confirmed) return;
+        const result = await postIntent("/operator/intent/stack/shutdown", {
+          confirm_shutdown_stack: true,
+          confirm_api_process_exit: true,
+          confirm_preserve_broker_positions: true,
+          confirm_no_broker_cleanup_requested: true
+        });
+        message = `${result.status}: ${result.reason_code}`;
+        skipReload = true;
+      }
       if (intent === "world-poll") {
         const confirmed = window.confirm("Request read-only Alpaca News poll? This cannot trade, bypass guardrails, or touch broker execution.");
         if (!confirmed) return;
@@ -9164,6 +9215,16 @@
         const result = await postIntent("/operator/historical-tests/run", form);
         message = `${result.status || "UNKNOWN"}: ${result.test_id || "historical_test"}`;
         data.historicalTests.lastRunResult = normalizeHistoricalRun(result);
+      }
+      if (skipReload) {
+        const selectedScreen = activeScreenId;
+        data = buildProductionUnavailableState(`operator stack shutdown requested: ${message}`);
+        data.supervisor.lastIntentResult = message;
+        renderTopBar();
+        renderScreens(selectedScreen);
+        renderRail();
+        renderAiChiefOverlay();
+        return;
       }
       const selectedScreen = activeScreenId;
       data = await loadData();

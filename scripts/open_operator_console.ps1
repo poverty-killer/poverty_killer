@@ -320,6 +320,25 @@ function Invoke-OperatorJson {
     return $response.Content | ConvertFrom-Json
 }
 
+function Request-OperatorStackShutdown {
+    param([string]$RequestedBy = "desktop_launcher")
+    try {
+        $payload = @{
+            confirm_shutdown_stack = $true
+            confirm_api_process_exit = $true
+            confirm_preserve_broker_positions = $true
+            confirm_no_broker_cleanup_requested = $true
+            requested_by = $RequestedBy
+        } | ConvertTo-Json -Compress
+        Invoke-WebRequest -Uri "$BaseUrl/operator/intent/stack/shutdown" -Method POST -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 2 | Out-Null
+        Write-LauncherLog "stack_shutdown_intent_sent endpoint=/operator/intent/stack/shutdown requested_by=$RequestedBy"
+        return $true
+    } catch {
+        Write-LauncherLog "stack_shutdown_intent_failed=$($_.Exception.GetType().Name):$($_.Exception.Message)"
+        return $false
+    }
+}
+
 function First-TextValue {
     param(
         [object]$Primary,
@@ -559,6 +578,18 @@ function Stop-Backend {
         Write-LauncherLog "stop_backend_no_operator_process port=$Port"
         Clear-LauncherTransition
         return
+    }
+    if (Request-OperatorStackShutdown "visible_launcher_stop_backend") {
+        for ($i = 0; $i -lt 24; $i += 1) {
+            Start-Sleep -Milliseconds 250
+            [System.Windows.Forms.Application]::DoEvents()
+            if (-not (Test-PortListening)) {
+                Write-LauncherLog "backend_stop_confirmed_via_stack_shutdown port=$Port"
+                Clear-LauncherTransition
+                return
+            }
+        }
+        Write-LauncherLog "stack_shutdown_port_still_listening_fallback_to_scoped_process_stop port=$Port"
     }
     foreach ($process in $processes) {
         Write-LauncherLog "stopping_backend_pid=$($process.ProcessId)"

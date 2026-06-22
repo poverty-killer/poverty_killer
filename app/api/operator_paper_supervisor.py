@@ -7,16 +7,19 @@ engine code, OMS internals, or strategy modules.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from app.api.operator_runtime_config import OperatorRuntimeConfig, RUNNER_MAX_PAPER_DURATION_SECONDS
 from app.api.operator_session_store import OperatorSessionStore
@@ -43,6 +46,8 @@ DEFAULT_MAX_PAPER_DURATION_SECONDS = RUNNER_MAX_PAPER_DURATION_SECONDS
 BOUNDED_RUNTIME_COMPLETED = "BOUNDED_RUNTIME_COMPLETED"
 DURATION_BOUND_EXCEEDED = "DURATION_BOUND_EXCEEDED"
 BOUNDED_RUNTIME_ACTIVE = "BOUNDED_RUNTIME_ACTIVE"
+ACTIVE_SESSION_STATUSES = {"STARTING", "RUNNING", "STOP_REQUESTED"}
+PR_SET_PDEATHSIG = 1
 
 
 def utc_now_iso() -> str:
@@ -51,6 +56,54 @@ def utc_now_iso() -> str:
 
 def repo_root_from_here() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def pid_liveness_status(pid: int | None) -> tuple[bool | None, str]:
+    try:
+        pid_int = int(pid or 0)
+    except (TypeError, ValueError):
+        return None, "STALE_SESSION_PID_NOT_AVAILABLE"
+    if pid_int <= 0:
+        return None, "STALE_SESSION_PID_NOT_AVAILABLE"
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid_int}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None, "STALE_SESSION_PID_CHECK_FAILED"
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 0:
+            return None, "STALE_SESSION_PID_CHECK_FAILED"
+        if not output or output.upper().startswith("INFO:"):
+            return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
+        if re.search(rf'(^|,)"?{pid_int}"?(,|$)', output):
+            return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
+        return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
+    except PermissionError:
+        return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
+    except OSError:
+        return None, "STALE_SESSION_PID_CHECK_FAILED"
+    return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
+
+
+def _linux_child_preexec() -> None:
+    os.setsid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    if result != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, "prctl(PR_SET_PDEATHSIG) failed")
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 @dataclass(frozen=True)
@@ -124,6 +177,32 @@ class PaperProcessHandle(Protocol):
         ...
 
 
+class AdoptedPaperProcessHandle:
+    """PID-only handle for a PAPER process that survived an API restart."""
+
+    def __init__(self, pid: int, liveness_probe: Callable[[int | None], tuple[bool | None, str]]) -> None:
+        self.pid = int(pid)
+        self._liveness_probe = liveness_probe
+
+    def poll(self) -> int | None:
+        running, _reason = self._liveness_probe(self.pid)
+        if running is False:
+            return 0
+        return None
+
+    def send_signal(self, sig: signal.Signals | int) -> None:
+        os.kill(self.pid, sig)
+
+    def terminate(self) -> None:
+        os.kill(self.pid, signal.SIGTERM)
+
+    def kill(self) -> None:
+        if os.name == "nt":
+            os.kill(self.pid, signal.SIGTERM)
+        else:
+            os.kill(self.pid, signal.SIGKILL)
+
+
 class PaperProcessRunner(Protocol):
     def is_available(self, repo_root: Path) -> tuple[bool, str | None]:
         ...
@@ -132,6 +211,9 @@ class PaperProcessRunner(Protocol):
         ...
 
     def request_graceful_stop(self, handle: PaperProcessHandle) -> tuple[bool, str]:
+        ...
+
+    def shutdown_process_group(self, handle: PaperProcessHandle, *, timeout_seconds: float = 5.0) -> tuple[bool, str]:
         ...
 
 
@@ -148,20 +230,26 @@ class SubprocessPaperRunner:
     def is_available(self, repo_root: Path) -> tuple[bool, str | None]:
         script = repo_root / "scripts" / "run_bounded_paper.ps1"
         python_path = repo_root / "venv" / "Scripts" / "python.exe"
+        if os.name != "nt":
+            python_path = repo_root / "venv" / "bin" / "python"
         if not script.exists():
             return False, "PAPER_RUN_SCRIPT_MISSING"
         if not python_path.exists():
-            return False, "WINDOWS_VENV_PYTHON_NOT_FOUND"
-        if os.name != "nt":
-            return False, "WINDOWS_POWERSHELL_REQUIRED"
+            return False, "WINDOWS_VENV_PYTHON_NOT_FOUND" if os.name == "nt" else "POSIX_VENV_PYTHON_NOT_FOUND"
         if shutil.which("powershell.exe") is None and shutil.which("pwsh") is None:
             return False, "POWERSHELL_NOT_FOUND"
         return True, None
 
+    def _popen_lifecycle_kwargs(self) -> dict[str, Any]:
+        if os.name == "nt":
+            return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+        if sys.platform.startswith("linux"):
+            return {"preexec_fn": _linux_child_preexec}
+        return {"start_new_session": True}
+
     def start(self, spec: ProcessStartSpec) -> PaperProcessHandle:
         stdout_file = open(spec.stdout_path, "a", encoding="utf-8")
         stderr_file = open(spec.stderr_path, "a", encoding="utf-8")
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         process_env = os.environ.copy()
         process_env.update(spec.env)
         try:
@@ -171,8 +259,8 @@ class SubprocessPaperRunner:
                 stdout=stdout_file,
                 stderr=stderr_file,
                 stdin=subprocess.DEVNULL,
-                creationflags=creationflags,
                 env=process_env,
+                **self._popen_lifecycle_kwargs(),
             )
         finally:
             stdout_file.close()
@@ -182,13 +270,69 @@ class SubprocessPaperRunner:
         if handle.poll() is not None:
             return True, "PROCESS_ALREADY_EXITED"
         if os.name != "nt" or not hasattr(signal, "CTRL_BREAK_EVENT"):
-            return False, "SAFE_STOP_UNAVAILABLE_NON_WINDOWS"
+            try:
+                os.killpg(os.getpgid(int(handle.pid)), signal.SIGTERM)
+                return True, "SIGTERM_SENT_TO_PROCESS_GROUP"
+            except ProcessLookupError:
+                return True, "PROCESS_ALREADY_EXITED"
+            except Exception:
+                return False, "PROCESS_GROUP_SIGNAL_FAILED"
         try:
             process = handle  # subprocess.Popen at runtime
             process.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
             return True, "CTRL_BREAK_EVENT_SENT"
         except Exception:
             return False, "GRACEFUL_STOP_SIGNAL_FAILED"
+
+    def shutdown_process_group(self, handle: PaperProcessHandle, *, timeout_seconds: float = 5.0) -> tuple[bool, str]:
+        if handle.poll() is not None:
+            return True, "PROCESS_ALREADY_EXITED"
+        ok, reason = self.request_graceful_stop(handle)
+        if ok and self._wait_for_exit(handle, timeout_seconds):
+            return True, reason
+        if os.name == "nt":
+            return self._force_windows_process_tree(handle)
+        return self._force_posix_process_group(handle)
+
+    def _wait_for_exit(self, handle: PaperProcessHandle, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(float(timeout_seconds or 0), 0.0)
+        while time.monotonic() < deadline:
+            if handle.poll() is not None:
+                return True
+            time.sleep(0.05)
+        return handle.poll() is not None
+
+    def _force_posix_process_group(self, handle: PaperProcessHandle) -> tuple[bool, str]:
+        try:
+            os.killpg(os.getpgid(int(handle.pid)), signal.SIGKILL)
+            return True, "SIGKILL_SENT_TO_PROCESS_GROUP"
+        except ProcessLookupError:
+            return True, "PROCESS_ALREADY_EXITED"
+        except Exception:
+            try:
+                os.kill(int(handle.pid), signal.SIGKILL)
+                return True, "SIGKILL_SENT_TO_PROCESS"
+            except ProcessLookupError:
+                return True, "PROCESS_ALREADY_EXITED"
+            except Exception:
+                return False, "PROCESS_GROUP_FORCE_KILL_FAILED"
+
+    def _force_windows_process_tree(self, handle: PaperProcessHandle) -> tuple[bool, str]:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(int(handle.pid)), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, "WINDOWS_PROCESS_TREE_FORCE_KILL_FAILED"
+        if result.returncode == 0:
+            return True, "WINDOWS_PROCESS_TREE_FORCE_KILL_SENT"
+        if "not found" in f"{result.stdout}\n{result.stderr}".lower():
+            return True, "PROCESS_ALREADY_EXITED"
+        return False, "WINDOWS_PROCESS_TREE_FORCE_KILL_FAILED"
 
 
 @dataclass
@@ -213,6 +357,7 @@ class PaperRunSession:
     created_by: str = "operator_api"
     audit_event_ids: list[str] = field(default_factory=list)
     pid: int | None = None
+    process_group_id: int | None = None
     started_at: str | None = None
     ended_at: str | None = None
     exit_code: int | None = None
@@ -268,6 +413,8 @@ class PaperSupervisorConfig:
     script_path: str = "scripts/run_bounded_paper.ps1"
     powershell_executable: str = "powershell.exe"
     process_env: dict[str, str] = field(default_factory=dict)
+    startup_lifecycle_reconcile: bool = True
+    shutdown_wait_seconds: float = 5.0
 
     @classmethod
     def from_runtime_config(cls, runtime_config: OperatorRuntimeConfig) -> "PaperSupervisorConfig":
@@ -296,12 +443,14 @@ class OperatorPaperSupervisor:
         config: PaperSupervisorConfig | None = None,
         runner: PaperProcessRunner | None = None,
         session_store: OperatorSessionStore | None = None,
+        pid_liveness_probe: Callable[[int | None], tuple[bool | None, str]] | None = None,
     ) -> None:
         if config is None:
             runtime_config = OperatorRuntimeConfig.from_env()
             config = PaperSupervisorConfig.from_runtime_config(runtime_config)
         self.config = config
         self.runner = runner or SubprocessPaperRunner()
+        self._pid_liveness_probe = pid_liveness_probe or pid_liveness_status
         store_path = Path(self.config.session_store_path) if self.config.session_store_path else (
             self.config.repo_root / "state" / "operator" / "sessions.jsonl"
         )
@@ -312,12 +461,17 @@ class OperatorPaperSupervisor:
         self._session: PaperRunSession | None = None
         self._process: PaperProcessHandle | None = None
         self._audit_events: list[AuditEvent] = []
+        self._startup_lifecycle_event: dict[str, Any] = {
+            "status": "NO_PRIOR_ACTIVE_SESSION",
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "live_endpoint_touched": False,
+            "real_money_touched": False,
+        }
         latest = self.session_store.latest_session()
         if latest:
             self._session = PaperRunSession.from_dict(latest)
-            if self._session.status in {"STARTING", "RUNNING", "STOP_REQUESTED"}:
-                self._session.status = "PROCESS_STATE_UNKNOWN_AFTER_RESTART"
-                self._session.stop_reason = self._session.stop_reason or "PROCESS_HANDLE_NOT_ATTACHED_AFTER_RESTART"
+            self._reconcile_latest_session_on_startup()
 
     def status_snapshot(self) -> dict[str, Any]:
         self._refresh_process_state()
@@ -363,6 +517,17 @@ class OperatorPaperSupervisor:
             },
             "broker_read_permission_profile": broker_read_profile,
             "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
+            "startup_lifecycle_reconciliation": dict(self._startup_lifecycle_event),
+            "process_lifecycle": {
+                "active_statuses": sorted(ACTIVE_SESSION_STATUSES),
+                "api_shutdown_kills_child_process_group": True,
+                "startup_self_healing_enabled": self.config.startup_lifecycle_reconcile,
+                "process_group_id": self._session.process_group_id if self._session else None,
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+            },
             "allowed_profile": self.config.allowed_profile,
             "allowed_watchlist": list(self.config.allowed_watchlist),
             "allowed_durations": sorted(self.config.allowed_durations),
@@ -448,6 +613,7 @@ class OperatorPaperSupervisor:
             )
 
         session.pid = int(process.pid)
+        session.process_group_id = int(process.pid)
         session.started_at = utc_now_iso()
         session.status = "RUNNING"
         self._session = session
@@ -503,6 +669,60 @@ class OperatorPaperSupervisor:
             audit_event=event,
             session=self._session,
             runtime_mutation_occurred=True,
+        )
+
+    def shutdown_active_processes(self, reason: str = "API_SHUTDOWN") -> dict[str, Any]:
+        self._refresh_process_state()
+        session_id = self._session.session_id if self._session else None
+        if self._session is None or self._session.status not in ACTIVE_SESSION_STATUSES:
+            event = self._record_event("process_lifecycle_shutdown", True, "NO_ACTIVE_RUN", session_id, False)
+            return self._intent_response(
+                intent="process_lifecycle_shutdown",
+                allowed=True,
+                reason_code="NO_ACTIVE_RUN",
+                audit_event=event,
+                session=self._session,
+                runtime_mutation_occurred=False,
+            )
+        if self._process is None:
+            event = self._record_event("process_lifecycle_shutdown", False, "ACTIVE_RUN_PROCESS_HANDLE_UNAVAILABLE", session_id, False)
+            return self._intent_response(
+                intent="process_lifecycle_shutdown",
+                allowed=False,
+                reason_code="ACTIVE_RUN_PROCESS_HANDLE_UNAVAILABLE",
+                audit_event=event,
+                session=self._session,
+                runtime_mutation_occurred=False,
+            )
+        ok, runner_reason = self.runner.shutdown_process_group(
+            self._process,
+            timeout_seconds=self.config.shutdown_wait_seconds,
+        )
+        reason_code = runner_reason if ok else runner_reason or "PROCESS_GROUP_SHUTDOWN_FAILED"
+        if ok:
+            self._session.stop_requested_at = self._session.stop_requested_at or utc_now_iso()
+            self._session.stop_reason = reason
+            self._session.status = "STOP_REQUESTED" if self._process.poll() is None else "STOPPED"
+            self._session.last_status_check_at = utc_now_iso()
+            event = self._record_event("process_lifecycle_shutdown", True, reason_code, session_id, True)
+            self._session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(self._session)
+            return self._intent_response(
+                intent="process_lifecycle_shutdown",
+                allowed=True,
+                reason_code=reason_code,
+                audit_event=event,
+                session=self._session,
+                runtime_mutation_occurred=True,
+            )
+        event = self._record_event("process_lifecycle_shutdown", False, reason_code, session_id, False)
+        return self._intent_response(
+            intent="process_lifecycle_shutdown",
+            allowed=False,
+            reason_code=reason_code,
+            audit_event=event,
+            session=self._session,
+            runtime_mutation_occurred=False,
         )
 
     def reconcile_stale_session(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -676,6 +896,100 @@ class OperatorPaperSupervisor:
             return baseline_context.baseline_context_error or PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED
         return None
 
+    def _reconcile_latest_session_on_startup(self) -> None:
+        if self._session is None or self._session.status not in ACTIVE_SESSION_STATUSES:
+            return
+        self._session.last_status_check_at = utc_now_iso()
+        if not self.config.startup_lifecycle_reconcile:
+            self._session.status = "PROCESS_STATE_UNKNOWN_AFTER_RESTART"
+            self._session.stop_reason = self._session.stop_reason or "PROCESS_HANDLE_NOT_ATTACHED_AFTER_RESTART"
+            self._startup_lifecycle_event = {
+                "status": "DISABLED_MARKED_UNKNOWN",
+                "reason_code": "STARTUP_LIFECYCLE_RECONCILE_DISABLED",
+                "session_id": self._session.session_id,
+                "pid": self._session.pid,
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+            }
+            self._persist_session(self._session)
+            return
+        running, reason_code = self._is_pid_running(self._session.pid)
+        if running is False:
+            self._session.status = "STALE_RECONCILED"
+            self._session.ended_at = self._session.ended_at or utc_now_iso()
+            self._session.stop_reason = "AUTO_RECONCILED_ON_API_STARTUP_PID_NOT_RUNNING"
+            event = self._record_event(
+                "paper_startup_reconcile",
+                True,
+                "STARTUP_RECONCILED_DEAD_PID",
+                self._session.session_id,
+                True,
+            )
+            self._session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(self._session)
+            self._startup_lifecycle_event = {
+                "status": "AUTO_RECONCILED_DEAD_PID",
+                "reason_code": "STARTUP_RECONCILED_DEAD_PID",
+                "session_id": self._session.session_id,
+                "pid": self._session.pid,
+                "audit_event_id": event.audit_event_id,
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+            }
+            return
+        if running is True:
+            self._session.status = "RUNNING"
+            self._session.process_group_id = self._session.process_group_id or self._session.pid
+            self._process = AdoptedPaperProcessHandle(int(self._session.pid or 0), self._pid_liveness_probe)
+            event = self._record_event(
+                "paper_startup_adopt",
+                True,
+                "STARTUP_ADOPTED_RUNNING_PID",
+                self._session.session_id,
+                True,
+            )
+            self._session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(self._session)
+            self._startup_lifecycle_event = {
+                "status": "ADOPTED_RUNNING_PID",
+                "reason_code": "STARTUP_ADOPTED_RUNNING_PID",
+                "session_id": self._session.session_id,
+                "pid": self._session.pid,
+                "process_group_id": self._session.process_group_id,
+                "audit_event_id": event.audit_event_id,
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "live_endpoint_touched": False,
+                "real_money_touched": False,
+            }
+            return
+        self._session.status = "PROCESS_STATE_UNKNOWN_AFTER_RESTART"
+        self._session.stop_reason = reason_code or "STARTUP_PID_LIVENESS_AMBIGUOUS"
+        event = self._record_event(
+            "paper_startup_reconcile",
+            False,
+            reason_code or "STARTUP_PID_LIVENESS_AMBIGUOUS",
+            self._session.session_id,
+            True,
+        )
+        self._session.audit_event_ids.append(event.audit_event_id)
+        self._persist_session(self._session)
+        self._startup_lifecycle_event = {
+            "status": "FAILED_CLOSED_AMBIGUOUS_PID",
+            "reason_code": reason_code or "STARTUP_PID_LIVENESS_AMBIGUOUS",
+            "session_id": self._session.session_id,
+            "pid": self._session.pid,
+            "audit_event_id": event.audit_event_id,
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "live_endpoint_touched": False,
+            "real_money_touched": False,
+        }
+
     def _broker_read_profile(self):
         return broker_read_profile_from_env(self.config.process_env)
 
@@ -837,40 +1151,7 @@ class OperatorPaperSupervisor:
         }
 
     def _is_pid_running(self, pid: int | None) -> tuple[bool | None, str]:
-        try:
-            pid_int = int(pid or 0)
-        except (TypeError, ValueError):
-            return None, "STALE_SESSION_PID_NOT_AVAILABLE"
-        if pid_int <= 0:
-            return None, "STALE_SESSION_PID_NOT_AVAILABLE"
-        if os.name == "nt":
-            try:
-                result = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {pid_int}", "/FO", "CSV", "/NH"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2.0,
-                    check=False,
-                )
-            except (OSError, subprocess.SubprocessError):
-                return None, "STALE_SESSION_PID_CHECK_FAILED"
-            output = f"{result.stdout}\n{result.stderr}".strip()
-            if result.returncode != 0:
-                return None, "STALE_SESSION_PID_CHECK_FAILED"
-            if not output or output.upper().startswith("INFO:"):
-                return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
-            if re.search(rf'(^|,)"?{pid_int}"?(,|$)', output):
-                return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
-            return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
-        try:
-            os.kill(pid_int, 0)
-        except ProcessLookupError:
-            return False, "STALE_SESSION_PROCESS_NOT_RUNNING"
-        except PermissionError:
-            return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
-        except OSError:
-            return None, "STALE_SESSION_PID_CHECK_FAILED"
-        return True, "STALE_SESSION_PROCESS_STILL_RUNNING"
+        return self._pid_liveness_probe(pid)
 
     def _record_event(
         self,

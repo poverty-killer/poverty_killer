@@ -445,6 +445,15 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "confirm_stale_session_reviewed" in text
     assert "confirm_no_broker_cleanup_requested" in text
     assert "Run visibility must show STOPPED" in text
+    assert "Stack Lifecycle" in text
+    assert "data-stack-shutdown-panel" in text
+    assert "data-stack-shutdown-control" in text
+    assert "Shut Down Stack" in text
+    assert "/operator/intent/stack/shutdown" in text
+    assert "confirm_shutdown_stack" in text
+    assert "confirm_api_process_exit" in text
+    assert "confirm_preserve_broker_positions" in text
+    assert "preserves broker positions" in text
     assert "Baseline adoption required - existing PAPER positions detected." in text
     assert "Reset is not required" in text
     assert "Position-aware PAPER baseline accepted." in text
@@ -509,6 +518,7 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert "data-paper-baseline-panel" in text
     assert "data-paper-baseline-advanced" in text
     assert ".paper-baseline-panel" in css
+    assert ".stack-shutdown-panel" in css
     assert "readOnlyPreflightAuthorized" in text
     assert "alpacaNetworkCallOccurred" in text
     assert "accountRequestOccurred" in text
