@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.core.authority_graph import authority_graph_summary
+
 
 SYSTEM_MAP_SUMMARY = {
     "report_path": "reports/poverty_killer_system_map_operator_explainer.md",
@@ -24,15 +26,53 @@ SYSTEM_MAP_SUMMARY = {
         "live readiness gates",
         "safe touch zones",
         "do-not-touch zones",
+        "authority graph",
     ],
     "live_status": "LIVE_LOCKED",
     "real_money_status": "BLOCKED",
     "advisory_ai_only": True,
+    "authority_graph_version": authority_graph_summary()["version"],
 }
 
 
+def _render_authority_graph_markdown() -> str:
+    graph = authority_graph_summary()
+    lines = [
+        "## Authority Graph",
+        "The authority graph names exactly one final-decision owner for each",
+        "commercial PAPER-readiness authority. Contributors are visible evidence,",
+        "diagnostic, gate-input, adapter, or display providers; they cannot",
+        "override the owner.",
+        "",
+    ]
+    for entry in graph["authorities"]:
+        owner = entry["owner"]
+        lines.append(f"### {entry['authority']}")
+        lines.append(f"Owner: `{owner['module']}`")
+        lines.append(f"Final decision: {owner['final_decision']}")
+        lines.append("Contributors:")
+        for contributor in entry["contributors"]:
+            status = contributor["status"]
+            reason = contributor.get("blocked_reason")
+            suffix = f" ({status}: {reason})" if reason else f" ({status})"
+            lines.append(
+                f"- `{contributor['module']}` - {contributor['role']}; "
+                f"{contributor['boundary']}{suffix}"
+            )
+        lines.append("")
+    lines.append("### Non-Authority Conflict Resolutions")
+    for item in graph["non_authority_conflict_resolutions"]:
+        lines.append(
+            f"- Conflict {item['conflict_id']} `{item['seam']}`: "
+            f"{item['final_owner']} owns; `{item['reference_module']}` remains "
+            f"{item['status']}."
+        )
+    return "\n".join(lines)
+
+
 def render_system_map_markdown() -> str:
-    return """# Poverty Killer System Map - Operator Explainer
+    return (
+        """# Poverty Killer System Map - Operator Explainer
 
 ## Runtime Launcher
 The governed local launcher starts only the operator API/UI. Bounded PAPER runs
@@ -104,6 +144,10 @@ or alpha behavior, thresholds, live endpoints, real-money controls, secrets,
 runtime logs/state/DB files, or quarantined dashboard code without explicit
 Board authorization.
 """
+        + "\n"
+        + _render_authority_graph_markdown()
+        + "\n"
+    )
 
 
 def ensure_system_map_report(path: Path | None = None) -> dict[str, object]:

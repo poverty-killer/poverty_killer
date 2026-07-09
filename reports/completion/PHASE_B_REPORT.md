@@ -6,7 +6,7 @@ Latest commit at scout: 44bbb30 phase A structural validation gate
 
 ## 1. VERDICT
 
-- B1 Every module classified: PASS (399 modules classified exactly once).
+- B1 Every module classified: PASS (Phase C-corrected countable modules=397; 2 generated __pycache__ artifacts excluded from counts).
 - B2 No silent module: PASS (0 rows missing role/authority fields).
 - B3 Duplicate authority surfaced: PASS (7 authorities named; 9 conflict seams logged for Phase C).
 
@@ -37,12 +37,18 @@ The map could look complete while hiding silent modules if it only listed paths.
 
 ## 6. MODULE INVENTORY COUNTS
 
-- Total classified modules: 399
-- WIRED: 292
-- BLOCKED: 96
+- Counted classified modules after Phase C correction: 397
+- WIRED: 297
+- BLOCKED: 89
 - PRESERVED-DEAD: 10
 - REJECTED-PRESERVED: 1
+- Excluded generated cache artifact rows: 2 (__pycache__)
 - Untracked code/operator modules inventoried: 4
+
+
+## Phase C Correction Note
+
+Phase C runtime/import verification corrected five false BLOCKED rows to WIRED: `app.api.operator_readonly_api`, `app.execution.order_router`, `app.main_loop`, `app.strategies.moving_floor`, and `app.world_awareness.config`. These were already product-reachable and import clean; Phase C did not rewire them. Two generated `__pycache__` artifact rows are excluded from corrected counts, and package `__init__.py` rows were excluded from runtime reachability promotion.
 
 ## 7. AUTHORITY OWNER MATRIX
 
@@ -81,18 +87,15 @@ The map could look complete while hiding silent modules if it only listed paths.
 ## 10. MODULE STATUS SUMMARY
 
 The full per-module status is in the truth map. Top blocker codes:
-- TEST_ONLY_STATIC_CALLER_NO_PRODUCT_CALLER: 39
+- TEST_ONLY_STATIC_CALLER_NO_PRODUCT_CALLER: 37
 - NO_PRODUCT_REACHABILITY_FROM_ACTIVE_ROOTS: 29
-- PRE_INTEGRATION: 14
+- PRE_INTEGRATION: 13
 - NO_STATIC_CALLER_FOUND: 4
-- NOT_WIRED: 3
 - Placeholder/under-construction module cannot truthfully run as a completed component.: 3
 - UNDER_CONSTRUCTION: 1
 - DISCONNECTED_FROM_LIVE_SPINE: 1
 - NO_CURRENT_RUNTIME_IMPACT: 1
-- NOT_YET_INTEGRATED: 1
-- ControlPlane artifact exists: 1
-- but ControlPlane has no current product caller beyond tests.: 1
+- ControlPlane artifact exists, but ControlPlane has no current product caller beyond tests.: 1
 
 ## 11. WHAT WORKS
 
@@ -104,7 +107,7 @@ The full per-module status is in the truth map. Top blocker codes:
 
 ## 12. WHAT IS NOT WIRED / NOT WORKING
 
-- 96 modules are not product-wired or are pre-integration/under-construction/test-only by static evidence.
+- 89 countable modules remain not product-wired or are pre-integration/under-construction/test-only by runtime/import-corrected evidence.
 - Risk authority is fragmented across pre_trade_guardrails, HybridRiskGuard, UnifiedRiskAuthority, SafetyGate, ExposureManager, NetEdgeGovernor, stale-data guards, and sovereign execution guard.
 - Portfolio/position truth is split between broker read snapshots, ExposureManager, StateStore, TruthKernel, OrderRouter/PaperBroker, and intelligence truth spine.
 - Market/instrument modeling has disconnected sophisticated modules (unified_market, instrument_profile, cross_asset_risk_model, opportunity_ranking) that cannot be silently discarded.
@@ -124,7 +127,7 @@ Every row has a purpose and an authority boundary. Silent rows found: 0.
 ## 15. TESTS / CHECKS
 
 - Phase A proof reused: pytest --collect-only clean, py_compile clean, import smoke clean.
-- Phase B truth-map invariant check: PASS, 399 rows counted with WIRED 292 / BLOCKED 96 / PRESERVED-DEAD 10 / REJECTED-PRESERVED 1.
+- Phase B truth-map invariant check: PASS. Phase C correction counts 397 module rows after excluding 2 generated __pycache__ artifacts: WIRED 297 / BLOCKED 89 / PRESERVED-DEAD 10 / REJECTED-PRESERVED 1.
 - Root pytest collection after Phase B docs: PASS, `1778 tests collected in 5.09s`.
 - Warnings observed: existing Pydantic deprecation warnings during collection; no collection errors.
 

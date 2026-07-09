@@ -71,7 +71,11 @@ from app.operator_intelligence.archive import RunArchive
 from app.operator_intelligence.decision_explainer import DecisionExplainer
 from app.operator_intelligence.pnl_tca import build_pnl_summary, build_tca_dashboard
 from app.operator_intelligence.reports import RunReportGenerator
-from app.operator_intelligence.system_map import SYSTEM_MAP_SUMMARY, render_system_map_markdown
+from app.operator_intelligence.system_map import (
+    SYSTEM_MAP_SUMMARY,
+    authority_graph_summary,
+    render_system_map_markdown,
+)
 from app.operator_intelligence.watchdog import AlertQueue, build_watchdog_alerts
 from app.run_visibility import read_run_visibility_snapshot, render_run_visibility_html
 
@@ -2125,6 +2129,7 @@ class OperatorSnapshotProvider:
         return {
             "source": "OPERATOR_SYSTEM_MAP",
             "summary": dict(SYSTEM_MAP_SUMMARY),
+            "authority_graph": authority_graph_summary(),
             "markdown": render_system_map_markdown(),
             "report_path": SYSTEM_MAP_SUMMARY["report_path"],
             "secrets_values_exposed": False,
