@@ -15,9 +15,28 @@ Math Utilities - Predator Grade Mathematical Edge
 
 import numpy as np
 from typing import List, Tuple, Optional, Union, Dict
-from numba import jit, prange, vectorize
 import math
 from collections import deque
+
+try:
+    from numba import jit, prange, vectorize
+except ModuleNotFoundError:
+    def jit(*jit_args, **jit_kwargs):
+        if jit_args and callable(jit_args[0]) and len(jit_args) == 1 and not jit_kwargs:
+            return jit_args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    prange = range
+
+    def vectorize(*vectorize_args, **vectorize_kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
 
 # Machine epsilon
 EPS = np.finfo(float).eps

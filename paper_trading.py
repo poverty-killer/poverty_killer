@@ -1,7 +1,7 @@
-﻿\"\"\"
+"""
 paper_trading
 Poverty Killer module - Under construction.
-\"\"\"
+"""
 
 def main():
     pass

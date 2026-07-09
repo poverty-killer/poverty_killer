@@ -95,9 +95,6 @@ class EventPacket:
     processing_start_ns: int = 0
     processing_end_ns: int = 0
 
-    __slots__ = ("event_type", "data", "exchange_ts_ns", "receive_ts_ns",
-                 "processing_start_ns", "processing_end_ns")
-
 
 class PaperBroker:
     """
