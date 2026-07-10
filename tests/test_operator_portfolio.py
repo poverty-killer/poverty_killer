@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.error import HTTPError
+
+import pytest
 
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.execution.broker_read_policy import BROKER_READ_PROFILE_ENV, PAPER_TCA_EXTENDED_READS
-from app.operator_credentials.store import LocalCredentialStore
+from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from app.operator_portfolio.snapshot import build_portfolio_snapshot
+
+PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
+TEST_BROKER_READ_AUTH = {"PK_BOARD_AUTHORIZED_PAPER_BROKER_READ": "YES_D4_BOARD_AUTHORIZED"}
 
 
 class FakeReadOnlyClient:
@@ -27,6 +33,32 @@ def _endpoint(app, path: str, method: str = "GET"):
         if route.path == path and method in (route.methods or set()):
             return route.endpoint
     raise AssertionError(f"route not found: {method} {path}")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_canonical_paper_env(monkeypatch, tmp_path) -> Path:
+    path = tmp_path / "canonical_alpaca_paper.env"
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(path))
+    return path
+
+
+def _write_canonical_paper_env(
+    path: Path,
+    *,
+    key_id: str = "id",
+    secret_key: str = "secret",
+    base_url: str | None = None,
+) -> None:
+    lines: list[str] = []
+    if base_url is not None:
+        lines.append(f"APCA_API_BASE_URL={base_url}")
+    lines.extend(
+        [
+            f"APCA_API_KEY_ID={key_id}",
+            f"APCA_API_SECRET_KEY={secret_key}",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _broker_payloads():
@@ -192,14 +224,15 @@ def test_portfolio_blocks_non_trading_endpoint_before_broker_read():
     assert client.calls == []
 
 
-def test_operator_portfolio_endpoints_are_read_only(tmp_path):
+def test_operator_portfolio_endpoints_are_read_only(tmp_path, _isolated_canonical_paper_env):
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     client = FakeReadOnlyClient(_broker_payloads())
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
-            provider_env={},
+            provider_env=dict(TEST_BROKER_READ_AUTH),
             credential_store=store,
             portfolio_client=client,
         )
@@ -218,12 +251,12 @@ def test_operator_portfolio_endpoints_are_read_only(tmp_path):
     assert all(method == "GET" for method, _path in client.calls)
 
 
-def test_operator_portfolio_refreshes_local_vault_saved_after_backend_start(tmp_path):
+def test_operator_portfolio_refreshes_canonical_env_after_backend_start(tmp_path, _isolated_canonical_paper_env):
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     client = FakeReadOnlyClient(_broker_payloads())
     provider = OperatorSnapshotProvider(
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
-        provider_env={},
+        provider_env=dict(TEST_BROKER_READ_AUTH),
         credential_store=store,
         portfolio_client=client,
     )
@@ -231,22 +264,26 @@ def test_operator_portfolio_refreshes_local_vault_saved_after_backend_start(tmp_
 
     before = _endpoint(app, "/operator/portfolio")()
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
+    after_local_save = _endpoint(app, "/operator/portfolio")()
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     after = _endpoint(app, "/operator/portfolio")()
 
     assert before["unavailable_reason"] == "MISSING_ALPACA_PAPER_CREDENTIALS"
+    assert after_local_save["unavailable_reason"] == "MISSING_ALPACA_PAPER_CREDENTIALS"
     assert after["status"] == "BROKER_CONFIRMED"
     assert after["broker_read_occurred"] is True
     assert all(method == "GET" for method, _path in client.calls)
 
 
-def test_broker_confirmed_portfolio_and_launch_readiness_share_alpaca_truth(tmp_path):
+def test_broker_confirmed_portfolio_and_launch_readiness_share_alpaca_truth(tmp_path, _isolated_canonical_paper_env):
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_news", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     client = FakeReadOnlyClient(_broker_payloads())
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
-            provider_env={},
+            provider_env=dict(TEST_BROKER_READ_AUTH),
             credential_store=store,
             portfolio_client=client,
         )
@@ -261,7 +298,11 @@ def test_broker_confirmed_portfolio_and_launch_readiness_share_alpaca_truth(tmp_
     assert "alpaca_paper_credentials" not in launch["reason_codes"]
 
 
-def test_alpaca_local_credentials_are_single_truth_for_cards_providers_launch_portfolio_and_supervisor(tmp_path):
+def test_alpaca_canonical_credentials_are_single_truth_for_cards_providers_launch_portfolio_and_supervisor(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env, base_url=PAPER_ENDPOINT)
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider(
         "alpaca_paper",
@@ -274,7 +315,7 @@ def test_alpaca_local_credentials_are_single_truth_for_cards_providers_launch_po
     client = FakeReadOnlyClient(_broker_payloads())
     provider = OperatorSnapshotProvider(
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
-        provider_env={},
+        provider_env=dict(TEST_BROKER_READ_AUTH),
         credential_store=store,
         portfolio_client=client,
     )
@@ -297,22 +338,26 @@ def test_alpaca_local_credentials_are_single_truth_for_cards_providers_launch_po
     assert credential_row["configured"] is True
     assert provider_row["status"] in {"CONFIGURED", "READY"}
     assert provider_readiness["ready_or_configured_count"] >= 1
-    assert source_map["APCA_API_KEY_ID"] == "LOCAL_SECRET_PRESENT"
-    assert source_map["APCA_API_SECRET_KEY"] == "LOCAL_SECRET_PRESENT"
-    assert source_map["APCA_API_BASE_URL"] == "LOCAL_SECRET_PRESENT"
+    assert source_map["APCA_API_KEY_ID"] == "CANONICAL_PAPER_ENV_FILE"
+    assert source_map["APCA_API_SECRET_KEY"] == "CANONICAL_PAPER_ENV_FILE"
+    assert source_map["APCA_API_BASE_URL"] == "CANONICAL_PAPER_ENV_FILE"
     assert launch["alpaca_paper_credentials_configured"] is True
     assert "alpaca_paper_credentials" not in launch["reason_codes"]
     assert portfolio["status"] == "BROKER_CONFIRMED"
-    assert diagnostics["source_used_by_credential_cards"] == "LOCAL_SECRET_PRESENT"
-    assert diagnostics["source_used_by_provider_table"] == "LOCAL_SECRET_PRESENT"
-    assert diagnostics["source_used_by_launch_readiness"] == "LOCAL_SECRET_PRESENT"
-    assert diagnostics["source_used_by_portfolio"] == "LOCAL_SECRET_PRESENT"
-    assert diagnostics["source_used_by_paper_supervisor"] == "LOCAL_SECRET_PRESENT"
+    assert diagnostics["source_used_by_credential_cards"] == "CANONICAL_PAPER_ENV_FILE"
+    assert diagnostics["source_used_by_provider_table"] == "CANONICAL_PAPER_ENV_FILE"
+    assert diagnostics["source_used_by_launch_readiness"] == "CANONICAL_PAPER_ENV_FILE"
+    assert diagnostics["source_used_by_portfolio"] == "CANONICAL_PAPER_ENV_FILE"
+    assert diagnostics["source_used_by_paper_supervisor"] == "CANONICAL_PAPER_ENV_FILE"
     assert all(diagnostics["paper_supervisor_required_field_names_present"].values())
     assert provider.supervisor.config.process_env["APCA_API_BASE_URL"] == "https://paper-api.alpaca.markets"
 
 
-def test_operator_portfolio_uses_local_vault_and_reports_broker_failure_not_missing_credentials(tmp_path):
+def test_operator_portfolio_uses_canonical_env_and_reports_broker_failure_not_missing_credentials(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     class FailingReadOnlyClient:
         def __init__(self) -> None:
             self.calls = []
@@ -327,7 +372,7 @@ def test_operator_portfolio_uses_local_vault_and_reports_broker_failure_not_miss
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
-            provider_env={},
+            provider_env=dict(TEST_BROKER_READ_AUTH),
             credential_store=store,
             portfolio_client=client,
         )
@@ -343,7 +388,8 @@ def test_operator_portfolio_uses_local_vault_and_reports_broker_failure_not_miss
     assert payload["broker_mutation_occurred"] is False
 
 
-def test_operator_portfolio_reports_auth_failure_not_missing_credentials(tmp_path):
+def test_operator_portfolio_reports_auth_failure_not_missing_credentials(tmp_path, _isolated_canonical_paper_env):
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     class AuthFailingReadOnlyClient:
         def __init__(self) -> None:
             self.calls = []
@@ -358,7 +404,7 @@ def test_operator_portfolio_reports_auth_failure_not_missing_credentials(tmp_pat
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
-            provider_env={},
+            provider_env=dict(TEST_BROKER_READ_AUTH),
             credential_store=store,
             portfolio_client=client,
         )

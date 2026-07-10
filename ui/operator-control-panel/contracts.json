@@ -270,7 +270,7 @@
     "run_paper_operator_state": "single derived read-only command-center view model",
     "raw_codes_in_advanced_details": true,
     "main_answer_plain_english": true,
-    "final_states": ["READY_FOR_BOUNDED_PAPER", "BLOCKED", "DEGRADED_BUT_RUNNABLE", "UNKNOWN"],
+    "final_states": ["READY_FOR_BOUNDED_PAPER", "BLOCKED", "UNKNOWN"],
     "uses_existing_governed_start_intent": "/operator/intent/paper/start",
     "manual_trading_available": false,
     "force_trade_available": false,
@@ -712,7 +712,7 @@
         "live_endpoint_touched": false,
         "real_money_touched": false
       },
-      "dominant_blocker": "READY_FOR_GOVERNED_PAPER | SUPERVISOR_PROCESS_RUNNING_OR_RECENT | PAPER_START_BLOCKED",
+      "dominant_blocker": "READY_FOR_BOUNDED_PAPER | SUPERVISOR_PROCESS_RUNNING_OR_RECENT | PAPER_START_BLOCKED",
       "reason_codes": [],
       "max_lease_seconds": 432000,
       "allowed_durations": [180, 300, 900, 1200, 1800, 3600, 7200, 10800, 14400, 86400, 259200, 432000],
@@ -1060,7 +1060,7 @@
     },
     "/operator/launch-readiness": {
       "source": "OPERATOR_LAUNCH_READINESS",
-      "final_launch_readiness": "READY_FOR_BOUNDED_PAPER | BLOCKED | DEGRADED_BUT_RUNNABLE | UNKNOWN",
+      "final_launch_readiness": "READY_FOR_BOUNDED_PAPER | BLOCKED | UNKNOWN",
       "checks": [],
       "paper_endpoint_authority": {
         "alpaca_endpoint_configured": false,

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
-from app.operator_credentials.store import LocalCredentialStore
+from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
+
+PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
 
 
 def _endpoint(app, path: str, method: str = "GET"):
@@ -12,6 +18,30 @@ def _endpoint(app, path: str, method: str = "GET"):
         if route.path == path and method in (route.methods or set()):
             return route.endpoint
     raise AssertionError(f"route not found: {method} {path}")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_canonical_paper_env(monkeypatch, tmp_path) -> Path:
+    path = tmp_path / "canonical_alpaca_paper.env"
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(path))
+    return path
+
+
+def _write_canonical_paper_env(
+    path: Path,
+    *,
+    key_id: str | None = "id",
+    secret_key: str | None = "secret",
+    base_url: str | None = None,
+) -> None:
+    lines: list[str] = []
+    if base_url is not None:
+        lines.append(f"APCA_API_BASE_URL={base_url}")
+    if key_id is not None:
+        lines.append(f"APCA_API_KEY_ID={key_id}")
+    if secret_key is not None:
+        lines.append(f"APCA_API_SECRET_KEY={secret_key}")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def test_launch_readiness_blocks_when_alpaca_credentials_missing(tmp_path):
@@ -57,8 +87,9 @@ def test_launch_readiness_blocks_when_alpaca_credentials_missing(tmp_path):
             "raw_value_exposed": False,
         },
     ]
-    assert setup["approved_secret_path"]["relative_path"] == ".operator_secrets/provider_credentials.json"
-    assert "Keys & Providers" in setup["approved_secret_path"]["label"]
+    assert setup["approved_secret_path"]["relative_path"] == "~/.poverty_killer_alpaca_paper_env"
+    assert setup["approved_secret_path"]["label"] == "Canonical Alpaca PAPER env file"
+    assert setup["approved_secret_path"]["credential_precedence"] == "ALPACA_PAPER_ENV_FILE_ONLY"
     assert "chat" in setup["approved_secret_path"]["forbidden_instruction"]
     assert "commit" in setup["approved_secret_path"]["forbidden_instruction"]
     assert setup["preflight_gate"]["read_only_preflight_authorized"] is False
@@ -75,14 +106,19 @@ def test_launch_readiness_blocks_when_alpaca_credentials_missing(tmp_path):
     assert state["advanced"]["secrets_values_exposed"] is False
 
 
-def test_launch_readiness_names_partial_alpaca_credentials_without_exposing_values(tmp_path):
+def test_launch_readiness_names_partial_alpaca_credentials_without_exposing_values(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(
+        _isolated_canonical_paper_env,
+        key_id="placeholder-paper-key",
+        secret_key=None,
+    )
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     provider = OperatorSnapshotProvider(
-        runtime_config=OperatorRuntimeConfig.from_env(
-            {"APCA_API_KEY_ID": "placeholder-paper-key"},
-            repo_root=tmp_path,
-        ),
-        provider_env={"APCA_API_KEY_ID": "placeholder-paper-key"},
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
         credential_store=store,
     )
     app = create_operator_app(provider=provider)
@@ -107,9 +143,12 @@ def test_launch_readiness_names_partial_alpaca_credentials_without_exposing_valu
     assert setup["safety"]["secrets_values_exposed"] is False
 
 
-def test_launch_readiness_blocks_bounded_paper_until_read_only_preflight_is_approved(tmp_path):
+def test_launch_readiness_blocks_bounded_paper_until_read_only_preflight_is_approved(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
-    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
@@ -159,7 +198,10 @@ def test_launch_readiness_blocks_bounded_paper_until_read_only_preflight_is_appr
     assert state["safety_locks"]["force_trade"]["available"] is False
 
 
-def test_launch_readiness_refreshes_local_vault_saved_after_backend_start(tmp_path):
+def test_launch_readiness_refreshes_canonical_env_file_after_backend_start(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     provider = OperatorSnapshotProvider(
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
@@ -170,15 +212,23 @@ def test_launch_readiness_refreshes_local_vault_saved_after_backend_start(tmp_pa
 
     before = _endpoint(app, "/operator/launch-readiness")()
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
-    after = _endpoint(app, "/operator/launch-readiness")()
+    after_local_save = _endpoint(app, "/operator/launch-readiness")()
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
+    after_canonical_file = _endpoint(app, "/operator/launch-readiness")()
 
     assert before["alpaca_paper_credentials_configured"] is False
-    assert after["alpaca_paper_credentials_configured"] is True
-    assert "alpaca_paper_credentials" not in after["reason_codes"]
-    assert "paper_read_only_preflight_gate" in after["reason_codes"]
+    assert after_local_save["alpaca_paper_credentials_configured"] is False
+    assert "alpaca_paper_credentials" in after_local_save["reason_codes"]
+    assert after_canonical_file["alpaca_paper_credentials_configured"] is True
+    assert "alpaca_paper_credentials" not in after_canonical_file["reason_codes"]
+    assert "paper_read_only_preflight_gate" in after_canonical_file["reason_codes"]
 
 
-def test_launch_readiness_uses_same_shared_alpaca_truth_as_portfolio(tmp_path):
+def test_launch_readiness_uses_same_canonical_alpaca_truth_as_portfolio(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_news", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     app = create_operator_app(
@@ -197,13 +247,16 @@ def test_launch_readiness_uses_same_shared_alpaca_truth_as_portfolio(tmp_path):
     assert payload["portfolio_read_availability"] == "BROKER_READ_READY"
 
 
-def test_launch_readiness_blocks_live_endpoint_even_with_local_credentials(tmp_path):
+def test_launch_readiness_blocks_live_endpoint_even_with_canonical_credentials(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env, base_url="https://api.alpaca.markets")
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
-    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
-            provider_env={"APCA_API_BASE_URL": "https://api.alpaca.markets"},
+            provider_env={},
             credential_store=store,
         )
     )
@@ -229,16 +282,15 @@ def test_launch_readiness_blocks_live_endpoint_even_with_local_credentials(tmp_p
     assert state["advanced"]["live_enabled"] is False
 
 
-def test_launch_readiness_accepts_normalized_paper_endpoint_variant(tmp_path):
-    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
-    store.save_provider(
-        "alpaca_paper",
-        {
-            "APCA_API_KEY_ID": "id",
-            "APCA_API_SECRET_KEY": "secret",
-            "APCA_API_BASE_URL": " HTTPS://PAPER-API.ALPACA.MARKETS/v2 ",
-        },
+def test_launch_readiness_accepts_normalized_paper_endpoint_variant(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(
+        _isolated_canonical_paper_env,
+        base_url=" HTTPS://PAPER-API.ALPACA.MARKETS/v2 ",
     )
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
@@ -265,16 +317,12 @@ def test_launch_readiness_accepts_normalized_paper_endpoint_variant(tmp_path):
     assert state["paper_credential_setup"]["preflight_gate"]["read_only_preflight_available"] is True
 
 
-def test_launch_readiness_rejects_data_endpoint_as_trading_endpoint(tmp_path):
+def test_launch_readiness_rejects_data_endpoint_as_trading_endpoint(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env, base_url="https://data.alpaca.markets")
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
-    store.save_provider(
-        "alpaca_paper",
-        {
-            "APCA_API_KEY_ID": "id",
-            "APCA_API_SECRET_KEY": "secret",
-            "APCA_API_BASE_URL": "https://data.alpaca.markets",
-        },
-    )
     app = create_operator_app(
         provider=OperatorSnapshotProvider(
             runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
@@ -300,9 +348,12 @@ def test_launch_readiness_rejects_data_endpoint_as_trading_endpoint(tmp_path):
     assert state["broker_truth"]["broker_read_occurred"] is False
 
 
-def test_governed_paper_start_uses_existing_intent_and_local_credentials_without_exposing_them(tmp_path):
+def test_governed_paper_start_uses_existing_intent_and_canonical_credentials_without_exposing_them(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env, secret_key="super-secret")
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
-    store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "super-secret"})
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
     provider = OperatorSnapshotProvider(
@@ -333,3 +384,4 @@ def test_governed_paper_start_uses_existing_intent_and_local_credentials_without
     assert "super-secret" not in str(result)
     assert "super-secret" not in " ".join(runner.started_specs[0].command)
     assert runner.started_specs[0].env["APCA_API_SECRET_KEY"] == "super-secret"
+    assert runner.started_specs[0].env["APCA_API_BASE_URL"] == PAPER_ENDPOINT

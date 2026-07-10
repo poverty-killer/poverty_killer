@@ -853,6 +853,51 @@ def _to_decimal_or_none(value: Any) -> Optional[Decimal]:
         return None
 
 
+def _int_or_none(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pre_trade_stale_data_observation(signal: Any, metadata: Dict[str, Any]) -> Optional[Dict[str, int]]:
+    explicit = metadata.get("stale_data_observation")
+    if isinstance(explicit, dict):
+        return dict(explicit)
+
+    execution_market_truth = metadata.get("execution_market_truth")
+    snapshot = metadata.get("market_truth_snapshot") or metadata.get("candidate_market_snapshot")
+    if not isinstance(snapshot, dict) and isinstance(execution_market_truth, dict):
+        snapshot = execution_market_truth.get("market_truth_snapshot")
+    snapshot = dict(snapshot) if isinstance(snapshot, dict) else {}
+
+    current_ts_ns = _int_or_none(
+        snapshot.get("snapshot_created_ns")
+        or metadata.get("current_ts_ns")
+        or metadata.get("receive_ts_ns")
+        or metadata.get("candle_batch_received_ns")
+    )
+    exchange_ts_ns = _int_or_none(
+        snapshot.get("candle_close_ts_ns")
+        or snapshot.get("candle_id")
+        or metadata.get("exchange_ts_ns")
+        or getattr(signal, "exchange_ts_ns", None)
+    )
+    if current_ts_ns is None or exchange_ts_ns is None:
+        return None
+
+    observation: Dict[str, int] = {
+        "current_ts_ns": current_ts_ns,
+        "exchange_ts_ns": exchange_ts_ns,
+    }
+    local_received_ts_ns = _int_or_none(snapshot.get("receive_ts_ns") or metadata.get("receive_ts_ns"))
+    if local_received_ts_ns is not None:
+        observation["local_received_ts_ns"] = local_received_ts_ns
+    return observation
+
+
 def _normalize_symbol_for_position_match(symbol: Any) -> str:
     return str(symbol or "").upper().replace("/", "").replace("-", "").replace("_", "").strip()
 
@@ -1252,6 +1297,7 @@ def _build_pre_trade_guardrail_verdict(
             economics_context=metadata.get("economics_context"),
             strategy_context=metadata.get("strategy_context"),
             exposure_authority_evidence=metadata.get("portfolio_risk_gate_evidence"),
+            stale_data_observation=_pre_trade_stale_data_observation(signal, metadata),
             source="main_loop_dispatch",
         )
     )

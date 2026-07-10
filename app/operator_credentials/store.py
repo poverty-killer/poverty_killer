@@ -19,10 +19,13 @@ from typing import Any, Mapping
 
 STORE_VERSION = "operator-local-credential-store-v1"
 DEFAULT_RELATIVE_STORE_PATH = ".operator_secrets/provider_credentials.json"
+ALPACA_PAPER_ENV_PATH_ENV_KEY = "POVERTY_KILLER_ALPACA_PAPER_ENV_PATH"
 ALPACA_PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
 ALPACA_LIVE_ENDPOINT = "https://api.alpaca.markets"
 ALPACA_MARKET_DATA_ENDPOINT = "https://data.alpaca.markets"
 ALPACA_ENDPOINT_SOURCE_ENV_KEY = "APCA_API_BASE_URL_SOURCE"
+ALPACA_PAPER_CREDENTIAL_KEYS = ("APCA_API_BASE_URL", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
+ALPACA_PAPER_REQUIRED_SECRET_KEYS = ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
 ALPACA_BROKER_ENDPOINT_HOSTS = frozenset(
     {
         "broker-api.alpaca.markets",
@@ -132,6 +135,27 @@ def utc_now_iso() -> str:
 
 def default_credential_store_path(repo_root: Path) -> Path:
     return repo_root / DEFAULT_RELATIVE_STORE_PATH
+
+
+def canonical_alpaca_paper_env_path() -> Path:
+    configured = os.environ.get(ALPACA_PAPER_ENV_PATH_ENV_KEY)
+    return Path(configured) if configured else Path.home() / ".poverty_killer_alpaca_paper_env"
+
+
+def read_alpaca_paper_env_file(path: Path | None = None) -> dict[str, str]:
+    env_path = path or canonical_alpaca_paper_env_path()
+    values: dict[str, str] = {}
+    if not env_path.exists():
+        return values
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        if key in ALPACA_PAPER_CREDENTIAL_KEYS:
+            values[key] = value.strip().strip("'").strip('"')
+    return values
 
 
 def fingerprint_secret(value: str | None) -> str | None:
@@ -566,6 +590,23 @@ class LocalCredentialStore:
         provider = normalize_provider_id(provider_id)
         process_env = process_env or {}
         candidate_names = (field_name, *ALTERNATIVE_CREDENTIAL_KEYS.get(field_name, ()))
+        if provider == "alpaca_paper" and field_name in ALPACA_PAPER_CREDENTIAL_KEYS:
+            file_values = read_alpaca_paper_env_file()
+            for candidate in candidate_names:
+                file_value = str(file_values.get(candidate, "") or "").strip()
+                if file_value:
+                    return {
+                        "name": field_name,
+                        "value": file_value,
+                        "source": "CANONICAL_PAPER_ENV_FILE",
+                        "source_provider_id": "alpaca_paper_env_file",
+                    }
+            return {
+                "name": field_name,
+                "value": "",
+                "source": "NOT_CONFIGURED",
+                "source_provider_id": "alpaca_paper_env_file",
+            }
         for candidate in candidate_names:
             env_value = str(process_env.get(candidate, "") or "").strip()
             if env_value:
@@ -637,6 +678,9 @@ class LocalCredentialStore:
         for key, value in process_env.items():
             if str(value or "").strip():
                 effective[str(key)] = str(value)
+        for key in ALPACA_PAPER_CREDENTIAL_KEYS:
+            effective.pop(key, None)
+        effective.update(self.effective_provider_values("alpaca_paper", {}))
         return effective
 
     def provider_summary(self, provider_id: str, process_env: Mapping[str, str] | None = None) -> dict[str, Any]:

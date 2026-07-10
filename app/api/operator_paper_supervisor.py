@@ -499,7 +499,7 @@ class OperatorPaperSupervisor:
             "paper_stop_refusal_reason": None if is_active else "NO_ACTIVE_RUN",
             "paper_credentials_configured": paper_key_refusal is None,
             "paper_credential_refusal_reason": paper_key_refusal,
-            "paper_credential_source": "PROCESS_ENV_PRESENT" if paper_key_refusal is None else "MISSING_OR_INVALID",
+            "paper_credential_source": "CANONICAL_PAPER_ENV_FILE" if paper_key_refusal is None else "MISSING_OR_INVALID",
             "paper_endpoint_only": endpoint_authority["paper_endpoint_only"],
             "paper_endpoint_status": endpoint_authority["status"],
             "paper_endpoint_source": endpoint_authority["endpoint_source"],

@@ -338,6 +338,7 @@ def build_portfolio_snapshot(
     *,
     client: ReadOnlyBrokerClient | None = None,
     now: str | None = None,
+    broker_read_authorized: bool = True,
 ) -> dict[str, Any]:
     headers = _headers(env)
     if headers is None:
@@ -346,6 +347,14 @@ def build_portfolio_snapshot(
     endpoint_truth = alpaca_endpoint_authority(env)
     if endpoint_truth["paper_endpoint_only"] is not True:
         return _empty_unavailable(str(endpoint_truth["reason_code"] or "ALPACA_PAPER_ENDPOINT_REQUIRED"), endpoint_authority=endpoint_truth)
+
+    if broker_read_authorized is not True:
+        return _empty_unavailable(
+            BROKER_READ_NOT_AUTHORIZED,
+            detail="D4 broker account/open-orders/positions read is UNKNOWN-pending-Board-read.",
+            broker_read_attempted=False,
+            endpoint_authority=endpoint_truth,
+        )
 
     base_url = _base_url(env)
     broker_client = client or AlpacaPaperReadOnlyClient(base_url=base_url)

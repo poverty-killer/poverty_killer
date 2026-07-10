@@ -104,6 +104,7 @@ def _verdict(
     open_orders=(),
     reservations=(),
     exposure_authority_evidence=None,
+    stale_data_observation=None,
 ):
     capability, portal_result = _cap(symbol, asset_class=asset_class, tif=tif)
     quote_options = {"market_open": None if asset_class == "crypto" else True}
@@ -130,6 +131,12 @@ def _verdict(
             open_orders=open_orders,
             reservations=reservations,
             exposure_authority_evidence=exposure_authority_evidence,
+            stale_data_observation=stale_data_observation
+            or {
+                "current_ts_ns": T0_NS,
+                "exchange_ts_ns": T0_NS,
+                "local_received_ts_ns": T0_NS,
+            },
         )
     )
 
@@ -311,6 +318,23 @@ def test_quote_session_and_market_data_blocking_reasons_are_preserved():
     assert "MARKET_CLOSED" in closed.reason_codes
 
 
+def test_stale_data_guard_blocks_stale_temporal_observation_before_routing():
+    verdict = _verdict(
+        stale_data_observation={
+            "current_ts_ns": T0_NS + 1_000_000_000,
+            "exchange_ts_ns": T0_NS,
+            "local_received_ts_ns": T0_NS + 900_000_000,
+        }
+    )
+    evidence = {item.module: item for item in verdict.module_evidence}
+
+    assert verdict.route_permitted is False
+    assert "STALE_DATA_GUARD_ABSOLUTE_DRIFT_LIMIT_BREACH" in verdict.reason_codes
+    assert evidence["StaleDataGuard"].status == "CONTRIBUTED_BLOCK"
+    assert evidence["StaleDataGuard"].details["mutation_authority"] is False
+    assert evidence["StaleDataGuard"].details["risk_action"] == "BLOCK_ALL_NEW"
+
+
 def test_exposure_manager_conflict_evidence_blocks_before_routing():
     duplicate = _verdict(
         exposure_authority_evidence=_exposure_authority_evidence("DUPLICATE_EXISTING_EXPOSURE")
@@ -395,7 +419,9 @@ def test_guardrail_verdict_contains_advisory_module_contribution_without_fake_ec
     assert evidence["economics advisory"].reason_code == "ECONOMICS_ADVISORY_MISSING_TRUTH"
     assert evidence["NetEdgeGovernor"].reason_code == "NET_EDGE_MISSING_TRUTH"
     assert evidence["TradeEfficiencyGovernor"].reason_code == "TRADE_EFFICIENCY_MISSING_TRUTH"
+    assert evidence["StaleDataGuard"].status == "CONTRIBUTED_ALLOW"
     assert evidence["SovereignExecutionGuard"].status == "DORMANT_BY_POLICY"
+    assert evidence["SovereignExecutionGuard"].reason_code == "SOVEREIGN_EXECUTION_GUARD_DORMANT_PENDING_PHASE_HI_ARM"
     assert evidence["StrategyAllocator / SovereignGovernor"].status == "CONTRIBUTED_ADVISORY"
     assert (
         evidence["StrategyAllocator / SovereignGovernor"].reason_code

@@ -54,7 +54,7 @@ def _set_process_env(monkeypatch, *, base_url: str, key_id: str, secret_key: str
     monkeypatch.setenv("APCA_API_SECRET_KEY", secret_key)
 
 
-def test_matching_process_env_and_fallback_file_passes(monkeypatch, tmp_path):
+def test_canonical_env_file_is_paper_execution_authority_even_when_process_env_matches(monkeypatch, tmp_path):
     env_path = tmp_path / "alpaca_paper.env"
     _write_env_file(
         env_path,
@@ -72,7 +72,7 @@ def test_matching_process_env_and_fallback_file_passes(monkeypatch, tmp_path):
     proof = validate_alpaca_paper_credential_authority(env_path)
 
     assert proof.status == "CREDENTIAL_AUTHORITY_OK"
-    assert proof.credential_source == "process_env"
+    assert proof.credential_source == "canonical_paper_env_file"
     assert proof.live_endpoint_used is False
 
 
@@ -117,7 +117,7 @@ def test_missing_base_url_defaults_to_paper_when_key_and_secret_present(monkeypa
     assert "CREDENTIALS_MISSING" not in proof.reason_codes
 
 
-def test_mismatched_process_env_and_fallback_file_fails_closed(monkeypatch, tmp_path):
+def test_mismatched_process_env_is_demoted_when_canonical_file_is_valid(monkeypatch, tmp_path):
     env_path = tmp_path / "alpaca_paper.env"
     _write_env_file(
         env_path,
@@ -134,9 +134,15 @@ def test_mismatched_process_env_and_fallback_file_fails_closed(monkeypatch, tmp_
 
     proof = validate_alpaca_paper_credential_authority(env_path)
 
-    assert proof.status == "FAILED_CLOSED"
-    assert "STALE_PROCESS_ENV_CREDENTIALS" in proof.reason_codes
-    assert "CREDENTIAL_AUTHORITY_CONFLICT" in proof.reason_codes
+    assert proof.status == "CREDENTIAL_AUTHORITY_OK"
+    assert proof.credential_source == "canonical_paper_env_file"
+    assert "STALE_PROCESS_ENV_CREDENTIALS" not in proof.reason_codes
+    assert "CREDENTIAL_AUTHORITY_CONFLICT" not in proof.reason_codes
+    assert proof.process_env_present["APCA_API_KEY_ID"] is True
+    assert (
+        proof.effective_fingerprints["APCA_API_KEY_ID"]["sha256_12"]
+        != proof.process_env_fingerprints["APCA_API_KEY_ID"]["sha256_12"]
+    )
 
 
 def test_missing_key_or_secret_fails_closed(monkeypatch, tmp_path):

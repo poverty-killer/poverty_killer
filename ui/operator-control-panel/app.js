@@ -5913,11 +5913,7 @@
 
   function aiContextPaperStartAllowed(context) {
     const readiness = context && (context.launch_readiness || context.launchReadiness);
-    const runtime = context && context.runtime;
-    return Boolean(
-      (readiness && (readiness.paper_start_allowed === true || readiness.paperStartAllowed === true)) ||
-      (runtime && (runtime.paper_start_allowed === true || runtime.paperStartAllowed === true))
-    );
+    return Boolean(readiness && (readiness.paper_start_allowed === true || readiness.paperStartAllowed === true));
   }
 
   function aiReadyIdleNoActiveRuntime(context) {
@@ -5929,7 +5925,7 @@
       blockers.includes("READY_IDLE_NO_ACTIVE_RUNTIME") ||
       blockers.includes("READY_IDLE_NO_ACTIVE_PAPER_RUN") ||
       blockers.includes("IDLE_NO_ACTIVE_PAPER_RUN") ||
-      (["READY_FOR_GOVERNED_PAPER", "READY_FOR_BOUNDED_PAPER"].includes(aiContextLaunchReadiness(context)) && aiContextPaperStartAllowed(context) && supervisorState === "IDLE" && processState !== "RUNNING")
+      (aiContextLaunchReadiness(context) === "READY_FOR_BOUNDED_PAPER" && aiContextPaperStartAllowed(context) && supervisorState === "IDLE" && processState !== "RUNNING")
     );
   }
 
@@ -5946,7 +5942,7 @@
 
   function aiPreferredKnownFact(result) {
     const facts = result && Array.isArray(result.knownFacts) ? result.knownFacts : [];
-    return facts.find((item) => /READY_FOR_GOVERNED_PAPER|READY_FOR_BOUNDED_PAPER|Supervisor:|Paper start allowed|Launch readiness/i.test(String(item || ""))) || facts[0] || "";
+    return facts.find((item) => /READY_FOR_BOUNDED_PAPER|Supervisor:|Paper start allowed|Launch readiness/i.test(String(item || ""))) || facts[0] || "";
   }
 
   function aiAnswerMetaText(result, createdAt) {
@@ -7733,7 +7729,8 @@
     const c = control || {};
     const activeRuntime = Boolean(c.activeRunId)
       || ["RUNNING", "STARTING", "STOP_REQUESTED"].includes(String(c.supervisorState || "").toUpperCase());
-    const allowed = c.paperStartAllowed === true;
+    const controlLaunch = c.finalLaunchReadiness || c.final_launch_readiness || (c.launch_readiness && c.launch_readiness.final_launch_readiness) || c.dominantBlocker || "";
+    const allowed = c.paperStartAllowed === true && controlLaunch === "READY_FOR_BOUNDED_PAPER";
     const reasonCodes = uniqueCodes(c.reasonCodes && c.reasonCodes.length ? c.reasonCodes : [c.dominantBlocker || "PAPER_START_BLOCKED"]);
     const endpointValid = c.endpointFamily === "paper" && String(c.endpointHost || c.endpointDisplay || "").includes("paper-api.alpaca.markets");
     const credentialConfigured = c.alpacaPaperConfigured === true || c.credentialStatus === "CONFIGURED";
@@ -7750,7 +7747,7 @@
       source: "OPERATOR_PAPER_CONTROL_STATE",
       schemaVersion: "run-paper-command-center-v1",
       overallStatus: {
-        code: allowed ? "READY_FOR_GOVERNED_PAPER" : "BLOCKED",
+        code: allowed ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED",
         label,
         severity: allowed ? "ready" : (activeRuntime ? "yellow" : "red"),
         detail
@@ -7818,7 +7815,7 @@
         brokerMutation: { label: "No broker mutation from control state", occurred: c.brokerMutationOccurred === true }
       },
       advanced: {
-        finalLaunchReadiness: allowed ? "READY_FOR_GOVERNED_PAPER" : "BLOCKED",
+        finalLaunchReadiness: allowed ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED",
         reasonCodes,
         checks: [],
         paperEndpointDisplay: c.endpointDisplay || c.endpointHost || "unavailable",
@@ -7862,10 +7859,11 @@
     state.supervisor.wrapperStderrPath = control.artifactPaths.wrapper_stderr_path || state.supervisor.wrapperStderrPath;
     state.supervisor.childStdoutPath = control.artifactPaths.child_stdout_path || state.supervisor.childStdoutPath;
     state.supervisor.childStderrPath = control.artifactPaths.child_stderr_path || state.supervisor.childStderrPath;
-    state.launchReadiness.paperStartAllowed = control.paperStartAllowed === true;
+    const controlLaunch = control.finalLaunchReadiness || control.final_launch_readiness || (control.launch_readiness && control.launch_readiness.final_launch_readiness) || control.dominantBlocker || "";
+    state.launchReadiness.paperStartAllowed = control.paperStartAllowed === true && controlLaunch === "READY_FOR_BOUNDED_PAPER";
     state.launchReadiness.reasonCodes = control.reasonCodes || [];
     state.launchReadiness.runPaperOperatorState = buildRunPaperStateFromControlState(control, state);
-    state.launchReadiness.finalLaunchReadiness = control.paperStartAllowed === true ? "READY_FOR_GOVERNED_PAPER" : "BLOCKED";
+    state.launchReadiness.finalLaunchReadiness = state.launchReadiness.paperStartAllowed === true ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED";
     state.launchReadiness.paperEndpointDisplay = control.endpointDisplay || state.launchReadiness.paperEndpointDisplay;
     state.launchReadiness.paperEndpointFamily = control.endpointFamily || state.launchReadiness.paperEndpointFamily;
     state.launchReadiness.paperEndpointHost = control.endpointHost || state.launchReadiness.paperEndpointHost;
@@ -7880,6 +7878,7 @@
   function lifecycleSourcesFromPayload(payload) {
     const status = (payload && payload.status) || {};
     const runtime = (payload && payload.runtime) || {};
+    const launchReadiness = (payload && payload.launchReadiness) || {};
     const latestRun = (payload && payload.latestRun) || {};
     const paperControlState = (payload && payload.paperControlState) || {};
     const controlLatestRun = (paperControlState && paperControlState.latest_run) || {};
@@ -7891,7 +7890,7 @@
       || runtime.latest_session
       || controlLatestRun.latest_session
       || {};
-    return { status, runtime, latestRun, paperControlState, controlLatestRun, supervisor, activeSession, latestSession };
+    return { status, runtime, launchReadiness, latestRun, paperControlState, controlLatestRun, supervisor, activeSession, latestSession };
   }
 
   function applyRuntimeLifecycleTruth(state, payload) {
@@ -7908,9 +7907,8 @@
     const selectedActive = hasActiveSession && isActiveSessionStatus(selectedStatus);
     const selectedTerminal = hasSelectedSession && isTerminalSessionStatus(selectedStatus);
     const supervisorState = pick(sources.supervisor.state || sources.paperControlState.supervisor_state || sources.runtime.supervisor_state, state.supervisor.state || "UNKNOWN");
-    const backendStartAllowed = sources.supervisor.paper_start_allowed === true
-      || sources.runtime.paper_start_allowed === true
-      || sources.paperControlState.paper_start_allowed === true;
+    const backendStartAllowed = sources.launchReadiness.paper_start_allowed === true
+      && sources.launchReadiness.final_launch_readiness === "READY_FOR_BOUNDED_PAPER";
     const startAllowed = selectedActive ? false : backendStartAllowed;
     const stopAllowed = selectedActive && (sources.supervisor.paper_stop_allowed === true || sources.runtime.paper_stop_allowed === true || sources.paperControlState.paper_stop_allowed === true);
     state.supervisor.state = supervisorState;
@@ -7956,7 +7954,7 @@
     if (selectedActive) {
       state.status.dominantBlocker = "SUPERVISOR_PROCESS_RUNNING_OR_RECENT";
     } else if (selectedTerminal) {
-      state.status.dominantBlocker = startAllowed === true ? "READY_FOR_GOVERNED_PAPER" : "IDLE_NO_ACTIVE_PAPER_RUN";
+      state.status.dominantBlocker = startAllowed === true ? "READY_FOR_BOUNDED_PAPER" : "IDLE_NO_ACTIVE_PAPER_RUN";
     }
 
     if (hasSelectedSession) {
@@ -8035,7 +8033,8 @@
     const latestHistoricalRefusal = latestRefused
       ? `paper_start: ${latestRefusalReason || "REFUSED"}${latestSession.session_id ? ` (${latestSession.session_id})` : ""}`
       : null;
-    const supervisorStartAllowed = supervisor.paper_start_allowed === true || runtime.paper_start_allowed === true;
+    const supervisorStartAllowed = launchReadiness.paper_start_allowed === true
+      && launchReadiness.final_launch_readiness === "READY_FOR_BOUNDED_PAPER";
     const readyIdleNoRuntime = !hasActiveSession
       && supervisorStartAllowed
       && (
@@ -8045,7 +8044,6 @@
         || runtime.runtime_attachment_state === "READY_IDLE_NO_ACTIVE_PAPER_RUN"
         || runtime.runtime_attachment_state === "IDLE_NO_ACTIVE_PAPER_RUN"
         || runtime.runtime_attachment_state === "NO_ACTIVE_RUNTIME_ATTACHED"
-        || launchReadiness.final_launch_readiness === "READY_FOR_GOVERNED_PAPER"
         || launchReadiness.final_launch_readiness === "READY_FOR_BOUNDED_PAPER"
       );
 

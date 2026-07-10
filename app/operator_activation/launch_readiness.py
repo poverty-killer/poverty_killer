@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.operator_credentials.store import DEFAULT_RELATIVE_STORE_PATH, alpaca_endpoint_authority
+from app.operator_credentials.store import (
+    ALPACA_PAPER_ENV_PATH_ENV_KEY,
+    canonical_alpaca_paper_env_path,
+    alpaca_endpoint_authority,
+)
 from app.operator_activation.paper_baseline import (
     BASELINE_POLICY_PROTECTED,
     PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS,
@@ -177,13 +181,6 @@ def _operator_status(
             "severity": "red",
             "detail": _first_blocker_detail(blockers) or str(supervisor.get("paper_start_refusal_reason") or "Start authority is blocked."),
         }
-    if warnings or final == "DEGRADED_BUT_RUNNABLE":
-        return {
-            "code": "READY",
-            "label": "PAPER start allowed with warnings",
-            "severity": "yellow",
-            "detail": "Backend start authority is available, but warnings remain in advanced readiness.",
-        }
     return {
         "code": "READY",
         "label": "Ready for bounded PAPER",
@@ -225,7 +222,7 @@ def _next_safe_action(
     if not endpoint_ok:
         return "Fix the Alpaca endpoint in Keys & Providers; only https://paper-api.alpaca.markets is accepted."
     if not alpaca_configured:
-        return "Open Keys & Providers and save Alpaca PAPER key ID and secret to the local credential vault; do not paste secrets into chat or commit them."
+        return "Populate ~/.poverty_killer_alpaca_paper_env with Alpaca PAPER key ID and secret; do not paste secrets into chat or commit them."
     if any(str(check.get("check_id") or "") == "paper_read_only_preflight_gate" for check in blockers):
         return "Do not start PAPER; request explicit Shan approval for read-only Alpaca account, open-orders, and positions preflight first."
     if any(str(check.get("check_id") or "") == "paper_existing_position_baseline" for check in blockers):
@@ -317,14 +314,16 @@ def _build_paper_credential_setup(
             "blocker_code": endpoint_authority.get("alpaca_endpoint_blocker_code"),
         },
         "approved_secret_path": {
-            "label": "Keys & Providers -> Alpaca PAPER Broker/Data -> Save local credentials",
-            "storage_type": "operator_secret_file",
-            "relative_path": DEFAULT_RELATIVE_STORE_PATH,
-            "credential_precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+            "label": "Canonical Alpaca PAPER env file",
+            "storage_type": "canonical_paper_env_file",
+            "relative_path": "~/.poverty_killer_alpaca_paper_env",
+            "absolute_path": str(canonical_alpaca_paper_env_path()),
+            "path_override_env": ALPACA_PAPER_ENV_PATH_ENV_KEY,
+            "credential_precedence": "ALPACA_PAPER_ENV_FILE_ONLY",
             "gitignored": True,
             "safe_instruction": (
-                "Open Keys & Providers, enter APCA_API_KEY_ID and APCA_API_SECRET_KEY for Alpaca PAPER Broker/Data, "
-                "then save local credentials. Values stay local and hidden."
+                "Store APCA_API_KEY_ID and APCA_API_SECRET_KEY in ~/.poverty_killer_alpaca_paper_env. "
+                "The old .operator_secrets provider vault is not PAPER execution truth."
             ),
             "forbidden_instruction": (
                 "Do not paste credentials into chat, do not commit .env files, and do not put raw secrets in tracked files."
@@ -362,7 +361,7 @@ def _build_paper_credential_setup(
             "secrets_values_exposed": False,
         },
         "next_safe_action": (
-            "Open Keys & Providers and save Alpaca PAPER credentials locally; never paste secrets into chat or tracked files."
+            "Populate ~/.poverty_killer_alpaca_paper_env with Alpaca PAPER credentials; never paste secrets into chat or tracked files."
             if not alpaca_configured
             else (
                 str(baseline_state.get("next_safe_action"))
@@ -465,7 +464,7 @@ def _build_run_paper_operator_state(
             "configured": alpaca_configured,
             "missing_fields": _missing_required_fields(alpaca),
             "source": alpaca.get("credential_source") or "NOT_CONFIGURED",
-            "precedence": credentials.get("precedence") or "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+            "precedence": "ALPACA_PAPER_ENV_FILE_ONLY",
             "raw_secret_values_included": False,
             "secrets_values_exposed": False,
         },
@@ -493,6 +492,14 @@ def _build_run_paper_operator_state(
             "manual_trading": {"label": "Manual trading unavailable", "available": False},
             "force_trade": {"label": "Force trade unavailable", "available": False},
             "broker_mutation": {"label": "No broker mutation from this readiness view", "occurred": False},
+        },
+        "final_reconciliation_contract": {
+            "required": True,
+            "owner": "OrderRouter.finalize_oms_shutdown_reconciliation",
+            "trigger": "bounded PAPER run shutdown",
+            "broker_read_authorization_required": True,
+            "status_before_run": "PENDING_RUN_AUTHORIZATION",
+            "failure_policy": "run cannot be marked complete without final broker reconciliation evidence or exact failure reason",
         },
         "advanced": {
             "final_launch_readiness": final,
@@ -523,6 +530,8 @@ def _build_run_paper_operator_state(
             "secrets_values_exposed": False,
             "backend_degraded_reasons": list(health.get("degraded_reasons") or []),
             "paper_start_authority_detail": _check_by_id(checks, "paper_start_authority").get("detail"),
+            "final_reconciliation_required": True,
+            "final_reconciliation_owner": "OrderRouter.finalize_oms_shutdown_reconciliation",
         },
     }
 
@@ -552,7 +561,7 @@ def build_launch_readiness(
             "alpaca_paper_credentials",
             "Alpaca PAPER credentials",
             "PASS" if alpaca_configured else "BLOCKED",
-            "configured through env/local secret store" if alpaca_configured else alpaca_detail,
+            "configured through canonical Alpaca PAPER env file" if alpaca_configured else alpaca_detail,
             blocker=not alpaca_configured,
         )
     )
@@ -619,13 +628,24 @@ def build_launch_readiness(
         )
     )
 
-    paper_start_allowed = supervisor.get("paper_start_allowed") is True or runtime.get("paper_start_allowed") is True
+    supervisor_start_allowed = supervisor.get("paper_start_allowed") is True
+    runtime_start_allowed = runtime.get("paper_start_allowed") is True
+    paper_start_allowed = supervisor_start_allowed and runtime_start_allowed
+    paper_start_detail = (
+        "supervisor and runtime start authority both agree"
+        if paper_start_allowed
+        else (
+            "supervisor_start_allowed="
+            f"{str(supervisor_start_allowed).lower()}, runtime_start_allowed={str(runtime_start_allowed).lower()}; "
+            f"{supervisor.get('paper_start_refusal_reason') or runtime.get('paper_start_refusal_reason') or 'start authority not unanimously green'}"
+        )
+    )
     checks.append(
         _check(
             "paper_start_authority",
             "Governed PAPER start",
             "PASS" if paper_start_allowed else "BLOCKED",
-            "existing /operator/intent/paper/start is available" if paper_start_allowed else str(supervisor.get("paper_start_refusal_reason") or runtime.get("paper_start_refusal_reason") or "not allowed"),
+            paper_start_detail,
             blocker=not paper_start_allowed,
         )
     )
@@ -661,25 +681,34 @@ def build_launch_readiness(
 
     paper_baseline_state = build_baseline_adoption_state(accepted_baseline=paper_baseline)
     baseline_ready = paper_baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
+    try:
+        baseline_position_count = int(paper_baseline_state.get("position_count") or 0)
+    except (TypeError, ValueError):
+        baseline_position_count = 0
     preflight_gate_open = alpaca_configured and endpoint_ok
     if baseline_ready:
         checks.append(
             _check(
                 "paper_existing_position_baseline",
-                "Existing-position PAPER baseline",
+                "PAPER baseline",
                 "PASS",
-                "Protected existing-position baseline accepted; existing inventory remains visible and protected.",
+                (
+                    "Protected existing-position baseline accepted; existing inventory remains visible and protected."
+                    if baseline_position_count > 0
+                    else "Clean PAPER baseline accepted; no existing positions require protection."
+                ),
             )
         )
-        checks.append(
-            _check(
-                "paper_baseline_position_aware_policy",
-                "Position-aware baseline policy",
-                "DEGRADED",
-                "Short PAPER smoke readiness only. Existing-position symbols are protected until run lot tracking is available.",
-                warning=True,
+        if baseline_position_count > 0:
+            checks.append(
+                _check(
+                    "paper_baseline_position_aware_policy",
+                    "Position-aware baseline policy",
+                    "DEGRADED",
+                    "Short PAPER smoke readiness only. Existing-position symbols are protected until run lot tracking is available.",
+                    warning=True,
+                )
             )
-        )
     else:
         checks.append(
             _check(
@@ -699,13 +728,11 @@ def build_launch_readiness(
 
     blockers = [check for check in checks if check["blocker"]]
     warnings = [check for check in checks if check["warning"]]
-    if blockers:
+    if blockers or warnings:
         final = "BLOCKED"
-    elif warnings:
-        final = "DEGRADED_BUT_RUNNABLE"
     else:
         final = "READY_FOR_BOUNDED_PAPER"
-    launch_paper_start_allowed = paper_start_allowed and not blockers
+    launch_paper_start_allowed = paper_start_allowed and final == "READY_FOR_BOUNDED_PAPER"
     run_paper_operator_state = _build_run_paper_operator_state(
         checks=checks,
         blockers=blockers,
@@ -729,7 +756,7 @@ def build_launch_readiness(
         "checks": checks,
         "reason_codes": [check["check_id"] for check in blockers + warnings],
         "alpaca_paper_credentials_configured": alpaca_configured,
-        "credential_precedence": credentials.get("precedence") or "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+        "credential_precedence": "ALPACA_PAPER_ENV_FILE_ONLY",
         "paper_endpoint_only": endpoint_ok,
         "paper_endpoint_authority": endpoint_authority,
         "paper_endpoint_status": endpoint_authority["status"],
@@ -753,6 +780,8 @@ def build_launch_readiness(
         "protected_same_symbol_guard_active": (run_paper_operator_state.get("paper_baseline_runtime_context") or {}).get("same_symbol_baseline_guard_active") is True,
         "protected_symbols_count": int((run_paper_operator_state.get("paper_baseline_runtime_context") or {}).get("protected_symbols_count") or 0),
         "safe_stop_status": safe_stop_status,
+        "final_reconciliation_required": True,
+        "final_reconciliation_contract": run_paper_operator_state["final_reconciliation_contract"],
         "portfolio_read_availability": "BROKER_READ_READY" if alpaca_configured else "UNAVAILABLE_MISSING_CREDENTIALS",
         "backend_degraded_reasons": list(health.get("degraded_reasons") or []),
         "can_execute": False,

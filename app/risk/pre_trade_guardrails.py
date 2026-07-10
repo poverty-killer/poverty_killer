@@ -12,6 +12,8 @@ from app.market.venue_capabilities import (
     QuoteSessionClassification,
     VenueCapability,
 )
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
+from app.utils.enums import is_blocking_risk_action
 
 
 ALLOW = "ALLOW"
@@ -85,6 +87,7 @@ class PreTradeGuardrailRequest:
     economics_context: Mapping[str, Any] | None = None
     strategy_context: Mapping[str, Any] | None = None
     exposure_authority_evidence: Mapping[str, Any] | None = None
+    stale_data_observation: TemporalInput | Mapping[str, Any] | None = None
     source: str = "pre_trade_guardrails"
     action: str | None = None
 
@@ -215,6 +218,10 @@ def evaluate_pre_trade_guardrails(request: PreTradeGuardrailRequest) -> PreTrade
                     details={"session_state": quote.session_state},
                 )
             )
+
+    stale_guard_reason = _append_stale_data_guard_evidence(evidence, request)
+    if stale_guard_reason:
+        reasons.append(stale_guard_reason)
 
     if requested_notional is None:
         reasons.append("REQUESTED_NOTIONAL_MISSING")
@@ -409,6 +416,101 @@ def _quantity_reasons(capability: VenueCapability | None, quantity: Decimal) -> 
     return tuple(dict.fromkeys(reasons))
 
 
+def _append_stale_data_guard_evidence(
+    evidence: list[GuardrailEvidence],
+    request: PreTradeGuardrailRequest,
+) -> str | None:
+    observation = _coerce_temporal_input(request.stale_data_observation)
+    if observation is None:
+        evidence.append(
+            GuardrailEvidence(
+                module="StaleDataGuard",
+                status=CONTRIBUTED_MISSING_TRUTH,
+                reason_code="STALE_DATA_GUARD_OBSERVATION_MISSING",
+                summary=(
+                    "No temporal observation was supplied to StaleDataGuard; the guard did not "
+                    "invent market freshness truth."
+                ),
+                details={"required_by_active_path": request.source == "main_loop_dispatch"},
+            )
+        )
+        if request.source == "main_loop_dispatch":
+            return "STALE_DATA_GUARD_OBSERVATION_MISSING"
+        return None
+
+    assessment = StaleDataGuard(symbol=request.symbol).assess(observation)
+    action = assessment.risk_action
+    blocking = is_blocking_risk_action(action)
+    reason_code = _stale_guard_reason_code(assessment, blocking=blocking)
+    evidence.append(
+        GuardrailEvidence(
+            module="StaleDataGuard",
+            status=CONTRIBUTED_BLOCK if blocking else CONTRIBUTED_ALLOW,
+            reason_code=reason_code,
+            summary=(
+                "StaleDataGuard assessed temporal market-data integrity and vetoed routing."
+                if blocking
+                else "StaleDataGuard assessed temporal market-data integrity and allowed routing."
+            ),
+            details={
+                "risk_action": getattr(action, "value", str(action)),
+                "risk_level": getattr(assessment.risk_level, "value", str(assessment.risk_level)),
+                "severity": getattr(assessment.severity, "value", str(assessment.severity)),
+                "authority_tier": getattr(assessment.authority_tier, "value", str(assessment.authority_tier)),
+                "priority": getattr(assessment.priority, "value", str(assessment.priority)),
+                "rationale": assessment.rationale,
+                "warnings": assessment.warnings,
+                "drift_ns": assessment.kinematics.drift_ns,
+                "current_ts_ns": observation.current_ts_ns,
+                "exchange_ts_ns": observation.exchange_ts_ns,
+                "local_received_ts_ns": observation.local_received_ts_ns,
+                "max_drift_ms": 500,
+                "mutation_authority": False,
+            },
+        )
+    )
+    return reason_code if blocking else None
+
+
+def _coerce_temporal_input(value: TemporalInput | Mapping[str, Any] | None) -> TemporalInput | None:
+    if isinstance(value, TemporalInput):
+        return value
+    if not isinstance(value, Mapping):
+        return None
+    current_ts_ns = _to_int(value.get("current_ts_ns") or value.get("snapshot_created_ns"))
+    exchange_ts_ns = _to_int(
+        value.get("exchange_ts_ns")
+        or value.get("candle_close_ts_ns")
+        or value.get("candle_id")
+        or value.get("latest_candle_ts_ns")
+    )
+    if current_ts_ns is None or exchange_ts_ns is None:
+        return None
+    local_received_ts_ns = _to_int(value.get("local_received_ts_ns") or value.get("receive_ts_ns"))
+    return TemporalInput(
+        current_ts_ns=current_ts_ns,
+        exchange_ts_ns=exchange_ts_ns,
+        local_received_ts_ns=local_received_ts_ns,
+    )
+
+
+def _stale_guard_reason_code(assessment: Any, *, blocking: bool) -> str:
+    if not blocking:
+        return "STALE_DATA_GUARD_ALLOW"
+    first_rationale = next((str(item) for item in assessment.rationale if str(item)), "")
+    if "absolute_drift_limit_breach" in first_rationale:
+        return "STALE_DATA_GUARD_ABSOLUTE_DRIFT_LIMIT_BREACH"
+    if first_rationale.startswith("invariant_violation:"):
+        return "STALE_DATA_GUARD_INVARIANT_VIOLATION"
+    action = getattr(assessment.risk_action, "value", str(assessment.risk_action))
+    return f"STALE_DATA_GUARD_{_sanitize_reason(action)}"
+
+
+def _sanitize_reason(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in str(value).upper())
+    return "_".join(part for part in cleaned.split("_") if part) or "BLOCK"
+
+
 def _requested_notional(request: PreTradeGuardrailRequest) -> Decimal | None:
     price = request.limit_price if request.limit_price is not None else request.current_price
     if price is None:
@@ -518,8 +620,17 @@ def _append_advisory_evidence(
         GuardrailEvidence(
             module="SovereignExecutionGuard",
             status=DORMANT_BY_POLICY,
-            reason_code="SOVEREIGN_EXECUTION_GUARD_NOT_AUTHORIZED_FOR_MUTATION",
-            summary="No independent mutation authority is granted to this guard in the pre-trade path.",
+            reason_code="SOVEREIGN_EXECUTION_GUARD_DORMANT_PENDING_PHASE_HI_ARM",
+            summary=(
+                "SovereignExecutionGuard is a mutation-capable capital authorization model and "
+                "stays intentionally dormant until live-arming policy authorizes it."
+            ),
+            details={
+                "bucket": "mutation_capable_dormant_by_policy",
+                "broker_mutation_authority": False,
+                "execution_authorization_authority": False,
+                "phase_required": "Phase H/I live arming",
+            },
         )
     )
     evidence.append(
@@ -581,6 +692,15 @@ def _to_decimal(value: Any) -> Decimal | None:
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
+        return None
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 

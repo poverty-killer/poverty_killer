@@ -299,7 +299,13 @@ def build_paper_baseline_runtime_context(
 
     policy = str(accepted_baseline.get("policy") or (accepted_snapshot.get("proof") or {}).get("policy") or "")
     if policy != expected_policy:
-        return _runtime_context_error("PAPER_BASELINE_POLICY_MISMATCH", required=required, source_path=source_path)
+        clean_baseline_allowed = (
+            policy == BASELINE_POLICY_CLEAN_ONLY
+            and expected_policy == BASELINE_POLICY_PROTECTED
+            and not _as_list(accepted_snapshot.get("positions"))
+        )
+        if not clean_baseline_allowed:
+            return _runtime_context_error("PAPER_BASELINE_POLICY_MISMATCH", required=required, source_path=source_path)
 
     open_order_count = int(((accepted_snapshot.get("orders") or {}).get("open_order_count") or 0))
     if open_order_count != 0:
@@ -331,6 +337,21 @@ def build_paper_baseline_runtime_context(
         }
     protected_symbols = tuple(sorted(protected_positions))
     if not protected_symbols:
+        if policy == BASELINE_POLICY_CLEAN_ONLY and not positions:
+            return PaperBaselineRuntimeContext(
+                baseline_required=required,
+                baseline_loaded=True,
+                baseline_snapshot_id=baseline_snapshot_id,
+                snapshot_hash=snapshot_hash,
+                policy=policy,
+                protected_symbols_normalized=(),
+                protected_positions={},
+                accepted_at=str(accepted_baseline.get("accepted_at") or proof.get("accepted_at") or ""),
+                source_path=str(source_path) if source_path else None,
+                same_symbol_trading_policy=SAME_SYMBOL_POLICY_BLOCK,
+                run_lot_tracking_available=False,
+                baseline_context_error=None,
+            )
         return _runtime_context_error("PAPER_BASELINE_PROTECTED_SYMBOLS_MISSING", required=required, source_path=source_path)
 
     return PaperBaselineRuntimeContext(

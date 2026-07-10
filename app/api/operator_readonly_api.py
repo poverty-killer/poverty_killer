@@ -212,9 +212,9 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
             "secrets_values_exposed": False,
             "paper_credential_setup": {
                 "schema_version": "paper-credential-setup-v1",
-                "canonical_credential_authority": "OPERATOR_LOCAL_CREDENTIAL_STORE_AND_PROCESS_ENV",
-                "approved_secret_path": DEFAULT_RELATIVE_STORE_PATH,
-                "credential_precedence": "ENV_PRESENT_OVERRIDES_LOCAL_SECRET",
+                "canonical_credential_authority": "ALPACA_PAPER_ENV_FILE_ONLY",
+                "approved_secret_path": "~/.poverty_killer_alpaca_paper_env",
+                "credential_precedence": "ALPACA_PAPER_ENV_FILE_ONLY",
                 "read_only_preflight_authorized": False,
                 "read_only_preflight_checks": ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
                 "alpaca_network_call_occurred": False,
@@ -593,7 +593,7 @@ class OperatorSnapshotProvider:
             "paper_stop_refusal_reason": None if is_active else "NO_ACTIVE_RUN",
             "paper_credentials_configured": paper_key_refusal is None,
             "paper_credential_refusal_reason": paper_key_refusal,
-            "paper_credential_source": "PROCESS_ENV_PRESENT" if paper_key_refusal is None else "MISSING_OR_INVALID",
+            "paper_credential_source": "CANONICAL_PAPER_ENV_FILE" if paper_key_refusal is None else "MISSING_OR_INVALID",
             "paper_endpoint_only": endpoint_authority["paper_endpoint_only"],
             "paper_endpoint_status": endpoint_authority["status"],
             "paper_endpoint_source": endpoint_authority["endpoint_source"],
@@ -1441,7 +1441,16 @@ class OperatorSnapshotProvider:
         return result
 
     def portfolio(self) -> dict[str, Any]:
-        snapshot = build_portfolio_snapshot(self._refresh_provider_env(), client=self.portfolio_client)
+        env = self._refresh_provider_env()
+        broker_read_authorized = (
+            str(env.get("PK_BOARD_AUTHORIZED_PAPER_BROKER_READ") or "").strip().upper()
+            == "YES_D4_BOARD_AUTHORIZED"
+        )
+        snapshot = build_portfolio_snapshot(
+            env,
+            client=self.portfolio_client,
+            broker_read_authorized=broker_read_authorized,
+        )
         self._latest_portfolio_snapshot = snapshot
         self._latest_portfolio_snapshot_at_monotonic = time.perf_counter()
         return snapshot
@@ -1693,7 +1702,7 @@ class OperatorSnapshotProvider:
         elif baseline_preflight_required:
             dominant_blocker = "paper_read_only_preflight_gate"
         elif local_start_ready:
-            dominant_blocker = "READY_FOR_GOVERNED_PAPER"
+            dominant_blocker = "READY_FOR_BOUNDED_PAPER"
         else:
             dominant_blocker = str(supervisor.get("paper_start_refusal_reason") or "PAPER_START_BLOCKED")
         reason_codes = list(dict.fromkeys([dominant_blocker, *required_failures, str(supervisor.get("paper_start_refusal_reason") or "")]))
@@ -2855,8 +2864,10 @@ class OperatorSnapshotProvider:
                 facts.append("Current state: READY_IDLE_NO_ACTIVE_RUNTIME (ready/idle; no active PAPER run attached).")
             if runtime.get("supervisor_state"):
                 facts.append(f"Supervisor: {runtime.get('supervisor_state')}.")
-            if runtime.get("paper_start_allowed") is not None or readiness.get("paper_start_allowed") is not None:
-                facts.append(f"Paper start allowed: {str(runtime.get('paper_start_allowed') is True or readiness.get('paper_start_allowed') is True).lower()}.")
+            if readiness.get("paper_start_allowed") is not None:
+                launch = str(readiness.get("final_launch_readiness") or "")
+                readiness_start_allowed = readiness.get("paper_start_allowed") is True and launch == "READY_FOR_BOUNDED_PAPER"
+                facts.append(f"Paper start allowed: {str(readiness_start_allowed).lower()}.")
             max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds")
             if max_duration:
                 facts.append(f"Max duration: {max_duration} seconds / {self._duration_days_label(max_duration)}.")
@@ -3338,18 +3349,17 @@ class OperatorSnapshotProvider:
         runtime = context.get("runtime") or {}
         return (
             self._ai_paper_runnable_readiness(readiness, runtime)
-            and (readiness.get("paper_start_allowed") is True or runtime.get("paper_start_allowed") is True)
             and str(runtime.get("supervisor_state") or "").upper() == "IDLE"
             and bool(runtime.get("current_runtime_attached")) is False
         )
 
     def _ai_paper_runnable_readiness(self, readiness: Mapping[str, Any], runtime: Mapping[str, Any] | None = None) -> bool:
         launch = str(readiness.get("final_launch_readiness") or "")
-        paper_start_allowed = readiness.get("paper_start_allowed") is True or (runtime or {}).get("paper_start_allowed") is True
-        return paper_start_allowed and launch in {"READY_FOR_BOUNDED_PAPER", "DEGRADED_BUT_RUNNABLE"}
+        paper_start_allowed = readiness.get("paper_start_allowed") is True
+        return paper_start_allowed and launch == "READY_FOR_BOUNDED_PAPER"
 
     def _ai_paper_runnable_truth(self, truth: Mapping[str, Any]) -> bool:
-        return truth.get("paper_start_allowed") is True and str(truth.get("launch") or "") in {"READY_FOR_BOUNDED_PAPER", "DEGRADED_BUT_RUNNABLE"}
+        return truth.get("paper_start_allowed") is True and str(truth.get("launch") or "") == "READY_FOR_BOUNDED_PAPER"
 
     def _ai_historical_duplicate_refusal(self, context: dict[str, Any]) -> bool:
         runtime = context.get("runtime") or {}
@@ -3367,7 +3377,7 @@ class OperatorSnapshotProvider:
         return {
             "launch": readiness.get("final_launch_readiness") or "UNKNOWN",
             "supervisor": runtime.get("supervisor_state") or "UNKNOWN",
-            "paper_start_allowed": readiness.get("paper_start_allowed") is True or runtime.get("paper_start_allowed") is True,
+            "paper_start_allowed": readiness.get("paper_start_allowed") is True,
             "live": "locked" if readiness.get("live_blocked") is not False else "UNKNOWN",
             "real_money": "blocked" if readiness.get("real_money_blocked") is not False else "UNKNOWN",
             "max_duration": max_duration_int,

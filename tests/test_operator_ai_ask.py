@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
+
+import pytest
 
 from app.ai_chief_operator.config import AIChiefConfig
 from app.ai_chief_operator.provider_gateway import AIProviderGateway
@@ -8,8 +12,8 @@ from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupe
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
-from app.operator_activation.paper_baseline import BASELINE_POLICY_PROTECTED
-from app.operator_credentials.store import LocalCredentialStore
+from app.operator_activation.paper_baseline import BASELINE_POLICY_CLEAN_ONLY, BASELINE_POLICY_PROTECTED
+from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
 
 
@@ -27,7 +31,32 @@ PAPER_ENV = {
 }
 
 
-def _paper_preflight_snapshot() -> dict[str, object]:
+@pytest.fixture(autouse=True)
+def _isolated_canonical_paper_env(monkeypatch, tmp_path) -> Path:
+    path = tmp_path / "canonical_alpaca_paper.env"
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(path))
+    return path
+
+
+def _write_canonical_paper_env() -> None:
+    path = Path(os.environ[ALPACA_PAPER_ENV_PATH_ENV_KEY])
+    path.write_text(
+        "\n".join(
+            [
+                "APCA_API_KEY_ID=test-paper-key",
+                "APCA_API_SECRET_KEY=test-paper-secret",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _paper_preflight_snapshot(*, existing_positions: bool = False) -> dict[str, object]:
+    positions = (
+        [{"symbol": "AAPL", "asset_class": "us_equity", "qty": "1", "side": "long"}]
+        if existing_positions
+        else []
+    )
     return {
         "endpoint_family": "paper",
         "account": {
@@ -43,16 +72,16 @@ def _paper_preflight_snapshot() -> dict[str, object]:
         },
         "open_order_count": 0,
         "open_orders": [],
-        "position_count": 1,
-        "positions": [{"symbol": "AAPL", "asset_class": "us_equity", "qty": "1", "side": "long"}],
+        "position_count": len(positions),
+        "positions": positions,
     }
 
 
-def _accept_ready_baseline(provider: OperatorSnapshotProvider) -> None:
+def _accept_ready_baseline(provider: OperatorSnapshotProvider, *, existing_positions: bool = False) -> None:
     accepted = provider.paper_baseline_accept(
         {
-            "preflight_snapshot": _paper_preflight_snapshot(),
-            "policy": BASELINE_POLICY_PROTECTED,
+            "preflight_snapshot": _paper_preflight_snapshot(existing_positions=existing_positions),
+            "policy": BASELINE_POLICY_PROTECTED if existing_positions else BASELINE_POLICY_CLEAN_ONLY,
             "accepted_by_operator": "Shan/local operator",
         }
     )
@@ -61,6 +90,7 @@ def _accept_ready_baseline(provider: OperatorSnapshotProvider) -> None:
 
 
 def _ready_app(tmp_path):
+    _write_canonical_paper_env()
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     provider = OperatorSnapshotProvider(
@@ -359,7 +389,7 @@ def test_ai_ask_ready_paper_run_answers_yes_without_fake_blocker(tmp_path):
 
     assert payload["mode"] == "RUN_PLANNER"
     assert answer.startswith("Yes - governed PAPER is ready and start is allowed.")
-    assert "Launch readiness: DEGRADED_BUT_RUNNABLE" in answer
+    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
     assert "Supervisor: IDLE" in answer
     assert "Paper start allowed: true" in answer
     assert "Live locked; real money blocked" in answer
@@ -378,6 +408,7 @@ def test_ai_ask_ready_paper_run_answers_yes_without_fake_blocker(tmp_path):
 
 
 def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_path):
+    _write_canonical_paper_env()
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     store.save_provider(
@@ -433,7 +464,7 @@ def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_pat
     assert payload["model_call_attempted"] is False
     assert payload["model_call_occurred"] is False
     assert answer.startswith("Yes - governed PAPER is ready and start is allowed.")
-    assert "Launch readiness: DEGRADED_BUT_RUNNABLE" in answer
+    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
     assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
     assert "READY_IDLE_NO_ACTIVE_RUNTIME" in " ".join(payload["known_facts"])
     assert "Use Run PAPER only after readiness blockers are cleared" not in answer
@@ -462,7 +493,7 @@ def test_ai_ask_alive_is_concise_health_answer_when_ready_idle(tmp_path):
     assert payload["model_call_occurred"] is False
     assert answer.startswith("Yes - backend connected and our bot is idle-ready.")
     assert "Runtime: IDLE / no active PAPER run" in answer
-    assert "Launch readiness: DEGRADED_BUT_RUNNABLE" in answer
+    assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
     assert "Current backend truth:" not in answer
     assert "Provider readiness loaded" not in answer
     assert "Redacted JSON" not in answer
@@ -1005,6 +1036,7 @@ def test_ai_ask_quant_smoke_run_assessment_calls_selected_provider_as_limited_ad
 
 
 def test_ai_ask_quant_smoke_run_live_contradiction_is_replaced_with_backend_truth(tmp_path):
+    _write_canonical_paper_env()
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     store.save_provider(
@@ -1076,7 +1108,7 @@ def test_ai_ask_quant_smoke_run_live_contradiction_is_replaced_with_backend_trut
     assert "answer: not ready" not in answer
     assert "blind robot" not in answer
     assert "wording was replaced with grounded backend truth" in answer
-    assert "launch readiness: degraded_but_runnable" in answer
+    assert "launch readiness: ready_for_bounded_paper" in answer
     assert "paper start allowed: true" in answer
     assert "ai cannot start it" in answer
     assert payload["answer_source"] == "API_LIGHT_MODEL"

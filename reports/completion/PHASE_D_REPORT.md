@@ -3,171 +3,292 @@
 Date: 2026-07-10
 Branch: master
 Latest commit at open: `eff471d phase C authority graph`
+Active packet: Phase D convergence + D1-FIX Board packet.
 
-## VERDICT
-
-Phase D is BLOCKED at D1 by Board-ratified stop condition.
-
-Binary gate status:
+## Gate Verdict
 
 | Gate | Status | Proof rung | Evidence |
 | --- | --- | --- | --- |
-| D0 - Single active broker path | PASS | tests prove logic / static runtime topology | `tests/test_phase_d_paper_readiness_truth.py` passed; active submit path outside `OrderRouter` is only `ExecutionEngine -> OrderRouter`; rejected orchestrator is not imported by active runtime. |
-| D1 - Safety guard liveness | FAIL | tests prove logic / runtime pre-trade function proof | `stale_data_guard` is not in live pre-trade evidence; `SovereignExecutionGuard` is emitted as `DORMANT_BY_POLICY`. Board packet says stop here and report, not wire. |
-| D2 - Single Alpaca PAPER credential source | NOT_RUN_DUE_D1_BLOCKER | not run | Board ruled `~/.poverty_killer_alpaca_paper_env` as canonical, but D2 rewiring was not attempted because D1 failed and the packet ordered a stop. |
-| D3 - Paper endpoint proven / live and real money blocked | NOT_RUN_DUE_D1_BLOCKER | not run | Existing code has paper/live locks, but Phase D proof work stopped at D1. |
-| D4 - Account / open-orders / positions baseline known | UNKNOWN-pending-Board-read | not run | Broker read was not authorized in this packet. No credential inspection or broker call occurred. |
-| D5 - Portfolio truth broker-confirmed or exact failure | NOT_RUN_DUE_D1_BLOCKER | not run | Required D5 UI/API rewiring was not attempted because D1 failed. Current known desired failure state is `broker read not authorized`. |
-| D6 - Run-PAPER button matches backend readiness | NOT_RUN_DUE_D1_BLOCKER | not run | Required READY_FOR_BOUNDED_PAPER-only unification was not attempted because D1 failed. |
-| D7 - Final reconciliation requirement explicit | NOT_RUN_DUE_D1_BLOCKER | not run | Existing code has reconciliation concepts, but Phase D contract proof was not attempted because D1 failed. |
+| D0 - Single active broker path | PASS | focused tests prove topology | `tests/test_phase_d_paper_readiness_truth.py` proves active runtime broker submit remains `ExecutionEngine -> OrderRouter -> broker_gateway/adapter`; rejected orchestrator is not imported by active runtime. |
+| D1 - Safety guard liveness | PASS | focused tests prove behavior | `StaleDataGuard` is now a blocking contributor under `evaluate_pre_trade_guardrails`; stale market data is rejected. `SovereignExecutionGuard` is mutation-capable and remains `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`, represented as such. |
+| D2 - Single Alpaca PAPER credential source | PASS | focused tests prove resolver behavior | Alpaca PAPER execution credentials resolve only from `~/.poverty_killer_alpaca_paper_env` or `POVERTY_KILLER_ALPACA_PAPER_ENV_PATH`; `.operator_secrets` and process APCA vars are demoted for PAPER execution truth. |
+| D3 - Paper endpoint proven / live and real money blocked | PASS | focused tests prove failure modes | Canonical live endpoint fails closed with `LIVE_ENDPOINT_BLOCKED`; PAPER endpoint normalizes to `https://paper-api.alpaca.markets`; real money remains blocked. |
+| D4 - Account / open-orders / positions baseline known | UNKNOWN-pending-Board-read | not run by governance | No broker read authorization was granted. No Alpaca account/open-orders/positions request was made. |
+| D5 - Portfolio truth broker-confirmed or exact failure | PASS | focused API test proves exact failure | Without D4 authorization, `/operator/portfolio` returns `BROKER_READ_NOT_AUTHORIZED` and does not call the broker client or show fabricated broker-confirmed values. |
+| D6 - Run-PAPER button/backend truth | PASS | focused tests + JS syntax check | Backend and UI gate on exactly `READY_FOR_BOUNDED_PAPER`; `DEGRADED_BUT_RUNNABLE` and `READY_FOR_GOVERNED_PAPER` are removed from runtime/UI contracts. |
+| D7 - Final reconciliation explicit | PASS | focused API test proves contract | Launch readiness exposes `final_reconciliation_required` and owner `OrderRouter.finalize_oms_shutdown_reconciliation`. |
 
-Phase D cannot honestly close. The next Board packet must decide how to wire or lawfully represent `app.risk.stale_data_guard` and `app.risk.sovereign_execution_guard` under `app.risk.pre_trade_guardrails.evaluate_pre_trade_guardrails` without weakening risk behavior or creating duplicate authority.
+## 1. Verdict
 
-## 1. VERDICT
+Phase D is complete for the authorized scope. PAPER was not run. Broker read remains held as `UNKNOWN-pending-Board-read`.
 
-BLOCKED. D0 passed. D1 failed as a real safety gap, not a static-analysis false positive. Per the Board's D1 ruling, I stopped before D2-D7 implementation.
+D1 was resolved without creating new authority: `StaleDataGuard` contributes a veto under the existing pre-trade guardrail owner, while `SovereignExecutionGuard` is classified as mutation-capable and kept dormant by policy until a future live-arming phase.
 
-## 2. FILES CHANGED
+## 2. Files Changed
 
-- `tests/test_phase_d_paper_readiness_truth.py` - new proof tests for D0 active broker path and D1 guard-liveness blocker.
-- `reports/completion/PHASE_D_REPORT.md` - this report.
-- `CHECKPOINT_TRACKER.md` - updated Phase D status and Board rulings.
-- `reports/codex_handoff_latest.md` - updated current handoff for the D1 blocker stop.
+Runtime/backend:
 
-No source runtime modules, UI modules, credentials, state, logs, thresholds, or broker code were edited.
+- `app/risk/pre_trade_guardrails.py`
+- `app/main_loop.py`
+- `app/core/authority_graph.py`
+- `app/operator_credentials/store.py`
+- `app/execution/alpaca_paper_adapter.py`
+- `app/operator_activation/launch_readiness.py`
+- `app/operator_activation/paper_baseline.py`
+- `app/operator_portfolio/snapshot.py`
+- `app/operator_providers/readiness.py`
+- `app/api/operator_readonly_api.py`
+- `app/api/operator_paper_supervisor.py`
 
-## 3. ROOT CAUSE
+UI/contracts:
 
-D0 root cause carried in from Phase C was missing runtime proof. Phase C named `OrderRouter` as broker/order lifecycle owner but did not prove that active code paths cannot bypass it.
+- `ui/operator-control-panel/app.js`
+- `ui/operator-control-panel/contracts.json`
 
-D1 root cause is real wiring absence:
+Tests:
 
-- `main_loop` calls `evaluate_pre_trade_guardrails(...)`.
-- `evaluate_pre_trade_guardrails(...)` does not call `StaleDataGuard`.
-- `evaluate_pre_trade_guardrails(...)` records `SovereignExecutionGuard` as `DORMANT_BY_POLICY` with reason `SOVEREIGN_EXECUTION_GUARD_NOT_AUTHORIZED_FOR_MUTATION`.
-- Therefore D1 is not a false BLOCKED row. It is an unresolved safety-contributor wiring gap.
+- `tests/test_phase_d_paper_readiness_truth.py`
+- `tests/test_pre_trade_guardrail_constraints.py`
+- `tests/test_alpaca_paper_credential_authority_guard.py`
+- `tests/test_operator_launch_readiness.py`
+- `tests/test_operator_credentials.py`
+- `tests/test_operator_portfolio.py`
+- `tests/test_operator_readonly_api.py`
+- `tests/test_operator_ai_ask.py`
+- `tests/test_operator_ui_wiring.py`
 
-## 4. FIXES IMPLEMENTED
+Reports/tracker:
 
-Implemented proof, not behavioral rewiring:
+- `reports/completion/PHASE_D_REPORT.md`
+- `CHECKPOINT_TRACKER.md`
+- `reports/codex_handoff_latest.md`
 
-- Added an AST-based D0 tripwire proving no active runtime `submit_order(...)` call bypasses `OrderRouter`.
-- Added proof that `app.execution.orchestrator` remains rejected/reference-only and is not imported by active runtime.
-- Added proof that lower-layer public methods on `PaperBroker` and `AlpacaPaperBrokerAdapter` remain preserved and are not treated as violations by themselves.
-- Added D1 proof showing `StaleDataGuard` is absent from live pre-trade evidence and `SovereignExecutionGuard` is dormant by policy.
+## 3. Root Cause
 
-No D1 wiring was attempted.
+D1 root cause: `StaleDataGuard` existed as a module but was not consumed by the live pre-trade guardrail evidence path. Static Phase C classification was correct enough to flag the gap.
 
-## 5. 360 ADJACENT IMPROVEMENTS
+D2 root cause: Alpaca PAPER credentials had multiple effective readers: process env, `.operator_secrets/provider_credentials.json`, and the paper env file. That could make the operator UI appear configured while execution used a different source.
 
-The new test distinguishes executable topology from prose, comments, and preserved APIs. The first draft caught a docstring and was corrected to AST call-node proof, which avoids fake failures and better matches the Board's D0 ruling.
+D6 root cause: readiness had multiple green-ish states and OR logic across supervisor/runtime/launch signals. That could produce fake green when one layer was ready and another was blocked.
 
-The D1 proof prevents a future report from promoting the guard row to WIRED without actual code evidence. It also protects against silently substituting `MarketTruthSnapshot` validation as a claimed `StaleDataGuard` wiring, which the Board explicitly rejected for this phase.
+## 4. Fixes Implemented
 
-## 6. TESTS / CHECKS
+`StaleDataGuard` now runs inside `evaluate_pre_trade_guardrails` as a labeled evidence contributor. It can block a trade but cannot size, route, submit, or mutate broker state.
 
-Proof ladder reached: tests prove logic. No runtime server, browser, broker-read, or PAPER run proof was performed.
+`main_loop` now passes market truth timing into pre-trade guardrails. If the live dispatch path cannot provide stale-data observation, it fails closed with `STALE_DATA_GUARD_OBSERVATION_MISSING`.
+
+`SovereignExecutionGuard` remains dormant as `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM` because live-repo evidence shows it can issue execution/capital authorization receipts. It was not activated.
+
+Alpaca PAPER execution credentials now resolve from the canonical paper env file only. Local vault values remain redacted/local provider data but no longer satisfy PAPER execution readiness.
+
+Launch readiness and UI control state now use exactly one green-light: `READY_FOR_BOUNDED_PAPER`.
+
+Portfolio endpoint now returns exact `BROKER_READ_NOT_AUTHORIZED` failure when D4 broker read has not been armed.
+
+Final reconciliation is explicit in the launch-readiness contract.
+
+## 5. 360 Adjacent Improvements
+
+Clean accepted PAPER baselines now load as valid runtime baseline context when there are no positions. Protected-position baselines still require protected symbols and remain warning-blocked until the Board authorizes the position-aware PAPER path.
+
+Provider readiness no longer falls back from an empty canonical Alpaca PAPER result to process/local secrets. That was a real D2 leak and is now closed.
+
+AI readiness answers now derive from the single readiness state and no longer treat deprecated degraded/governed aliases as runnable.
+
+Tests now isolate `POVERTY_KILLER_ALPACA_PAPER_ENV_PATH` so they cannot pass accidentally because Shan's real machine has a canonical env file.
+
+## 6. Tests / Checks
 
 Passed:
 
 ```powershell
-python -m pytest tests/test_phase_d_paper_readiness_truth.py -q --basetemp .pytest_tmp\phase_d_probe
+node --check ui/operator-control-panel/app.js
 ```
-
-Result: 4 passed, 72 existing warnings.
 
 Passed:
 
 ```powershell
-python -m py_compile tests/test_phase_d_paper_readiness_truth.py
+python -m py_compile app\risk\pre_trade_guardrails.py app\main_loop.py app\core\authority_graph.py app\operator_credentials\store.py app\execution\alpaca_paper_adapter.py app\operator_activation\launch_readiness.py app\operator_activation\paper_baseline.py app\operator_portfolio\snapshot.py app\operator_providers\readiness.py app\api\operator_readonly_api.py app\api\operator_paper_supervisor.py
 ```
 
-Initial failed check:
+Passed:
 
 ```powershell
-python -m pytest tests/test_phase_d_paper_readiness_truth.py -q --basetemp .pytest_tmp\phase_d_probe
+rg -n "DEGRADED_BUT_RUNNABLE|READY_FOR_GOVERNED_PAPER" app ui tests -S
 ```
 
-Result: 1 failed, 3 passed. The failure was a test bug: plain text matching counted an `ExecutionEngine` docstring. I corrected the proof to parse AST call nodes.
+Only the negative assertions in `tests/test_phase_d_paper_readiness_truth.py` remain.
 
-## 7. BROWSER / RUNTIME / BROKER-READ-ONLY PROOF
+Passed:
 
-Browser proof: not run. No UI code was changed.
+```powershell
+python -m pytest tests/test_phase_d_paper_readiness_truth.py tests/test_pre_trade_guardrail_constraints.py tests/test_alpaca_paper_credential_authority_guard.py tests/test_operator_launch_readiness.py tests/test_operator_credentials.py tests/test_operator_portfolio.py tests/test_operator_readonly_api.py tests/test_operator_ai_ask.py tests/test_operator_ui_wiring.py tests/test_operator_paper_supervisor.py -q --basetemp .pytest_tmp\phase_d_focused_all
+```
 
-Runtime server proof: not run. The Board's D1 stop condition fired before runtime/API changes.
+Result: 206 passed, 72 existing warnings.
 
-Broker-read-only proof: not run. D4 broker read was explicitly held as `UNKNOWN-pending-Board-read`; no live credentials, no Alpaca call, no broker read, and no broker mutation occurred.
+## 7. Runtime / Browser / Broker Proof
 
-## 8. SELF-RED-TEAM + ANTI-HALLUCINATION
+Runtime server proof: not run; this phase used focused in-process API/unit proof.
 
-Pre-code red-team answers:
+Browser proof: not run; UI change was contract/JS logic and `node --check` only.
 
-- Duplicate authority risk: D0 tests could accidentally treat adapter public methods as illegal and push us toward flattening lower-layer broker APIs. Mitigation: test preserves those methods and only blocks active runtime bypasses.
-- Fake readiness risk: D1 could be papered over by claiming `MarketTruthSnapshot` stale validation equals `StaleDataGuard`. Mitigation: report D1 as blocker because the Board forbade substitution.
-- Hidden broker path risk: static grep can match comments or miss dynamic calls. Mitigation: AST call-node scan for active `submit_order` call sites plus rejected-orchestrator import scan.
-- Runtime-fails-while-tests-pass risk: these tests prove topology and guard evidence, not full runtime readiness. Report does not claim runtime readiness.
-- Credential/UI fake green risk: D2-D7 were not touched because D1 failed; report marks them not run rather than implying partial success.
+Broker read proof: not run by governance. D4 remains `UNKNOWN-pending-Board-read`.
 
-Anti-hallucination answers:
+Broker mutation/PAPER run: not run.
 
-- Actually inspected: `AGENTS.md`, `CHECKPOINT_TRACKER.md`, latest handoff, `app/risk/pre_trade_guardrails.py`, `app/main_loop.py`, `app/execution/engine.py`, `app/execution/order_router.py`, `app/execution/orchestrator.py`, operator readiness code, UI readiness references, and focused tests.
-- Tests prove: active submit call topology, rejected orchestrator not imported, lower-layer broker methods preserved, and D1 blocker evidence.
-- Runtime proves: nothing in this phase.
-- Browser proves: nothing in this phase.
-- Broker-read-only proves: nothing in this phase.
-- Inference: D1 is a safety gap requiring Board design because the live evidence path does not include the two named guards.
-- Unknown: D2-D7 final behavior after future implementation; account/open-orders/positions baseline because no broker read was authorized.
-- Not run: PAPER run, broker read, live read, UI browser validation, root test suite.
-- No failure was summarized away: the report explicitly marks D1 FAIL and D2-D7 not run.
+## 8. Self-Red-Team
 
-## 9. SAFETY CONFIRMATION
+Fake readiness vector: a test could pass while production still reads `.operator_secrets`. Closed by changing `LocalCredentialStore.resolve_provider_field`, `effective_env`, `alpaca_paper_adapter`, and provider readiness, then testing stale local/process values against a canonical file.
 
-- No Sacred Safety Law was weakened.
-- No risk, stale/TTL, economic, sizing, masking, strategy, NetEdge, OMS, broker, or threshold logic was changed.
-- No broker mutation occurred.
-- No PAPER run occurred.
-- No live endpoint was enabled or touched.
-- No real-money path was enabled or touched.
-- No raw secrets were read, written, printed, logged, or staged.
-- No state, log, runtime DB, `.operator_secrets`, or credential file was edited.
-- No dormant or blocked module was deleted, flattened, or faked into working.
+Hidden broker path vector: public adapter methods could be mistaken for active bypasses. D0 tests distinguish preserved lower-layer APIs from active runtime dispatch.
 
-## 10. MODULE STATUS
+Guard weakening vector: wiring stale guard could alter thresholds. No stale threshold was changed; guard result is consumed as evidence/veto only.
 
-| Module | Status | Role / blocker |
+UI fake-green vector: UI could OR supervisor/runtime/launch truth. UI and backend now require exact `READY_FOR_BOUNDED_PAPER`.
+
+Portfolio fake truth vector: cached/fake portfolio could appear broker-confirmed without D4. `/operator/portfolio` now returns exact no-read authorization failure.
+
+## 9. Governance / Safety Confirmation
+
+No Sacred Safety Law was weakened.
+
+No risk, stale/TTL, economic, sizing, masking, strategy, NetEdge, OMS, broker, or threshold value was weakened.
+
+No broker read was performed.
+
+No broker mutation occurred.
+
+No PAPER run occurred.
+
+No live endpoint was enabled or touched.
+
+No real-money path was enabled or touched.
+
+No raw secrets were read, printed, written, or staged.
+
+No state, log, runtime DB, `.operator_secrets`, credential file, or screenshot is recommended for staging.
+
+## 10. Module Status
+
+| Module | Status | Role / reason |
 | --- | --- | --- |
-| `app.execution.order_router.OrderRouter` | wired-with-role | Sole active broker/order lifecycle owner; active external broker submit path runs under it. |
-| `app.execution.engine.ExecutionEngine` | wired-with-role | Active execution spine caller into `OrderRouter.submit_order`. |
-| `app.execution.orchestrator` | rejected-preserved | Reference-only rejected dual-authority module; not imported by active runtime. |
-| `app.execution.paper_broker.PaperBroker` | wired-lower-layer | Preserved simulator API used under `OrderRouter`; public method existence is not a D0 violation. |
-| `app.execution.alpaca_paper_adapter.AlpacaPaperBrokerAdapter` | wired-lower-layer | Preserved external PAPER adapter API used under `OrderRouter`; public method existence is not a D0 violation. |
-| `app.risk.pre_trade_guardrails.evaluate_pre_trade_guardrails` | wired-owner-with-blocker | Live pre-trade risk-gate owner; currently lacks live `StaleDataGuard` execution and marks `SovereignExecutionGuard` dormant. |
-| `app.risk.stale_data_guard.StaleDataGuard` | blocked-with-reason | Not in live pre-trade guardrail evidence path. Board ordered report/blocker only, no silent wiring. |
-| `app.risk.sovereign_execution_guard.SovereignExecutionGuard` | blocked-with-reason | Represented as `DORMANT_BY_POLICY`, not live firing guard. Board ordered report/blocker only, no silent wiring. |
+| `app.execution.order_router.OrderRouter` | WIRED | Sole active broker/order lifecycle owner. |
+| `app.execution.orchestrator` | REJECTED-PRESERVED | Reference-only rejected orchestrator, not active runtime. |
+| `app.risk.pre_trade_guardrails` | WIRED | Risk-gate owner; consumes stale guard evidence. |
+| `app.risk.stale_data_guard.StaleDataGuard` | WIRED | Blocking stale-data evidence contributor; no broker mutation/sizing authority. |
+| `app.risk.sovereign_execution_guard.SovereignExecutionGuard` | BLOCKED/DORMANT_BY_POLICY | Mutation-capable capital/execution authorization guard; intentionally dormant until Phase H/I arming. |
+| `app.operator_credentials.store` | WIRED | Canonical Alpaca PAPER credential source enforcement. |
+| `app.execution.alpaca_paper_adapter` | WIRED | Uses canonical paper env file; live endpoint blocked. |
+| `app.operator_activation.launch_readiness` | WIRED | Single readiness green-light and final reconciliation contract. |
+| `app.operator_portfolio.snapshot` | WIRED | Exact broker-read-not-authorized failure when D4 is not armed. |
+| `ui/operator-control-panel/app.js` | WIRED | Run-PAPER UI derives enabled state from exact backend readiness truth. |
 
-## 11. DISAGREEMENTS
+## 11. D0 Details
 
-No remaining disagreement with the Board packet. The Board accepted the challenge and explicitly ruled that a genuine D1 absence must hold Phase D open. I followed that stop condition.
+D0 active broker-path proof remains: active broker submit goes through `OrderRouter`. Preserved lower-layer public methods on paper broker/adapters are not violations by themselves.
 
-Engineering view for next packet: D1 should likely be resolved by making `evaluate_pre_trade_guardrails` consume structured evidence from these guard modules under the risk-gate owner, not by granting them independent mutation authority.
+## 12. D1 Details
 
-## 12. LIMITATIONS + UNKNOWNS
+Challenge result:
 
-- D2 credential-source unification is still unfixed.
-- D3 endpoint/live/real-money proof remains unexecuted for Phase D.
-- D4 account/open-orders/positions baseline remains `UNKNOWN-pending-Board-read`.
-- D5 exact portfolio failure state remains unimplemented.
-- D6 READY_FOR_BOUNDED_PAPER-only backend/UI contract remains unimplemented.
-- D7 final reconciliation contract remains unimplemented.
-- The focused D0/D1 tests do not prove full app runtime readiness.
-- Existing dirty/untracked files remain preserved and unstaged.
+- `StaleDataGuard` is block-only for this seam: it returns risk actions and evidence, no broker/order calls.
+- `SovereignExecutionGuard` is mutation-capable by design because it produces authorization receipts and capital/execution allowance fields. It remains dormant by policy.
 
-## 13. EXACT STAGING RECOMMENDATION
+Proof:
+
+- Stale market data in the live pre-trade guardrail path is rejected.
+- Sovereign guard evidence appears as dormant, not silently live and not hidden.
+
+## 13. D2 Details
+
+Canonical source: `~/.poverty_killer_alpaca_paper_env`, overrideable in tests/operator process by `POVERTY_KILLER_ALPACA_PAPER_ENV_PATH`.
+
+Demoted source: `.operator_secrets/provider_credentials.json` is not PAPER execution truth.
+
+Process APCA variables are not allowed to override the canonical paper file for PAPER execution readiness.
+
+## 14. D3 Details
+
+The allowed endpoint is `https://paper-api.alpaca.markets`.
+
+`https://api.alpaca.markets` fails closed as `LIVE_ENDPOINT_BLOCKED`.
+
+Real-money remains blocked; no code enables it.
+
+## 15. D4 Details
+
+D4 is `UNKNOWN-pending-Board-read`.
+
+No account, open-orders, or positions request was made. No live credentials were inspected.
+
+## 16. D5 Details
+
+When broker read is not armed, portfolio truth shows exact failure:
+
+- `status`: `BACKEND_DEGRADED`
+- `unavailable_reason`: `BROKER_READ_NOT_AUTHORIZED`
+- `broker_read_attempted`: `False`
+- no fake account, positions, orders, P&L, fees, TCA, or broker-confirmed values.
+
+## 17. D6 Details
+
+The only runnable state is `READY_FOR_BOUNDED_PAPER`.
+
+Removed runnable aliases:
+
+- `DEGRADED_BUT_RUNNABLE`
+- `READY_FOR_GOVERNED_PAPER`
+
+No OR-logic remains for UI button enablement across runtime/supervisor/launch truth.
+
+## 18. D7 Details
+
+Launch readiness exposes final reconciliation as required:
+
+- `final_reconciliation_required`: `True`
+- owner: `OrderRouter.finalize_oms_shutdown_reconciliation`
+- failure policy: a future authorized run cannot be marked complete without final broker reconciliation evidence or exact failure reason.
+
+## 19. Limitations / Unknowns
+
+D4 remains unknown until Shan explicitly authorizes read-only Alpaca PAPER account/open-orders/positions inspection.
+
+No browser screenshot proof was captured for the UI button.
+
+No end-to-end dev server proof was run.
+
+No PAPER run was executed.
+
+Existing unrelated dirty/untracked files remain preserved.
+
+## 20. Exact Staging Recommendation
 
 Stage exactly:
 
 ```powershell
+git add -- app/risk/pre_trade_guardrails.py
+git add -- app/main_loop.py
+git add -- app/core/authority_graph.py
+git add -- app/operator_credentials/store.py
+git add -- app/execution/alpaca_paper_adapter.py
+git add -- app/operator_activation/launch_readiness.py
+git add -- app/operator_activation/paper_baseline.py
+git add -- app/operator_portfolio/snapshot.py
+git add -- app/operator_providers/readiness.py
+git add -- app/api/operator_readonly_api.py
+git add -- app/api/operator_paper_supervisor.py
+git add -- ui/operator-control-panel/app.js
+git add -- ui/operator-control-panel/contracts.json
 git add -- tests/test_phase_d_paper_readiness_truth.py
+git add -- tests/test_pre_trade_guardrail_constraints.py
+git add -- tests/test_alpaca_paper_credential_authority_guard.py
+git add -- tests/test_operator_launch_readiness.py
+git add -- tests/test_operator_credentials.py
+git add -- tests/test_operator_portfolio.py
+git add -- tests/test_operator_readonly_api.py
+git add -- tests/test_operator_ai_ask.py
+git add -- tests/test_operator_ui_wiring.py
 git add -- reports/completion/PHASE_D_REPORT.md
 git add -- CHECKPOINT_TRACKER.md
 git add -- reports/codex_handoff_latest.md
@@ -179,14 +300,7 @@ Do not stage:
 - `.pytest_tmp/`
 - `AGENTS.prev.md`
 - `POVERTY_KILLER_AUDIT_REPORT.txt`
-- untracked old reports
+- untracked old handoff reports
 - `reports/operator_perf/`
 - untracked audit scripts
-- any secrets, logs, DB/runtime files, or screenshots
-
-## RESEARCH USED
-
-- Comparable systems/patterns reviewed: public incident/status-console patterns from prior handoff research and internal operator-console practice.
-- Lessons applied: blocker-first reporting, exact state labels, and no green state without backend proof.
-- Lessons rejected: cosmetic dashboard work and readiness claims based on partial local tests.
-- Impact on our bot: Phase D now has a precise safety blocker instead of an ambiguous "probably ready" state.
+- secrets, logs, DB/runtime files, screenshots, or quarantine.

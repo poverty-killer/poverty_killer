@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Mapping
 
-from app.operator_credentials.store import LocalCredentialStore, fingerprint_secret
+from app.operator_credentials.store import ALPACA_PAPER_CREDENTIAL_KEYS, LocalCredentialStore, fingerprint_secret
 from app.operator_providers.models import EnvVarStatus, ProviderProfile, ProviderReadiness
 from app.operator_providers.registry import list_provider_profiles
 
@@ -30,6 +30,8 @@ def _credential_value(
     if credential_store is not None:
         resolved = credential_store.resolve_provider_field(provider_id, name, env)
         value = str(resolved.get("value") or "").strip()
+        if provider_id == "alpaca_paper" and name in ALPACA_PAPER_CREDENTIAL_KEYS:
+            return value, str(resolved.get("source") or "NOT_CONFIGURED")
         if value:
             return value, str(resolved.get("source") or "LOCAL_SECRET_PRESENT")
     env_value = str(env.get(name, "") or "").strip()

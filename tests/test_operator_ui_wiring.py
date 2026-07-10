@@ -351,7 +351,7 @@ def test_ai_evidence_labels_ready_idle_as_state_not_blocker():
     assert "Current state: IDLE_NO_ACTIVE_PAPER_RUN" in text
     assert "Current blocker: ${blocker}" in text
     assert "value === \"READY_IDLE_NO_ACTIVE_RUNTIME\"" in text
-    assert "READY_FOR_GOVERNED_PAPER" in text
+    assert "READY_FOR_BOUNDED_PAPER" in text
 
 
 def test_fills_summary_labels_strict_smoke_fee_hydration_skip():

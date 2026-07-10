@@ -3,12 +3,16 @@ from __future__ import annotations
 import inspect
 import asyncio
 import time
+import os
+from pathlib import Path
+
+import pytest
 
 from app.api.operator_readonly_api import API_VERSION, OPERATOR_ACTIVATION_VERSION, OperatorSnapshotProvider, create_operator_app
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
-from app.operator_credentials.store import LocalCredentialStore
+from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
 
 
@@ -17,6 +21,27 @@ PAPER_ENV = {
     "APCA_API_SECRET_KEY": "test-paper-secret",
     "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
 }
+
+
+@pytest.fixture(autouse=True)
+def _isolated_canonical_paper_env(monkeypatch, tmp_path) -> Path:
+    path = tmp_path / "canonical_alpaca_paper.env"
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(path))
+    return path
+
+
+def _write_canonical_paper_env(path: Path | None = None, *, base_url: str | None = None) -> None:
+    path = path or Path(os.environ[ALPACA_PAPER_ENV_PATH_ENV_KEY])
+    lines: list[str] = []
+    if base_url is not None:
+        lines.append(f"APCA_API_BASE_URL={base_url}")
+    lines.extend(
+        [
+            "APCA_API_KEY_ID=paper-key",
+            "APCA_API_SECRET_KEY=paper-secret",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 class FakeReadOnlyClient:
@@ -116,7 +141,7 @@ def test_operator_contracts_distinguish_truth_authorities(tmp_path):
     assert payload["view_models"]["run_paper_operator_state"]["broker_mutation_occurred"] is False
     setup_contract = payload["view_models"]["run_paper_operator_state"]["paper_credential_setup"]
     assert setup_contract["schema_version"] == "paper-credential-setup-v1"
-    assert setup_contract["approved_secret_path"] == ".operator_secrets/provider_credentials.json"
+    assert setup_contract["approved_secret_path"] == "~/.poverty_killer_alpaca_paper_env"
     assert setup_contract["read_only_preflight_authorized"] is False
     assert "GET /v2/account" in setup_contract["read_only_preflight_checks"]
     assert setup_contract["alpaca_network_call_occurred"] is False
@@ -220,6 +245,7 @@ def test_operator_cockpit_capabilities_gate_future_modes_without_mutation(tmp_pa
 
 
 def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
+    _write_canonical_paper_env()
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(
         config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
@@ -250,6 +276,7 @@ def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
 
 
 def test_paper_control_state_is_canonical_safe_run_paper_payload(tmp_path):
+    _write_canonical_paper_env()
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(
         config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
@@ -377,6 +404,7 @@ def test_paper_control_state_dominant_blocker_is_active_supervisor_when_running(
 
 
 def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
+    _write_canonical_paper_env()
     runner = FakeRunner()
     store_path = tmp_path / "state" / "operator" / "sessions.jsonl"
     store = OperatorSessionStore(path=store_path)
@@ -438,7 +466,11 @@ def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
     assert "paper_read_only_preflight_gate" in launch["reason_codes"]
 
 
-def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoint_truth(tmp_path):
+def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoint_truth(
+    tmp_path,
+    _isolated_canonical_paper_env,
+):
+    _write_canonical_paper_env(_isolated_canonical_paper_env)
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     provider = OperatorSnapshotProvider(
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
@@ -489,6 +521,7 @@ def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoin
 
 
 def test_operator_api_exposes_stale_reconcile_intent_without_broker_call(tmp_path):
+    _write_canonical_paper_env()
     runner = FakeRunner()
     store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
     store.write_session(
@@ -541,6 +574,7 @@ def test_operator_api_exposes_stale_reconcile_intent_without_broker_call(tmp_pat
 
 
 def test_operator_api_stack_shutdown_is_confirmed_process_only_lifecycle_intent(tmp_path):
+    _write_canonical_paper_env()
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(
         config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
@@ -596,6 +630,7 @@ def test_operator_api_stack_shutdown_is_confirmed_process_only_lifecycle_intent(
 
 
 def test_operator_run_visibility_uses_supervisor_overlay_for_active_session(tmp_path):
+    _write_canonical_paper_env()
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(
         config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),

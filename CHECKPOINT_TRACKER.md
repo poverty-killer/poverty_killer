@@ -10,7 +10,7 @@ Branch: master
 | A - Repo Validation Clean | PASS | `reports/completion/PHASE_A_REPORT.md` |
 | B - Module Truth Map Complete | PASS | `reports/completion/PHASE_B_MODULE_TRUTH_MAP.md`; Phase C-corrected 397 countable modules plus 2 excluded generated cache artifacts |
 | C - Authority Graph Implemented | PASS | `reports/completion/PHASE_C_AUTHORITY_GRAPH_REPORT.md`; 7 owners named in code; 9 Phase B conflicts resolved as owner/contributor/reference boundaries |
-| D - PAPER Readiness Truthful | BLOCKED | `reports/completion/PHASE_D_REPORT.md`; D0 PASS; D1 FAIL real safety guard liveness blocker; D2-D7 not run due Board stop condition |
+| D - PAPER Readiness Truthful | PASS_WITH_D4_HELD | `reports/completion/PHASE_D_REPORT.md`; D0/D1/D2/D3/D5/D6/D7 PASS; D4 UNKNOWN-pending-Board-read by explicit Board hold |
 | E - AI Chief Useful | NOT_STARTED | Known prior test drift remains later-phase scope |
 | F - UI Cockpit Understandable | NOT_STARTED | Browser proof not part of Phase A |
 | G - Bounded PAPER Run Ready | NOT_STARTED | PAPER run still requires explicit Board approval |
@@ -49,13 +49,17 @@ Phase C authority graph passed on 2026-07-09:
 
 ## Phase D Result
 
-Phase D opened on 2026-07-10 under the Board convergence packet.
+Phase D completed on 2026-07-10 under the Board convergence packet plus D1-FIX packet.
 
 - D0 PASS - focused tests prove no active runtime broker submit path bypasses `OrderRouter`; rejected orchestrator is not imported by active runtime; lower-layer `PaperBroker` and `AlpacaPaperBrokerAdapter` public methods remain preserved.
-- D1 FAIL - focused tests prove `app.risk.stale_data_guard.StaleDataGuard` is not in the live pre-trade evidence path, and `app.risk.sovereign_execution_guard.SovereignExecutionGuard` is emitted as `DORMANT_BY_POLICY` with reason `SOVEREIGN_EXECUTION_GUARD_NOT_AUTHORIZED_FOR_MUTATION`.
-- Board ruling required STOP at D1 if those guards were genuinely not live. Therefore D2, D3, D5, D6, and D7 were not attempted in this pass.
-- D4 remains `UNKNOWN-pending-Board-read`; no broker read was authorized and no broker/credential inspection occurred.
-- Validation: `python -m pytest tests/test_phase_d_paper_readiness_truth.py -q --basetemp .pytest_tmp\phase_d_probe` passed; `python -m py_compile tests/test_phase_d_paper_readiness_truth.py` passed.
+- D1 PASS - `StaleDataGuard` is wired as a blocking evidence contributor under `evaluate_pre_trade_guardrails`; stale market data is rejected. `SovereignExecutionGuard` is classified mutation-capable and remains `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`.
+- D2 PASS - Alpaca PAPER execution credentials resolve only from `~/.poverty_killer_alpaca_paper_env` / `POVERTY_KILLER_ALPACA_PAPER_ENV_PATH`; `.operator_secrets` and process APCA vars are demoted for PAPER execution truth.
+- D3 PASS - Alpaca PAPER endpoint is proven; live endpoint fails closed; real-money remains blocked.
+- D4 UNKNOWN-pending-Board-read - no broker read was authorized and no account/open-orders/positions request occurred.
+- D5 PASS - portfolio endpoint returns exact `BROKER_READ_NOT_AUTHORIZED` failure without D4 authorization and does not fabricate broker truth.
+- D6 PASS - backend/UI green-light is exactly `READY_FOR_BOUNDED_PAPER`; deprecated `DEGRADED_BUT_RUNNABLE` and `READY_FOR_GOVERNED_PAPER` are removed from runtime contracts.
+- D7 PASS - final reconciliation contract is explicit with owner `OrderRouter.finalize_oms_shutdown_reconciliation`.
+- Validation: focused Phase D and adjacent suite passed: 206 tests, 72 existing warnings. `node --check` and `py_compile` passed.
 
 ## Dirty Tree / Baseline Status
 
@@ -68,6 +72,7 @@ clean/stash/reset.
 
 - Shan authorized Phase A reversible work to fix collection/syntax/import health.
 - Shan authorized Phase B reversible work to write and commit the truth-map document and tracker.
-- Shan authorized Phase D build after accepting Codex's challenge note. Board rulings: `~/.poverty_killer_alpaca_paper_env` is the single canonical Alpaca PAPER credential authority for D2; only `READY_FOR_BOUNDED_PAPER` may green-light Run PAPER for D6; D1 guard absence is a real blocker and must stop the phase without silent wiring; D0 proof means no active runtime path outside `OrderRouter`; D4 broker read remains held without separate authorization.
+- Shan authorized Phase D build after accepting Codex's challenge note. Board rulings: `~/.poverty_killer_alpaca_paper_env` is the single canonical Alpaca PAPER credential authority for D2; only `READY_FOR_BOUNDED_PAPER` may green-light Run PAPER for D6; D0 proof means no active runtime path outside `OrderRouter`; D4 broker read remains held without separate authorization.
+- Shan authorized Phase D1-FIX: `StaleDataGuard` is wired as a blocking evidence contributor under `evaluate_pre_trade_guardrails`; `SovereignExecutionGuard` is mutation-capable and remains dormant by policy pending Phase H/I arming.
 - No PAPER run was authorized.
 - No live mode, live read-only mode, or broker mutation was authorized.

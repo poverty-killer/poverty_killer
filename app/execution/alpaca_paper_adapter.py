@@ -16,6 +16,8 @@ from app.operator_credentials.store import (
     ALPACA_LIVE_ENDPOINT as FORBIDDEN_ALPACA_LIVE_BASE_URL,
     ALPACA_PAPER_ENDPOINT as EXPECTED_ALPACA_PAPER_BASE_URL,
     alpaca_endpoint_authority,
+    canonical_alpaca_paper_env_path,
+    read_alpaca_paper_env_file,
 )
 from app.execution.broker_gateway import (
     BrokerAdapterIdentity,
@@ -172,22 +174,11 @@ class AlpacaPaperReadOnlyPreflightProof:
 
 
 def _default_alpaca_paper_env_path() -> Path:
-    configured_path = os.environ.get("POVERTY_KILLER_ALPACA_PAPER_ENV_PATH")
-    return Path(configured_path) if configured_path else Path.home() / ".poverty_killer_alpaca_paper_env"
+    return canonical_alpaca_paper_env_path()
 
 
 def _read_alpaca_paper_env_file(env_path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if env_path.exists():
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip().removeprefix("export ").strip()
-            if key in ALPACA_PAPER_CREDENTIAL_KEYS:
-                values[key] = value.strip().strip("'").strip('"')
-    return values
+    return read_alpaca_paper_env_file(env_path)
 
 
 def _credential_fingerprint(value: str) -> dict[str, Any]:
@@ -210,7 +201,7 @@ def validate_alpaca_paper_credential_authority(
     env_values = {key: (env or os.environ).get(key, "") or "" for key in ALPACA_PAPER_CREDENTIAL_KEYS}
     file_values = _read_alpaca_paper_env_file(env_path)
     effective_values = {
-        key: env_values.get(key) or file_values.get(key, "")
+        key: file_values.get(key, "")
         for key in ALPACA_PAPER_CREDENTIAL_KEYS
     }
 
@@ -226,18 +217,9 @@ def validate_alpaca_paper_credential_authority(
     else:
         effective_values["APCA_API_BASE_URL"] = EXPECTED_ALPACA_PAPER_BASE_URL
 
-    conflict_keys = [
-        key for key in ALPACA_PAPER_CREDENTIAL_KEYS
-        if env_values.get(key) and file_values.get(key) and env_values[key] != file_values[key]
-    ]
-    if conflict_keys:
-        if any(key in conflict_keys for key in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")):
-            reasons.append("STALE_PROCESS_ENV_CREDENTIALS")
-        reasons.append("CREDENTIAL_AUTHORITY_CONFLICT")
-
     process_present = {key: bool(env_values.get(key)) for key in ALPACA_PAPER_CREDENTIAL_KEYS}
     fallback_present = {key: bool(file_values.get(key)) for key in ALPACA_PAPER_CREDENTIAL_KEYS}
-    credential_source = "process_env" if any(process_present.values()) else "fallback_file"
+    credential_source = "canonical_paper_env_file"
     credentials = AlpacaPaperCredentials(
         base_url=endpoint,
         key_id=effective_values.get("APCA_API_KEY_ID", ""),
@@ -273,9 +255,9 @@ def load_alpaca_paper_credentials(path: Path | None = None, *, enforce_authority
             raise BrokerGatewayError("credential_authority_blocked", message=",".join(proof.reason_codes))
     values = _read_alpaca_paper_env_file(env_path)
     return AlpacaPaperCredentials(
-        base_url=str(alpaca_endpoint_authority({"APCA_API_BASE_URL": os.environ.get("APCA_API_BASE_URL") or values.get("APCA_API_BASE_URL") or ""})["alpaca_endpoint_display"] or ""),
-        key_id=os.environ.get("APCA_API_KEY_ID") or values.get("APCA_API_KEY_ID") or "",
-        secret_key=os.environ.get("APCA_API_SECRET_KEY") or values.get("APCA_API_SECRET_KEY") or "",
+        base_url=str(alpaca_endpoint_authority({"APCA_API_BASE_URL": values.get("APCA_API_BASE_URL") or ""})["alpaca_endpoint_display"] or ""),
+        key_id=values.get("APCA_API_KEY_ID") or "",
+        secret_key=values.get("APCA_API_SECRET_KEY") or "",
     )
 
 
