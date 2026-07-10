@@ -59,10 +59,12 @@ from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_snapshot_store import OperatorPerfRecorder, OperatorSnapshotStore
 from app.operator_credentials.store import (
     ALPACA_ENDPOINT_SOURCE_ENV_KEY,
+    ALPACA_PAPER_ACCOUNT_PIN_ENV_KEY,
     DEFAULT_RELATIVE_STORE_PATH,
     PROVIDER_CREDENTIAL_FIELDS,
     LocalCredentialStore,
     alpaca_endpoint_authority,
+    alpaca_paper_account_pin_env,
     default_credential_store_path,
     normalize_provider_id,
 )
@@ -357,6 +359,7 @@ class OperatorSnapshotProvider:
         provider_env: dict[str, str] | None = None,
         credential_store: LocalCredentialStore | None = None,
         portfolio_client: ReadOnlyBrokerClient | None = None,
+        account_identity_checker: Callable[[Mapping[str, str]], dict[str, Any]] | None = None,
         historical_tests: HistoricalTestService | None = None,
         stack_exit_callback: Callable[[], None] | None = None,
     ) -> None:
@@ -380,12 +383,19 @@ class OperatorSnapshotProvider:
         self.provider_env = self.credential_store.effective_env(self.process_env)
         self.provider_env.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         self.portfolio_client = portfolio_client
+        self.account_identity_checker = account_identity_checker
         self._latest_portfolio_snapshot: dict[str, Any] | None = None
         self._latest_portfolio_snapshot_at_monotonic: float | None = None
         self.paper_baseline_store = PaperBaselineStore(self.runtime_config.operator_state_dir / "paper_baseline.json")
         supervisor_config = PaperSupervisorConfig.from_runtime_config(self.runtime_config)
         supervisor_config.process_env = self._paper_process_env(self.provider_env)
-        self.supervisor = supervisor or OperatorPaperSupervisor(config=supervisor_config)
+        self.supervisor = supervisor or OperatorPaperSupervisor(
+            config=supervisor_config,
+            account_identity_checker=account_identity_checker,
+        )
+        if supervisor is not None and account_identity_checker is not None:
+            self.supervisor._account_identity_checker = account_identity_checker
+            self.supervisor._account_identity_checker_requires_board_read = False
         self.supervisor.config.process_env = self._paper_process_env()
         self.world_awareness_env = world_awareness_env if world_awareness_env is not None else dict(self.provider_env)
         if world_awareness_runtime is not None:
@@ -535,8 +545,16 @@ class OperatorSnapshotProvider:
         paper_env = {
             key: str(value)
             for key, value in effective_env.items()
-            if key in {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL", ALPACA_ENDPOINT_SOURCE_ENV_KEY} and str(value).strip()
+            if key in {
+                "APCA_API_KEY_ID",
+                "APCA_API_SECRET_KEY",
+                "APCA_API_BASE_URL",
+                ALPACA_ENDPOINT_SOURCE_ENV_KEY,
+                ALPACA_PAPER_ACCOUNT_PIN_ENV_KEY,
+                "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ",
+            } and str(value).strip()
         }
+        paper_env.update(alpaca_paper_account_pin_env())
         endpoint_authority = alpaca_endpoint_authority(paper_env)
         if endpoint_authority["paper_endpoint_only"] is True:
             paper_env["APCA_API_BASE_URL"] = str(endpoint_authority["alpaca_endpoint_display"])
@@ -1690,12 +1708,15 @@ class OperatorSnapshotProvider:
             and str(baseline.get("policy") or "") == BASELINE_POLICY_PROTECTED
         )
         baseline_runtime_context = supervisor.get("paper_baseline_runtime_context") or {}
+        account_identity = supervisor.get("paper_account_identity_assertion") if isinstance(supervisor.get("paper_account_identity_assertion"), dict) else {}
+        account_pin_ok = supervisor.get("paper_account_pinned") is True or account_identity.get("status") == "PASS"
         credential_configured = alpaca.get("configured") is True
         supervisor_allows_start = supervisor.get("paper_start_allowed") is True
         local_start_ready = (
             supervisor_allows_start
             and credential_configured
             and endpoint_valid
+            and account_pin_ok
             and baseline_accepted
             and not baseline_position_aware_policy_blocked
             and not supervisor_running
@@ -1709,6 +1730,8 @@ class OperatorSnapshotProvider:
             dominant_blocker = "PAPER_CREDENTIALS_MISSING"
         elif not endpoint_valid:
             dominant_blocker = str(endpoint_authority.get("reason_code") or "PAPER_ENDPOINT_NOT_VERIFIED")
+        elif not account_pin_ok:
+            dominant_blocker = str(account_identity.get("reason_code") or "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN")
         elif baseline_adoption_required:
             dominant_blocker = "BASELINE_ADOPTION_REQUIRED"
         elif baseline_preflight_required:
@@ -1777,6 +1800,10 @@ class OperatorSnapshotProvider:
             "endpoint_display": endpoint_display,
             "endpoint_source": endpoint_authority.get("alpaca_endpoint_source") or endpoint_authority.get("endpoint_source") or "UNKNOWN",
             "endpoint_status": endpoint_authority.get("status") or "UNKNOWN",
+            "paper_account_identity_assertion": account_identity,
+            "paper_account_pinned": account_pin_ok,
+            "paper_account_expected_suffix": account_identity.get("expected_suffix"),
+            "paper_account_actual_suffix": account_identity.get("actual_suffix"),
             "baseline_status": baseline.get("status") or "UNKNOWN",
             "baseline_accepted": baseline_accepted,
             "baseline_snapshot_id": baseline.get("baseline_snapshot_id"),

@@ -26,6 +26,9 @@ ALPACA_MARKET_DATA_ENDPOINT = "https://data.alpaca.markets"
 ALPACA_ENDPOINT_SOURCE_ENV_KEY = "APCA_API_BASE_URL_SOURCE"
 ALPACA_PAPER_CREDENTIAL_KEYS = ("APCA_API_BASE_URL", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
 ALPACA_PAPER_REQUIRED_SECRET_KEYS = ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
+ALPACA_PAPER_ACCOUNT_PIN_ENV_KEY = "PK_ALPACA_PAPER_EXPECTED_ACCOUNT_SUFFIX"
+ALPACA_PAPER_EXPECTED_ACCOUNT_SUFFIX = "045ded"
+ALPACA_PAPER_ACCOUNT_PIN_SOURCE = "BOARD_D4_ACCOUNT_PIN_FUNDED_045DED"
 ALPACA_BROKER_ENDPOINT_HOSTS = frozenset(
     {
         "broker-api.alpaca.markets",
@@ -140,6 +143,39 @@ def default_credential_store_path(repo_root: Path) -> Path:
 def canonical_alpaca_paper_env_path() -> Path:
     configured = os.environ.get(ALPACA_PAPER_ENV_PATH_ENV_KEY)
     return Path(configured) if configured else Path.home() / ".poverty_killer_alpaca_paper_env"
+
+
+def normalize_alpaca_account_suffix(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.lower().startswith("redacted_suffix:"):
+        text = text.split(":", 1)[1]
+    return text[-6:].lower() if len(text) > 6 else text.lower()
+
+
+def expected_alpaca_paper_account_suffix(_env: Mapping[str, str] | None = None) -> str:
+    """Single canonical PAPER account pin.
+
+    The active Board packet pins PAPER trading to Shan's funded 045ded account.
+    Runtime env may carry this value to child processes, but cannot override it.
+    """
+    return ALPACA_PAPER_EXPECTED_ACCOUNT_SUFFIX
+
+
+def alpaca_paper_account_pin_env() -> dict[str, str]:
+    return {ALPACA_PAPER_ACCOUNT_PIN_ENV_KEY: expected_alpaca_paper_account_suffix()}
+
+
+def alpaca_paper_account_pin_config() -> dict[str, Any]:
+    return {
+        "source": ALPACA_PAPER_ACCOUNT_PIN_SOURCE,
+        "expected_suffix": expected_alpaca_paper_account_suffix(),
+        "env_key": ALPACA_PAPER_ACCOUNT_PIN_ENV_KEY,
+        "env_override_allowed": False,
+        "raw_account_id_exposed": False,
+        "secrets_values_exposed": False,
+    }
 
 
 def read_alpaca_paper_env_file(path: Path | None = None) -> dict[str, str]:

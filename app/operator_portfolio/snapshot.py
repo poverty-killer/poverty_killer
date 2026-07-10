@@ -29,6 +29,7 @@ from app.execution.broker_read_policy import (
 
 
 PORTFOLIO_SOURCE = "OPERATOR_PORTFOLIO_READ_ONLY"
+ACCOUNT_IDENTITY_SOURCE = "OPERATOR_ALPACA_PAPER_ACCOUNT_IDENTITY_READ_ONLY"
 
 
 class ReadOnlyBrokerClient(Protocol):
@@ -184,6 +185,51 @@ def _empty_unavailable(
     }
 
 
+def _empty_account_identity_unavailable(
+    reason: str,
+    *,
+    detail: str | None = None,
+    broker_read_attempted: bool = False,
+    endpoint_authority: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    endpoint_truth = endpoint_authority or alpaca_endpoint_authority({})
+    return {
+        "source": ACCOUNT_IDENTITY_SOURCE,
+        "data_source": "UNAVAILABLE",
+        "status": "BACKEND_DEGRADED",
+        "unavailable_reason": reason,
+        "detail": detail,
+        "summary": {
+            "account_status": None,
+            "account_id": None,
+            "currency": None,
+            "cash": None,
+            "buying_power": None,
+            "total_equity": None,
+            "portfolio_value": None,
+            "trading_blocked": None,
+            "account_blocked": None,
+            "transfers_blocked": None,
+            "pattern_day_trader": None,
+        },
+        "broker_read_attempted": broker_read_attempted,
+        "broker_read_occurred": False,
+        "account_request_occurred": False,
+        "paper_endpoint_authority": endpoint_truth,
+        "paper_endpoint_only": endpoint_truth["paper_endpoint_only"],
+        "paper_endpoint_status": endpoint_truth["status"],
+        "paper_endpoint_operator_action": endpoint_truth["operator_action"],
+        "broker_mutation_occurred": False,
+        "order_submission_occurred": False,
+        "cancel_occurred": False,
+        "liquidation_occurred": False,
+        "live_enabled": False,
+        "real_money_enabled": False,
+        "secrets_values_exposed": False,
+        "raw_secret_values_included": False,
+    }
+
+
 def _headers(env: Mapping[str, str]) -> dict[str, str] | None:
     key_id = str(env.get("APCA_API_KEY_ID") or "").strip()
     secret_key = str(env.get("APCA_API_SECRET_KEY") or "").strip()
@@ -199,6 +245,92 @@ def _headers(env: Mapping[str, str]) -> dict[str, str] | None:
 def _base_url(env: Mapping[str, str]) -> str:
     endpoint_truth = alpaca_endpoint_authority(env)
     return str(endpoint_truth["alpaca_endpoint_display"] or ALPACA_PAPER_ENDPOINT)
+
+
+def build_account_identity_snapshot(
+    env: Mapping[str, str],
+    *,
+    client: ReadOnlyBrokerClient | None = None,
+    now: str | None = None,
+    broker_read_authorized: bool = True,
+) -> dict[str, Any]:
+    headers = _headers(env)
+    if headers is None:
+        return _empty_account_identity_unavailable("MISSING_ALPACA_PAPER_CREDENTIALS")
+
+    endpoint_truth = alpaca_endpoint_authority(env)
+    if endpoint_truth["paper_endpoint_only"] is not True:
+        return _empty_account_identity_unavailable(
+            str(endpoint_truth["reason_code"] or "ALPACA_PAPER_ENDPOINT_REQUIRED"),
+            endpoint_authority=endpoint_truth,
+        )
+
+    if broker_read_authorized is not True:
+        return _empty_account_identity_unavailable(
+            BROKER_READ_NOT_AUTHORIZED,
+            detail="Account identity pin requires an authorized read-only PAPER account GET.",
+            broker_read_attempted=False,
+            endpoint_authority=endpoint_truth,
+        )
+
+    read_profile = broker_read_profile_from_env(env)
+    if not read_profile.allows(READ_ACCOUNT):
+        return _empty_account_identity_unavailable(
+            BROKER_READ_NOT_AUTHORIZED,
+            detail=read_profile.name,
+            broker_read_attempted=False,
+            endpoint_authority=endpoint_truth,
+        )
+
+    broker_client = client or AlpacaPaperReadOnlyClient(base_url=_base_url(env))
+    freshness = now or _utc_now()
+    try:
+        account = broker_client.get_json("/v2/account", headers)
+    except Exception as exc:
+        return _empty_account_identity_unavailable(
+            _broker_failure_reason(exc),
+            detail=exc.__class__.__name__,
+            broker_read_attempted=True,
+            endpoint_authority=endpoint_truth,
+        )
+
+    account_map = account if isinstance(account, dict) else {}
+    return {
+        "source": ACCOUNT_IDENTITY_SOURCE,
+        "data_source": "BROKER_CONFIRMED",
+        "status": "BROKER_CONFIRMED",
+        "unavailable_reason": None,
+        "detail": "Broker-reported PAPER account identity loaded through GET /v2/account.",
+        "summary": {
+            "account_status": account_map.get("status"),
+            "account_id": _redacted_suffix(account_map.get("id") or account_map.get("account_id")),
+            "currency": account_map.get("currency"),
+            "cash": _decimal_text(account_map.get("cash")),
+            "buying_power": _decimal_text(account_map.get("buying_power")),
+            "total_equity": _decimal_text(account_map.get("equity") or account_map.get("portfolio_value")),
+            "portfolio_value": _decimal_text(account_map.get("portfolio_value") or account_map.get("equity")),
+            "trading_blocked": bool(account_map.get("trading_blocked")),
+            "account_blocked": bool(account_map.get("account_blocked")),
+            "transfers_blocked": bool(account_map.get("transfers_blocked")),
+            "pattern_day_trader": bool(account_map.get("pattern_day_trader")),
+        },
+        "data_freshness_ts": freshness,
+        "broker_read_attempted": True,
+        "broker_read_occurred": True,
+        "account_request_occurred": True,
+        "paper_endpoint_authority": endpoint_truth,
+        "paper_endpoint_only": endpoint_truth["paper_endpoint_only"],
+        "paper_endpoint_status": endpoint_truth["status"],
+        "paper_endpoint_operator_action": endpoint_truth["operator_action"],
+        "broker_mutation_occurred": False,
+        "order_submission_occurred": False,
+        "cancel_occurred": False,
+        "liquidation_occurred": False,
+        "live_enabled": False,
+        "real_money_enabled": False,
+        "secrets_values_exposed": False,
+        "raw_secret_values_included": False,
+    }
 
 
 def _active_order(order: Mapping[str, Any]) -> bool:

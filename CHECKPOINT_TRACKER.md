@@ -12,7 +12,7 @@ Branch: master
 | C - Authority Graph Implemented | PASS | `reports/completion/PHASE_C_AUTHORITY_GRAPH_REPORT.md`; 7 owners named in code; 9 Phase B conflicts resolved as owner/contributor/reference boundaries |
 | D - PAPER Readiness Truthful | PASS | `reports/completion/PHASE_D_REPORT.md`; D0-D7 PASS after D4 Board-armed read-only Alpaca PAPER baseline |
 | E - AI Chief Useful | PASS | `reports/completion/PHASE_E_REPORT.md`; AI route truth and evidence contract are live; canonical blockers come from D6 readiness |
-| F - UI Cockpit Understandable | BLOCKED | D4-ACCOUNT-IDENTITY addendum found account target is runtime-inferred; Board must confirm account pin fix before Phase F |
+| F - UI Cockpit Understandable | IN_PROGRESS | D4-ACCOUNT-PIN closed `ACCOUNT_TARGET_RUNTIME_INFERRED`; Phase F UI cockpit proof/build is now open |
 | G - Bounded PAPER Run Ready | NOT_STARTED | PAPER run still requires explicit Board approval |
 | H - Live-Readiness Shadow Mode | NOT_STARTED | Live credentials read-only requires Board approval |
 | I - Tiny Live Canary | NOT_STARTED | Individually Board-approved only |
@@ -86,6 +86,19 @@ D4-ACCOUNT-IDENTITY was completed on 2026-07-10 before Phase F under read-only B
 - Blocking finding: code pins credential source to the canonical env file but does not hard-pin target account ID/suffix. Trading account is runtime-inferred from whichever paper account the canonical key resolves to.
 - Current blocker before Phase F: `ACCOUNT_TARGET_RUNTIME_INFERRED`. Do not self-fix; Board must confirm target-account pin policy.
 
+## D4 Account Pin Addendum
+
+D4-ACCOUNT-PIN was completed on 2026-07-10 under Board authorization to pin Shan's funded `045ded` Alpaca PAPER account.
+
+- PASS - Account target is no longer runtime-inferred. Canonical expected PAPER account suffix is defined once in `app.operator_credentials.store` as `045ded`.
+- PASS - Startup/status readiness and governed PAPER start authority consume the account-pin assertion and fail closed unless broker-reported identity matches the pin.
+- PASS - Supervisor start validation forces a fresh account identity proof before the runner spec is built. A simulated drained/reachable account suffix `104e2a` is rejected with `ALPACA_PAPER_ACCOUNT_PIN_MISMATCH`, and no runner launch occurs.
+- PASS - Launch readiness and paper control state expose `paper_account_identity_assertion`, expected suffix, actual suffix, and `paper_account_pinned`; `READY_FOR_BOUNDED_PAPER` cannot be true when the account pin is missing or mismatched.
+- PASS - Child process env carries `PK_ALPACA_PAPER_EXPECTED_ACCOUNT_SUFFIX=045ded` from the canonical pin source.
+- Validation: account-pin/readiness/supervisor/API/AI/portfolio/credential focused suites passed; py_compile passed for touched modules.
+- No real broker read, PAPER run, live endpoint, real-money path, order placement, cancel, liquidation, threshold change, or secret exposure occurred in this addendum.
+- `ACCOUNT_TARGET_RUNTIME_INFERRED` is CLEARED. Phase F is unblocked and now in progress.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from pre-existing runtime/report leftovers and Phase A
@@ -102,5 +115,6 @@ clean/stash/reset.
 - Shan authorized D4 read-only Alpaca PAPER inspection: account status, open orders, and positions only; canonical env credential source; paper endpoint only; no order placement/cancel/close/liquidate/flatten and no PAPER run.
 - Shan authorized Phase E AI Chief Useful: AI remains advisory-only; no broker/live/threshold touch; provider/model route truth, evidence-bound answers, canonical D6 blockers, and mutation/secret refusal proofs required.
 - Shan authorized D4-ACCOUNT-IDENTITY read-only proof before Phase F. Result: canonical account is funded `redacted_suffix:045ded`, second account `redacted_suffix:104e2a` is reachable only through demoted local vault/state, but account identity is runtime-inferred in code, so Phase F is blocked pending Board confirmation of the account-pin fix.
+- Shan authorized D4-ACCOUNT-PIN to hard-pin PAPER operation to funded account suffix `045ded`. Result: account identity assertion is wired into readiness/supervisor start, mismatch fails closed, demoted/drained suffix `104e2a` is rejected in tests, and Phase F is unblocked/in progress.
 - No PAPER run was authorized.
 - No live mode, live read-only mode, or broker mutation was authorized.

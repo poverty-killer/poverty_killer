@@ -513,3 +513,130 @@ Do not stage:
 - `reports/operator_perf/`
 - untracked audit scripts
 - secrets, logs, DB/runtime files, screenshots, or quarantine.
+
+---
+
+# D4 Account Pin Addendum - Runtime-Inference Hazard Closed
+
+Date: 2026-07-10
+
+## 1. Verdict
+
+D4-ACCOUNT-PIN is PASS at tests + runtime-contract proof rung. The prior blocker `ACCOUNT_TARGET_RUNTIME_INFERRED` is closed in code.
+
+The bot now has a single canonical Alpaca PAPER account pin for Shan's funded paper account suffix `045ded`. Startup/status readiness and governed PAPER start authority fail closed unless the broker-reported PAPER account identity is proven read-only and matches the pin. A simulated drained/reachable account suffix `104e2a` is rejected before the runner can launch.
+
+No PAPER run was executed.
+
+## 2. Files Changed
+
+- `app/operator_credentials/store.py`
+- `app/operator_portfolio/snapshot.py`
+- `app/operator_activation/account_identity.py`
+- `app/operator_activation/launch_readiness.py`
+- `app/api/operator_paper_supervisor.py`
+- `app/api/operator_readonly_api.py`
+- `tests/test_operator_account_identity_pin.py`
+- `tests/test_operator_paper_supervisor.py`
+- `tests/test_operator_launch_readiness.py`
+- `tests/test_operator_readonly_api.py`
+- `tests/test_operator_ai_ask.py`
+- `reports/completion/PHASE_D_REPORT.md`
+- `CHECKPOINT_TRACKER.md`
+- `reports/codex_handoff_latest.md`
+
+## 3. Root Cause
+
+The D4 account-identity audit proved the credential source was pinned to `~/.poverty_killer_alpaca_paper_env`, but the account target was still runtime-inferred from whatever PAPER account the canonical key resolved to. That left a go-live hazard: a stale/demoted/reissued credential could resolve to a different Alpaca paper account without a hard account-identity stop.
+
+## 4. Fixes Implemented
+
+Added one canonical account-pin authority in `app.operator_credentials.store`: expected suffix `045ded`, source `BOARD_D4_ACCOUNT_PIN_FUNDED_045DED`, and child-process env key `PK_ALPACA_PAPER_EXPECTED_ACCOUNT_SUFFIX`. Runtime env may carry the value, but cannot override it.
+
+Added a GET-only account identity reader that calls only `/v2/account`, never positions/orders, and preserves all no-mutation flags.
+
+Added `app.operator_activation.account_identity` to convert broker-read-only identity evidence into a PASS/BLOCKED assertion with exact expected/got suffixes.
+
+Wired the assertion into `OperatorPaperSupervisor.status_snapshot`, `_paper_start_prerequisite_refusal`, and forced start validation before `_build_start_spec`. The child process env now carries the canonical expected suffix.
+
+Wired launch readiness and paper control state so `READY_FOR_BOUNDED_PAPER` cannot be reached unless the account pin is PASS.
+
+## 5. 360 Adjacent Improvements
+
+The readiness/UI contract now exposes `paper_account_identity_assertion`, `paper_account_pinned`, expected suffix, actual suffix, and exact reason code. The operator sees account-pin truth instead of a generic start refusal.
+
+Legacy supervisor/API/AI tests now explicitly mock a PASS account-pin assertion when they are testing unrelated lifecycle or wording behavior. The new account-pin tests cover the real PASS/MISMATCH paths.
+
+## 6. Tests / Checks
+
+PASS - `python -m py_compile app\operator_credentials\store.py app\operator_portfolio\snapshot.py app\operator_activation\account_identity.py app\operator_activation\launch_readiness.py app\api\operator_paper_supervisor.py app\api\operator_readonly_api.py`
+
+PASS - `python -m pytest tests/test_operator_account_identity_pin.py tests/test_phase_d_paper_readiness_truth.py tests/test_operator_launch_readiness.py tests/test_operator_paper_supervisor.py -q --basetemp .pytest_tmp\account_pin_existing2`
+
+PASS - `python -m pytest tests/test_operator_readonly_api.py tests/test_operator_ai_ask.py -q --basetemp .pytest_tmp\account_pin_api2`
+
+PASS - `python -m pytest tests/test_operator_portfolio.py tests/test_operator_credentials.py tests/test_broker_read_policy.py -q --basetemp .pytest_tmp\account_pin_adjacent`
+
+## 7. Browser / Runtime / Broker-Read-Only Proof
+
+Runtime-contract proof: the supervisor start path now forces account identity proof before runner launch. Test `test_supervisor_rejects_account_pin_mismatch_before_runner_launch` proves `104e2a` is rejected and `runner.started_specs == []`.
+
+Broker-read-only design proof: the new account identity snapshot calls only `GET /v2/account`; tests assert the fake client receives exactly `[("GET", "/v2/account")]`. No real broker read was performed in this addendum.
+
+## 8. Self-Red-Team + Anti-Hallucination
+
+Duplicate authority check: the expected account suffix lives in `app.operator_credentials.store` only. Supervisor/readiness/UI consume that authority and do not define their own target account.
+
+Fake readiness check: `paper_start_allowed` and `READY_FOR_BOUNDED_PAPER` now require `paper_account_pinned == true`; no OR-logic can green-light around the pin.
+
+Broker-path bypass check: arming/status readiness, supervisor start validation, and child process env all pass through the pin contract. A direct lower-layer adapter method still exists by design, but the active governed runtime path cannot launch without the supervisor account assertion.
+
+Unknowns: no live browser proof was run for the UI display of the new account-pin fields in this addendum. No PAPER run was executed.
+
+## 9. Safety Confirmation
+
+No live mode, real-money enablement, manual trading, force trading, order submit, cancel, liquidation, close, threshold change, or secret exposure was added. The only broker-facing operation introduced is read-only account identity GET, and tests use fakes.
+
+No Sacred Law, risk threshold, stale/TTL threshold, sizing/masking authority, strategy threshold, or NetEdge gate was weakened.
+
+## 10. Module Status
+
+- `app.operator_credentials.store`: WIRED with role as canonical PAPER credential + account-pin config authority.
+- `app.operator_portfolio.snapshot`: WIRED with added read-only account identity evidence provider.
+- `app.operator_activation.account_identity`: WIRED with role as account-pin assertion contributor under readiness/supervisor authority.
+- `app.api.operator_paper_supervisor`: WIRED with role as final governed PAPER start authority enforcing the pin.
+- `app.operator_activation.launch_readiness`: WIRED with role as D6 readiness contract exposing pin state.
+- `app.api.operator_readonly_api`: WIRED with role as operator API/UI truth surface consuming pin state.
+
+## 11. Disagreements / What I Would Do Differently
+
+I would keep the Board-read authorization env requirement for the production default checker, because an account identity proof is still a broker read. Tests use injected/faked assertions when they are not testing broker identity.
+
+## 12. Limitations + Unknowns
+
+No browser screenshot validation yet for the operator cockpit account-pin display. That belongs to Phase F UI cockpit proof.
+
+No real Alpaca read was repeated in this addendum; the prior D4 broker-read-only proof already established canonical `045ded` externally. This seam proves code enforcement with faked read-only clients.
+
+## 13. Exact Staging Recommendation
+
+Stage exactly:
+
+```powershell
+git add -- app/operator_credentials/store.py
+git add -- app/operator_portfolio/snapshot.py
+git add -- app/operator_activation/account_identity.py
+git add -- app/operator_activation/launch_readiness.py
+git add -- app/api/operator_paper_supervisor.py
+git add -- app/api/operator_readonly_api.py
+git add -- tests/test_operator_account_identity_pin.py
+git add -- tests/test_operator_paper_supervisor.py
+git add -- tests/test_operator_launch_readiness.py
+git add -- tests/test_operator_readonly_api.py
+git add -- tests/test_operator_ai_ask.py
+git add -- reports/completion/PHASE_D_REPORT.md
+git add -- CHECKPOINT_TRACKER.md
+git add -- reports/codex_handoff_latest.md
+```
+
+Do not stage `state/*`, `.pytest_tmp/`, untracked old handoffs, `reports/operator_perf/`, untracked audit scripts, secrets, logs, DB/runtime files, screenshots, or quarantine.

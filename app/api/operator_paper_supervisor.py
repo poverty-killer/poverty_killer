@@ -19,11 +19,17 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from app.api.operator_runtime_config import OperatorRuntimeConfig, RUNNER_MAX_PAPER_DURATION_SECONDS
 from app.api.operator_session_store import OperatorSessionStore
 from app.execution.broker_read_policy import broker_read_profile_from_env
+from app.operator_activation.account_identity import (
+    ACCOUNT_PIN_NOT_PROVEN,
+    account_identity_assertion_passed,
+    blocked_account_identity_assertion,
+    build_alpaca_paper_account_identity_assertion,
+)
 from app.operator_activation.paper_baseline import (
     PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED,
     PAPER_BASELINE_ENV_PATH,
@@ -32,7 +38,11 @@ from app.operator_activation.paper_baseline import (
     PaperBaselineStore,
     build_paper_baseline_runtime_context,
 )
-from app.operator_credentials.store import ALPACA_ENDPOINT_SOURCE_ENV_KEY, alpaca_endpoint_authority
+from app.operator_credentials.store import (
+    ALPACA_ENDPOINT_SOURCE_ENV_KEY,
+    alpaca_endpoint_authority,
+    alpaca_paper_account_pin_env,
+)
 
 
 SUPERVISOR_VERSION = "operator-paper-supervisor-v1"
@@ -444,6 +454,7 @@ class OperatorPaperSupervisor:
         runner: PaperProcessRunner | None = None,
         session_store: OperatorSessionStore | None = None,
         pid_liveness_probe: Callable[[int | None], tuple[bool | None, str]] | None = None,
+        account_identity_checker: Callable[[Mapping[str, str]], dict[str, Any]] | None = None,
     ) -> None:
         if config is None:
             runtime_config = OperatorRuntimeConfig.from_env()
@@ -451,6 +462,10 @@ class OperatorPaperSupervisor:
         self.config = config
         self.runner = runner or SubprocessPaperRunner()
         self._pid_liveness_probe = pid_liveness_probe or pid_liveness_status
+        self._account_identity_checker = account_identity_checker or build_alpaca_paper_account_identity_assertion
+        self._account_identity_checker_requires_board_read = account_identity_checker is None
+        self._account_identity_cache: dict[str, Any] | None = None
+        self._account_identity_cache_at_monotonic: float | None = None
         store_path = Path(self.config.session_store_path) if self.config.session_store_path else (
             self.config.repo_root / "state" / "operator" / "sessions.jsonl"
         )
@@ -481,7 +496,8 @@ class OperatorPaperSupervisor:
         active_session = latest_session if is_active else None
         paper_key_refusal = self._paper_key_refusal()
         endpoint_authority = self._paper_endpoint_authority()
-        paper_start_refusal = self._paper_start_prerequisite_refusal()
+        account_identity = self._paper_account_identity_assertion()
+        paper_start_refusal = self._paper_start_prerequisite_refusal(account_identity=account_identity)
         broker_read_profile = self._broker_read_profile().to_dict()
         return {
             "supervisor_version": SUPERVISOR_VERSION,
@@ -506,6 +522,13 @@ class OperatorPaperSupervisor:
             "paper_endpoint_refusal_reason": endpoint_authority["reason_code"],
             "paper_endpoint_operator_action": endpoint_authority["operator_action"],
             "paper_endpoint_authority": endpoint_authority,
+            "paper_account_identity_assertion": account_identity,
+            "paper_account_pinned": account_identity_assertion_passed(account_identity),
+            "paper_account_expected_suffix": account_identity.get("expected_suffix"),
+            "paper_account_actual_suffix": account_identity.get("actual_suffix"),
+            "paper_account_pin_refusal_reason": None
+            if account_identity_assertion_passed(account_identity)
+            else account_identity.get("reason_code"),
             "stale_reconciliation": self._stale_reconciliation_status() if stale_after_restart else {
                 "available": False,
                 "reason_code": "NO_STALE_SESSION_TO_RECONCILE",
@@ -869,7 +892,7 @@ class OperatorPaperSupervisor:
         allowed = set(self.config.allowed_watchlist)
         if any(symbol not in allowed for symbol in watchlist):
             return "UNSUPPORTED_WATCHLIST_SYMBOL"
-        prerequisite_refusal = self._paper_start_prerequisite_refusal()
+        prerequisite_refusal = self._paper_start_prerequisite_refusal(force_account_pin=True)
         if prerequisite_refusal:
             return prerequisite_refusal
         return None
@@ -884,13 +907,78 @@ class OperatorPaperSupervisor:
     def _paper_endpoint_authority(self) -> dict[str, Any]:
         return alpaca_endpoint_authority(self.config.process_env)
 
-    def _paper_start_prerequisite_refusal(self) -> str | None:
+    def _paper_account_identity_assertion(self, *, force: bool = False) -> dict[str, Any]:
+        key_refusal = self._paper_key_refusal()
+        if key_refusal:
+            return blocked_account_identity_assertion(
+                key_refusal,
+                "Account identity pin is not evaluated until Alpaca PAPER credentials are configured.",
+            )
+        endpoint_authority = self._paper_endpoint_authority()
+        if endpoint_authority["reason_code"]:
+            return blocked_account_identity_assertion(
+                str(endpoint_authority["reason_code"]),
+                "Account identity pin is not evaluated until the Alpaca PAPER endpoint is confirmed.",
+            )
+        now = time.monotonic()
+        if (
+            force is not True
+            and self._account_identity_cache is not None
+            and self._account_identity_cache_at_monotonic is not None
+            and now - self._account_identity_cache_at_monotonic <= 10.0
+        ):
+            return dict(self._account_identity_cache)
+
+        env = dict(self.config.process_env)
+        pin_env = alpaca_paper_account_pin_env()
+        env.update(pin_env)
+        if (
+            self._account_identity_checker_requires_board_read
+            and str(env.get("PK_BOARD_AUTHORIZED_PAPER_BROKER_READ") or "").strip().upper() != "YES_D4_BOARD_AUTHORIZED"
+        ):
+            assertion = blocked_account_identity_assertion(
+                ACCOUNT_PIN_NOT_PROVEN,
+                "Expected Alpaca PAPER account suffix "
+                f"{next(iter(pin_env.values()))}, but read-only broker account identity is not authorized/proven.",
+            )
+            self._account_identity_cache = dict(assertion)
+            self._account_identity_cache_at_monotonic = now
+            return dict(assertion)
+        try:
+            assertion = self._account_identity_checker(env)
+        except Exception as exc:
+            assertion = blocked_account_identity_assertion(
+                ACCOUNT_PIN_NOT_PROVEN,
+                f"Account identity checker failed closed: {exc.__class__.__name__}.",
+            )
+        if not isinstance(assertion, dict):
+            assertion = blocked_account_identity_assertion(
+                ACCOUNT_PIN_NOT_PROVEN,
+                "Account identity checker returned a non-dict result.",
+            )
+        self._account_identity_cache = dict(assertion)
+        self._account_identity_cache_at_monotonic = now
+        return dict(assertion)
+
+    def _paper_start_prerequisite_refusal(
+        self,
+        *,
+        account_identity: Mapping[str, Any] | None = None,
+        force_account_pin: bool = False,
+    ) -> str | None:
         key_refusal = self._paper_key_refusal()
         if key_refusal:
             return key_refusal
         endpoint_authority = self._paper_endpoint_authority()
         if endpoint_authority["reason_code"]:
             return endpoint_authority["reason_code"]
+        identity_assertion = (
+            dict(account_identity)
+            if isinstance(account_identity, Mapping)
+            else self._paper_account_identity_assertion(force=force_account_pin)
+        )
+        if not account_identity_assertion_passed(identity_assertion):
+            return str(identity_assertion.get("reason_code") or ACCOUNT_PIN_NOT_PROVEN)
         baseline_context = self._paper_baseline_runtime_context()
         if baseline_context.baseline_required and not baseline_context.baseline_loaded:
             return baseline_context.baseline_context_error or PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED
@@ -1027,6 +1115,7 @@ class OperatorPaperSupervisor:
         log_dir = repo_root / self.config.log_directory
         log_dir.mkdir(parents=True, exist_ok=True)
         process_env = dict(self.config.process_env)
+        process_env.update(alpaca_paper_account_pin_env())
         endpoint_authority = alpaca_endpoint_authority(process_env)
         if endpoint_authority["paper_endpoint_only"] is True:
             process_env["APCA_API_BASE_URL"] = str(endpoint_authority["alpaca_endpoint_display"])
@@ -1184,6 +1273,7 @@ class OperatorPaperSupervisor:
         session: PaperRunSession | None,
         runtime_mutation_occurred: bool,
     ) -> dict[str, Any]:
+        account_identity = self._account_identity_cache if isinstance(self._account_identity_cache, dict) else None
         return {
             "intent": intent,
             "intent_id": f"intent_{uuid.uuid4().hex[:16]}",
@@ -1207,6 +1297,8 @@ class OperatorPaperSupervisor:
             "real_money_touched": False,
             "broker_read_permission_profile": self._broker_read_profile().to_dict(),
             "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
+            "paper_account_identity_assertion": dict(account_identity or {}),
+            "paper_account_pinned": account_identity_assertion_passed(account_identity),
         }
 
     def _new_session_id(self) -> str:

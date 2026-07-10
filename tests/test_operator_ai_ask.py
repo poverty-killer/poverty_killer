@@ -31,6 +31,37 @@ PAPER_ENV = {
 }
 
 
+def _account_pin_ok_assertion() -> dict:
+    return {
+        "source": "TEST_ACCOUNT_PIN",
+        "status": "PASS",
+        "reason_code": "ALPACA_PAPER_ACCOUNT_PIN_OK",
+        "detail": "offline unit test account pin is pre-proven",
+        "expected_suffix": "045ded",
+        "actual_suffix": "045ded",
+        "paper_account_pinned": True,
+        "broker_read_attempted": True,
+        "broker_read_occurred": True,
+        "account_request_occurred": True,
+        "broker_mutation_occurred": False,
+        "order_submission_occurred": False,
+        "cancel_occurred": False,
+        "liquidation_occurred": False,
+        "live_enabled": False,
+        "real_money_enabled": False,
+        "secrets_values_exposed": False,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _offline_account_pin_for_legacy_ai_tests(monkeypatch):
+    monkeypatch.setattr(
+        OperatorPaperSupervisor,
+        "_paper_account_identity_assertion",
+        lambda self, *, force=False: _account_pin_ok_assertion(),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_canonical_paper_env(monkeypatch, tmp_path) -> Path:
     path = tmp_path / "canonical_alpaca_paper.env"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.operator_activation.account_identity import account_identity_assertion_passed
 from app.operator_credentials.store import (
     ALPACA_PAPER_ENV_PATH_ENV_KEY,
     canonical_alpaca_paper_env_path,
@@ -136,6 +137,8 @@ def _plain_check_detail(check: dict[str, Any]) -> str:
         return "Alpaca PAPER key ID and secret are missing."
     if check_id == "paper_endpoint_only":
         return str(check.get("detail") or "Only the Alpaca PAPER trading endpoint is accepted.")
+    if check_id == "alpaca_paper_account_pin":
+        return str(check.get("detail") or "Alpaca PAPER account identity does not match the pinned target account.")
     if check_id == "paper_read_only_preflight_gate":
         return "Read-only Alpaca PAPER preflight has not run and requires explicit Shan approval before Alpaca is called."
     if check_id == "paper_existing_position_baseline":
@@ -223,6 +226,8 @@ def _next_safe_action(
         return "Fix the Alpaca endpoint in Keys & Providers; only https://paper-api.alpaca.markets is accepted."
     if not alpaca_configured:
         return "Populate ~/.poverty_killer_alpaca_paper_env with Alpaca PAPER key ID and secret; do not paste secrets into chat or commit them."
+    if any(str(check.get("check_id") or "") == "alpaca_paper_account_pin" for check in blockers):
+        return "Do not start PAPER; resolve the Alpaca PAPER account pin mismatch or missing identity proof first."
     if any(str(check.get("check_id") or "") == "paper_read_only_preflight_gate" for check in blockers):
         return "Do not start PAPER; request explicit Shan approval for read-only Alpaca account, open-orders, and positions preflight first."
     if any(str(check.get("check_id") or "") == "paper_existing_position_baseline" for check in blockers):
@@ -397,6 +402,7 @@ def _build_run_paper_operator_state(
     credentials: dict[str, Any],
     health: dict[str, Any],
     paper_baseline_state: dict[str, Any] | None = None,
+    account_identity_assertion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blocker_codes = [str(check.get("check_id") or "unknown") for check in blockers]
     warning_codes = [str(check.get("check_id") or "unknown") for check in warnings]
@@ -469,6 +475,8 @@ def _build_run_paper_operator_state(
             "secrets_values_exposed": False,
         },
         "paper_credential_setup": credential_setup,
+        "paper_account_identity_assertion": account_identity_assertion or {},
+        "paper_account_pinned": account_identity_assertion_passed(account_identity_assertion),
         "paper_baseline": paper_baseline_state or credential_setup["baseline_adoption"],
         "stale_reconciliation": supervisor.get("stale_reconciliation") or {},
         "paper_baseline_runtime_context": baseline_runtime_context,
@@ -517,6 +525,8 @@ def _build_run_paper_operator_state(
             "paper_start_allowed": paper_start_allowed,
             "launch_readiness_start_allowed": paper_start_allowed and not blockers,
             "paper_credential_setup": credential_setup,
+            "paper_account_identity_assertion": account_identity_assertion or {},
+            "paper_account_pinned": account_identity_assertion_passed(account_identity_assertion),
             "paper_baseline": paper_baseline_state or credential_setup["baseline_adoption"],
             "paper_baseline_runtime_context": baseline_runtime_context,
             "baseline_context_required": baseline_runtime_context.get("baseline_required") is True,
@@ -575,6 +585,34 @@ def build_launch_readiness(
             "PASS" if endpoint_ok else "BLOCKED",
             str(endpoint_authority["safe_detail"]),
             blocker=not endpoint_ok,
+        )
+    )
+
+    account_identity_assertion = (
+        supervisor.get("paper_account_identity_assertion")
+        if isinstance(supervisor.get("paper_account_identity_assertion"), dict)
+        else {}
+    )
+    account_pin_ok = account_identity_assertion_passed(account_identity_assertion)
+    account_pin_required = alpaca_configured and endpoint_ok
+    expected_suffix = str(account_identity_assertion.get("expected_suffix") or "unknown")
+    actual_suffix = account_identity_assertion.get("actual_suffix")
+    account_pin_detail = (
+        str(account_identity_assertion.get("detail") or f"Broker-reported account identity matches {expected_suffix}.")
+        if account_pin_ok
+        else str(
+            account_identity_assertion.get("detail")
+            or f"Expected Alpaca PAPER account suffix {expected_suffix}, got {actual_suffix or 'unknown'}."
+        )
+    )
+    checks.append(
+        _check(
+            "alpaca_paper_account_pin",
+            "Pinned PAPER account",
+            "PASS" if account_pin_ok else ("BLOCKED" if account_pin_required else "DEGRADED"),
+            account_pin_detail,
+            blocker=account_pin_required and not account_pin_ok,
+            warning=not account_pin_required and not account_pin_ok,
         )
     )
 
@@ -749,6 +787,7 @@ def build_launch_readiness(
         credentials=credentials,
         health=health,
         paper_baseline_state=paper_baseline_state,
+        account_identity_assertion=account_identity_assertion,
     )
     return {
         "source": "OPERATOR_LAUNCH_READINESS",
@@ -766,6 +805,10 @@ def build_launch_readiness(
         "paper_endpoint_family": endpoint_authority["alpaca_trading_endpoint_family"],
         "paper_endpoint_host": endpoint_authority["alpaca_trading_endpoint_host"],
         "paper_endpoint_blocker_code": endpoint_authority["alpaca_endpoint_blocker_code"],
+        "paper_account_identity_assertion": account_identity_assertion,
+        "paper_account_pinned": account_pin_ok,
+        "paper_account_expected_suffix": account_identity_assertion.get("expected_suffix"),
+        "paper_account_actual_suffix": account_identity_assertion.get("actual_suffix"),
         "alpaca_endpoint_configured": endpoint_authority["alpaca_endpoint_configured"],
         "alpaca_paper_endpoint_valid": endpoint_authority["alpaca_paper_endpoint_valid"],
         "alpaca_live_endpoint_blocked": endpoint_authority["alpaca_live_endpoint_blocked"],
