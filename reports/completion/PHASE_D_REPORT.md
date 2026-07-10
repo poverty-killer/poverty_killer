@@ -258,6 +258,166 @@ Real-money remains blocked; no code enables it.
 
 ## 15. D4 Details
 
+D4 account/open-orders/positions baseline addendum was completed on 2026-07-10 under the Board packet `D4-ACCOUNT-IDENTITY`.
+
+### D4-Account-Identity Gate Verdict
+
+| Item | Status | Proof rung | Evidence |
+| --- | --- | --- | --- |
+| Canonical env account identity | PASS | broker-read-only | `~/.poverty_killer_alpaca_paper_env` resolves to account `redacted_suffix:045ded`. |
+| Canonical equals funded baseline `045ded` | YES | broker-read-only | Broker-confirmed account suffix exactly matches `redacted_suffix:045ded`. |
+| Buying power / cash / portfolio / positions | PASS | broker-read-only | Buying power `3960450.72`; cash `990112.68`; portfolio value `1000325.77`; 4 positions; 0 open orders. |
+| Second paper account reachable | YES | broker-read-only | Demoted local operator vault `alpaca_paper` credential reaches `redacted_suffix:104e2a`. |
+| Trading account hard-pinned | FAIL / BLOCKER | live-code inspection | Code pins the credential source to the canonical file, but does not pin or assert target account ID/suffix. Trading account identity is runtime-inferred from whichever account the canonical key resolves to. |
+| Phase F proceed gate | STOP | Board blocker rule | Even though canonical currently equals funded `045ded`, runtime-inferred account identity is a blocker under this packet. Do not self-fix the pin. |
+
+### Challenge Finding
+
+Live-code challenge result: the bot is credential-source pinned, not account-identity pinned.
+
+Evidence:
+
+- `app/operator_credentials/store.py:140` defines the canonical Alpaca PAPER env path.
+- `app/operator_credentials/store.py:584` and `app/operator_credentials/store.py:593` resolve Alpaca PAPER credential fields from `CANONICAL_PAPER_ENV_FILE`.
+- `app/operator_credentials/store.py:675` and `app/operator_credentials/store.py:683` rebuild effective env with canonical Alpaca PAPER values after removing process/local APCA values.
+- `app/execution/alpaca_paper_adapter.py:250` loads Alpaca PAPER credentials from the canonical env path.
+- `app/execution/alpaca_paper_adapter.py:295` builds the adapter from those credentials.
+- Search for `target_account`, `expected_account`, and `account_suffix` in execution/readiness credential paths found no account-target pin or suffix assertion.
+
+Conclusion: the active trading account is runtime-inferred from the canonical key. This is a latent go-live hazard because rotating the canonical file to a different PAPER key would silently change the account unless an account-target assertion is added later under Board confirmation.
+
+### Read-Only Path Confirmation
+
+The successful proof used the existing read-only portfolio path:
+
+- `app/operator_portfolio/snapshot.py:336` `build_portfolio_snapshot`.
+- `app/operator_portfolio/snapshot.py:375` GET `/v2/account`.
+- `app/operator_portfolio/snapshot.py:376` GET `/v2/positions`.
+- `app/operator_portfolio/snapshot.py:377` GET `/v2/orders?status=open&limit=100&nested=false`.
+- `app/operator_portfolio/snapshot.py:477` through `app/operator_portfolio/snapshot.py:480` return broker mutation/order/cancel/liquidation flags as false.
+
+No POST, DELETE, order submission, cancel, replace, close, liquidation, flatten, PAPER run, live endpoint, or real-money path was used.
+
+Note: an initial proof script failed after collecting the canonical snapshot because it called a nonexistent local reporting helper on `LocalCredentialStore`. The script used the same GET-only portfolio path before failing. The corrected script was rerun and produced the broker-read-only proof below.
+
+### Canonical Account Proof
+
+Credential source:
+
+```text
+source: CANONICAL_PAPER_ENV_FILE
+path label: ~/.poverty_killer_alpaca_paper_env
+endpoint: PAPER_ENDPOINT_CONFIRMED
+account suffix: redacted_suffix:045ded
+canonical equals funded baseline 045ded: YES
+account status: ACTIVE
+currency: USD
+cash: 990112.68
+buying power: 3960450.72
+portfolio value/equity: 1000325.77
+total market value: 10213.089124
+position count: 4
+open order count: 0
+broker read occurred: true
+broker mutation occurred: false
+order submission occurred: false
+cancel occurred: false
+liquidation occurred: false
+live enabled: false
+real money enabled: false
+secrets values exposed: false
+```
+
+Broker-confirmed canonical positions:
+
+| Symbol | Asset class | Quantity | Side | Market value | Unrealized P&L |
+| --- | --- | ---: | --- | ---: | ---: |
+| AVAXUSD | crypto | 475.373488709 | long | 3205.918808 | 3205.918808 |
+| ETHUSD | crypto | 2.233125238 | long | 3996.713563 | 3996.713563 |
+| LINKUSD | crypto | 374.74289054 | long | 2971.711122 | 2971.711122 |
+| SOLUSD | crypto | 0.498972077 | long | 38.745631 | 38.745631 |
+
+### Second Paper Account Proof
+
+A second distinct paper account is reachable through demoted local operator vault `alpaca_paper` credentials. This source is not PAPER execution truth after D2, and it was not promoted or switched. It was used only for Board-authorized read-only identity reconciliation.
+
+```text
+source: LOCAL_OPERATOR_VAULT_ALPACA_PAPER_DEMOTED_FOR_EXECUTION
+account suffix: redacted_suffix:104e2a
+canonical equals funded baseline 045ded: NO
+account status: ACTIVE
+currency: USD
+cash: -11
+buying power: 48.58
+portfolio value/equity: 87904.72
+total market value: 87915.715432
+position count: 12
+open order count: 0
+broker read occurred: true
+broker mutation occurred: false
+order submission occurred: false
+cancel occurred: false
+liquidation occurred: false
+live enabled: false
+real money enabled: false
+secrets values exposed: false
+```
+
+Broker-confirmed second-account positions:
+
+| Symbol | Asset class | Quantity | Side | Market value | Unrealized P&L |
+| --- | --- | ---: | --- | ---: | ---: |
+| AAPL | us_equity | 0.016903 | long | 5.325459 | 0.32589 |
+| AMZN | us_equity | 0.018912 | long | 4.645544 | -0.354259 |
+| BTCUSD | crypto | 1.029458301 | long | 65672.645179 | 65672.645179 |
+| ETHUSD | crypto | 4.716938618 | long | 8442.093722 | 8442.093722 |
+| GOOGL | us_equity | 0.012572 | long | 4.492604 | -0.506375 |
+| LINKUSD | crypto | 373.924413822 | long | 2965.220602 | 2965.220602 |
+| LTCUSD | crypto | 75.894278058 | long | 3395.479643 | 3395.479643 |
+| NVDA | us_equity | 0.022593 | long | 4.765993 | -0.233476 |
+| QQQ | us_equity | 0.007111 | long | 5.161662 | 0.162288 |
+| SOLUSD | crypto | 95.372899887 | long | 7405.791512 | 7405.791512 |
+| SPY | us_equity | 0.006787 | long | 5.124049 | 0.124555 |
+| TSLA | us_equity | 0.012195 | long | 4.969463 | -0.030072 |
+
+Process `APCA_*` values, if present in the shell, matched the canonical account credential pair and were not separately read. Local `alpaca_news` matched an already checked credential pair and was not separately read.
+
+Current local state baseline file contains a redacted accepted protected baseline for the second account:
+
+```text
+state/operator/paper_baseline.json exists: true
+accepted: true
+policy: ADOPT_EXISTING_POSITIONS_PROTECTED
+account suffix: redacted_suffix:104e2a
+buying power in stored baseline: 91188.09
+portfolio value in stored baseline: 86202.29
+position count in stored baseline: 10
+```
+
+This state file was read only. It was not edited or staged.
+
+### D1 Audit Thread Closure
+
+`SovereignExecutionGuard` is certified dormant, not wired live.
+
+Restatement:
+
+- `StaleDataGuard` is wired as a blocking evidence contributor under `evaluate_pre_trade_guardrails`.
+- `SovereignExecutionGuard` is mutation-capable by design and remains `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`.
+- It was not activated, substituted, or hidden during this addendum.
+
+### Stop / Blocker Decision
+
+Per the D4-ACCOUNT-IDENTITY packet:
+
+```text
+Canonical == funded 045ded: YES.
+Account identity hard-pinned in code: NO.
+Trading account binding: RUNTIME_INFERRED_FROM_CANONICAL_CREDENTIALS_NOT_ACCOUNT_ID_PINNED.
+Blocker: ACCOUNT_TARGET_RUNTIME_INFERRED.
+Action: STOP. Do not self-fix the pin. Hold for Board read before Phase F.
+```
+
 D4 is PASS.
 
 The authorized read path was challenged before use:

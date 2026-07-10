@@ -1,152 +1,119 @@
-# Codex Session Handoff - Phase E AI Chief Useful Closed
+# Codex Session Handoff - D4 Account Identity Blocker
 
 Date: 2026-07-10 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Active packet: Phase E AI Chief Useful.
+Active packet: D4-ACCOUNT-IDENTITY blocking read-only addendum before Phase F.
 
 ## 1. Verdict
 
-Phase E is complete for the authorized scope.
+D4-ACCOUNT-IDENTITY read-only proof is complete and appended to `reports/completion/PHASE_D_REPORT.md`.
 
-- E1 PASS.
-- E2 PASS.
-- E3 PASS.
-- E4 PASS.
+Result:
 
-AI Chief is now route-truthful and evidence-bound. It reports provider/fallback state, exposes its evidence contract, names current blockers from canonical D6 readiness, and remains advisory-only with no broker, live, real-money, or threshold mutation authority.
+- Canonical `~/.poverty_killer_alpaca_paper_env` resolves to funded account `redacted_suffix:045ded`.
+- Canonical equals funded baseline `045ded`: YES.
+- A second distinct paper account is reachable through demoted local operator vault `alpaca_paper`: `redacted_suffix:104e2a`.
+- The active trading account is not hard-pinned by account ID/suffix in code. It is runtime-inferred from whichever paper account the canonical credentials resolve to.
 
-No broker read, broker mutation, live mode, real-money mode, threshold change, or PAPER run occurred in Phase E.
+Blocker:
 
-## 2. Main Changes
+- `ACCOUNT_TARGET_RUNTIME_INFERRED`
 
-`/operator/ai/status` now exposes:
+Per Board packet, stop here and do not self-fix the pin. Phase F is blocked until Shan/Board confirms target-account pin policy.
 
-- route truth owner: `app.ai_chief_operator.provider_gateway.AIProviderGateway`
-- active provider
-- active model
-- response mode
-- fallback state
-- advisory-only/no-mutation flags
+## 2. Broker-Read-Only Proof
 
-`/operator/ai/ask` now returns:
+Canonical account:
 
-- `evidence_bound=true`
-- `evidence_contract`
-- `canonical_readiness`
-- `canonical_readiness_blockers`
-- `unknown_evidence_message`
+- source: `CANONICAL_PAPER_ENV_FILE`
+- account suffix: `redacted_suffix:045ded`
+- account status: `ACTIVE`
+- cash: `990112.68`
+- buying power: `3960450.72`
+- portfolio value/equity: `1000325.77`
+- total market value: `10213.089124`
+- positions: 4
+- open orders: 0
 
-Evidence contract schema: `ai-chief-evidence-contract-v1`.
+Canonical positions:
 
-Missing evidence must be represented with: `Unknown because this evidence is missing.`
+- `AVAXUSD` crypto qty `475.373488709`, market value `3205.918808`
+- `ETHUSD` crypto qty `2.233125238`, market value `3996.713563`
+- `LINKUSD` crypto qty `374.74289054`, market value `2971.711122`
+- `SOLUSD` crypto qty `0.498972077`, market value `38.745631`
 
-Provider adapter prompts now require model answers to use only supplied structured evidence packets and to avoid filling missing broker truth, market truth, portfolio values, blockers, fills, fees, TCA, or P&L from general knowledge.
+Second reachable paper account:
 
-AI UI now displays evidence-bound state, schema, canonical readiness, current blockers, missing required packets, and route diagnostics.
+- source: `LOCAL_OPERATOR_VAULT_ALPACA_PAPER_DEMOTED_FOR_EXECUTION`
+- account suffix: `redacted_suffix:104e2a`
+- account status: `ACTIVE`
+- cash: `-11`
+- buying power: `48.58`
+- portfolio value/equity: `87904.72`
+- total market value: `87915.715432`
+- positions: 12
+- open orders: 0
 
-Adjacent safety correction: `paper_control_state` now blocks accepted protected-position baselines with `paper_baseline_position_aware_policy`, matching `launch_readiness`. This closes a false-green risk where control state could otherwise say `READY_FOR_BOUNDED_PAPER` while launch readiness blocked.
+State baseline:
 
-D1 status carried forward:
+- `state/operator/paper_baseline.json` exists and was read only.
+- accepted: true
+- policy: `ADOPT_EXISTING_POSITIONS_PROTECTED`
+- account suffix: `redacted_suffix:104e2a`
+- stored buying power: `91188.09`
+- stored portfolio value: `86202.29`
+- stored position count: 10
 
-- `StaleDataGuard` is wired as a blocking evidence contributor.
+## 3. Challenge Result
+
+Live code is credential-source pinned, not account-identity pinned.
+
+Evidence:
+
+- `app/operator_credentials/store.py:140` defines canonical paper env path.
+- `app/operator_credentials/store.py:584` and `app/operator_credentials/store.py:593` resolve Alpaca PAPER fields from `CANONICAL_PAPER_ENV_FILE`.
+- `app/operator_credentials/store.py:675` and `app/operator_credentials/store.py:683` rebuild effective env with canonical Alpaca PAPER values.
+- `app/execution/alpaca_paper_adapter.py:250` loads Alpaca PAPER credentials from the canonical path.
+- No `target_account`, `expected_account`, or account suffix assertion exists in the execution/readiness credential path.
+
+## 4. D1 Thread Closure
+
+`SovereignExecutionGuard` is certified dormant, not wired live.
+
+- `StaleDataGuard` is wired as a blocking evidence contributor under `evaluate_pre_trade_guardrails`.
 - `SovereignExecutionGuard` is mutation-capable and remains `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`.
-
-## 3. Files Changed
-
-Runtime/backend:
-
-- `app/api/operator_readonly_api.py`
-- `app/ai_chief_operator/provider_adapters.py`
-
-UI:
-
-- `ui/operator-control-panel/app.js`
-
-Tests:
-
-- `tests/test_operator_ai_ask.py`
-- `tests/test_operator_ui_wiring.py`
-- `tests/test_operator_paper_baseline.py`
-
-Reports/tracker:
-
-- `reports/completion/PHASE_E_REPORT.md`
-- `CHECKPOINT_TRACKER.md`
-- `reports/codex_handoff_latest.md`
-
-## 4. Validation
-
-Passed:
-
-```powershell
-python -m py_compile app\api\operator_readonly_api.py app\ai_chief_operator\provider_adapters.py
-```
-
-Passed:
-
-```powershell
-node --check ui\operator-control-panel\app.js
-```
-
-Passed:
-
-```powershell
-python -m pytest tests/test_operator_ai_ask.py tests/test_operator_ui_wiring.py -q --basetemp .pytest_tmp\phase_e_ai
-```
-
-Result: 83 passed.
-
-Passed:
-
-```powershell
-python -m pytest tests/test_operator_ai_ask.py tests/test_operator_readonly_api.py tests/test_operator_ui_wiring.py tests/test_operator_credentials.py tests/test_operator_launch_readiness.py -q --basetemp .pytest_tmp\phase_e_adjacent
-```
-
-Result: 138 passed.
-
-Passed:
-
-```powershell
-python -m pytest tests/test_operator_paper_baseline.py tests/test_operator_readonly_api.py tests/test_operator_launch_readiness.py tests/test_operator_ai_ask.py tests/test_operator_ui_wiring.py -q --basetemp .pytest_tmp\phase_e_readiness_ai
-```
-
-Result: 128 passed, 72 existing warnings.
-
-In-process API proof used a temporary fake canonical paper env and no broker call. Observed current blocker: `paper_baseline_position_aware_policy`.
 
 ## 5. Safety Confirmation
 
-No Sacred Safety Law was weakened.
+Only Alpaca PAPER GET calls were used.
 
-AI remains advisory-only.
+No broker mutation occurred.
 
-AI cannot trade, call broker, enable live/real money, mutate OMS/risk/thresholds/strategy/sizing, or see raw secrets through the Phase E paths.
+No order submission, cancel, replace, close, liquidation, flatten, PAPER run, live endpoint, real-money path, threshold change, or secret exposure occurred.
 
-No raw secrets were printed or staged.
+The first proof script failed after collecting the canonical snapshot because it called a nonexistent local reporting helper. The corrected script was rerun. Both attempts used the same GET-only portfolio path and no mutation path.
 
-No state, logs, runtime DB files, `.operator_secrets`, screenshots, or `.pytest_tmp` files should be staged.
+## 6. Files Changed
 
-## 6. Remaining Holds
+Reports/tracker only:
 
-No Phase E hold remains.
+- `reports/completion/PHASE_D_REPORT.md`
+- `CHECKPOINT_TRACKER.md`
+- `reports/codex_handoff_latest.md`
 
-PAPER run authorization is still a separate future Board gate.
+## 7. Hold
 
-Phase F UI Cockpit Understandable is next in the tracker, but it has not been authorized in this packet.
+Do not proceed to Phase F.
 
-## 7. Exact Staging
+Next required Board action: confirm whether and how to hard-pin the intended PAPER account target before UI cockpit work continues.
+
+## 8. Exact Staging
 
 Stage exactly:
 
 ```powershell
-git add -- app/api/operator_readonly_api.py
-git add -- app/ai_chief_operator/provider_adapters.py
-git add -- ui/operator-control-panel/app.js
-git add -- tests/test_operator_ai_ask.py
-git add -- tests/test_operator_ui_wiring.py
-git add -- tests/test_operator_paper_baseline.py
-git add -- reports/completion/PHASE_E_REPORT.md
+git add -- reports/completion/PHASE_D_REPORT.md
 git add -- CHECKPOINT_TRACKER.md
 git add -- reports/codex_handoff_latest.md
 ```

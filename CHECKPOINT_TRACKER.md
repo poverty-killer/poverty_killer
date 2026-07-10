@@ -12,7 +12,7 @@ Branch: master
 | C - Authority Graph Implemented | PASS | `reports/completion/PHASE_C_AUTHORITY_GRAPH_REPORT.md`; 7 owners named in code; 9 Phase B conflicts resolved as owner/contributor/reference boundaries |
 | D - PAPER Readiness Truthful | PASS | `reports/completion/PHASE_D_REPORT.md`; D0-D7 PASS after D4 Board-armed read-only Alpaca PAPER baseline |
 | E - AI Chief Useful | PASS | `reports/completion/PHASE_E_REPORT.md`; AI route truth and evidence contract are live; canonical blockers come from D6 readiness |
-| F - UI Cockpit Understandable | NOT_STARTED | Browser proof not part of Phase A |
+| F - UI Cockpit Understandable | BLOCKED | D4-ACCOUNT-IDENTITY addendum found account target is runtime-inferred; Board must confirm account pin fix before Phase F |
 | G - Bounded PAPER Run Ready | NOT_STARTED | PAPER run still requires explicit Board approval |
 | H - Live-Readiness Shadow Mode | NOT_STARTED | Live credentials read-only requires Board approval |
 | I - Tiny Live Canary | NOT_STARTED | Individually Board-approved only |
@@ -73,6 +73,19 @@ Phase E completed on 2026-07-10 under the Board-authorized AI Chief Useful packe
 - Current canonical PAPER blocker observed in Phase E proof: `paper_baseline_position_aware_policy`.
 - Validation: `python -m py_compile app\api\operator_readonly_api.py app\ai_chief_operator\provider_adapters.py` passed; `node --check ui\operator-control-panel\app.js` passed; focused readiness/AI suite passed with 128 tests and 72 existing warnings.
 
+## D4 Account Identity Addendum
+
+D4-ACCOUNT-IDENTITY was completed on 2026-07-10 before Phase F under read-only Board authorization.
+
+- Canonical source `~/.poverty_killer_alpaca_paper_env` resolved to `redacted_suffix:045ded`.
+- Canonical account equals funded baseline `045ded`: YES.
+- Canonical broker-confirmed values: buying power `3960450.72`; cash `990112.68`; portfolio value `1000325.77`; 4 positions; 0 open orders.
+- Second distinct paper account reachable only through demoted local operator vault `alpaca_paper`: `redacted_suffix:104e2a`; cash `-11`; buying power `48.58`; portfolio value `87904.72`; 12 positions; 0 open orders.
+- Local stored baseline `state/operator/paper_baseline.json` is accepted/protected for `redacted_suffix:104e2a`; read-only inspection only, not staged.
+- `SovereignExecutionGuard` audit thread closed as certified dormant: mutation-capable and `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`.
+- Blocking finding: code pins credential source to the canonical env file but does not hard-pin target account ID/suffix. Trading account is runtime-inferred from whichever paper account the canonical key resolves to.
+- Current blocker before Phase F: `ACCOUNT_TARGET_RUNTIME_INFERRED`. Do not self-fix; Board must confirm target-account pin policy.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from pre-existing runtime/report leftovers and Phase A
@@ -88,5 +101,6 @@ clean/stash/reset.
 - Shan authorized Phase D1-FIX: `StaleDataGuard` is wired as a blocking evidence contributor under `evaluate_pre_trade_guardrails`; `SovereignExecutionGuard` is mutation-capable and remains dormant by policy pending Phase H/I arming.
 - Shan authorized D4 read-only Alpaca PAPER inspection: account status, open orders, and positions only; canonical env credential source; paper endpoint only; no order placement/cancel/close/liquidate/flatten and no PAPER run.
 - Shan authorized Phase E AI Chief Useful: AI remains advisory-only; no broker/live/threshold touch; provider/model route truth, evidence-bound answers, canonical D6 blockers, and mutation/secret refusal proofs required.
+- Shan authorized D4-ACCOUNT-IDENTITY read-only proof before Phase F. Result: canonical account is funded `redacted_suffix:045ded`, second account `redacted_suffix:104e2a` is reachable only through demoted local vault/state, but account identity is runtime-inferred in code, so Phase F is blocked pending Board confirmation of the account-pin fix.
 - No PAPER run was authorized.
 - No live mode, live read-only mode, or broker mutation was authorized.
