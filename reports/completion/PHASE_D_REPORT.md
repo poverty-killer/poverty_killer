@@ -2,8 +2,9 @@
 
 Date: 2026-07-10
 Branch: master
-Latest commit at open: `eff471d phase C authority graph`
-Active packet: Phase D convergence + D1-FIX Board packet.
+Latest commit at original Phase D open: `eff471d phase C authority graph`
+Latest commit before D4 armed addendum: `0ad558b complete phase D paper readiness truth`
+Active packet: Phase D convergence + D1-FIX Board packet + D4 armed read-only broker inspection packet.
 
 ## Gate Verdict
 
@@ -13,14 +14,14 @@ Active packet: Phase D convergence + D1-FIX Board packet.
 | D1 - Safety guard liveness | PASS | focused tests prove behavior | `StaleDataGuard` is now a blocking contributor under `evaluate_pre_trade_guardrails`; stale market data is rejected. `SovereignExecutionGuard` is mutation-capable and remains `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`, represented as such. |
 | D2 - Single Alpaca PAPER credential source | PASS | focused tests prove resolver behavior | Alpaca PAPER execution credentials resolve only from `~/.poverty_killer_alpaca_paper_env` or `POVERTY_KILLER_ALPACA_PAPER_ENV_PATH`; `.operator_secrets` and process APCA vars are demoted for PAPER execution truth. |
 | D3 - Paper endpoint proven / live and real money blocked | PASS | focused tests prove failure modes | Canonical live endpoint fails closed with `LIVE_ENDPOINT_BLOCKED`; PAPER endpoint normalizes to `https://paper-api.alpaca.markets`; real money remains blocked. |
-| D4 - Account / open-orders / positions baseline known | UNKNOWN-pending-Board-read | not run by governance | No broker read authorization was granted. No Alpaca account/open-orders/positions request was made. |
-| D5 - Portfolio truth broker-confirmed or exact failure | PASS | focused API test proves exact failure | Without D4 authorization, `/operator/portfolio` returns `BROKER_READ_NOT_AUTHORIZED` and does not call the broker client or show fabricated broker-confirmed values. |
+| D4 - Account / open-orders / positions baseline known | PASS | broker-read-only runtime proof | Board-authorized read-only Alpaca PAPER inspection made exactly `GET /v2/account`, `GET /v2/positions`, and `GET /v2/orders?status=open&limit=100&nested=false`; account/open-orders/positions baseline retrieved. |
+| D5 - Portfolio truth broker-confirmed or exact failure | PASS | broker-read-only runtime proof + focused API test | Authorized `/operator/portfolio` path returned `BROKER_CONFIRMED` data with no fabricated values; unarmed path remains exact `BROKER_READ_NOT_AUTHORIZED` failure. |
 | D6 - Run-PAPER button/backend truth | PASS | focused tests + JS syntax check | Backend and UI gate on exactly `READY_FOR_BOUNDED_PAPER`; `DEGRADED_BUT_RUNNABLE` and `READY_FOR_GOVERNED_PAPER` are removed from runtime/UI contracts. |
 | D7 - Final reconciliation explicit | PASS | focused API test proves contract | Launch readiness exposes `final_reconciliation_required` and owner `OrderRouter.finalize_oms_shutdown_reconciliation`. |
 
 ## 1. Verdict
 
-Phase D is complete for the authorized scope. PAPER was not run. Broker read remains held as `UNKNOWN-pending-Board-read`.
+Phase D is fully closed for D0-D7. PAPER was not run. The D4 read-only broker inspection was Board-armed and completed against Alpaca PAPER only.
 
 D1 was resolved without creating new authority: `StaleDataGuard` contributes a veto under the existing pre-trade guardrail owner, while `SovereignExecutionGuard` is classified as mutation-capable and kept dormant by policy until a future live-arming phase.
 
@@ -62,6 +63,8 @@ Reports/tracker:
 - `reports/completion/PHASE_D_REPORT.md`
 - `CHECKPOINT_TRACKER.md`
 - `reports/codex_handoff_latest.md`
+
+D4 armed addendum changed only the report/tracker/handoff files above. No source code, tests, state, logs, runtime DB, or secret files were edited for the D4 broker-read proof.
 
 ## 3. Root Cause
 
@@ -129,11 +132,46 @@ Result: 206 passed, 72 existing warnings.
 
 ## 7. Runtime / Browser / Broker Proof
 
-Runtime server proof: not run; this phase used focused in-process API/unit proof.
+Runtime server proof: not run; the build phase used focused in-process API/unit proof.
 
 Browser proof: not run; UI change was contract/JS logic and `node --check` only.
 
-Broker read proof: not run by governance. D4 remains `UNKNOWN-pending-Board-read`.
+Broker read proof: completed under the D4 armed packet using the same operator backend provider boundary:
+
+```text
+Credential source: CANONICAL_PAPER_ENV_FILE for required Alpaca PAPER fields
+Endpoint: https://paper-api.alpaca.markets
+Calls: GET /v2/account; GET /v2/positions; GET /v2/orders?status=open&limit=100&nested=false
+Portfolio status: BROKER_CONFIRMED
+Account status: ACTIVE
+Account id: redacted_suffix:045ded
+Currency: USD
+Trading blocked: false
+Account blocked: false
+Transfers blocked: false
+Pattern day trader: false
+Open orders: 0
+Positions: 4
+Total equity: 1000327.32
+Cash: 990112.68
+Buying power: 3960450.72
+Total market value: 10214.638362
+Total unrealized P&L: 10214.638362
+Broker read profile: PAPER_SMOKE_STRICT_READS
+Account activities: SKIPPED_NOT_AUTHORIZED
+Freshness: 2026-07-10T17:01:18.931176+00:00
+```
+
+Broker-confirmed positions:
+
+| Symbol | Asset class | Quantity | Side | Market value | Unrealized P&L | Source |
+| --- | --- | ---: | --- | ---: | ---: | --- |
+| AVAXUSD | crypto | 475.373488709 | long | 3187.902153 | 3187.902153 | BROKER_CONFIRMED |
+| ETHUSD | crypto | 2.233125238 | long | 4010.514277 | 4010.514277 | BROKER_CONFIRMED |
+| LINKUSD | crypto | 374.74289054 | long | 2977.392224 | 2977.392224 | BROKER_CONFIRMED |
+| SOLUSD | crypto | 0.498972077 | long | 38.829708 | 38.829708 | BROKER_CONFIRMED |
+
+Open orders: none.
 
 Broker mutation/PAPER run: not run.
 
@@ -155,7 +193,9 @@ No Sacred Safety Law was weakened.
 
 No risk, stale/TTL, economic, sizing, masking, strategy, NetEdge, OMS, broker, or threshold value was weakened.
 
-No broker read was performed.
+Broker read-only inspection was performed only after explicit D4 Board arming.
+
+The read-only proof recorded these mutation and safety flags as false: `broker_mutation_occurred`, `order_submission_occurred`, `cancel_occurred`, `liquidation_occurred`, `live_enabled`, `real_money_enabled`.
 
 No broker mutation occurred.
 
@@ -218,13 +258,46 @@ Real-money remains blocked; no code enables it.
 
 ## 15. D4 Details
 
-D4 is `UNKNOWN-pending-Board-read`.
+D4 is PASS.
 
-No account, open-orders, or positions request was made. No live credentials were inspected.
+The authorized read path was challenged before use:
+
+- `AlpacaPaperReadOnlyClient.get_json` constructs `urllib.request.Request(..., method="GET")` only.
+- `build_portfolio_snapshot` calls only `/v2/account`, `/v2/positions`, and `/v2/orders?status=open&limit=100&nested=false` under the strict D4 profile.
+- Account activities stayed skipped because the strict read profile does not authorize them.
+- `app.execution.alpaca_paper_adapter` still contains governed POST/DELETE methods for execution, but that adapter is not the D4 operator portfolio read path.
+
+Retrieved broker-confirmed baseline:
+
+- account status: `ACTIVE`
+- account id: `redacted_suffix:045ded`
+- currency: `USD`
+- trading/account/transfers blocked: `false` / `false` / `false`
+- pattern day trader: `false`
+- open orders: `0`
+- positions: `4`
+- symbols: `AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`
+- total equity: `1000327.32`
+- cash: `990112.68`
+- buying power: `3960450.72`
+- total market value: `10214.638362`
+- total unrealized P&L: `10214.638362`
+- credential source: required Alpaca PAPER fields resolved from `CANONICAL_PAPER_ENV_FILE`
+- endpoint status: `PAPER_ENDPOINT_CONFIRMED`
+- mutation/live/real-money flags: all false
 
 ## 16. D5 Details
 
-When broker read is not armed, portfolio truth shows exact failure:
+D5 is PASS at broker-read-only proof rung.
+
+When D4 broker read is armed, portfolio truth renders broker-confirmed values from the read-only Alpaca PAPER response:
+
+- `status`: `BROKER_CONFIRMED`
+- `data_source`: `BROKER_CONFIRMED`
+- positions and open orders are broker-confirmed only; no fabricated fallback rows are promoted.
+- read-only order rows cannot cancel, replace, or liquidate.
+
+When broker read is not armed, the unarmed path still shows exact failure:
 
 - `status`: `BACKEND_DEGRADED`
 - `unavailable_reason`: `BROKER_READ_NOT_AUTHORIZED`
@@ -252,8 +325,6 @@ Launch readiness exposes final reconciliation as required:
 
 ## 19. Limitations / Unknowns
 
-D4 remains unknown until Shan explicitly authorizes read-only Alpaca PAPER account/open-orders/positions inspection.
-
 No browser screenshot proof was captured for the UI button.
 
 No end-to-end dev server proof was run.
@@ -267,28 +338,6 @@ Existing unrelated dirty/untracked files remain preserved.
 Stage exactly:
 
 ```powershell
-git add -- app/risk/pre_trade_guardrails.py
-git add -- app/main_loop.py
-git add -- app/core/authority_graph.py
-git add -- app/operator_credentials/store.py
-git add -- app/execution/alpaca_paper_adapter.py
-git add -- app/operator_activation/launch_readiness.py
-git add -- app/operator_activation/paper_baseline.py
-git add -- app/operator_portfolio/snapshot.py
-git add -- app/operator_providers/readiness.py
-git add -- app/api/operator_readonly_api.py
-git add -- app/api/operator_paper_supervisor.py
-git add -- ui/operator-control-panel/app.js
-git add -- ui/operator-control-panel/contracts.json
-git add -- tests/test_phase_d_paper_readiness_truth.py
-git add -- tests/test_pre_trade_guardrail_constraints.py
-git add -- tests/test_alpaca_paper_credential_authority_guard.py
-git add -- tests/test_operator_launch_readiness.py
-git add -- tests/test_operator_credentials.py
-git add -- tests/test_operator_portfolio.py
-git add -- tests/test_operator_readonly_api.py
-git add -- tests/test_operator_ai_ask.py
-git add -- tests/test_operator_ui_wiring.py
 git add -- reports/completion/PHASE_D_REPORT.md
 git add -- CHECKPOINT_TRACKER.md
 git add -- reports/codex_handoff_latest.md
