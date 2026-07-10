@@ -88,6 +88,8 @@ ANSWER_MODES = {
     ANSWER_MODE_AI_CHAT_MODEL,
     ANSWER_MODE_AI_REASONING_STRATEGY,
 }
+AI_UNKNOWN_EVIDENCE_MESSAGE = "Unknown because this evidence is missing."
+AI_EVIDENCE_CONTRACT_SCHEMA = "ai-chief-evidence-contract-v1"
 
 
 def normalize_ai_answer_mode(value: Any) -> tuple[str, str]:
@@ -1678,6 +1680,15 @@ class OperatorSnapshotProvider:
             "READ_ONLY_PREFLIGHT_REQUIRED",
             "NOT_ACCEPTED",
         }
+        try:
+            baseline_position_count_for_policy = int(baseline.get("position_count") or 0)
+        except (TypeError, ValueError):
+            baseline_position_count_for_policy = 0
+        baseline_position_aware_policy_blocked = (
+            baseline_accepted
+            and baseline_position_count_for_policy > 0
+            and str(baseline.get("policy") or "") == BASELINE_POLICY_PROTECTED
+        )
         baseline_runtime_context = supervisor.get("paper_baseline_runtime_context") or {}
         credential_configured = alpaca.get("configured") is True
         supervisor_allows_start = supervisor.get("paper_start_allowed") is True
@@ -1686,6 +1697,7 @@ class OperatorSnapshotProvider:
             and credential_configured
             and endpoint_valid
             and baseline_accepted
+            and not baseline_position_aware_policy_blocked
             and not supervisor_running
             and not required_failures
         )
@@ -1701,6 +1713,8 @@ class OperatorSnapshotProvider:
             dominant_blocker = "BASELINE_ADOPTION_REQUIRED"
         elif baseline_preflight_required:
             dominant_blocker = "paper_read_only_preflight_gate"
+        elif baseline_position_aware_policy_blocked:
+            dominant_blocker = "paper_baseline_position_aware_policy"
         elif local_start_ready:
             dominant_blocker = "READY_FOR_BOUNDED_PAPER"
         else:
@@ -1768,6 +1782,7 @@ class OperatorSnapshotProvider:
             "baseline_snapshot_id": baseline.get("baseline_snapshot_id"),
             "baseline_policy": baseline.get("policy"),
             "baseline_position_count": baseline.get("position_count") or 0,
+            "baseline_position_aware_policy_blocked": baseline_position_aware_policy_blocked,
             "baseline_runtime_context": baseline_runtime_context,
             "protected_symbols": baseline_runtime_context.get("protected_symbols_normalized") or baseline.get("protected_symbols") or [],
             "portfolio_truth_status": portfolio_truth_status,
@@ -2146,10 +2161,18 @@ class OperatorSnapshotProvider:
 
     def ai_status(self) -> dict[str, Any]:
         recs = self.ai_queue.list()
+        gateway_status = self.ai_gateway.status()
+        gateway_provider = gateway_status.get("provider") if isinstance(gateway_status.get("provider"), dict) else {}
+        gateway_policy = gateway_status.get("model_policy") if isinstance(gateway_status.get("model_policy"), dict) else {}
         return {
             "source": "AI_CHIEF_OPERATOR",
             "persona": quant_persona_summary(),
-            "gateway": self.ai_gateway.status(),
+            "gateway": gateway_status,
+            "route_truth_owner": "app.ai_chief_operator.provider_gateway.AIProviderGateway",
+            "active_provider": gateway_provider.get("provider_id") or gateway_provider.get("provider") or "disabled",
+            "active_model": gateway_provider.get("model_name") or gateway_provider.get("model") or gateway_policy.get("model_name"),
+            "response_mode": gateway_provider.get("provider_mode") or gateway_policy.get("provider_mode") or "NOT_CONFIGURED",
+            "fallback_state": gateway_provider.get("fallback_reason") or gateway_provider.get("provider_state") or "UNKNOWN",
             "routing_settings": dict(self.ai_routing_settings),
             "routing_settings_source": self.ai_routing_settings_source,
             "routing_settings_status": self.ai_routing_settings_last_result.get("status"),
@@ -2210,6 +2233,7 @@ class OperatorSnapshotProvider:
         safety_filter = {"triggered": False, "blocked_terms": []}
         if not classification["allowed"]:
             context = self._ai_light_context()
+            context = self._ai_context_for_mode(context, mode)
             response = (
                 "Refused or redirected. The Chief Quant Advisor cannot trade, call broker, enable live, "
                 "handle secrets, bypass safety gates, submit/cancel/liquidate orders, or mutate strategy. "
@@ -2247,6 +2271,7 @@ class OperatorSnapshotProvider:
                 or model_identity_question
                 or provider_self_test_question
             ) else self._ai_context()
+            context = self._ai_context_for_mode(context, mode)
             if effective_answer_mode == ANSWER_MODE_DETERMINISTIC:
                 route_reason = "DETERMINISTIC_MODE_LOCAL_TRUTH"
                 if provider_self_test_question:
@@ -2531,6 +2556,8 @@ class OperatorSnapshotProvider:
             "NO_SILENT_DOWNGRADE_TO_LOWER_REASONING_MODEL",
         }):
             response = self._ai_current_truth_operational_answer(mode, question, known_facts, unknowns, next_step, context)
+        evidence_contract = context.get("evidence_contract") if isinstance(context.get("evidence_contract"), dict) else self._ai_evidence_contract(context, mode)
+        canonical_readiness = evidence_contract.get("canonical_readiness") if isinstance(evidence_contract.get("canonical_readiness"), dict) else self._ai_canonical_readiness_contract(context)
         empty_model_answer = response.strip() == "Provider returned an empty advisory response."
         if empty_model_answer:
             status = "PROVIDER_ERROR"
@@ -2623,6 +2650,11 @@ class OperatorSnapshotProvider:
             "http_status_code": provider.get("http_status_code"),
             "ai_call_trace": ai_call_trace,
             "route_decision": gateway_answer.get("route_decision") if isinstance(gateway_answer, dict) else {},
+            "evidence_bound": True,
+            "evidence_contract": evidence_contract,
+            "canonical_readiness": canonical_readiness,
+            "canonical_readiness_blockers": canonical_readiness.get("current_blockers") or [],
+            "unknown_evidence_message": AI_UNKNOWN_EVIDENCE_MESSAGE,
             "question": question,
             "answer": response,
             "response": response,
@@ -2844,41 +2876,47 @@ class OperatorSnapshotProvider:
         runtime = context.get("runtime") or {}
         portfolio = context.get("portfolio") or {}
         providers = context.get("provider_readiness") or {}
+        evidence_contract = context.get("evidence_contract") if isinstance(context.get("evidence_contract"), dict) else {}
+        canonical_readiness = (
+            evidence_contract.get("canonical_readiness")
+            if isinstance(evidence_contract.get("canonical_readiness"), dict)
+            else self._ai_canonical_readiness_contract(context)
+        )
+        current_blockers = [str(item) for item in (canonical_readiness.get("current_blockers") or []) if str(item)]
         facts = [
             "AI is advisory-only and can_execute=false.",
             f"Live status is {context.get('live_status') or 'LIVE_LOCKED'}; real-money remains blocked.",
+            f"Launch readiness: {canonical_readiness.get('final_launch_readiness') or readiness.get('final_launch_readiness') or 'UNKNOWN'}.",
             f"Provider readiness loaded: {providers.get('provider_count', 0)} providers, {providers.get('missing_credentials_count', 0)} missing credentials.",
+            f"Evidence contract: {evidence_contract.get('schema_version') or AI_EVIDENCE_CONTRACT_SCHEMA}; evidence_bound=true.",
         ]
         unknowns = [
             "Future profit is unknown and cannot be inferred from PAPER or historical tests alone.",
-            "Unknown broker-confirmed fees, slippage, and TCA must stay unknown until evidence exists.",
+            f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: broker-confirmed fees, slippage, and TCA evidence is not present in this AI answer packet.",
         ]
+        unknowns.extend(str(item) for item in (evidence_contract.get("missing_required_evidence") or []) if str(item))
         if mode == "PORTFOLIO_REVIEW":
             summary = portfolio.get("summary") if isinstance(portfolio.get("summary"), dict) else {}
             facts.append(f"Portfolio status: {portfolio.get('status') or 'UNKNOWN'}; positions={summary.get('position_count', 0)}; open_orders={summary.get('open_order_count', 0)}.")
             if portfolio.get("status") not in {"BROKER_CONFIRMED", "BROKER_CONFIRMED_EMPTY"}:
-                unknowns.append(f"Broker portfolio truth unavailable: {portfolio.get('unavailable_reason') or 'UNKNOWN'}.")
+                unknowns.append(f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: broker portfolio truth unavailable: {portfolio.get('unavailable_reason') or 'portfolio packet not loaded'}.")
         if mode in {"RUN_PLANNER", "TRADING_SYSTEMS_AUDITOR", "OPERATOR_GUIDE"}:
-            facts.append(f"Launch readiness: {readiness.get('final_launch_readiness') or 'UNKNOWN'}.")
             if self._ai_ready_idle_no_active_runtime(context):
                 facts.append("Current state: READY_IDLE_NO_ACTIVE_RUNTIME (ready/idle; no active PAPER run attached).")
             if runtime.get("supervisor_state"):
                 facts.append(f"Supervisor: {runtime.get('supervisor_state')}.")
-            if readiness.get("paper_start_allowed") is not None:
-                launch = str(readiness.get("final_launch_readiness") or "")
-                readiness_start_allowed = readiness.get("paper_start_allowed") is True and launch == "READY_FOR_BOUNDED_PAPER"
-                facts.append(f"Paper start allowed: {str(readiness_start_allowed).lower()}.")
+            facts.append(f"Paper start allowed: {str(canonical_readiness.get('paper_start_allowed') is True).lower()}.")
             max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds")
             if max_duration:
                 facts.append(f"Max duration: {max_duration} seconds / {self._duration_days_label(max_duration)}.")
-            if readiness.get("reason_codes"):
-                unknowns.append(f"Run blockers/warnings: {', '.join(str(item) for item in readiness.get('reason_codes') or [])}.")
+            if current_blockers:
+                unknowns.append(f"Canonical readiness blockers: {', '.join(current_blockers)}.")
             else:
                 facts.append("Launch readiness reports no current blocker reason codes.")
             if self._ai_historical_duplicate_refusal(context):
                 facts.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
             if self._ai_ready_idle_no_active_runtime(context):
-                unknowns.append("No active DecisionFrame, NetEdge, fills, fees, or TCA evidence exists because no PAPER run is active.")
+                unknowns.append(f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: no active DecisionFrame, NetEdge, fills, fees, or TCA evidence exists because no PAPER run is active.")
         return facts[:10], unknowns[:8]
 
     def _ai_current_truth_operational_answer(
@@ -3345,10 +3383,11 @@ class OperatorSnapshotProvider:
         }
 
     def _ai_ready_idle_no_active_runtime(self, context: dict[str, Any]) -> bool:
-        readiness = context.get("launch_readiness") or {}
+        canonical_readiness = self._ai_canonical_readiness_contract(context)
         runtime = context.get("runtime") or {}
         return (
-            self._ai_paper_runnable_readiness(readiness, runtime)
+            canonical_readiness.get("paper_start_allowed") is True
+            and canonical_readiness.get("final_launch_readiness") == "READY_FOR_BOUNDED_PAPER"
             and str(runtime.get("supervisor_state") or "").upper() == "IDLE"
             and bool(runtime.get("current_runtime_attached")) is False
         )
@@ -3366,6 +3405,7 @@ class OperatorSnapshotProvider:
         return runtime.get("historical_refusal_reason") == "DUPLICATE_ACTIVE_RUN"
 
     def _ai_runtime_truth(self, context: dict[str, Any]) -> dict[str, Any]:
+        canonical_readiness = self._ai_canonical_readiness_contract(context)
         readiness = context.get("launch_readiness") or {}
         runtime = context.get("runtime") or {}
         max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds") or 432000
@@ -3373,11 +3413,11 @@ class OperatorSnapshotProvider:
             max_duration_int = int(max_duration)
         except (TypeError, ValueError):
             max_duration_int = 432000
-        blocking_codes = list(readiness.get("reason_codes") or []) if readiness.get("final_launch_readiness") == "BLOCKED" else []
+        blocking_codes = [str(item) for item in (canonical_readiness.get("current_blockers") or []) if str(item)]
         return {
-            "launch": readiness.get("final_launch_readiness") or "UNKNOWN",
+            "launch": canonical_readiness.get("final_launch_readiness") or readiness.get("final_launch_readiness") or "UNKNOWN",
             "supervisor": runtime.get("supervisor_state") or "UNKNOWN",
-            "paper_start_allowed": readiness.get("paper_start_allowed") is True,
+            "paper_start_allowed": canonical_readiness.get("paper_start_allowed") is True,
             "live": "locked" if readiness.get("live_blocked") is not False else "UNKNOWN",
             "real_money": "blocked" if readiness.get("real_money_blocked") is not False else "UNKNOWN",
             "max_duration": max_duration_int,
@@ -3498,16 +3538,18 @@ class OperatorSnapshotProvider:
 
     def _ai_next_step(self, mode: str, context: dict[str, Any], page_id: str) -> dict[str, str | None]:
         readiness = context.get("launch_readiness") or {}
+        canonical_readiness = self._ai_canonical_readiness_contract(context)
         provider_setup = context.get("provider_setup") if isinstance(context.get("provider_setup"), dict) else {}
-        alpaca_missing = "alpaca_paper_credentials" in set(readiness.get("reason_codes") or [])
+        current_blockers = [str(item) for item in (canonical_readiness.get("current_blockers") or []) if str(item)]
+        alpaca_missing = "alpaca_paper_credentials" in set(current_blockers) or "alpaca_paper_credentials" in set(readiness.get("reason_codes") or [])
         if mode == "SETUP_HELP" or alpaca_missing:
             return {"label": "Open Keys & Providers and save/validate Alpaca PAPER credentials.", "page": "providers", "control_id": "credential_save_alpaca_paper"}
         if mode == "PORTFOLIO_REVIEW":
             return {"label": "Review Portfolio Home positions, exposure, open orders, and unavailable broker truth.", "page": "positions", "control_id": "positions_preview_table"}
         if mode == "RUN_PLANNER":
-            if self._ai_paper_runnable_readiness(readiness):
+            if canonical_readiness.get("paper_start_allowed") is True and canonical_readiness.get("final_launch_readiness") == "READY_FOR_BOUNDED_PAPER":
                 return {"label": "Start through the governed Run PAPER control. I cannot start it; Shan must click Start PAPER.", "page": "command", "control_id": "paper_start"}
-            reason = str((readiness.get("reason_codes") or ["UNKNOWN_BLOCKER"])[0])
+            reason = str((current_blockers or ["UNKNOWN_BLOCKER"])[0])
             return {"label": f"Do not start PAPER until {reason} is resolved.", "page": "command", "control_id": "paper_start"}
         if mode == "CODEX_PACKET_ADVISOR":
             return {"label": "Draft a scoped Codex packet with exact blocker, file area, tests, and safety limits.", "page": "ai", "control_id": "ai_ask"}
@@ -3517,35 +3559,146 @@ class OperatorSnapshotProvider:
             return {"label": "Configure required providers before relying on model or broker answers.", "page": "providers", "control_id": "credential_save_alpaca_paper"}
         return {"label": "Review the current page summary and ask a narrower follow-up if evidence is missing.", "page": page_id or "positions", "control_id": "ai_ask"}
 
+    def _ai_canonical_readiness_contract(self, context: Mapping[str, Any]) -> dict[str, Any]:
+        launch = context.get("launch_readiness") if isinstance(context.get("launch_readiness"), Mapping) else {}
+        control = context.get("paper_control_state") if isinstance(context.get("paper_control_state"), Mapping) else {}
+        final = str(launch.get("final_launch_readiness") or "UNKNOWN")
+        control_blocker = str(control.get("dominant_blocker") or "")
+        launch_reason_codes = [str(item) for item in (launch.get("reason_codes") or []) if str(item)]
+        control_reason_codes = [str(item) for item in (control.get("reason_codes") or []) if str(item)]
+        if final == "READY_FOR_BOUNDED_PAPER":
+            current_blockers: list[str] = []
+        elif launch_reason_codes:
+            current_blockers = launch_reason_codes
+        elif control_blocker and control_blocker != "READY_FOR_BOUNDED_PAPER":
+            current_blockers = [control_blocker]
+        else:
+            current_blockers = [code for code in control_reason_codes if code != "READY_FOR_BOUNDED_PAPER"]
+        current_blockers = list(dict.fromkeys(current_blockers))
+        paper_start_allowed = launch.get("paper_start_allowed") is True and final == "READY_FOR_BOUNDED_PAPER"
+        return {
+            "source": "OPERATOR_LAUNCH_READINESS_D6_CONTRACT",
+            "control_state_source": control.get("source") or "OPERATOR_PAPER_CONTROL_STATE",
+            "final_launch_readiness": final,
+            "paper_start_allowed": paper_start_allowed,
+            "current_blockers": current_blockers,
+            "launch_reason_codes": launch_reason_codes,
+            "paper_control_dominant_blocker": control_blocker or None,
+            "paper_control_reason_codes": control_reason_codes,
+            "ready_state": final == "READY_FOR_BOUNDED_PAPER" and paper_start_allowed,
+            "unknown_reason": None if final != "UNKNOWN" else f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: launch_readiness.",
+        }
+
+    def _ai_evidence_contract(self, context: Mapping[str, Any], mode: str) -> dict[str, Any]:
+        canonical_readiness = self._ai_canonical_readiness_contract(context)
+
+        def packet(name: str, key: str, *, required: bool = True, present: bool | None = None, reason: str | None = None) -> dict[str, Any]:
+            value = context.get(key)
+            if present is None:
+                present = isinstance(value, Mapping) and bool(value)
+            return {
+                "name": name,
+                "context_key": key,
+                "required": required,
+                "present": bool(present),
+                "reason": None if present else (reason or f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: {name}."),
+            }
+
+        portfolio = context.get("portfolio") if isinstance(context.get("portfolio"), Mapping) else {}
+        portfolio_status = str(portfolio.get("status") or "")
+        portfolio_present = portfolio_status in {"BROKER_CONFIRMED", "BROKER_CONFIRMED_EMPTY", "BACKEND_DEGRADED", "MISSING_CREDENTIALS", "AUTH_FAILED", "BROKER_READ_FAILED"}
+        evidence_graph = context.get("evidence_graph") if isinstance(context.get("evidence_graph"), Mapping) else {}
+        decision_explainer = context.get("decision_explainer") if isinstance(context.get("decision_explainer"), Mapping) else {}
+        action_center = context.get("action_center") if isinstance(context.get("action_center"), Mapping) else {}
+        packets = [
+            packet("readiness_state", "launch_readiness", reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: launch readiness packet."),
+            packet("paper_control_state", "paper_control_state", required=False, reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: paper control-state packet."),
+            packet("provider_readiness", "provider_readiness", reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: provider readiness packet."),
+            packet("runtime_state", "runtime", reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: runtime state packet."),
+            packet(
+                "portfolio_truth",
+                "portfolio",
+                required=mode == "PORTFOLIO_REVIEW",
+                present=portfolio_present,
+                reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: broker-confirmed portfolio packet was not loaded for this AI answer.",
+            ),
+            packet(
+                "decision_records",
+                "decision_explainer",
+                required=mode in {"TRADING_SYSTEMS_AUDITOR", "QUANT_ADVISOR", "RUN_PLANNER"},
+                present=bool(decision_explainer) and decision_explainer.get("status") != "NO_DECISIONFRAME_EVIDENCE",
+                reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: DecisionFrame/decision record evidence is missing.",
+            ),
+            packet(
+                "market_truth",
+                "evidence_graph",
+                required=mode in {"TRADING_SYSTEMS_AUDITOR", "QUANT_ADVISOR"},
+                present=bool(evidence_graph),
+                reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: market truth evidence graph is missing.",
+            ),
+            packet(
+                "risk_results",
+                "action_center",
+                required=mode in {"TRADING_SYSTEMS_AUDITOR", "RUN_PLANNER"},
+                present=bool(action_center),
+                reason=f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: risk/action-center evidence packet is missing.",
+            ),
+            {
+                "name": "module_contributions",
+                "context_key": "system_map",
+                "required": False,
+                "present": False,
+                "reason": f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: module contribution map is not included in the compact AI ask packet.",
+            },
+        ]
+        missing = [str(item["reason"]) for item in packets if item.get("required") and item.get("present") is not True]
+        return {
+            "schema_version": AI_EVIDENCE_CONTRACT_SCHEMA,
+            "evidence_bound": True,
+            "answer_policy": (
+                "AI Chief may answer only from the listed structured evidence packets. "
+                f"Missing evidence must be stated as: {AI_UNKNOWN_EVIDENCE_MESSAGE}."
+            ),
+            "mode": mode,
+            "canonical_readiness": canonical_readiness,
+            "packets": packets,
+            "missing_required_evidence": list(dict.fromkeys(missing)),
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+
     def _ai_light_context(self) -> dict[str, Any]:
         launch = self.launch_readiness()
+        paper_control = self.paper_control_state_synchronized()
         providers = self.providers_readiness()
-        return redact_secrets(
-            {
-                "context_version": "ai-chief-light-context-v1",
-                "scope": "operator_status_and_local_guide",
-                "readiness": self.readiness(),
-                "launch_readiness": launch,
-                "provider_readiness": providers,
-                "provider_setup": self.credentials_providers(),
-                "health": self.health(),
-                "runtime": self.runtime(),
-                "portfolio": {
-                    "status": "PAGE_CONTEXT_OR_PORTFOLIO_ENDPOINT_REQUIRED",
-                    "detail": "Light AI context does not call broker. Use Portfolio Home or /operator/portfolio for broker-confirmed holdings.",
-                    "broker_read_occurred": False,
-                    "broker_mutation_occurred": False,
-                },
-                "live_status": "LIVE_LOCKED",
-                "real_money_blocked": True,
-                "raw_logs_included": False,
-                "secrets_values_exposed": False,
-                "advisory_only": True,
-                "can_execute": False,
-                "broker_call_occurred": False,
-                "trading_mutation_occurred": False,
-            }
-        )
+        context = {
+            "context_version": "ai-chief-light-context-v1",
+            "scope": "operator_status_and_local_guide",
+            "readiness": self.readiness(),
+            "launch_readiness": launch,
+            "paper_control_state": paper_control,
+            "provider_readiness": providers,
+            "provider_setup": self.credentials_providers(),
+            "health": self.health(),
+            "runtime": self.runtime(),
+            "portfolio": {
+                "status": "PAGE_CONTEXT_OR_PORTFOLIO_ENDPOINT_REQUIRED",
+                "detail": "Light AI context does not call broker. Use Portfolio Home or /operator/portfolio for broker-confirmed holdings.",
+                "broker_read_occurred": False,
+                "broker_mutation_occurred": False,
+            },
+            "live_status": "LIVE_LOCKED",
+            "real_money_blocked": True,
+            "raw_logs_included": False,
+            "secrets_values_exposed": False,
+            "advisory_only": True,
+            "can_execute": False,
+            "broker_call_occurred": False,
+            "trading_mutation_occurred": False,
+        }
+        context["evidence_contract"] = self._ai_evidence_contract(context, "OPERATOR_GUIDE")
+        return redact_secrets(context)
 
     def _ai_context(self) -> dict[str, Any]:
         archive = self.runs()
@@ -3574,6 +3727,7 @@ class OperatorSnapshotProvider:
         context["provider_readiness"] = self.providers()
         context["provider_setup"] = self.credentials_providers()
         context["launch_readiness"] = self.launch_readiness()
+        context["paper_control_state"] = self.paper_control_state_synchronized()
         context["runtime"] = self.runtime()
         context["portfolio"] = {
             "status": "PAGE_CONTEXT_OR_PORTFOLIO_ENDPOINT_REQUIRED",
@@ -3588,7 +3742,13 @@ class OperatorSnapshotProvider:
         context["can_execute"] = False
         context["broker_call_occurred"] = False
         context["trading_mutation_occurred"] = False
+        context["evidence_contract"] = self._ai_evidence_contract(context, "OPERATOR_GUIDE")
         return redact_secrets(context)
+
+    def _ai_context_for_mode(self, context: dict[str, Any], mode: str) -> dict[str, Any]:
+        updated = dict(context)
+        updated["evidence_contract"] = self._ai_evidence_contract(updated, mode)
+        return redact_secrets(updated)
 
     def ai_analyze(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         context = self._ai_context()

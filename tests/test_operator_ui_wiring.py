@@ -311,6 +311,13 @@ def test_ai_active_provider_controls_are_clear_and_no_silent_fallback_markers():
     assert "ai_call_trace" in text
     assert "normalizeAiCallTrace" in text
     assert "AI Call Trace" in text
+    assert "Evidence Contract" in text
+    assert "evidenceBound" in text
+    assert "evidenceContract" in text
+    assert "canonicalReadiness" in text
+    assert "canonicalReadinessBlockers" in text
+    assert "Canonical blocker" in text
+    assert "Canonical readiness: READY_FOR_BOUNDED_PAPER" in text
     assert "Safety filter triggered" in text
     assert "Challenge echoed" in text
     assert "Safe local fallback | ${fallbackSource} | provider call failed" in text
@@ -348,8 +355,8 @@ def test_ai_evidence_labels_ready_idle_as_state_not_blocker():
     text = _app_text()
 
     assert "function aiReadyIdleNoActiveRuntime" in text
-    assert "Current state: IDLE_NO_ACTIVE_PAPER_RUN" in text
-    assert "Current blocker: ${blocker}" in text
+    assert "Runtime state: idle, no active PAPER run attached" in text
+    assert "Canonical blocker: ${blocker}" in text
     assert "value === \"READY_IDLE_NO_ACTIVE_RUNTIME\"" in text
     assert "READY_FOR_BOUNDED_PAPER" in text
 

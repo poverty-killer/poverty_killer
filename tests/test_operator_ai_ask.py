@@ -355,6 +355,133 @@ def test_ai_ask_treats_blocking_bot_question_as_operator_prompt(tmp_path):
     assert payload["broker_call_occurred"] is False
 
 
+def test_ai_status_exposes_gateway_route_truth_owner(tmp_path):
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    app = create_operator_app(provider=provider)
+
+    payload = _endpoint(app, "/operator/ai/status")()
+
+    assert payload["route_truth_owner"] == "app.ai_chief_operator.provider_gateway.AIProviderGateway"
+    assert payload["active_provider"]
+    assert "active_model" in payload
+    assert payload["response_mode"]
+    assert payload["advisory_only"] is True
+    assert payload["can_execute"] is False
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+
+
+def test_ai_ask_returns_evidence_contract_and_canonical_blockers(tmp_path):
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    app = create_operator_app(provider=provider)
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "What is blocking the bot right now?",
+            "route_mode": "LOCAL_GUIDE",
+            "page_context": {"page_id": "command", "page_title": "Run PAPER"},
+        }
+    )
+
+    contract = payload["evidence_contract"]
+    canonical = payload["canonical_readiness"]
+    blocker_text = " ".join(payload["canonical_readiness_blockers"])
+
+    assert payload["evidence_bound"] is True
+    assert contract["schema_version"] == "ai-chief-evidence-contract-v1"
+    assert contract["evidence_bound"] is True
+    assert contract["canonical_readiness"]["current_blockers"] == payload["canonical_readiness_blockers"]
+    assert canonical["source"] == "OPERATOR_LAUNCH_READINESS_D6_CONTRACT"
+    assert canonical["final_launch_readiness"] == "BLOCKED"
+    assert "alpaca_paper_credentials" in blocker_text
+    assert "IDLE_NO_ACTIVE_PAPER_RUN" not in blocker_text
+    assert any("Unknown because this evidence is missing" in item for item in payload["unknowns"])
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+
+
+def test_ai_ask_portfolio_review_marks_missing_broker_packet_unknown(tmp_path):
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    app = create_operator_app(provider=provider)
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "What do I own right now?",
+            "route_mode": "LOCAL_GUIDE",
+            "page_context": {"page_id": "positions", "page_title": "Portfolio Home"},
+        }
+    )
+
+    packets = {row["name"]: row for row in payload["evidence_contract"]["packets"]}
+    assert payload["mode"] == "PORTFOLIO_REVIEW"
+    assert packets["portfolio_truth"]["required"] is True
+    assert packets["portfolio_truth"]["present"] is False
+    assert "Unknown because this evidence is missing" in packets["portfolio_truth"]["reason"]
+    assert any("broker portfolio truth unavailable" in item for item in payload["unknowns"])
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+
+
+def test_ai_provider_prompt_receives_evidence_contract_not_secret_or_tools(tmp_path):
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    store.save_provider(
+        "deepseek",
+        {
+            "DEEPSEEK_API_KEY": "deepseek-test-token-value",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def fake_post(url, headers, body, timeout_seconds):
+        captured.update({"url": url, "headers": headers, "body": body, "timeout_seconds": timeout_seconds})
+        return {"id": "ds-evidence-1", "model": "deepseek-chat", "choices": [{"message": {"content": "I can only use the supplied evidence contract."}}]}
+
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    provider.ai_gateway = AIProviderGateway(
+        AIChiefConfig.from_env(provider.provider_env),
+        credential_env=provider.provider_env,
+        http_post=fake_post,
+    )
+    app = create_operator_app(provider=provider)
+    _endpoint(app, "/operator/ai/router/settings", "POST")(
+        {
+            "default_mode": "LIGHT_API",
+            "active_provider": "deepseek",
+            "active_model": "deepseek-chat",
+            "light_provider": "deepseek",
+            "light_model": "deepseek-chat",
+            "high_reasoning_provider": "openai",
+            "high_reasoning_model": "gpt-5.5-pro",
+            "local_model": "local-model",
+        }
+    )
+
+    payload = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "Explain the current bot state in plain English.",
+            "answer_mode": "AI_CHAT_MODEL",
+            "page_context": {"page_id": "ai", "page_title": "AI Advisor"},
+        }
+    )
+
+    body_text = str(captured["body"])
+    assert payload["model_call_occurred"] is True
+    assert "evidence_contract" in body_text
+    assert "Unknown because this evidence is missing" in body_text
+    assert "allow_broker_tools" in body_text
+    assert "deepseek-test-token-value" not in body_text
+    assert "test-paper-secret" not in body_text
+    assert "sk-" not in body_text
+    assert payload["evidence_bound"] is True
+    assert payload["broker_call_occurred"] is False
+    assert payload["trading_mutation_occurred"] is False
+
+
 def test_ai_ask_can_i_start_paper_uses_run_planner_truth(tmp_path):
     provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
     app = create_operator_app(provider=provider)

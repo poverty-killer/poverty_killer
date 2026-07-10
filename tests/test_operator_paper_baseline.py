@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -26,7 +27,7 @@ from app.operator_activation.paper_baseline import (
     load_paper_baseline_runtime_context_from_env,
     normalize_baseline_symbol,
 )
-from app.operator_credentials.store import LocalCredentialStore
+from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from app.main_loop import _build_pre_trade_guardrail_verdict
 
 
@@ -163,6 +164,38 @@ def test_operator_baseline_accept_endpoint_is_local_only_and_readiness_uses_it(t
     assert readiness["broker_mutation_occurred"] is False
 
 
+def test_paper_control_state_blocks_protected_position_baseline_until_position_aware_policy(tmp_path, monkeypatch) -> None:
+    paper_env = tmp_path / "canonical_alpaca_paper.env"
+    paper_env.write_text(
+        "APCA_API_KEY_ID=test-paper-key\nAPCA_API_SECRET_KEY=test-paper-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(paper_env))
+    store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=store,
+    )
+    app = create_operator_app(provider=provider)
+    accepted = _endpoint(app, "/operator/paper-baseline/accept", "POST")(
+        {"preflight_snapshot": _preflight(), "policy": BASELINE_POLICY_PROTECTED, "accepted_by_operator": "Shan/local operator"}
+    )
+
+    control = asyncio.run(_endpoint(app, "/operator/paper-control-state")())
+    launch = _endpoint(app, "/operator/launch-readiness")()
+
+    assert accepted["accepted"] is True
+    assert control["paper_start_allowed"] is False
+    assert control["dominant_blocker"] == "paper_baseline_position_aware_policy"
+    assert "paper_baseline_position_aware_policy" in control["reason_codes"]
+    assert control["baseline_position_aware_policy_blocked"] is True
+    assert launch["paper_start_allowed"] is False
+    assert "paper_baseline_position_aware_policy" in launch["reason_codes"]
+    assert control["broker_call_occurred"] is False
+    assert control["broker_mutation_occurred"] is False
+
+
 def test_protected_baseline_blocks_same_symbol_trading_without_lot_tracking() -> None:
     accepted = accept_existing_position_baseline(_preflight(), accepted_by="Shan/local operator")
 
@@ -268,7 +301,18 @@ def test_runtime_context_does_not_baseline_block_unprotected_symbol() -> None:
             paper_baseline_runtime_context=context,
         ),
         symbol="LTC/USD",
-        signal=SimpleNamespace(side="buy", quantity=Decimal("1"), metadata={"quote_fresh": True}),
+        signal=SimpleNamespace(
+            side="buy",
+            quantity=Decimal("1"),
+            metadata={
+                "quote_fresh": True,
+                "stale_data_observation": {
+                    "current_ts_ns": 1_777_948_800_000_000_000,
+                    "exchange_ts_ns": 1_777_948_800_000_000_000,
+                    "local_received_ts_ns": 1_777_948_800_000_000_000,
+                },
+            },
+        ),
         runtime=SimpleNamespace(last_price=Decimal("100")),
         is_attack=False,
     )

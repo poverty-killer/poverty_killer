@@ -1,89 +1,77 @@
-# Codex Session Handoff - Phase D Paper Readiness Truth Fully Closed
+# Codex Session Handoff - Phase E AI Chief Useful Closed
 
 Date: 2026-07-10 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Active packet: Phase D convergence + D1-FIX Board packet + D4 armed read-only broker inspection packet.
+Active packet: Phase E AI Chief Useful.
 
 ## 1. Verdict
 
-Phase D is complete for the authorized scope. D4 and D5 are now closed at broker-read-only proof rung.
+Phase E is complete for the authorized scope.
 
-- D0 PASS.
-- D1 PASS.
-- D2 PASS.
-- D3 PASS.
-- D4 PASS.
-- D5 PASS.
-- D6 PASS.
-- D7 PASS.
+- E1 PASS.
+- E2 PASS.
+- E3 PASS.
+- E4 PASS.
 
-No PAPER run occurred. A Board-authorized read-only Alpaca PAPER inspection occurred. No live credentials were inspected. No broker mutation occurred.
+AI Chief is now route-truthful and evidence-bound. It reports provider/fallback state, exposes its evidence contract, names current blockers from canonical D6 readiness, and remains advisory-only with no broker, live, real-money, or threshold mutation authority.
+
+No broker read, broker mutation, live mode, real-money mode, threshold change, or PAPER run occurred in Phase E.
 
 ## 2. Main Changes
 
-`StaleDataGuard` is now a live blocking evidence contributor under `app.risk.pre_trade_guardrails.evaluate_pre_trade_guardrails`. It does not receive broker, sizing, or mutation authority.
+`/operator/ai/status` now exposes:
 
-`SovereignExecutionGuard` was classified from repo truth as mutation-capable. It remains represented as `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`.
+- route truth owner: `app.ai_chief_operator.provider_gateway.AIProviderGateway`
+- active provider
+- active model
+- response mode
+- fallback state
+- advisory-only/no-mutation flags
 
-Alpaca PAPER execution credential truth now resolves only from the canonical paper env file: `~/.poverty_killer_alpaca_paper_env`, overrideable by `POVERTY_KILLER_ALPACA_PAPER_ENV_PATH`.
+`/operator/ai/ask` now returns:
 
-`.operator_secrets/provider_credentials.json` remains a redacted local vault, but is demoted from PAPER execution truth.
+- `evidence_bound=true`
+- `evidence_contract`
+- `canonical_readiness`
+- `canonical_readiness_blockers`
+- `unknown_evidence_message`
 
-Run-PAPER readiness is unified to exactly `READY_FOR_BOUNDED_PAPER`; `DEGRADED_BUT_RUNNABLE` and `READY_FOR_GOVERNED_PAPER` are no longer runtime/UI contract states.
+Evidence contract schema: `ai-chief-evidence-contract-v1`.
 
-Portfolio truth now fails exactly as `BROKER_READ_NOT_AUTHORIZED` when D4 broker read has not been armed.
+Missing evidence must be represented with: `Unknown because this evidence is missing.`
 
-Final reconciliation requirement is explicit in launch readiness.
+Provider adapter prompts now require model answers to use only supplied structured evidence packets and to avoid filling missing broker truth, market truth, portfolio values, blockers, fills, fees, TCA, or P&L from general knowledge.
 
-D4 broker-read-only proof:
+AI UI now displays evidence-bound state, schema, canonical readiness, current blockers, missing required packets, and route diagnostics.
 
-- required Alpaca PAPER credential fields resolved from `CANONICAL_PAPER_ENV_FILE`; no secret values printed.
-- endpoint status `PAPER_ENDPOINT_CONFIRMED`.
-- calls made: `GET /v2/account`, `GET /v2/positions`, `GET /v2/orders?status=open&limit=100&nested=false`.
-- account status `ACTIVE`, account id `redacted_suffix:045ded`, currency `USD`.
-- trading/account/transfers blocked: `false` / `false` / `false`; pattern day trader `false`.
-- positions: 4 broker-confirmed (`AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`).
-- open orders: 0.
-- total equity `1000327.32`, cash `990112.68`, buying power `3960450.72`, market value `10214.638362`, unrealized P&L `10214.638362`.
-- mutation/live/real-money flags all false.
+Adjacent safety correction: `paper_control_state` now blocks accepted protected-position baselines with `paper_baseline_position_aware_policy`, matching `launch_readiness`. This closes a false-green risk where control state could otherwise say `READY_FOR_BOUNDED_PAPER` while launch readiness blocked.
+
+D1 status carried forward:
+
+- `StaleDataGuard` is wired as a blocking evidence contributor.
+- `SovereignExecutionGuard` is mutation-capable and remains `DORMANT_BY_POLICY_PENDING_PHASE_HI_ARM`.
 
 ## 3. Files Changed
 
 Runtime/backend:
 
-- `app/risk/pre_trade_guardrails.py`
-- `app/main_loop.py`
-- `app/core/authority_graph.py`
-- `app/operator_credentials/store.py`
-- `app/execution/alpaca_paper_adapter.py`
-- `app/operator_activation/launch_readiness.py`
-- `app/operator_activation/paper_baseline.py`
-- `app/operator_portfolio/snapshot.py`
-- `app/operator_providers/readiness.py`
 - `app/api/operator_readonly_api.py`
-- `app/api/operator_paper_supervisor.py`
+- `app/ai_chief_operator/provider_adapters.py`
 
-UI/contracts:
+UI:
 
 - `ui/operator-control-panel/app.js`
-- `ui/operator-control-panel/contracts.json`
 
 Tests:
 
-- `tests/test_phase_d_paper_readiness_truth.py`
-- `tests/test_pre_trade_guardrail_constraints.py`
-- `tests/test_alpaca_paper_credential_authority_guard.py`
-- `tests/test_operator_launch_readiness.py`
-- `tests/test_operator_credentials.py`
-- `tests/test_operator_portfolio.py`
-- `tests/test_operator_readonly_api.py`
 - `tests/test_operator_ai_ask.py`
 - `tests/test_operator_ui_wiring.py`
+- `tests/test_operator_paper_baseline.py`
 
 Reports/tracker:
 
-- `reports/completion/PHASE_D_REPORT.md`
+- `reports/completion/PHASE_E_REPORT.md`
 - `CHECKPOINT_TRACKER.md`
 - `reports/codex_handoff_latest.md`
 
@@ -92,55 +80,75 @@ Reports/tracker:
 Passed:
 
 ```powershell
-node --check ui/operator-control-panel/app.js
+python -m py_compile app\api\operator_readonly_api.py app\ai_chief_operator\provider_adapters.py
 ```
 
 Passed:
 
 ```powershell
-python -m py_compile app\risk\pre_trade_guardrails.py app\main_loop.py app\core\authority_graph.py app\operator_credentials\store.py app\execution\alpaca_paper_adapter.py app\operator_activation\launch_readiness.py app\operator_activation\paper_baseline.py app\operator_portfolio\snapshot.py app\operator_providers\readiness.py app\api\operator_readonly_api.py app\api\operator_paper_supervisor.py
+node --check ui\operator-control-panel\app.js
 ```
 
 Passed:
 
 ```powershell
-python -m pytest tests/test_phase_d_paper_readiness_truth.py tests/test_pre_trade_guardrail_constraints.py tests/test_alpaca_paper_credential_authority_guard.py tests/test_operator_launch_readiness.py tests/test_operator_credentials.py tests/test_operator_portfolio.py tests/test_operator_readonly_api.py tests/test_operator_ai_ask.py tests/test_operator_ui_wiring.py tests/test_operator_paper_supervisor.py -q --basetemp .pytest_tmp\phase_d_focused_all
+python -m pytest tests/test_operator_ai_ask.py tests/test_operator_ui_wiring.py -q --basetemp .pytest_tmp\phase_e_ai
 ```
 
-Result: 206 passed, 72 existing warnings.
+Result: 83 passed.
 
-Alias scan:
+Passed:
 
 ```powershell
-rg -n "DEGRADED_BUT_RUNNABLE|READY_FOR_GOVERNED_PAPER" app ui tests -S
+python -m pytest tests/test_operator_ai_ask.py tests/test_operator_readonly_api.py tests/test_operator_ui_wiring.py tests/test_operator_credentials.py tests/test_operator_launch_readiness.py -q --basetemp .pytest_tmp\phase_e_adjacent
 ```
 
-Only negative assertions remain in `tests/test_phase_d_paper_readiness_truth.py`.
+Result: 138 passed.
+
+Passed:
+
+```powershell
+python -m pytest tests/test_operator_paper_baseline.py tests/test_operator_readonly_api.py tests/test_operator_launch_readiness.py tests/test_operator_ai_ask.py tests/test_operator_ui_wiring.py -q --basetemp .pytest_tmp\phase_e_readiness_ai
+```
+
+Result: 128 passed, 72 existing warnings.
+
+In-process API proof used a temporary fake canonical paper env and no broker call. Observed current blocker: `paper_baseline_position_aware_policy`.
 
 ## 5. Safety Confirmation
 
-No Sacred Law was weakened.
+No Sacred Safety Law was weakened.
 
-No live mode, real-money mode, manual trade, force trade, threshold weakening, broker mutation, or PAPER run occurred.
+AI remains advisory-only.
 
-The only broker contact was the D4 Board-armed read-only Alpaca PAPER baseline inspection, limited to account, positions, and open orders.
+AI cannot trade, call broker, enable live/real money, mutate OMS/risk/thresholds/strategy/sizing, or see raw secrets through the Phase E paths.
 
-No secrets were printed or staged.
+No raw secrets were printed or staged.
 
-No `state/*`, logs, runtime DB files, `.operator_secrets`, screenshots, or `.pytest_tmp` files should be staged.
+No state, logs, runtime DB files, `.operator_secrets`, screenshots, or `.pytest_tmp` files should be staged.
 
-## 6. Remaining Hold
+## 6. Remaining Holds
 
-No Phase D hold remains. PAPER run authorization is still a separate future Board gate.
+No Phase E hold remains.
+
+PAPER run authorization is still a separate future Board gate.
+
+Phase F UI Cockpit Understandable is next in the tracker, but it has not been authorized in this packet.
 
 ## 7. Exact Staging
 
 Stage exactly:
 
 ```powershell
-git add -- reports/completion/PHASE_D_REPORT.md
+git add -- app/api/operator_readonly_api.py
+git add -- app/ai_chief_operator/provider_adapters.py
+git add -- ui/operator-control-panel/app.js
+git add -- tests/test_operator_ai_ask.py
+git add -- tests/test_operator_ui_wiring.py
+git add -- tests/test_operator_paper_baseline.py
+git add -- reports/completion/PHASE_E_REPORT.md
 git add -- CHECKPOINT_TRACKER.md
 git add -- reports/codex_handoff_latest.md
 ```
 
-Do not stage dirty runtime/state files or untracked leftovers.
+Do not stage dirty runtime/state files or unrelated untracked leftovers.

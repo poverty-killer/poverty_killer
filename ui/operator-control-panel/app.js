@@ -5707,6 +5707,13 @@
       safetyFilterTriggered: payload.safety_filter_triggered === true || payload.safetyFilterTriggered === true || aiCallTrace.safetyFilterTriggered === true,
       blockedTerms: Array.isArray(payload.blocked_terms) ? payload.blocked_terms : aiCallTrace.blockedTerms,
       aiCallTrace,
+      evidenceBound: payload.evidence_bound === true || payload.evidenceBound === true,
+      evidenceContract: payload.evidence_contract || payload.evidenceContract || {},
+      canonicalReadiness: payload.canonical_readiness || payload.canonicalReadiness || {},
+      canonicalReadinessBlockers: Array.isArray(payload.canonical_readiness_blockers)
+        ? payload.canonical_readiness_blockers
+        : (Array.isArray(payload.canonicalReadinessBlockers) ? payload.canonicalReadinessBlockers : []),
+      unknownEvidenceMessage: payload.unknown_evidence_message || payload.unknownEvidenceMessage || "Unknown because this evidence is missing.",
       canExecute: payload.can_execute === true,
       brokerCallOccurred: payload.broker_call_occurred === true,
       tradingMutationOccurred: payload.trading_mutation_occurred === true,
@@ -5929,6 +5936,26 @@
     );
   }
 
+  function aiCanonicalReadiness(result, context) {
+    const fromResult = result && result.canonicalReadiness && typeof result.canonicalReadiness === "object" ? result.canonicalReadiness : {};
+    const fromContract = result && result.evidenceContract && result.evidenceContract.canonical_readiness && typeof result.evidenceContract.canonical_readiness === "object"
+      ? result.evidenceContract.canonical_readiness
+      : {};
+    const readiness = context && (context.launch_readiness || context.launchReadiness) || {};
+    const finalLaunchReadiness = fromResult.final_launch_readiness || fromResult.finalLaunchReadiness || fromContract.final_launch_readiness || fromContract.finalLaunchReadiness || readiness.final_launch_readiness || readiness.finalLaunchReadiness || readiness.final || "UNKNOWN";
+    const paperStartAllowed = fromResult.paper_start_allowed === true || fromResult.paperStartAllowed === true || fromContract.paper_start_allowed === true || fromContract.paperStartAllowed === true || readiness.paper_start_allowed === true || readiness.paperStartAllowed === true;
+    const blockers = Array.isArray(result && result.canonicalReadinessBlockers)
+      ? result.canonicalReadinessBlockers
+      : (Array.isArray(fromResult.current_blockers)
+        ? fromResult.current_blockers
+        : (Array.isArray(fromContract.current_blockers) ? fromContract.current_blockers : []));
+    return {
+      finalLaunchReadiness,
+      paperStartAllowed,
+      currentBlockers: finalLaunchReadiness === "READY_FOR_BOUNDED_PAPER" && paperStartAllowed ? [] : blockers
+    };
+  }
+
   function aiActualBlocker(context) {
     const blockers = context && Array.isArray(context.blockers) ? context.blockers : [];
     return blockers.find((item) => {
@@ -5979,11 +6006,13 @@
   function aiEvidenceBullets(result, context) {
     const bullets = [];
     if (result.evidenceLevel) bullets.push(`Evidence level: ${result.evidenceLevel}`);
-    const blocker = aiActualBlocker(context);
-    if (aiReadyIdleNoActiveRuntime(context)) {
-      bullets.push("Current state: IDLE_NO_ACTIVE_PAPER_RUN");
+    const canonical = aiCanonicalReadiness(result, context);
+    const blocker = (canonical.currentBlockers || [])[0] || aiActualBlocker(context);
+    if (canonical.finalLaunchReadiness === "READY_FOR_BOUNDED_PAPER" && canonical.paperStartAllowed === true) {
+      bullets.push("Canonical readiness: READY_FOR_BOUNDED_PAPER");
+      if (aiReadyIdleNoActiveRuntime(context)) bullets.push("Runtime state: idle, no active PAPER run attached");
     } else if (blocker) {
-      bullets.push(`Current blocker: ${blocker}`);
+      bullets.push(`Canonical blocker: ${blocker}`);
     }
     const known = aiPreferredKnownFact(result);
     if (known) bullets.push(`Known: ${known}`);
@@ -6056,6 +6085,16 @@
             ["Challenge echoed", badge(String(result.aiCallTrace.challengeEchoed), result.aiCallTrace.challengeEchoed ? "green" : "gray")],
             ["Latency ms", escapeHtml(String(result.aiCallTrace.latencyMs || "not returned"))],
             ["Provider request id", escapeHtml(result.aiCallTrace.providerRequestId || "not returned")]
+          ])}
+        </div>
+        <div class="ai-context-preview">
+          <h3>Evidence Contract</h3>
+          ${kv([
+            ["Evidence bound", badge(String(result.evidenceBound), result.evidenceBound ? "green" : "red")],
+            ["Schema", escapeHtml((result.evidenceContract && result.evidenceContract.schema_version) || "not returned")],
+            ["Canonical readiness", badge((result.canonicalReadiness && (result.canonicalReadiness.final_launch_readiness || result.canonicalReadiness.finalLaunchReadiness)) || "UNKNOWN", statusColor((result.canonicalReadiness && (result.canonicalReadiness.final_launch_readiness || result.canonicalReadiness.finalLaunchReadiness)) || "UNKNOWN"))],
+            ["Current blockers", escapeHtml((result.canonicalReadinessBlockers || []).join(", ") || "none")],
+            ["Missing required packets", escapeHtml(((result.evidenceContract && result.evidenceContract.missing_required_evidence) || []).join(" | ") || "none")]
           ])}
         </div>
         <div class="ai-context-preview">
