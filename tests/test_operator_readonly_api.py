@@ -743,16 +743,21 @@ def test_operator_ui_index_is_no_store_and_commit_cache_busted(tmp_path):
 
     health = _endpoint(app, "/operator/health")()
     response = _endpoint(app, "/operator-ui/")()
+    response_no_slash = _endpoint(app, "/operator-ui")()
     html = response.body.decode("utf-8")
+    html_no_slash = response_no_slash.body.decode("utf-8")
     version = health["loaded_commit"]
     asset_version = f"{version}-ui4-enforce-unblock"
 
     assert response.headers["Cache-Control"] == "no-store, max-age=0, must-revalidate"
     assert response.headers["Pragma"] == "no-cache"
     assert response.headers["Expires"] == "0"
-    assert f"styles.css?v={asset_version}" in html
-    assert f"mock-data.js?v={asset_version}" in html
-    assert f"app.js?v={asset_version}" in html
+    assert f"/operator-ui/styles.css?v={asset_version}" in html
+    assert f"/operator-ui/mock-data.js?v={asset_version}" in html
+    assert f"/operator-ui/app.js?v={asset_version}" in html
+    assert f"/operator-ui/styles.css?v={asset_version}" in html_no_slash
+    assert f"/operator-ui/mock-data.js?v={asset_version}" in html_no_slash
+    assert f"/operator-ui/app.js?v={asset_version}" in html_no_slash
     assert f'window.PK_OPERATOR_UI_BUILD_COMMIT = "{version}"' in html
     assert f'window.PK_OPERATOR_UI_ASSET_VERSION = "{asset_version}"' in html
     assert "operator-ui-build" not in html

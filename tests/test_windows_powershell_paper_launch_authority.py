@@ -51,6 +51,10 @@ def test_launcher_uses_get_only_preflight_before_bounded_run():
     assert "POST_count" in text
     assert "MUTATION_OCCURRED" in text
     assert "LIVE_ENDPOINT_USED" in text
+    assert "alpaca_paper_preflight_account_pin_status" in text
+    assert 'account_pin["status"] != "PASS"' in text
+    assert 'failures.append(account_pin["reason_code"])' in text
+    assert "account_pin_verified" in text
 
 
 def test_launcher_passes_duration_to_runtime_for_graceful_shutdown_accounting():

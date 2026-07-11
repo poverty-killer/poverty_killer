@@ -1,97 +1,108 @@
-# Codex Session Handoff - Phase F Closed / Awaiting Phase G Board Packet
+# Codex Session Handoff - Phase G Closed / Awaiting PAPER Run Packet
 
-Date: 2026-07-10 America/Chicago
+Date: 2026-07-11 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Active packet completed: Phase F UI Cockpit Understandable after D4-ACCOUNT-PIN.
+Active packet completed: Phase G - Bounded PAPER Run READY.
 
 ## 1. Verdict
 
-Phase F is complete for the authorized UI cockpit seam.
+Phase G is complete for readiness proof.
 
-The Run PAPER cockpit now shows the D4 account-pin requirement as a first-class operator proof. Start remains disabled unless backend readiness is exactly `READY_FOR_BOUNDED_PAPER` and the pinned Alpaca PAPER account identity is proven. The UI now displays expected suffix, actual suffix, pin status, and account-pin reason code.
+All G1-G7 gates are PASS in `reports/completion/PHASE_G_REPORT.md`.
 
-Current local browser proof is intentionally fail-closed:
+No PAPER run was executed. The actual run remains Shan/Board-gated.
 
-- dominant blocker: `ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN`
-- expected suffix: `045ded`
-- actual suffix: `unknown`
-- Start disabled: yes
+## 2. Final Proof Snapshot
 
-D4 broker read was not re-armed during Phase F browser validation, so the UI correctly shows the account pin as not proven.
+Final backend read-only proof:
 
-No PAPER run was executed.
+- `launch_final=READY_FOR_BOUNDED_PAPER`
+- `launch_start_allowed=true`
+- `launch_paper_endpoint_status=PAPER_ENDPOINT_CONFIRMED`
+- `launch_live_blocked=true`
+- `launch_real_money_blocked=true`
+- `launch_paper_account_pinned=true`
+- expected/actual suffix: `045ded`
+- `control_dominant_blocker=READY_FOR_BOUNDED_PAPER`
+- `control_baseline_account_suffix=045ded`
+- `control_baseline_account_matches_pin=true`
+- max lease: `432000` seconds
+- final reconciliation required: true
 
-## 2. What Changed
+Broker-confirmed account baseline:
 
-Runtime UI:
+- account: `redacted_suffix:045ded`
+- status: `ACTIVE`
+- cash: `990112.68`
+- buying power: `3960450.72`
+- final backend snapshot equity: `1000426.67`
+- open orders: `0`
+- positions: `AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`
 
-- `ui/operator-control-panel/app.js` - account-pin normalization, Run PAPER fail-closed gating, account-pin proof tile, advanced diagnostic rows, safe lock colors, and top-bar refresh on screen switch.
+Browser proof:
 
-Tests:
+- desktop: `scrollWidth=1440`, `clientWidth=1440`, no horizontal overflow
+- mobile: `scrollWidth=390`, `clientWidth=390`, no horizontal overflow
+- UI shows pin proven, broker-confirmed portfolio, four non-flat baseline symbols, Start allowed on green backend, live locked, real-money blocked
+- screenshots/metrics under `C:\tmp\poverty_killer_phase_g_runtime\`
 
-- `tests/test_operator_ui_wiring.py` - contract assertions for account-pin UI fields, fail-closed gating, and top-bar refresh.
-- `tests/test_operator_readonly_api.py` - API fixture assertion for pinned `045ded` account when backend account assertion is PASS.
+## 3. Key Fixes
 
-Docs:
+- Direct PowerShell bounded-paper launcher now validates the broker-reported account suffix after read-only preflight.
+- Accepted baseline account suffix must match the pinned paper account suffix, or readiness/control-state fail closed.
+- Supervisor baseline runtime context now honors configured `PK_OPERATOR_STATE_DIR`.
+- Protected nonzero baseline can be ready only when baseline runtime context is loaded and same-symbol baseline guard is active.
+- `/operator-ui` no-slash route now hydrates correctly with `/operator-ui/...` asset URLs.
+- Run PAPER UI no longer falls back to a legacy disabled reason when canonical `OPERATOR_PAPER_CONTROL_STATE` is green.
+- Stale “Not 72-hour ready yet” copy was replaced with the real bounded-position-aware baseline condition.
 
-- `reports/completion/PHASE_F_REPORT.md`
-- `CHECKPOINT_TRACKER.md`
-- `reports/codex_handoff_latest.md`
+## 4. Important Condition
 
-## 3. Proof
+The tracked default `state/operator/paper_baseline.json` remains stale for `redacted_suffix:104e2a` and was not edited or staged.
+
+If the bot is launched against that default stale state, readiness now blocks with `paper_baseline_account_pin_mismatch`. The positive Phase G proof used configured operator state:
+
+`C:\tmp\poverty_killer_phase_g_runtime\state\operator\paper_baseline.json`
+
+That temp baseline was created from Board-authorized read-only broker truth for `045ded`.
+
+## 5. Tests
 
 Passed:
 
 ```powershell
+python -m pytest tests\test_operator_paper_baseline.py tests\test_alpaca_paper_credential_authority_guard.py tests\test_windows_powershell_paper_launch_authority.py tests\test_operator_readonly_api.py tests\test_operator_ui_wiring.py -q --basetemp .pytest_tmp\phase_g_final_core3
+```
+
+Result: `106 passed, 72 existing warnings`.
+
+Passed:
+
+```powershell
+python -m pytest tests\test_phase_d_paper_readiness_truth.py tests\test_operator_account_identity_pin.py tests\test_operator_launch_readiness.py tests\test_operator_paper_supervisor.py tests\test_broker_gateway_adapter_layer.py -q --basetemp .pytest_tmp\phase_g_final_adjacent3
+```
+
+Result: `66 passed, 72 existing warnings`.
+
+Passed:
+
+```powershell
+python -m py_compile app\operator_activation\launch_readiness.py app\api\operator_readonly_api.py app\api\operator_paper_supervisor.py app\execution\alpaca_paper_adapter.py app\operator_activation\paper_baseline.py
 node --check ui\operator-control-panel\app.js
 ```
 
-Passed:
+`git diff --check` passed with only line-ending warnings on protected runtime state files and the touched PowerShell launcher.
 
-```powershell
-python -m pytest tests\test_operator_ui_wiring.py tests\test_operator_readonly_api.py -q --basetemp .pytest_tmp\phase_f_ui_api3
-```
+## 6. Safety
 
-Result:
+No broker mutation, PAPER run, live endpoint, real-money path, order placement, cancel, replace, close, liquidation, flattening, threshold change, state cleanup, raw secret exposure, or broad refactor occurred.
 
-```text
-71 passed in 21.80s
-```
+Read-only broker calls were limited to the Phase G D4 re-arm scope.
 
-Browser/runtime proof used local `uvicorn` plus Chrome DevTools Protocol. No broker mutation, PAPER run, live mode, real-money path, order placement, cancel, or liquidation occurred.
+## 7. Dirty Tree / Do Not Stage
 
-Desktop controls proof:
-
-- topbar: `Controls & Settings`
-- `hasPinnedBanner=true`
-- `hasPinnedTile=true`
-- `scrollWidth=1440`
-- `clientWidth=1440`
-- `startDisabled=true`
-- blocker: `Expected Alpaca PAPER account suffix 045ded, but read-only broker account identity is not authorized/proven.`
-
-Mobile controls proof:
-
-- topbar: `Controls & Settings`
-- `hasPinnedBanner=true`
-- `hasPinnedTile=true`
-- `scrollWidth=390`
-- `clientWidth=390`
-- `startDisabled=true`
-- same account-pin blocker.
-
-Screenshots were saved under `C:\tmp\poverty_killer_phase_f_browser\` and are not staged.
-
-## 4. Safety
-
-No broker mutation, PAPER run, live endpoint, real-money path, order placement, cancel, liquidation, threshold change, state edit, secret exposure, or broad cleanup occurred.
-
-The UI remains display-only. Backend readiness remains the PAPER start authority, and the D4 account-pin backend contract remains the account identity authority. The UI refuses to show a green start without that proof.
-
-## 5. Current Dirty Tree
-
-Pre-existing dirty/untracked files remain and must not be staged:
+Do not stage:
 
 - `state/override_log.jsonl`
 - `state/risk_state.backup`
@@ -104,33 +115,33 @@ Pre-existing dirty/untracked files remain and must not be staged:
 - old untracked `reports/codex_handoff_*`
 - `reports/operator_perf/`
 - untracked audit scripts under `scripts/`
+- screenshots/metrics in `C:\tmp`
+- secrets/logs/runtime files
 
-Approved Phase F files to stage:
-
-- `ui/operator-control-panel/app.js`
-- `tests/test_operator_ui_wiring.py`
-- `tests/test_operator_readonly_api.py`
-- `reports/completion/PHASE_F_REPORT.md`
-- `CHECKPOINT_TRACKER.md`
-- `reports/codex_handoff_latest.md`
-
-## 6. Next Work
-
-Await the Phase G Board packet before any bounded PAPER run.
-
-Phase G remains Board-gated because PAPER execution requires explicit authorization. Do not run PAPER, touch live mode, touch real-money paths, mutate broker state, change thresholds, or stage runtime/secrets.
-
-## 7. Exact Staging
+## 8. Exact Staging
 
 Stage exactly:
 
 ```powershell
+git add -- app/execution/alpaca_paper_adapter.py
+git add -- app/operator_activation/paper_baseline.py
+git add -- app/operator_activation/launch_readiness.py
+git add -- app/api/operator_readonly_api.py
+git add -- app/api/operator_paper_supervisor.py
+git add -- scripts/run_bounded_paper.ps1
 git add -- ui/operator-control-panel/app.js
-git add -- tests/test_operator_ui_wiring.py
+git add -- tests/test_alpaca_paper_credential_authority_guard.py
+git add -- tests/test_operator_paper_baseline.py
 git add -- tests/test_operator_readonly_api.py
-git add -- reports/completion/PHASE_F_REPORT.md
+git add -- tests/test_operator_ui_wiring.py
+git add -- tests/test_windows_powershell_paper_launch_authority.py
+git add -- reports/completion/PHASE_G_REPORT.md
 git add -- CHECKPOINT_TRACKER.md
 git add -- reports/codex_handoff_latest.md
 ```
 
-Do not stage `state/*`, `.pytest_tmp/`, old untracked reports, `reports/operator_perf/`, untracked audit scripts, secrets, logs, DB/runtime files, screenshots, or quarantine.
+Commit message: `complete phase G bounded paper readiness`.
+
+## 9. Next Work
+
+Await Shan's explicit bounded PAPER run packet. A run packet must name the operator-state path/baseline to use, keep the duration bounded, keep live/real-money blocked, and require final broker reconciliation.

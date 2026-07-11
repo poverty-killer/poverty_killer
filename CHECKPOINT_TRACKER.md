@@ -1,6 +1,6 @@
 # POVERTY_KILLER Completion Checkpoint Tracker
 
-Updated: 2026-07-10
+Updated: 2026-07-11
 Branch: master
 
 ## Checkpoint Summary
@@ -13,7 +13,7 @@ Branch: master
 | D - PAPER Readiness Truthful | PASS | `reports/completion/PHASE_D_REPORT.md`; D0-D7 PASS after D4 Board-armed read-only Alpaca PAPER baseline |
 | E - AI Chief Useful | PASS | `reports/completion/PHASE_E_REPORT.md`; AI route truth and evidence contract are live; canonical blockers come from D6 readiness |
 | F - UI Cockpit Understandable | PASS | `reports/completion/PHASE_F_REPORT.md`; Run PAPER cockpit shows D4 account-pin truth, disables Start without proven pin, and passed desktop/mobile browser proof |
-| G - Bounded PAPER Run Ready | NOT_STARTED | PAPER run still requires explicit Board approval |
+| G - Bounded PAPER Run Ready | PASS | `reports/completion/PHASE_G_REPORT.md`; readiness proven with broker-read-only + browser proof; actual PAPER run still requires explicit Board approval |
 | H - Live-Readiness Shadow Mode | NOT_STARTED | Live credentials read-only requires Board approval |
 | I - Tiny Live Canary | NOT_STARTED | Individually Board-approved only |
 
@@ -115,6 +115,20 @@ Phase F completed on 2026-07-10 under the UI Cockpit Understandable seam after D
 - Validation: `node --check ui\operator-control-panel\app.js`; focused UI/API pytest suite passed with 71 tests; local Chrome CDP browser proof captured desktop and mobile controls screens.
 - Phase G remains Board-gated because any bounded PAPER run requires explicit authorization.
 
+## Phase G Result
+
+Phase G completed on 2026-07-11 under the Board-authorized Bounded PAPER Run READY packet. D4 read-only Alpaca PAPER inspection was re-armed for account identity, account/open-orders, and positions only.
+
+- G1 PASS - launch readiness proved `READY_FOR_BOUNDED_PAPER` end-to-end under the configured Phase G operator state.
+- G2 PASS - endpoint is Alpaca PAPER; live and real-money remain blocked.
+- G3 PASS - account pin is enforced on supervisor readiness/start, child runner env, direct PowerShell launcher preflight, and accepted baseline account suffix.
+- G4 PASS - drained/stale account suffix `104e2a` is rejected; stale accepted baseline from `104e2a` blocks readiness/control-state with `paper_baseline_account_pin_mismatch`.
+- G5 PASS - read-only broker baseline retrieved for `redacted_suffix:045ded`: account `ACTIVE`, 4 positions (`AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`), 0 open orders, cash `990112.68`, buying power `3960450.72`, final backend snapshot equity `1000426.67`.
+- G6 PASS - desktop and mobile browser proof show pinned account, broker-confirmed portfolio truth, non-flat baseline, Start allowed on green backend, live locked, real-money blocked, and no horizontal overflow.
+- G7 PASS - max lease is explicit at `432000` seconds and final reconciliation remains required.
+- Important condition: tracked `state/operator/paper_baseline.json` remains stale for `redacted_suffix:104e2a` and was not edited/staged. If default repo state is used, readiness now fails closed. Positive Phase G proof used configured operator state under `C:\tmp\poverty_killer_phase_g_runtime\state\operator` with the broker-confirmed `045ded` protected baseline.
+- No PAPER run, broker mutation, live mode, real-money path, order submit, cancel, close, liquidate, flatten, threshold change, secret exposure, or tracked runtime-state edit occurred.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from pre-existing runtime/report leftovers and Phase A
@@ -133,5 +147,6 @@ clean/stash/reset.
 - Shan authorized D4-ACCOUNT-IDENTITY read-only proof before Phase F. Result: canonical account is funded `redacted_suffix:045ded`, second account `redacted_suffix:104e2a` is reachable only through demoted local vault/state, but account identity is runtime-inferred in code, so Phase F is blocked pending Board confirmation of the account-pin fix.
 - Shan authorized D4-ACCOUNT-PIN to hard-pin PAPER operation to funded account suffix `045ded`. Result: account identity assertion is wired into readiness/supervisor start, mismatch fails closed, demoted/drained suffix `104e2a` is rejected in tests, and Phase F is unblocked.
 - Phase F UI cockpit is complete. Result: Run PAPER cockpit renders account-pin truth, disables Start without proven pin, and passed desktop/mobile browser validation. Phase G bounded PAPER run remains Board-gated.
+- Shan authorized Phase G Bounded PAPER Run READY with D4 read-only broker re-arm. Result: Phase G readiness is PASS with broker-read-only and browser proof; actual PAPER execution remains Shan/Board-gated.
 - No PAPER run was authorized.
 - No live mode, live read-only mode, or broker mutation was authorized.

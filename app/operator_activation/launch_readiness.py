@@ -9,10 +9,12 @@ from app.operator_credentials.store import (
     ALPACA_PAPER_ENV_PATH_ENV_KEY,
     canonical_alpaca_paper_env_path,
     alpaca_endpoint_authority,
+    normalize_alpaca_account_suffix,
 )
 from app.operator_activation.paper_baseline import (
     BASELINE_POLICY_PROTECTED,
     PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS,
+    accepted_baseline_account_suffix,
     build_baseline_adoption_state,
 )
 
@@ -718,7 +720,20 @@ def build_launch_readiness(
     )
 
     paper_baseline_state = build_baseline_adoption_state(accepted_baseline=paper_baseline)
+    baseline_runtime_context = (
+        supervisor.get("paper_baseline_runtime_context")
+        if isinstance(supervisor.get("paper_baseline_runtime_context"), dict)
+        else {}
+    )
+    baseline_context_loaded = baseline_runtime_context.get("baseline_loaded") is True
+    same_symbol_guard_active = baseline_runtime_context.get("same_symbol_baseline_guard_active") is True
     baseline_ready = paper_baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
+    baseline_account_suffix = accepted_baseline_account_suffix(paper_baseline)
+    baseline_account_matches_pin = (
+        not baseline_account_suffix
+        or not account_pin_ok
+        or baseline_account_suffix == normalize_alpaca_account_suffix(expected_suffix)
+    )
     try:
         baseline_position_count = int(paper_baseline_state.get("position_count") or 0)
     except (TypeError, ValueError):
@@ -735,18 +750,48 @@ def build_launch_readiness(
                     if baseline_position_count > 0
                     else "Clean PAPER baseline accepted; no existing positions require protection."
                 ),
-            )
-        )
-        if baseline_position_count > 0:
-            checks.append(
-                _check(
-                    "paper_baseline_position_aware_policy",
-                    "Position-aware baseline policy",
-                    "DEGRADED",
-                    "Short PAPER smoke readiness only. Existing-position symbols are protected until run lot tracking is available.",
-                    warning=True,
                 )
             )
+        if baseline_account_suffix and not baseline_account_matches_pin:
+            checks.append(
+                _check(
+                    "paper_baseline_account_pin_mismatch",
+                    "Baseline account matches pinned PAPER account",
+                    "BLOCKED",
+                    (
+                        "Accepted PAPER baseline was captured from account suffix "
+                        f"{baseline_account_suffix}, but the pinned broker account is {expected_suffix}. "
+                        "Refresh read-only broker truth and accept a baseline for the pinned account before starting PAPER."
+                    ),
+                    blocker=True,
+                )
+            )
+        if baseline_position_count > 0:
+            if baseline_context_loaded and same_symbol_guard_active:
+                checks.append(
+                    _check(
+                        "paper_baseline_position_aware_policy",
+                        "Position-aware baseline policy",
+                        "PASS",
+                        (
+                            "Short bounded PAPER readiness with existing positions is allowed only because the protected "
+                            "baseline runtime context is loaded and same-symbol baseline trading is blocked until run lot tracking exists."
+                        ),
+                    )
+                )
+            else:
+                checks.append(
+                    _check(
+                        "paper_baseline_position_aware_policy",
+                        "Position-aware baseline policy",
+                        "BLOCKED",
+                        (
+                            "Existing PAPER positions are accepted, but the protected baseline runtime guard is not proven loaded. "
+                            "Do not start PAPER until the guard context is present."
+                        ),
+                        blocker=True,
+                    )
+                )
     else:
         checks.append(
             _check(

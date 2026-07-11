@@ -212,12 +212,16 @@ sys.path.insert(0, os.getcwd())
 from app.config import Config
 from app.core.decision_frame import resolve_active_threshold_profile
 from app.data.feed_provider_router import select_configured_market_data_provider
-from app.execution.alpaca_paper_adapter import collect_alpaca_paper_read_only_preflight_truth
+from app.execution.alpaca_paper_adapter import (
+    alpaca_paper_preflight_account_pin_status,
+    collect_alpaca_paper_read_only_preflight_truth,
+)
 import main
 
 proof = collect_alpaca_paper_read_only_preflight_truth(timeout=20.0)
 account = proof.reconciliation.broker_truth.get("account") if proof.reconciliation else {}
 account_status = account.get("status") if isinstance(account, dict) else None
+account_pin = alpaca_paper_preflight_account_pin_status(proof)
 
 config = Config.from_env()
 config.broker_mode = "paper"
@@ -237,6 +241,9 @@ summary = {
     "preflight_status": proof.status,
     "endpoint": proof.credential_authority.endpoint,
     "account_status": account_status,
+    "expected_account_suffix": account_pin["expected_suffix"],
+    "actual_account_suffix": account_pin["actual_suffix"],
+    "account_pin_verified": account_pin["account_pin_verified"],
     "positions_count": proof.reconciliation.positions_count if proof.reconciliation else None,
     "open_orders_count": proof.reconciliation.open_orders_count if proof.reconciliation else None,
     "GET_count": proof.reconciliation.request_counts.get("GET", 0) if proof.reconciliation else 0,
@@ -262,6 +269,8 @@ summary = {
 failures = []
 if proof.status != "PAPER_READ_ONLY_PREFLIGHT_PASSED":
     failures.append("READ_ONLY_PREFLIGHT_FAILED")
+if account_pin["status"] != "PASS":
+    failures.append(account_pin["reason_code"])
 if summary["POST_count"] != 0:
     failures.append("POST_COUNT_NONZERO")
 if summary["live_endpoint_used"]:

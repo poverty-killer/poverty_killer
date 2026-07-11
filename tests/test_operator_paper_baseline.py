@@ -31,6 +31,28 @@ from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalC
 from app.main_loop import _build_pre_trade_guardrail_verdict
 
 
+def _account_pin_ok_assertion(_env=None) -> dict[str, object]:
+    return {
+        "source": "TEST_ACCOUNT_PIN",
+        "status": "PASS",
+        "reason_code": "ALPACA_PAPER_ACCOUNT_PIN_OK",
+        "detail": "offline unit test account pin is pre-proven",
+        "expected_suffix": "045ded",
+        "actual_suffix": "045ded",
+        "paper_account_pinned": True,
+        "broker_read_attempted": True,
+        "broker_read_occurred": True,
+        "account_request_occurred": True,
+        "broker_mutation_occurred": False,
+        "order_submission_occurred": False,
+        "cancel_occurred": False,
+        "liquidation_occurred": False,
+        "live_enabled": False,
+        "real_money_enabled": False,
+        "secrets_values_exposed": False,
+    }
+
+
 def _endpoint(app, path: str, method: str = "GET"):
     for route in app.routes:
         if route.path == path and method in (route.methods or set()):
@@ -38,7 +60,12 @@ def _endpoint(app, path: str, method: str = "GET"):
     raise AssertionError(f"route not found: {method} {path}")
 
 
-def _preflight(*, positions: list[dict[str, object]] | None = None, open_orders: list[dict[str, object]] | None = None) -> dict[str, object]:
+def _preflight(
+    *,
+    positions: list[dict[str, object]] | None = None,
+    open_orders: list[dict[str, object]] | None = None,
+    account_id: str = "paper-account-045ded",
+) -> dict[str, object]:
     rows = positions if positions is not None else [
         {
             "symbol": "AAPL",
@@ -57,7 +84,7 @@ def _preflight(*, positions: list[dict[str, object]] | None = None, open_orders:
     return {
         "endpoint_family": "paper",
         "account": {
-            "id": "full-account-id-123456",
+            "id": account_id,
             "status": "ACTIVE",
             "equity": "50000",
             "buying_power": "75000",
@@ -74,8 +101,9 @@ def _preflight(*, positions: list[dict[str, object]] | None = None, open_orders:
     }
 
 
-def _crypto_preflight() -> dict[str, object]:
+def _crypto_preflight(*, account_id: str = "paper-account-045ded") -> dict[str, object]:
     return _preflight(
+        account_id=account_id,
         positions=[
             {"symbol": "BTCUSD", "asset_class": "crypto", "qty": "0.5", "side": "long"},
             {"symbol": "ETHUSD", "asset_class": "crypto", "qty": "2", "side": "long"},
@@ -103,7 +131,7 @@ def test_accepted_protected_baseline_allows_position_aware_preflight_state() -> 
     assert accepted["accepted"] is True
     assert accepted["policy"] == BASELINE_POLICY_PROTECTED
     assert accepted["baseline_snapshot"]["account"]["account_id"].startswith("redacted_suffix:")
-    assert "full-account-id-123456" not in str(accepted)
+    assert "paper-account-045ded" not in str(accepted)
     assert state["status"] == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
     assert state["decision"] == "PREFLIGHT_READY_FOR_SHORT_PAPER_SMOKE"
     assert state["start_ready"] is True
@@ -160,14 +188,17 @@ def test_operator_baseline_accept_endpoint_is_local_only_and_readiness_uses_it(t
     assert baseline["status"] == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
     assert readiness["paper_credential_setup"]["preflight_gate"]["account_check_status"] == "accepted_existing_positions"
     assert "paper_read_only_preflight_gate" not in readiness["reason_codes"]
-    assert "paper_baseline_position_aware_policy" in readiness["reason_codes"]
+    assert "paper_baseline_position_aware_policy" not in readiness["reason_codes"]
+    checks = {row["check_id"]: row for row in readiness["checks"]}
+    assert checks["paper_baseline_position_aware_policy"]["status"] == "PASS"
+    assert readiness["protected_same_symbol_guard_active"] is True
     assert readiness["broker_mutation_occurred"] is False
 
 
-def test_paper_control_state_blocks_protected_position_baseline_until_position_aware_policy(tmp_path, monkeypatch) -> None:
+def test_paper_control_state_allows_protected_position_baseline_when_runtime_guard_is_loaded(tmp_path, monkeypatch) -> None:
     paper_env = tmp_path / "canonical_alpaca_paper.env"
     paper_env.write_text(
-        "APCA_API_KEY_ID=test-paper-key\nAPCA_API_SECRET_KEY=test-paper-secret\n",
+        "APCA_API_BASE_URL=https://paper-api.alpaca.markets\nAPCA_API_KEY_ID=test-paper-key\nAPCA_API_SECRET_KEY=test-paper-secret\n",
         encoding="utf-8",
     )
     monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(paper_env))
@@ -176,6 +207,7 @@ def test_paper_control_state_blocks_protected_position_baseline_until_position_a
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
         provider_env={},
         credential_store=store,
+        account_identity_checker=_account_pin_ok_assertion,
     )
     app = create_operator_app(provider=provider)
     accepted = _endpoint(app, "/operator/paper-baseline/accept", "POST")(
@@ -186,14 +218,81 @@ def test_paper_control_state_blocks_protected_position_baseline_until_position_a
     launch = _endpoint(app, "/operator/launch-readiness")()
 
     assert accepted["accepted"] is True
-    assert control["paper_start_allowed"] is False
-    assert control["dominant_blocker"] == "paper_baseline_position_aware_policy"
-    assert "paper_baseline_position_aware_policy" in control["reason_codes"]
-    assert control["baseline_position_aware_policy_blocked"] is True
-    assert launch["paper_start_allowed"] is False
-    assert "paper_baseline_position_aware_policy" in launch["reason_codes"]
+    assert control["paper_start_allowed"] is True
+    assert control["dominant_blocker"] == "READY_FOR_BOUNDED_PAPER"
+    assert "paper_baseline_position_aware_policy" not in control["reason_codes"]
+    assert control["baseline_position_aware_policy_blocked"] is False
+    assert control["baseline_position_aware_policy_guarded"] is True
+    assert launch["paper_start_allowed"] is True
+    assert launch["final_launch_readiness"] == "READY_FOR_BOUNDED_PAPER"
+    assert "paper_baseline_position_aware_policy" not in launch["reason_codes"]
+    assert launch["protected_same_symbol_guard_active"] is True
     assert control["broker_call_occurred"] is False
     assert control["broker_mutation_occurred"] is False
+
+
+def test_supervisor_baseline_context_uses_configured_operator_state_dir(tmp_path, monkeypatch) -> None:
+    paper_env = tmp_path / "canonical_alpaca_paper.env"
+    paper_env.write_text(
+        "APCA_API_BASE_URL=https://paper-api.alpaca.markets\nAPCA_API_KEY_ID=test-paper-key\nAPCA_API_SECRET_KEY=test-paper-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(paper_env))
+    repo_state = tmp_path / "state" / "operator"
+    configured_state = tmp_path / "configured_operator_state"
+    repo_state.mkdir(parents=True)
+    configured_state.mkdir(parents=True)
+    stale = accept_existing_position_baseline(_crypto_preflight(), accepted_by="stale wrong-path baseline")
+    current = accept_existing_position_baseline(_preflight(), accepted_by="configured operator state baseline")
+    (repo_state / "paper_baseline.json").write_text(json.dumps(stale), encoding="utf-8")
+    (configured_state / "paper_baseline.json").write_text(json.dumps(current), encoding="utf-8")
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({"PK_OPERATOR_STATE_DIR": str(configured_state)}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json"),
+        account_identity_checker=_account_pin_ok_assertion,
+    )
+    app = create_operator_app(provider=provider)
+
+    launch = _endpoint(app, "/operator/launch-readiness")()
+    control = asyncio.run(_endpoint(app, "/operator/paper-control-state")())
+
+    assert launch["protected_symbols_count"] == 1
+    assert launch["paper_baseline_runtime_context"]["protected_symbols_normalized"] == ["AAPL"]
+    assert control["baseline_runtime_context"]["protected_symbols_normalized"] == ["AAPL"]
+    assert "BTCUSD" not in str(launch["paper_baseline_runtime_context"])
+
+
+def test_stale_baseline_from_wrong_account_blocks_paper_readiness(tmp_path, monkeypatch) -> None:
+    paper_env = tmp_path / "canonical_alpaca_paper.env"
+    paper_env.write_text(
+        "APCA_API_BASE_URL=https://paper-api.alpaca.markets\nAPCA_API_KEY_ID=test-paper-key\nAPCA_API_SECRET_KEY=test-paper-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(paper_env))
+    repo_state = tmp_path / "state" / "operator"
+    repo_state.mkdir(parents=True)
+    stale = accept_existing_position_baseline(
+        _crypto_preflight(account_id="paper-account-104e2a"),
+        accepted_by="stale wrong-account baseline",
+    )
+    (repo_state / "paper_baseline.json").write_text(json.dumps(stale), encoding="utf-8")
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        provider_env={},
+        credential_store=LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json"),
+        account_identity_checker=_account_pin_ok_assertion,
+    )
+    app = create_operator_app(provider=provider)
+
+    launch = _endpoint(app, "/operator/launch-readiness")()
+    control = asyncio.run(_endpoint(app, "/operator/paper-control-state")())
+
+    assert launch["paper_account_pinned"] is True
+    assert launch["final_launch_readiness"] == "BLOCKED"
+    assert "paper_baseline_account_pin_mismatch" in launch["reason_codes"]
+    assert control["paper_start_allowed"] is False
+    assert "paper_baseline_account_pin_mismatch" in control["reason_codes"]
 
 
 def test_protected_baseline_blocks_same_symbol_trading_without_lot_tracking() -> None:

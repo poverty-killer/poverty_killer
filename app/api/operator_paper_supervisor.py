@@ -418,6 +418,7 @@ class PaperSupervisorConfig:
     max_paper_duration_seconds: int = DEFAULT_MAX_PAPER_DURATION_SECONDS
     log_directory: str = "logs/operator_runs"
     runtime_profile: str = "LOCAL_PAPER"
+    operator_state_dir: str | None = None
     session_store_path: str | None = None
     max_session_history: int = 250
     script_path: str = "scripts/run_bounded_paper.ps1"
@@ -441,6 +442,7 @@ class PaperSupervisorConfig:
             if runtime_config.log_dir.is_relative_to(runtime_config.repo_root)
             else str(runtime_config.log_dir / "operator_runs"),
             runtime_profile=runtime_config.runtime_profile,
+            operator_state_dir=str(runtime_config.operator_state_dir),
             session_store_path=str(runtime_config.operator_session_store_path),
             max_session_history=runtime_config.max_session_history,
         )
@@ -1085,6 +1087,8 @@ class OperatorPaperSupervisor:
         configured = str(self.config.process_env.get(PAPER_BASELINE_ENV_PATH) or "").strip()
         if configured and str(self.config.process_env.get(PAPER_BASELINE_ENV_REQUIRED) or "").strip():
             return Path(configured)
+        if self.config.operator_state_dir:
+            return Path(self.config.operator_state_dir) / "paper_baseline.json"
         return self.config.repo_root / "state" / "operator" / "paper_baseline.json"
 
     def _paper_baseline_runtime_context(self) -> PaperBaselineRuntimeContext:

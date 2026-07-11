@@ -17,6 +17,8 @@ from app.operator_credentials.store import (
     ALPACA_PAPER_ENDPOINT as EXPECTED_ALPACA_PAPER_BASE_URL,
     alpaca_endpoint_authority,
     canonical_alpaca_paper_env_path,
+    expected_alpaca_paper_account_suffix,
+    normalize_alpaca_account_suffix,
     read_alpaca_paper_env_file,
 )
 from app.execution.broker_gateway import (
@@ -171,6 +173,50 @@ class AlpacaPaperReadOnlyPreflightProof:
             "credential_authority": self.credential_authority.to_sanitized_dict(),
             "reconciliation": self.reconciliation.to_sanitized_dict() if self.reconciliation else None,
         }
+
+
+def alpaca_paper_preflight_account_pin_status(
+    proof: AlpacaPaperReadOnlyPreflightProof,
+    *,
+    expected_suffix: str | None = None,
+) -> dict[str, Any]:
+    reconciliation = proof.reconciliation
+    broker_truth = reconciliation.broker_truth if reconciliation is not None else {}
+    account = broker_truth.get("account") if isinstance(broker_truth, Mapping) else {}
+    actual_suffix = normalize_alpaca_account_suffix(account.get("id") if isinstance(account, Mapping) else None)
+    expected = normalize_alpaca_account_suffix(expected_suffix or expected_alpaca_paper_account_suffix()) or ""
+    if not actual_suffix:
+        return {
+            "status": "BLOCKED",
+            "reason_code": "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN",
+            "expected_suffix": expected,
+            "actual_suffix": None,
+            "account_pin_verified": False,
+            "detail": f"Expected Alpaca PAPER account suffix {expected}, but broker account identity is not proven.",
+            "broker_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+    if actual_suffix != expected:
+        return {
+            "status": "BLOCKED",
+            "reason_code": "ALPACA_PAPER_ACCOUNT_PIN_MISMATCH",
+            "expected_suffix": expected,
+            "actual_suffix": actual_suffix,
+            "account_pin_verified": False,
+            "detail": f"Expected Alpaca PAPER account suffix {expected}, got {actual_suffix}.",
+            "broker_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+    return {
+        "status": "PASS",
+        "reason_code": "ALPACA_PAPER_ACCOUNT_PIN_OK",
+        "expected_suffix": expected,
+        "actual_suffix": actual_suffix,
+        "account_pin_verified": True,
+        "detail": f"Broker-reported Alpaca PAPER account suffix matches the pinned account {expected}.",
+        "broker_mutation_occurred": False,
+        "secrets_values_exposed": False,
+    }
 
 
 def _default_alpaca_paper_env_path() -> Path:

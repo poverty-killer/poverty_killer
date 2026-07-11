@@ -782,6 +782,23 @@ def test_paper_control_state_timeout_is_precise_fail_closed_authority():
     assert "BACKEND_PAPER_CONTROL_STATE_UNAVAILABLE" not in text
 
 
+def test_canonical_paper_control_state_green_light_does_not_fall_back_to_legacy_disabled_reason():
+    text = _app_text()
+    function_body = text[text.index("function paperLaunchDisabledReason"):text.index("function renderRunPaperProofTile")]
+
+    assert "if (op.source && canRun.allowed === true)" in function_body
+    assert 'return "";' in function_body
+    assert function_body.index("if (op.source && canRun.allowed === true)") < function_body.index("return legacyPaperLaunchDisabledReason();")
+
+
+def test_position_aware_baseline_copy_does_not_contradict_bounded_paper_ready_state():
+    text = _app_text()
+
+    assert "position-aware bounded path" in text
+    assert "Ready for bounded position-aware PAPER only while the protected baseline guard stays loaded" in text
+    assert "Not 72-hour ready yet" not in text
+
+
 def test_overview_notifications_surface_degraded_optional_feeds():
     text = _app_text()
 

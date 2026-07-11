@@ -15,6 +15,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
+from app.operator_credentials.store import normalize_alpaca_account_suffix
+
 
 BASELINE_POLICY_CLEAN_ONLY = "CLEAN_ONLY"
 BASELINE_POLICY_PROTECTED = "ADOPT_EXISTING_POSITIONS_PROTECTED"
@@ -508,6 +510,16 @@ def _accepted_snapshot(accepted_baseline: Mapping[str, Any] | None) -> dict[str,
     if str(accepted_baseline.get("schema_version") or "") == BASELINE_SCHEMA_VERSION:
         return dict(accepted_baseline)
     return None
+
+
+def accepted_baseline_account_suffix(accepted_baseline: Mapping[str, Any] | None) -> str | None:
+    accepted_snapshot = _accepted_snapshot(accepted_baseline)
+    if not accepted_snapshot:
+        return None
+    account = accepted_snapshot.get("account")
+    if not isinstance(account, Mapping):
+        return None
+    return normalize_alpaca_account_suffix(account.get("account_id") or account.get("id"))
 
 
 def _positions_drift(current_positions: list[dict[str, Any]], accepted_snapshot: Mapping[str, Any]) -> bool:

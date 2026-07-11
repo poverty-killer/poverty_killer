@@ -2366,6 +2366,9 @@
       const reason = canRun.reason || overall.detail || "backend start authority is blocked";
       return `Disabled: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
     }
+    if (op.source && canRun.allowed === true) {
+      return "";
+    }
     if (baseline.accepted !== true && positionCount > 0) {
       return "Disabled: Existing positions require baseline adoption.";
     }
@@ -2602,7 +2605,7 @@
       ? "Default policy: protected baseline. Existing positions count against risk/exposure; existing baseline quantities will not be sold by default; same-symbol trading is blocked until run lot tracking is available."
       : "Baseline policy will be selected after read-only preflight truth exists.";
     const startDetail = accepted
-      ? "Ready for a short position-aware PAPER smoke only if all backend gates pass. Not 72-hour ready yet."
+      ? "Ready for bounded position-aware PAPER only while the protected baseline guard stays loaded and same-symbol baseline trading remains blocked until run lot tracking is available."
       : (controlStateUnavailable ? "Start remains disabled until canonical PAPER control state returns." : (hasExistingPositions ? "Start remains disabled until baseline is accepted and all other gates pass." : "Start remains governed by backend launch readiness."));
     const acceptDisabled = (!backendConnected() || accepted || !hasExistingPositions || openOrderCount !== 0) ? "disabled" : "";
     const acceptReason = accepted
@@ -2623,7 +2626,7 @@
           ${renderRunPaperProofTile("Account", summary.accountStatus || "UNKNOWN", `Endpoint ${baseline.endpointFamily || "paper"}; buying power ${summary.buyingPower || "unavailable"}; equity ${summary.totalEquity || "unavailable"}.`, (summary.accountBlocked || summary.tradingBlocked) ? "red" : "green")}
           ${renderRunPaperProofTile("Policy", baseline.policy || "ADOPT_EXISTING_POSITIONS_PROTECTED", policyDetail, "cyan")}
           ${renderRunPaperProofTile("P&L attribution", "nonzero baseline labeled", "Total account P&L includes baseline carry. Bot incremental P&L requires run fill attribution.", "cyan")}
-          ${renderRunPaperProofTile("Start readiness", accepted ? "position-aware smoke path" : "blocked pending baseline", startDetail, accepted ? "yellow" : "red")}
+          ${renderRunPaperProofTile("Start readiness", accepted ? "position-aware bounded path" : "blocked pending baseline", startDetail, accepted ? "yellow" : "red")}
         </div>
         ${accepted ? `<div class="notice" data-paper-baseline-accepted-text>Position-aware PAPER baseline accepted. Snapshot ${escapeHtml(baseline.baselineSnapshotId || "unknown")} at ${escapeHtml(baseline.acceptedAt || "unknown")}.</div>` : ""}
         ${hasExistingPositions && !accepted ? `<div class="notice" data-paper-baseline-required-text>Existing positions require baseline adoption. Reset is not required.</div>` : ""}

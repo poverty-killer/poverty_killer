@@ -52,6 +52,7 @@ from app.operator_activation.launch_readiness import build_launch_readiness
 from app.operator_activation.paper_baseline import (
     BASELINE_POLICY_PROTECTED,
     PaperBaselineStore,
+    accepted_baseline_account_suffix,
     build_baseline_adoption_state,
 )
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
@@ -66,6 +67,7 @@ from app.operator_credentials.store import (
     alpaca_endpoint_authority,
     alpaca_paper_account_pin_env,
     default_credential_store_path,
+    normalize_alpaca_account_suffix,
     normalize_provider_id,
 )
 from app.operator_intelligence.action_center import build_action_center
@@ -176,8 +178,9 @@ def _render_operator_ui_index(ui_dir: Path, version: str) -> str:
     safe_build_version = re.sub(r"[^A-Za-z0-9._-]", "", version or "") or "UNKNOWN_NOT_AVAILABLE"
     safe_asset_version = f"{safe_build_version}-{OPERATOR_UI_ASSET_VERSION}"
     for asset in ("styles.css", "mock-data.js", "app.js"):
-        html = re.sub(rf'{re.escape(asset)}\?v=[^"]+', f"{asset}?v={safe_asset_version}", html)
-        html = html.replace(f'{asset}"', f'{asset}?v={safe_asset_version}"')
+        asset_url = f"/operator-ui/{asset}?v={safe_asset_version}"
+        html = re.sub(rf'(?:/operator-ui/)?{re.escape(asset)}\?v=[^"]+', asset_url, html)
+        html = html.replace(f'{asset}"', f'{asset_url}"')
     build_script = (
         f'<script>window.PK_OPERATOR_UI_BUILD_COMMIT = "{safe_build_version}";'
         f'window.PK_OPERATOR_UI_ASSET_VERSION = "{safe_asset_version}";</script>'
@@ -1636,6 +1639,7 @@ class OperatorSnapshotProvider:
         supervisor = run_subcheck("supervisor_snapshot", self.supervisor.status_snapshot, reason_code="SUPERVISOR_SNAPSHOT_FAILED") or {}
         credentials = run_subcheck("credential_summary", lambda: self.credential_store.providers_summary(self.process_env), reason_code="CREDENTIAL_SUMMARY_FAILED") or {}
         endpoint_authority = run_subcheck("endpoint_authority", lambda: alpaca_endpoint_authority(self._paper_process_env(effective_env)), reason_code="ENDPOINT_AUTHORITY_FAILED") or {}
+        accepted_baseline = run_subcheck("accepted_baseline_store", self.paper_baseline_store.current, reason_code="ACCEPTED_BASELINE_STORE_FAILED") or {}
         baseline = run_subcheck("baseline_state", self.paper_baseline, reason_code="BASELINE_STATE_FAILED") or {}
         git_identity = {
             "repo_head": self.loaded_git_commit_short,
@@ -1702,14 +1706,32 @@ class OperatorSnapshotProvider:
             baseline_position_count_for_policy = int(baseline.get("position_count") or 0)
         except (TypeError, ValueError):
             baseline_position_count_for_policy = 0
+        baseline_runtime_context = supervisor.get("paper_baseline_runtime_context") or {}
+        baseline_context_loaded = baseline_runtime_context.get("baseline_loaded") is True
+        same_symbol_guard_active = baseline_runtime_context.get("same_symbol_baseline_guard_active") is True
         baseline_position_aware_policy_blocked = (
             baseline_accepted
             and baseline_position_count_for_policy > 0
             and str(baseline.get("policy") or "") == BASELINE_POLICY_PROTECTED
+            and not (baseline_context_loaded and same_symbol_guard_active)
         )
-        baseline_runtime_context = supervisor.get("paper_baseline_runtime_context") or {}
+        baseline_position_aware_policy_guarded = (
+            baseline_accepted
+            and baseline_position_count_for_policy > 0
+            and str(baseline.get("policy") or "") == BASELINE_POLICY_PROTECTED
+            and baseline_context_loaded
+            and same_symbol_guard_active
+        )
         account_identity = supervisor.get("paper_account_identity_assertion") if isinstance(supervisor.get("paper_account_identity_assertion"), dict) else {}
         account_pin_ok = supervisor.get("paper_account_pinned") is True or account_identity.get("status") == "PASS"
+        baseline_account_suffix = accepted_baseline_account_suffix(accepted_baseline if accepted_baseline.get("accepted") is True else None)
+        expected_account_suffix = normalize_alpaca_account_suffix(account_identity.get("expected_suffix"))
+        baseline_account_pin_mismatch = (
+            baseline_account_suffix is not None
+            and account_pin_ok
+            and expected_account_suffix is not None
+            and baseline_account_suffix != expected_account_suffix
+        )
         credential_configured = alpaca.get("configured") is True
         supervisor_allows_start = supervisor.get("paper_start_allowed") is True
         local_start_ready = (
@@ -1718,6 +1740,7 @@ class OperatorSnapshotProvider:
             and endpoint_valid
             and account_pin_ok
             and baseline_accepted
+            and not baseline_account_pin_mismatch
             and not baseline_position_aware_policy_blocked
             and not supervisor_running
             and not required_failures
@@ -1736,6 +1759,8 @@ class OperatorSnapshotProvider:
             dominant_blocker = "BASELINE_ADOPTION_REQUIRED"
         elif baseline_preflight_required:
             dominant_blocker = "paper_read_only_preflight_gate"
+        elif baseline_account_pin_mismatch:
+            dominant_blocker = "paper_baseline_account_pin_mismatch"
         elif baseline_position_aware_policy_blocked:
             dominant_blocker = "paper_baseline_position_aware_policy"
         elif local_start_ready:
@@ -1809,7 +1834,10 @@ class OperatorSnapshotProvider:
             "baseline_snapshot_id": baseline.get("baseline_snapshot_id"),
             "baseline_policy": baseline.get("policy"),
             "baseline_position_count": baseline.get("position_count") or 0,
+            "baseline_account_suffix": baseline_account_suffix,
+            "baseline_account_matches_pin": not baseline_account_pin_mismatch,
             "baseline_position_aware_policy_blocked": baseline_position_aware_policy_blocked,
+            "baseline_position_aware_policy_guarded": baseline_position_aware_policy_guarded,
             "baseline_runtime_context": baseline_runtime_context,
             "protected_symbols": baseline_runtime_context.get("protected_symbols_normalized") or baseline.get("protected_symbols") or [],
             "portfolio_truth_status": portfolio_truth_status,
