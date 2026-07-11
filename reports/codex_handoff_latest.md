@@ -4,6 +4,7 @@ Date: 2026-07-11 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
 Active packet completed: Phase G - Bounded PAPER Run READY.
+Latest committed/pushed work: `a861142 complete phase G bounded paper readiness`.
 
 ## 1. Verdict
 
@@ -118,29 +119,14 @@ Do not stage:
 - screenshots/metrics in `C:\tmp`
 - secrets/logs/runtime files
 
-## 8. Exact Staging
+## 8. Commit / Push State
 
-Stage exactly:
+Phase G was staged exactly, committed, and pushed:
 
-```powershell
-git add -- app/execution/alpaca_paper_adapter.py
-git add -- app/operator_activation/paper_baseline.py
-git add -- app/operator_activation/launch_readiness.py
-git add -- app/api/operator_readonly_api.py
-git add -- app/api/operator_paper_supervisor.py
-git add -- scripts/run_bounded_paper.ps1
-git add -- ui/operator-control-panel/app.js
-git add -- tests/test_alpaca_paper_credential_authority_guard.py
-git add -- tests/test_operator_paper_baseline.py
-git add -- tests/test_operator_readonly_api.py
-git add -- tests/test_operator_ui_wiring.py
-git add -- tests/test_windows_powershell_paper_launch_authority.py
-git add -- reports/completion/PHASE_G_REPORT.md
-git add -- CHECKPOINT_TRACKER.md
-git add -- reports/codex_handoff_latest.md
-```
+- commit: `a861142 complete phase G bounded paper readiness`
+- push: `0911297..a861142 master -> master`
 
-Commit message: `complete phase G bounded paper readiness`.
+No Phase G source, test, report, tracker, or current handoff changes remain unstaged after that commit. The remaining dirty/untracked files listed above are protected runtime or unrelated pre-existing artifacts and must not be staged without Board approval.
 
 ## 9. Next Work
 

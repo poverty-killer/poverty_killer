@@ -128,11 +128,12 @@ Phase G completed on 2026-07-11 under the Board-authorized Bounded PAPER Run REA
 - G7 PASS - max lease is explicit at `432000` seconds and final reconciliation remains required.
 - Important condition: tracked `state/operator/paper_baseline.json` remains stale for `redacted_suffix:104e2a` and was not edited/staged. If default repo state is used, readiness now fails closed. Positive Phase G proof used configured operator state under `C:\tmp\poverty_killer_phase_g_runtime\state\operator` with the broker-confirmed `045ded` protected baseline.
 - No PAPER run, broker mutation, live mode, real-money path, order submit, cancel, close, liquidate, flatten, threshold change, secret exposure, or tracked runtime-state edit occurred.
+- Commit pushed: `a861142 complete phase G bounded paper readiness`.
 
 ## Dirty Tree / Baseline Status
 
-The worktree remains dirty from pre-existing runtime/report leftovers and Phase A
-edits. Do not create `pre-completion-baseline` yet. Per AGENTS.md v3, baseline
+The worktree remains dirty from protected runtime files and pre-existing
+untracked report/script leftovers. Do not create `pre-completion-baseline` yet. Per AGENTS.md v3, baseline
 tag and `completion/main` branch require a clean tree and must not be forced by
 clean/stash/reset.
 
