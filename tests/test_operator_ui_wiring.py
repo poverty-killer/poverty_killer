@@ -443,6 +443,13 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "requires explicit approval before Alpaca is called" in text
     assert "account, open orders, and positions" in text
     assert "will not place, cancel, replace, liquidate, enable live, enable real money, or start PAPER" in text
+    assert "Pinned PAPER account" in text
+    assert "paperAccountPin" in text
+    assert "normalizePaperAccountPin" in text
+    assert "paper_account_pinned" in text
+    assert "paper_account_expected_suffix" in text
+    assert "paper_account_actual_suffix" in text
+    assert "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN" in text
     assert "Stale PAPER Session Reconciliation" in text
     assert "data-stale-reconcile-panel" in text
     assert "data-paper-reconcile-stale-control" in text
@@ -483,6 +490,9 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "paperEndpointHost" in text
     assert "paperEndpointBlockerCode" in text
     assert "alpacaLiveEndpointBlocked" in text
+    assert "paperAccountPinned" in text
+    assert "paperAccountExpectedSuffix" in text
+    assert "paperAccountActualSuffix" in text
     assert "Endpoint action:" in text
     assert "Endpoint display" in text
     assert "Endpoint family" in text
@@ -551,6 +561,7 @@ def test_backend_connected_run_paper_never_keeps_mock_authority():
     assert "function reconcileBackendConnectedAuthority" in text
     assert "function runPaperStateHasMockAuthority" in text
     assert "function runPaperSourceMismatchCodes" in text
+    assert "function paperAccountPinFromState" in text
     assert "OPERATOR_BACKEND_DEGRADED_RUN_PAPER_VIEW" in text
     assert "BACKEND_LAUNCH_READINESS_UNAVAILABLE" in text
     assert "READINESS_SOURCE_MISMATCH" in text
@@ -563,6 +574,9 @@ def test_backend_connected_run_paper_never_keeps_mock_authority():
     assert "renderPaperBaselinePanel(baseline, data.portfolio || {})" in text
     assert "buildCredentialSetupFromBackendState" in text
     assert "credentialSetupWithProviderTruth" in text
+    assert "const accountPinPassed = accountPin.pinned === true" in text
+    assert 'controlLaunch === "READY_FOR_BOUNDED_PAPER" && accountPinPassed' in text
+    assert "Pinned PAPER account not proven" in text
     assert "OPERATOR_BACKEND_CREDENTIALS" in text
     assert "OPERATOR_LOCAL_CREDENTIAL_STORE" in text
     assert "Backend source" in text
@@ -609,6 +623,9 @@ def test_operator_ui_uses_scheduler_and_active_screen_rendering():
     assert "const renderer = renderers[selected] || renderCockpitOverview" in text
     assert 'main.innerHTML = `<section class="screen active" id="screen-${selected}">${renderer()}</section>`' in text
     assert 'screens.map(([id]) => `<section class="screen"' not in text
+    show_screen = text[text.index("function showScreen"):text.index("function renderCommand")]
+    assert "activeScreenId = selected" in show_screen
+    assert "renderTopBar();" in show_screen
     assert "refreshActiveScreenData(selected)" in text
     assert 'path: "/operator/ai/recommendations", priority: 3, lane: "optional", optional: true' in text
 

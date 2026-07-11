@@ -1427,6 +1427,86 @@
     };
   }
 
+  function normalizePaperAccountPin(payload, fallback) {
+    const raw = payload || {};
+    const fallbackRaw = fallback || {};
+    const identity = raw.paper_account_identity_assertion
+      || raw.paperAccountIdentityAssertion
+      || (raw.advanced && raw.advanced.paper_account_identity_assertion)
+      || fallbackRaw.paper_account_identity_assertion
+      || fallbackRaw.paperAccountIdentityAssertion
+      || {};
+    const expectedSuffix = pick(
+      raw.paper_account_expected_suffix
+      || raw.paperAccountExpectedSuffix
+      || identity.expected_suffix
+      || fallbackRaw.paper_account_expected_suffix
+      || fallbackRaw.paperAccountExpectedSuffix,
+      "unknown"
+    );
+    const actualSuffix = pick(
+      raw.paper_account_actual_suffix
+      || raw.paperAccountActualSuffix
+      || identity.actual_suffix
+      || fallbackRaw.paper_account_actual_suffix
+      || fallbackRaw.paperAccountActualSuffix,
+      null
+    );
+    const pinned = raw.paper_account_pinned === true
+      || raw.paperAccountPinned === true
+      || fallbackRaw.paper_account_pinned === true
+      || fallbackRaw.paperAccountPinned === true
+      || identity.paper_account_pinned === true
+      || identity.status === "PASS";
+    const reasonCode = pick(
+      identity.reason_code
+      || raw.paper_account_reason_code
+      || raw.paperAccountReasonCode
+      || fallbackRaw.paper_account_reason_code
+      || fallbackRaw.paperAccountReasonCode,
+      pinned ? "ALPACA_PAPER_ACCOUNT_PIN_OK" : "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN"
+    );
+    const detail = pick(
+      identity.detail
+      || raw.paper_account_detail
+      || raw.paperAccountDetail
+      || fallbackRaw.paper_account_detail
+      || fallbackRaw.paperAccountDetail,
+      pinned
+        ? `Broker-reported account identity matches ${expectedSuffix}.`
+        : `Expected Alpaca PAPER account suffix ${expectedSuffix}; broker-reported suffix is ${actualSuffix || "unknown"}.`
+    );
+    return {
+      pinned,
+      expectedSuffix,
+      actualSuffix,
+      reasonCode,
+      detail,
+      source: pick(identity.source || raw.paper_account_source || fallbackRaw.paper_account_source, "UNKNOWN"),
+      brokerReadAttempted: identity.broker_read_attempted === true || raw.broker_read_attempted === true,
+      brokerReadOccurred: identity.broker_read_occurred === true || raw.broker_read_occurred === true,
+      brokerMutationOccurred: identity.broker_mutation_occurred === true || raw.broker_mutation_occurred === true,
+      secretsValuesExposed: identity.secrets_values_exposed === true || raw.secrets_values_exposed === true
+    };
+  }
+
+  function paperAccountPinFromState(state, op) {
+    const launch = (state && state.launchReadiness) || {};
+    const control = (state && state.paperControlState) || {};
+    const view = op || launch.runPaperOperatorState || {};
+    return normalizePaperAccountPin(
+      view.paperAccountPin ? {
+        paperAccountPinned: view.paperAccountPin.pinned,
+        paperAccountExpectedSuffix: view.paperAccountPin.expectedSuffix,
+        paperAccountActualSuffix: view.paperAccountPin.actualSuffix,
+        paperAccountReasonCode: view.paperAccountPin.reasonCode,
+        paperAccountDetail: view.paperAccountPin.detail,
+        paper_account_identity_assertion: view.paperAccountPin.identityAssertion || {}
+      } : control,
+      launch
+    );
+  }
+
   function buildCredentialSetupFromBackendState(state) {
     const truth = alpacaPaperCredentialTruth(state);
     const endpoint = endpointTruthFromState(state);
@@ -1582,6 +1662,7 @@
         }
       : baseline;
     const rawCredentialSetup = buildCredentialSetupFromBackendState(state);
+    const accountPin = paperAccountPinFromState(state, launch.runPaperOperatorState || {});
     const credentialSetup = credentialStatusUnavailable
       ? {
           ...rawCredentialSetup,
@@ -1635,6 +1716,7 @@
         secretsValuesExposed: false
       },
       paperCredentialSetup: credentialSetup,
+      paperAccountPin: accountPin,
       paperBaseline: displayedBaseline,
       runtime: {
         label: activeRuntime ? "PAPER supervisor process is attached" : "No active PAPER run",
@@ -1667,6 +1749,10 @@
         alpacaLiveEndpointBlocked: true,
         paperStartAllowed: false,
         launchReadinessStartAllowed: false,
+        paperAccountPinned: accountPin.pinned === true,
+        paperAccountExpectedSuffix: accountPin.expectedSuffix,
+        paperAccountActualSuffix: accountPin.actualSuffix,
+        paperAccountReasonCode: accountPin.reasonCode,
         brokerMutationOccurred: false,
         tradingMutationOccurred: false,
         liveEnabled: false,
@@ -1792,6 +1878,7 @@
           rawSecretValuesIncluded: false
         }
       },
+      paperAccountPin: normalizePaperAccountPin({}, {}),
       paperBaseline: {
         source: "BACKEND_UNAVAILABLE",
         schemaVersion: "paper-baseline-view-v1",
@@ -1860,6 +1947,10 @@
         alpacaLiveEndpointBlocked: true,
         paperStartAllowed: false,
         launchReadinessStartAllowed: false,
+        paperAccountPinned: false,
+        paperAccountExpectedSuffix: "unknown",
+        paperAccountActualSuffix: null,
+        paperAccountReasonCode: "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN",
         brokerMutationOccurred: false,
         tradingMutationOccurred: false,
         liveEnabled: false,
@@ -1928,6 +2019,10 @@
       alpacaEndpointConfigured: false,
       alpacaPaperEndpointValid: false,
       alpacaLiveEndpointBlocked: true,
+      paperAccountIdentityAssertion: {},
+      paperAccountPinned: false,
+      paperAccountExpectedSuffix: "unknown",
+      paperAccountActualSuffix: null,
       paperStartAllowed: false,
       runPaperOperatorState: buildBackendUnavailableRunPaperState(detail),
       safeStopStatus: "UNKNOWN",
@@ -2034,6 +2129,10 @@
         alpacaEndpointConfigured: endpointTruthFromState(state).configured,
         alpacaPaperEndpointValid: endpointTruthFromState(state).valid,
         alpacaLiveEndpointBlocked: true,
+        paperAccountIdentityAssertion: launch.paperAccountIdentityAssertion || {},
+        paperAccountPinned: launch.paperAccountPinned === true,
+        paperAccountExpectedSuffix: launch.paperAccountExpectedSuffix || "unknown",
+        paperAccountActualSuffix: launch.paperAccountActualSuffix || null,
         paperStartAllowed: false,
         runPaperOperatorState: buildBackendConnectedRunPaperState(state, launchFailure),
         safeStopStatus: launch.safeStopStatus || "UNKNOWN",
@@ -2577,9 +2676,13 @@
       ["alpaca_endpoint_configured", badge(advanced.alpacaEndpointConfigured === true ? "true" : "false", advanced.alpacaEndpointConfigured === true ? "gray" : "cyan")],
       ["alpaca_endpoint_source", tokenText(advanced.alpacaEndpointSource || launch.paperEndpointSource || "UNKNOWN")],
       ["alpaca_paper_endpoint_valid", badge(advanced.alpacaPaperEndpointValid === true ? "true" : "false", advanced.alpacaPaperEndpointValid === true ? "green" : "red")],
-      ["alpaca_live_endpoint_blocked", badge(advanced.alpacaLiveEndpointBlocked !== false ? "true" : "false", advanced.alpacaLiveEndpointBlocked !== false ? "red" : "yellow")],
+      ["alpaca_live_endpoint_blocked", badge(advanced.alpacaLiveEndpointBlocked !== false ? "true" : "false", advanced.alpacaLiveEndpointBlocked !== false ? "green" : "red")],
       ["paper_start_allowed", badge(advanced.paperStartAllowed === true ? "true" : "false", advanced.paperStartAllowed === true ? "green" : "red")],
       ["launch_readiness_start_allowed", badge(advanced.launchReadinessStartAllowed === true ? "true" : "false", advanced.launchReadinessStartAllowed === true ? "green" : "red")],
+      ["paper_account_pinned", badge(advanced.paperAccountPinned === true ? "true" : "false", advanced.paperAccountPinned === true ? "green" : "red")],
+      ["paper_account_expected_suffix", tokenText(advanced.paperAccountExpectedSuffix || launch.paperAccountExpectedSuffix || "unknown")],
+      ["paper_account_actual_suffix", tokenText(advanced.paperAccountActualSuffix || launch.paperAccountActualSuffix || "unknown")],
+      ["paper_account_reason_code", tokenText(advanced.paperAccountReasonCode || "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN")],
       ["broker_mutation_occurred", badge(advanced.brokerMutationOccurred === true ? "true" : "false", advanced.brokerMutationOccurred === true ? "red" : "green")],
       ["trading_mutation_occurred", badge(advanced.tradingMutationOccurred === true ? "true" : "false", advanced.tradingMutationOccurred === true ? "red" : "green")],
       ["live_enabled", badge(advanced.liveEnabled === true ? "true" : "false", advanced.liveEnabled === true ? "red" : "green")],
@@ -2602,6 +2705,7 @@
     const endpoint = op.endpoint || {};
     const credentials = op.credentials || {};
     const credentialSetup = op.paperCredentialSetup || {};
+    const accountPin = op.paperAccountPin || paperAccountPinFromState(data, op);
     const baseline = paperBaselineFromState(data, op);
     const runtime = op.runtime || {};
     const brokerTruth = op.brokerTruth || {};
@@ -2635,6 +2739,13 @@
     const credentialSummary = credentialSetup && credentialSetup.overallStatus
       ? (credentialSetup.overallStatus.detail || credentialSetup.overallStatus.label || "Credential setup status returned by backend.")
       : "Credential setup proof is available when the PAPER control state is loaded.";
+    const accountPinLabel = accountPin.pinned === true
+      ? `${accountPin.expectedSuffix || "expected"} confirmed`
+      : (accountPin.actualSuffix ? "account mismatch" : "identity not proven");
+    const accountPinColor = accountPin.pinned === true
+      ? "green"
+      : (accountPin.actualSuffix && accountPin.expectedSuffix && accountPin.actualSuffix !== accountPin.expectedSuffix ? "red" : "yellow");
+    const accountPinDetail = `Expected suffix ${accountPin.expectedSuffix || "unknown"}; broker reported ${accountPin.actualSuffix || "unknown"}. ${accountPin.detail || accountPin.reasonCode || ""}`;
     const baselineSummary = baseline.accepted === true
       ? `Accepted baseline: ${baseline.positionCount || 0} positions, ${baseline.openOrderCount || 0} open orders.`
       : `Baseline not accepted: ${baseline.positionCount || 0} positions, ${baseline.openOrderCount || 0} open orders.`;
@@ -2681,6 +2792,7 @@
           ${renderRunPaperProofTile("Backend source", data.meta.dataSource || "UNKNOWN", `${backendDegradedCount()} degraded endpoint checks; Run PAPER source ${op.source || "UNKNOWN"}.`, data.meta.dataSource === "OPERATOR_BACKEND" ? "green" : (data.meta.dataSource === "PARTIAL_BACKEND" ? "yellow" : "red"))}
           ${renderRunPaperProofTile("Alpaca PAPER endpoint", endpoint.label || launch.paperEndpointDisplay || "Endpoint unavailable", `Source ${endpointSourceLabel}; family ${endpoint.family || launch.paperEndpointFamily || "unknown"}; host ${endpoint.host || launch.paperEndpointHost || "unavailable"}.`, endpoint.valid === true || launch.paperEndpointOnly ? "green" : "red")}
           ${renderRunPaperProofTile("Credentials", credentials.label || (launch.alpacaPaperCredentialsConfigured ? "Alpaca PAPER credentials configured" : "Alpaca PAPER credentials missing"), credentialDetail, credentials.configured === true || launch.alpacaPaperCredentialsConfigured ? "green" : "red")}
+          ${renderRunPaperProofTile("Pinned PAPER account", accountPinLabel, accountPinDetail, accountPinColor)}
           ${renderRunPaperProofTile("Runtime", runtime.label || runtimeAttachment, `Supervisor ${runtime.state || sup.state || "UNKNOWN"}; safe stop ${runtime.safeStopStatus || launch.safeStopStatus || "UNKNOWN"}.`, (runtime.state || sup.state) === "RUNNING" ? "yellow" : "green")}
           ${renderRunPaperProofTile("Broker / portfolio truth", brokerTruth.label || "Broker truth not loaded in this card", brokerTruth.detail || "Portfolio Snapshot remains the broker-confirmed truth area; no positions are invented here.", brokerTruth.brokerConfirmed === true ? "green" : (brokerTruth.status === "BROKER_READ_READY_NOT_IN_THIS_VIEW" ? "yellow" : "red"))}
           ${renderRunPaperProofTile("Safety locks", "Live locked / real money blocked", safetyDetail, "green")}
@@ -2812,6 +2924,8 @@
     const endpointSource = endpoint.source || launch.paperEndpointSource || "UNKNOWN";
     const endpointReady = endpoint.valid === true || launch.paperEndpointOnly === true;
     const credentialsConfigured = credentials.configured === true || launch.alpacaPaperCredentialsConfigured === true;
+    const liveEndpointBlocked = launch.alpacaLiveEndpointBlocked !== false;
+    const accountPin = op.paperAccountPin || paperAccountPinFromState(data, op);
     const blockerChecks = (launch.checks || []).filter((check) => {
       const status = String(check.status || "").toUpperCase();
       return check.blocker === true || status.includes("BLOCK") || status.includes("MISSING") || status.includes("DEGRADED") || status.includes("FAIL");
@@ -2828,10 +2942,11 @@
         ["Endpoint host", escapeHtml(endpoint.host || launch.paperEndpointHost || "unavailable")],
         ["Endpoint source", badge(endpointSource, endpointSource === "SAFE_DEFAULT_PAPER_ENDPOINT" || endpointSource === "OPERATOR_STATUS" ? "cyan" : "gray")],
         ["Endpoint configured", badge(launch.alpacaEndpointConfigured ? "yes" : "safe default", launch.alpacaEndpointConfigured ? "gray" : "cyan")],
-        ["Live endpoint blocked", badge(launch.alpacaLiveEndpointBlocked ? "yes" : "no", launch.alpacaLiveEndpointBlocked ? "red" : "yellow")],
+        ["Live endpoint blocked", badge(liveEndpointBlocked ? "yes" : "no", liveEndpointBlocked ? "green" : "red")],
+        ["Pinned PAPER account", badge(accountPin.pinned ? `yes (${accountPin.expectedSuffix || "expected"})` : (accountPin.actualSuffix ? `mismatch (${accountPin.actualSuffix})` : "not proven"), accountPin.pinned ? "green" : (accountPin.actualSuffix ? "red" : "yellow"))],
         ["Provider status", escapeHtml(`${readiness.readyOrConfiguredCount || 0} ready/configured, ${readiness.missingCredentialsCount || providerCounts.MISSING_CREDENTIALS || 0} missing`)],
-        ["Live", badge("LOCKED", "red")],
-        ["Real money", badge("BLOCKED", "red")],
+        ["Live", badge("LOCKED", "green")],
+        ["Real money", badge("BLOCKED", "green")],
         ["Active runtime", badge(data.supervisor.processState || "UNKNOWN", statusColor(data.supervisor.processState || "UNKNOWN"))],
         ["Safe stop", badge(launch.safeStopStatus || "UNKNOWN", statusColor(launch.safeStopStatus || "UNKNOWN"))],
         ["Storage/audit", badge(data.diagnostics.sessionStoreStatus || "UNKNOWN", statusColor(data.diagnostics.sessionStoreStatus || "UNKNOWN"))],
@@ -3881,6 +3996,7 @@
   function showScreen(id) {
     const selected = normalizeScreenId(id);
     activeScreenId = selected;
+    renderTopBar();
     const existing = document.querySelector(`#screen-${selected}`);
     if (!existing) {
       renderScreens(selected);
@@ -7533,6 +7649,7 @@
         secretsValuesExposed: credentials.secrets_values_exposed === true
       },
       paperCredentialSetup: normalizePaperCredentialSetup(payload.paper_credential_setup || {}),
+      paperAccountPin: normalizePaperAccountPin(payload, advanced),
       paperBaseline: normalizePaperBaseline(payload.paper_baseline || (payload.paper_credential_setup && payload.paper_credential_setup.baseline_adoption) || {}),
       staleReconciliation: normalizeStaleReconciliation(payload.stale_reconciliation || {}),
       runtime: {
@@ -7595,6 +7712,10 @@
         alpacaLiveEndpointBlocked: advanced.alpaca_live_endpoint_blocked !== false,
         paperStartAllowed: advanced.paper_start_allowed === true,
         launchReadinessStartAllowed: advanced.launch_readiness_start_allowed === true,
+        paperAccountPinned: advanced.paper_account_pinned === true,
+        paperAccountExpectedSuffix: pick(advanced.paper_account_expected_suffix, null),
+        paperAccountActualSuffix: pick(advanced.paper_account_actual_suffix, null),
+        paperAccountReasonCode: pick((advanced.paper_account_identity_assertion || {}).reason_code, null),
         brokerMutationOccurred: advanced.broker_mutation_occurred === true,
         tradingMutationOccurred: advanced.trading_mutation_occurred === true,
         liveEnabled: advanced.live_enabled === true,
@@ -7649,6 +7770,10 @@
       activePid: pick(control.active_pid, null),
       paperStartAllowed: control.paper_start_allowed === true,
       paperStopAllowed: control.paper_stop_allowed === true,
+      paperAccountIdentityAssertion: control.paper_account_identity_assertion || {},
+      paperAccountPinned: control.paper_account_pinned === true,
+      paperAccountExpectedSuffix: pick(control.paper_account_expected_suffix, null),
+      paperAccountActualSuffix: pick(control.paper_account_actual_suffix, null),
       dominantBlocker: pick(control.dominant_blocker, "PAPER_START_BLOCKED"),
       reasonCodes: Array.isArray(control.reason_codes) ? control.reason_codes : [],
       maxLeaseSeconds: pick(control.max_lease_seconds, 432000),
@@ -7769,19 +7894,31 @@
     const activeRuntime = Boolean(c.activeRunId)
       || ["RUNNING", "STARTING", "STOP_REQUESTED"].includes(String(c.supervisorState || "").toUpperCase());
     const controlLaunch = c.finalLaunchReadiness || c.final_launch_readiness || (c.launch_readiness && c.launch_readiness.final_launch_readiness) || c.dominantBlocker || "";
-    const allowed = c.paperStartAllowed === true && controlLaunch === "READY_FOR_BOUNDED_PAPER";
-    const reasonCodes = uniqueCodes(c.reasonCodes && c.reasonCodes.length ? c.reasonCodes : [c.dominantBlocker || "PAPER_START_BLOCKED"]);
     const endpointValid = c.endpointFamily === "paper" && String(c.endpointHost || c.endpointDisplay || "").includes("paper-api.alpaca.markets");
     const credentialConfigured = c.alpacaPaperConfigured === true || c.credentialStatus === "CONFIGURED";
+    const accountPin = normalizePaperAccountPin({
+      paper_account_identity_assertion: c.paperAccountIdentityAssertion,
+      paper_account_pinned: c.paperAccountPinned,
+      paper_account_expected_suffix: c.paperAccountExpectedSuffix,
+      paper_account_actual_suffix: c.paperAccountActualSuffix
+    }, state && state.launchReadiness);
+    const accountPinRequired = c.paperStartAllowed === true || (credentialConfigured && endpointValid);
+    const accountPinPassed = accountPin.pinned === true;
+    const accountPinBlocksStart = accountPinRequired && !accountPinPassed;
+    const allowed = c.paperStartAllowed === true && controlLaunch === "READY_FOR_BOUNDED_PAPER" && accountPinPassed;
+    const accountPinBlocker = accountPin.reasonCode || "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN";
+    const reasonCodes = uniqueCodes((c.reasonCodes && c.reasonCodes.length ? c.reasonCodes : [c.dominantBlocker || "PAPER_START_BLOCKED"]).concat(accountPinBlocksStart ? [accountPinBlocker] : []));
     const baseline = paperBaselineFromControlState(c);
     const label = allowed
       ? "Ready for governed PAPER"
-      : (activeRuntime ? "PAPER supervisor running" : (c.dominantBlocker || "Start blocked"));
+      : (activeRuntime ? "PAPER supervisor running" : (accountPinBlocksStart ? "Pinned PAPER account not proven" : (c.dominantBlocker || "Start blocked")));
     const detail = allowed
       ? "Backend paper-control-state says governed PAPER start is allowed with current safety locks."
       : (activeRuntime
         ? "PAPER supervisor process is attached; duplicate start is blocked."
-        : `Current backend blocker: ${c.dominantBlocker || reasonCodes[0] || "PAPER_START_BLOCKED"}.`);
+        : (accountPinBlocksStart
+          ? accountPin.detail
+          : `Current backend blocker: ${c.dominantBlocker || reasonCodes[0] || "PAPER_START_BLOCKED"}.`));
     return {
       source: "OPERATOR_PAPER_CONTROL_STATE",
       schemaVersion: "run-paper-command-center-v1",
@@ -7823,6 +7960,7 @@
         secretsValuesExposed: false
       },
       paperCredentialSetup: buildCredentialSetupFromBackendState(state || data),
+      paperAccountPin: accountPin,
       paperBaseline: baseline,
       staleReconciliation: normalizeStaleReconciliation(c.staleReconciliation || {}),
       runtime: {
@@ -7830,7 +7968,7 @@
         state: c.supervisorState || "UNKNOWN",
         processState: c.supervisorState || "UNKNOWN",
         activeSessionId: c.activeRunId || null,
-        paperStartRefusalReason: allowed ? null : (c.dominantBlocker || reasonCodes[0]),
+        paperStartRefusalReason: allowed ? null : (accountPinBlocksStart ? accountPinBlocker : (c.dominantBlocker || reasonCodes[0])),
         paperStopAllowed: c.paperStopAllowed === true,
         safeStopStatus: c.paperStopAllowed === true ? "GOVERNED_STOP_AVAILABLE" : "NO_ACTIVE_RUN"
       },
@@ -7867,6 +8005,10 @@
         alpacaLiveEndpointBlocked: c.liveLocked !== false,
         paperStartAllowed: allowed,
         launchReadinessStartAllowed: allowed,
+        paperAccountPinned: accountPinPassed,
+        paperAccountExpectedSuffix: accountPin.expectedSuffix,
+        paperAccountActualSuffix: accountPin.actualSuffix,
+        paperAccountReasonCode: accountPin.reasonCode,
         brokerMutationOccurred: c.brokerMutationOccurred === true,
         tradingMutationOccurred: c.orderSubmissionOccurred === true || c.cancelOccurred === true || c.replaceOccurred === true || c.liquidationOccurred === true || c.closePositionOccurred === true,
         liveEnabled: c.liveEnabled === true,
@@ -7884,9 +8026,7 @@
     state.supervisor.sessionId = control.activeRunId || "none";
     state.supervisor.pid = control.activePid || "none";
     state.supervisor.processState = control.supervisorState || state.supervisor.processState;
-    state.supervisor.paperStartAllowed = control.paperStartAllowed === true;
     state.supervisor.paperStopAllowed = control.paperStopAllowed === true;
-    state.supervisor.paperStartRefusalReason = control.paperStartAllowed === true ? null : control.dominantBlocker;
     state.supervisor.paperStopRefusalReason = control.paperStopAllowed === true ? null : "NO_ACTIVE_RUN";
     state.supervisor.maxPaperDurationSeconds = control.maxLeaseSeconds || state.supervisor.maxPaperDurationSeconds || 432000;
     state.supervisor.runnerMaxPaperDurationSeconds = control.maxLeaseSeconds || state.supervisor.runnerMaxPaperDurationSeconds || 432000;
@@ -7898,10 +8038,12 @@
     state.supervisor.wrapperStderrPath = control.artifactPaths.wrapper_stderr_path || state.supervisor.wrapperStderrPath;
     state.supervisor.childStdoutPath = control.artifactPaths.child_stdout_path || state.supervisor.childStdoutPath;
     state.supervisor.childStderrPath = control.artifactPaths.child_stderr_path || state.supervisor.childStderrPath;
-    const controlLaunch = control.finalLaunchReadiness || control.final_launch_readiness || (control.launch_readiness && control.launch_readiness.final_launch_readiness) || control.dominantBlocker || "";
-    state.launchReadiness.paperStartAllowed = control.paperStartAllowed === true && controlLaunch === "READY_FOR_BOUNDED_PAPER";
+    const convertedRunPaperState = buildRunPaperStateFromControlState(control, state);
+    state.supervisor.paperStartAllowed = convertedRunPaperState.canRunPaper && convertedRunPaperState.canRunPaper.allowed === true;
+    state.supervisor.paperStartRefusalReason = state.supervisor.paperStartAllowed ? null : convertedRunPaperState.runtime.paperStartRefusalReason;
+    state.launchReadiness.paperStartAllowed = convertedRunPaperState.canRunPaper && convertedRunPaperState.canRunPaper.allowed === true;
     state.launchReadiness.reasonCodes = control.reasonCodes || [];
-    state.launchReadiness.runPaperOperatorState = buildRunPaperStateFromControlState(control, state);
+    state.launchReadiness.runPaperOperatorState = convertedRunPaperState;
     state.launchReadiness.finalLaunchReadiness = state.launchReadiness.paperStartAllowed === true ? "READY_FOR_BOUNDED_PAPER" : "BLOCKED";
     state.launchReadiness.paperEndpointDisplay = control.endpointDisplay || state.launchReadiness.paperEndpointDisplay;
     state.launchReadiness.paperEndpointFamily = control.endpointFamily || state.launchReadiness.paperEndpointFamily;
@@ -7910,6 +8052,10 @@
     state.launchReadiness.paperEndpointStatus = control.endpointStatus || state.launchReadiness.paperEndpointStatus;
     state.launchReadiness.alpacaPaperCredentialsConfigured = control.alpacaPaperConfigured === true;
     state.launchReadiness.alpacaPaperEndpointValid = control.endpointFamily === "paper";
+    state.launchReadiness.paperAccountIdentityAssertion = control.paperAccountIdentityAssertion || state.launchReadiness.paperAccountIdentityAssertion || {};
+    state.launchReadiness.paperAccountPinned = control.paperAccountPinned === true;
+    state.launchReadiness.paperAccountExpectedSuffix = control.paperAccountExpectedSuffix || state.launchReadiness.paperAccountExpectedSuffix;
+    state.launchReadiness.paperAccountActualSuffix = control.paperAccountActualSuffix || state.launchReadiness.paperAccountActualSuffix;
     state.status.dominantBlocker = control.dominantBlocker || state.status.dominantBlocker;
     state.status.lastHeartbeat = control.lastHeartbeat || state.status.lastHeartbeat;
   }
@@ -8460,6 +8606,10 @@
         alpacaPaperEndpointValid: launchReadiness.alpaca_paper_endpoint_valid === true,
         alpacaLiveEndpointBlocked: launchReadiness.alpaca_live_endpoint_blocked !== false,
         paperEndpointAuthority: launchReadiness.paper_endpoint_authority || {},
+        paperAccountIdentityAssertion: launchReadiness.paper_account_identity_assertion || {},
+        paperAccountPinned: launchReadiness.paper_account_pinned === true,
+        paperAccountExpectedSuffix: pick(launchReadiness.paper_account_expected_suffix, null),
+        paperAccountActualSuffix: pick(launchReadiness.paper_account_actual_suffix, null),
         paperStartAllowed: launchReadiness.paper_start_allowed === true,
         runPaperOperatorState: normalizeRunPaperOperatorState(launchReadiness.run_paper_operator_state),
         safeStopStatus: pick(launchReadiness.safe_stop_status, "UNKNOWN"),

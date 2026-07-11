@@ -1,44 +1,41 @@
-# Codex Session Handoff - D4 Account Pin Closed / Phase F Open
+# Codex Session Handoff - Phase F Closed / Awaiting Phase G Board Packet
 
 Date: 2026-07-10 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Active packet: D4-ACCOUNT-PIN, then proceed into Phase F.
+Active packet completed: Phase F UI Cockpit Understandable after D4-ACCOUNT-PIN.
 
 ## 1. Verdict
 
-D4-ACCOUNT-PIN is complete and appended to `reports/completion/PHASE_D_REPORT.md`.
+Phase F is complete for the authorized UI cockpit seam.
 
-Result:
+The Run PAPER cockpit now shows the D4 account-pin requirement as a first-class operator proof. Start remains disabled unless backend readiness is exactly `READY_FOR_BOUNDED_PAPER` and the pinned Alpaca PAPER account identity is proven. The UI now displays expected suffix, actual suffix, pin status, and account-pin reason code.
 
-- `ACCOUNT_TARGET_RUNTIME_INFERRED` is CLEARED.
-- Canonical PAPER account suffix is pinned once in `app.operator_credentials.store`: `045ded`.
-- The supervisor/readiness path refuses PAPER start unless the broker-reported account identity is proven read-only and matches `045ded`.
-- A simulated drained/reachable account suffix `104e2a` is rejected with `ALPACA_PAPER_ACCOUNT_PIN_MISMATCH` before runner launch.
-- The child process env carries `PK_ALPACA_PAPER_EXPECTED_ACCOUNT_SUFFIX=045ded` from the canonical pin source.
-- Phase F is no longer blocked by account identity; tracker marks Phase F `IN_PROGRESS`.
+Current local browser proof is intentionally fail-closed:
+
+- dominant blocker: `ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN`
+- expected suffix: `045ded`
+- actual suffix: `unknown`
+- Start disabled: yes
+
+D4 broker read was not re-armed during Phase F browser validation, so the UI correctly shows the account pin as not proven.
 
 No PAPER run was executed.
 
 ## 2. What Changed
 
-Source:
+Runtime UI:
 
-- `app/operator_credentials/store.py` - canonical account-pin authority and normalization helpers.
-- `app/operator_portfolio/snapshot.py` - GET-only account identity snapshot using `/v2/account`.
-- `app/operator_activation/account_identity.py` - account-pin assertion PASS/BLOCKED contract.
-- `app/api/operator_paper_supervisor.py` - status/start prerequisite enforcement and child env pin.
-- `app/operator_activation/launch_readiness.py` - D6 readiness check for account pin.
-- `app/api/operator_readonly_api.py` - paper control state/account-pin display fields.
+- `ui/operator-control-panel/app.js` - account-pin normalization, Run PAPER fail-closed gating, account-pin proof tile, advanced diagnostic rows, safe lock colors, and top-bar refresh on screen switch.
 
 Tests:
 
-- `tests/test_operator_account_identity_pin.py` - new PASS/MISMATCH/start-reject/readiness tests.
-- Existing supervisor/readiness/API/AI tests now use module-local offline PASS pin fixtures where account identity is not the behavior under test.
+- `tests/test_operator_ui_wiring.py` - contract assertions for account-pin UI fields, fail-closed gating, and top-bar refresh.
+- `tests/test_operator_readonly_api.py` - API fixture assertion for pinned `045ded` account when backend account assertion is PASS.
 
 Docs:
 
-- `reports/completion/PHASE_D_REPORT.md`
+- `reports/completion/PHASE_F_REPORT.md`
 - `CHECKPOINT_TRACKER.md`
 - `reports/codex_handoff_latest.md`
 
@@ -47,23 +44,50 @@ Docs:
 Passed:
 
 ```powershell
-python -m py_compile app\operator_credentials\store.py app\operator_portfolio\snapshot.py app\operator_activation\account_identity.py app\operator_activation\launch_readiness.py app\api\operator_paper_supervisor.py app\api\operator_readonly_api.py
-python -m pytest tests/test_operator_account_identity_pin.py tests/test_phase_d_paper_readiness_truth.py tests/test_operator_launch_readiness.py tests/test_operator_paper_supervisor.py -q --basetemp .pytest_tmp\account_pin_existing2
-python -m pytest tests/test_operator_readonly_api.py tests/test_operator_ai_ask.py -q --basetemp .pytest_tmp\account_pin_api2
-python -m pytest tests/test_operator_portfolio.py tests/test_operator_credentials.py tests/test_broker_read_policy.py -q --basetemp .pytest_tmp\account_pin_adjacent
+node --check ui\operator-control-panel\app.js
 ```
 
-Proof details:
+Passed:
 
-- `tests/test_operator_account_identity_pin.py::test_demoted_or_drained_account_104e2a_is_rejected_by_pin` proves the drained suffix is rejected.
-- `tests/test_operator_account_identity_pin.py::test_supervisor_rejects_account_pin_mismatch_before_runner_launch` proves no runner launch occurs on mismatch.
-- `tests/test_operator_account_identity_pin.py::test_supervisor_passes_pinned_account_to_child_env_when_identity_matches` proves child env receives the canonical pin.
+```powershell
+python -m pytest tests\test_operator_ui_wiring.py tests\test_operator_readonly_api.py -q --basetemp .pytest_tmp\phase_f_ui_api3
+```
+
+Result:
+
+```text
+71 passed in 21.80s
+```
+
+Browser/runtime proof used local `uvicorn` plus Chrome DevTools Protocol. No broker mutation, PAPER run, live mode, real-money path, order placement, cancel, or liquidation occurred.
+
+Desktop controls proof:
+
+- topbar: `Controls & Settings`
+- `hasPinnedBanner=true`
+- `hasPinnedTile=true`
+- `scrollWidth=1440`
+- `clientWidth=1440`
+- `startDisabled=true`
+- blocker: `Expected Alpaca PAPER account suffix 045ded, but read-only broker account identity is not authorized/proven.`
+
+Mobile controls proof:
+
+- topbar: `Controls & Settings`
+- `hasPinnedBanner=true`
+- `hasPinnedTile=true`
+- `scrollWidth=390`
+- `clientWidth=390`
+- `startDisabled=true`
+- same account-pin blocker.
+
+Screenshots were saved under `C:\tmp\poverty_killer_phase_f_browser\` and are not staged.
 
 ## 4. Safety
 
 No broker mutation, PAPER run, live endpoint, real-money path, order placement, cancel, liquidation, threshold change, state edit, secret exposure, or broad cleanup occurred.
 
-The only broker-capable code added is read-only account identity proof, and tests used fake clients. Production default still requires Board read authorization before the default checker performs broker read.
+The UI remains display-only. Backend readiness remains the PAPER start authority, and the D4 account-pin backend contract remains the account identity authority. The UI refuses to show a green start without that proof.
 
 ## 5. Current Dirty Tree
 
@@ -81,34 +105,30 @@ Pre-existing dirty/untracked files remain and must not be staged:
 - `reports/operator_perf/`
 - untracked audit scripts under `scripts/`
 
+Approved Phase F files to stage:
+
+- `ui/operator-control-panel/app.js`
+- `tests/test_operator_ui_wiring.py`
+- `tests/test_operator_readonly_api.py`
+- `reports/completion/PHASE_F_REPORT.md`
+- `CHECKPOINT_TRACKER.md`
+- `reports/codex_handoff_latest.md`
+
 ## 6. Next Work
 
-Proceed with Phase F UI Cockpit Understandable:
+Await the Phase G Board packet before any bounded PAPER run.
 
-- Re-read AGENTS and tracker before editing Phase F UI.
-- Scout operator-control-panel UI/API contracts.
-- Research comparable cockpit/status patterns if web access is available.
-- Prove desktop + mobile browser behavior.
-- Do not run PAPER.
-- Do not touch secrets, live, thresholds, state/runtime files, or broker mutation.
+Phase G remains Board-gated because PAPER execution requires explicit authorization. Do not run PAPER, touch live mode, touch real-money paths, mutate broker state, change thresholds, or stage runtime/secrets.
 
 ## 7. Exact Staging
 
 Stage exactly:
 
 ```powershell
-git add -- app/operator_credentials/store.py
-git add -- app/operator_portfolio/snapshot.py
-git add -- app/operator_activation/account_identity.py
-git add -- app/operator_activation/launch_readiness.py
-git add -- app/api/operator_paper_supervisor.py
-git add -- app/api/operator_readonly_api.py
-git add -- tests/test_operator_account_identity_pin.py
-git add -- tests/test_operator_paper_supervisor.py
-git add -- tests/test_operator_launch_readiness.py
+git add -- ui/operator-control-panel/app.js
+git add -- tests/test_operator_ui_wiring.py
 git add -- tests/test_operator_readonly_api.py
-git add -- tests/test_operator_ai_ask.py
-git add -- reports/completion/PHASE_D_REPORT.md
+git add -- reports/completion/PHASE_F_REPORT.md
 git add -- CHECKPOINT_TRACKER.md
 git add -- reports/codex_handoff_latest.md
 ```

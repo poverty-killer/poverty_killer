@@ -331,6 +331,10 @@ def test_paper_control_state_is_canonical_safe_run_paper_payload(tmp_path):
     assert payload["endpoint_family"] == "paper"
     assert payload["endpoint_host"] == "paper-api.alpaca.markets"
     assert payload["credential_status"] == "CONFIGURED"
+    assert payload["paper_account_pinned"] is True
+    assert payload["paper_account_expected_suffix"] == "045ded"
+    assert payload["paper_account_actual_suffix"] == "045ded"
+    assert payload["paper_account_identity_assertion"]["reason_code"] == "ALPACA_PAPER_ACCOUNT_PIN_OK"
     assert payload["portfolio_truth_status"] == "PORTFOLIO_READ_AVAILABLE_SEPARATELY"
     assert payload["portfolio_data_source"] == "CONTROL_STATE_FAST_PATH_NO_BROKER_READ"
     assert payload["positions_count"] == 0

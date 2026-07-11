@@ -12,7 +12,7 @@ Branch: master
 | C - Authority Graph Implemented | PASS | `reports/completion/PHASE_C_AUTHORITY_GRAPH_REPORT.md`; 7 owners named in code; 9 Phase B conflicts resolved as owner/contributor/reference boundaries |
 | D - PAPER Readiness Truthful | PASS | `reports/completion/PHASE_D_REPORT.md`; D0-D7 PASS after D4 Board-armed read-only Alpaca PAPER baseline |
 | E - AI Chief Useful | PASS | `reports/completion/PHASE_E_REPORT.md`; AI route truth and evidence contract are live; canonical blockers come from D6 readiness |
-| F - UI Cockpit Understandable | IN_PROGRESS | D4-ACCOUNT-PIN closed `ACCOUNT_TARGET_RUNTIME_INFERRED`; Phase F UI cockpit proof/build is now open |
+| F - UI Cockpit Understandable | PASS | `reports/completion/PHASE_F_REPORT.md`; Run PAPER cockpit shows D4 account-pin truth, disables Start without proven pin, and passed desktop/mobile browser proof |
 | G - Bounded PAPER Run Ready | NOT_STARTED | PAPER run still requires explicit Board approval |
 | H - Live-Readiness Shadow Mode | NOT_STARTED | Live credentials read-only requires Board approval |
 | I - Tiny Live Canary | NOT_STARTED | Individually Board-approved only |
@@ -99,6 +99,22 @@ D4-ACCOUNT-PIN was completed on 2026-07-10 under Board authorization to pin Shan
 - No real broker read, PAPER run, live endpoint, real-money path, order placement, cancel, liquidation, threshold change, or secret exposure occurred in this addendum.
 - `ACCOUNT_TARGET_RUNTIME_INFERRED` is CLEARED. Phase F is unblocked and now in progress.
 
+## Phase F Result
+
+Phase F completed on 2026-07-10 under the UI Cockpit Understandable seam after D4-ACCOUNT-PIN cleared the runtime-inference hazard.
+
+- F0 PASS - AGENTS v3, tracker, handoff, relevant UI/API/tests, scout, red-team, and UI research were completed before edits.
+- F1 PASS - Run PAPER Command Center now shows the exact current blocker and next safe action instead of a fake-green state.
+- F2 PASS - Run PAPER Start is disabled unless backend truth is `READY_FOR_BOUNDED_PAPER` and account pin proof is passed.
+- F3 PASS - D4 account-pin truth is visible in the cockpit: expected suffix, actual suffix, pin status, and reason code.
+- F4 PASS - backend-connected Run PAPER display cannot be overridden by stale mock/local authority.
+- F5 PASS - desktop and mobile browser proof showed no horizontal overflow.
+- F6 PASS - advanced diagnostics remain available without replacing the primary operator cockpit.
+- F7 PASS - no unsafe controls, raw secrets, broker mutation, PAPER run, live mode, real-money path, or threshold changes occurred.
+- Current local browser proof intentionally shows `ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN` because D4 broker read was not re-armed in Phase F; the UI fails closed with Start disabled.
+- Validation: `node --check ui\operator-control-panel\app.js`; focused UI/API pytest suite passed with 71 tests; local Chrome CDP browser proof captured desktop and mobile controls screens.
+- Phase G remains Board-gated because any bounded PAPER run requires explicit authorization.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from pre-existing runtime/report leftovers and Phase A
@@ -115,6 +131,7 @@ clean/stash/reset.
 - Shan authorized D4 read-only Alpaca PAPER inspection: account status, open orders, and positions only; canonical env credential source; paper endpoint only; no order placement/cancel/close/liquidate/flatten and no PAPER run.
 - Shan authorized Phase E AI Chief Useful: AI remains advisory-only; no broker/live/threshold touch; provider/model route truth, evidence-bound answers, canonical D6 blockers, and mutation/secret refusal proofs required.
 - Shan authorized D4-ACCOUNT-IDENTITY read-only proof before Phase F. Result: canonical account is funded `redacted_suffix:045ded`, second account `redacted_suffix:104e2a` is reachable only through demoted local vault/state, but account identity is runtime-inferred in code, so Phase F is blocked pending Board confirmation of the account-pin fix.
-- Shan authorized D4-ACCOUNT-PIN to hard-pin PAPER operation to funded account suffix `045ded`. Result: account identity assertion is wired into readiness/supervisor start, mismatch fails closed, demoted/drained suffix `104e2a` is rejected in tests, and Phase F is unblocked/in progress.
+- Shan authorized D4-ACCOUNT-PIN to hard-pin PAPER operation to funded account suffix `045ded`. Result: account identity assertion is wired into readiness/supervisor start, mismatch fails closed, demoted/drained suffix `104e2a` is rejected in tests, and Phase F is unblocked.
+- Phase F UI cockpit is complete. Result: Run PAPER cockpit renders account-pin truth, disables Start without proven pin, and passed desktop/mobile browser validation. Phase G bounded PAPER run remains Board-gated.
 - No PAPER run was authorized.
 - No live mode, live read-only mode, or broker mutation was authorized.
