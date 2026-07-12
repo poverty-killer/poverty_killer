@@ -1383,7 +1383,7 @@
       "required_body": {
         "mode": "PAPER",
         "profile": "PAPER_EXPLORATION_ALPHA",
-        "duration_seconds": "governed PAPER lease seconds from 60 to 432000",
+        "duration_seconds": "bounded PAPER lease seconds from 60 to 432000",
         "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
         "approve_autonomous_paper": true,
         "real_money": false,

@@ -33,8 +33,15 @@ $LaunchLog = Join-Path $LogRoot "launcher.log"
 $StdoutLog = Join-Path $LogRoot "operator_backend_$Stamp.stdout.log"
 $StderrLog = Join-Path $LogRoot "operator_backend_$Stamp.stderr.log"
 $CmdLauncher = Join-Path $LogRoot "start_operator_backend_$Stamp.cmd"
+$OperatorStateBase = [Environment]::GetFolderPath("LocalApplicationData")
+if ([string]::IsNullOrWhiteSpace($OperatorStateBase)) {
+    $OperatorStateBase = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".local\state"
+}
+$OperatorStateRoot = Join-Path $OperatorStateBase "PovertyKiller\state\operator"
+[Environment]::SetEnvironmentVariable("PK_OPERATOR_STATE_DIR", $OperatorStateRoot, "Process")
 
 New-Item -Path $LogRoot -ItemType Directory -Force | Out-Null
+New-Item -Path $OperatorStateRoot -ItemType Directory -Force | Out-Null
 
 function Write-LaunchLog {
     param([string]$Message)

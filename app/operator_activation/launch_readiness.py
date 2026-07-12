@@ -683,7 +683,7 @@ def build_launch_readiness(
     checks.append(
         _check(
             "paper_start_authority",
-            "Governed PAPER start",
+            "Bounded PAPER start",
             "PASS" if paper_start_allowed else "BLOCKED",
             paper_start_detail,
             blocker=not paper_start_allowed,

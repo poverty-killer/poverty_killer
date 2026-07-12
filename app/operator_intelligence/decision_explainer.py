@@ -87,7 +87,7 @@ class DecisionExplainer:
             "headline": "No active DecisionFrame evidence is attached to the operator backend.",
             "evidence": [],
             "blockers": ["NO_DECISIONFRAME_EVIDENCE"],
-            "next_best_action": "Start or review a governed PAPER run, then inspect archive and runtime summaries.",
+            "next_best_action": "Start or review a bounded PAPER run, then inspect archive and runtime summaries.",
             "confidence": "LOW",
             "missing_truth": ["LATEST_DECISIONFRAME", "MARKET_TRUTH_STATE", "NETEDGE_RESULT", "BROKER_BOUNDARY_STATE"],
             "scoring_changed": False,

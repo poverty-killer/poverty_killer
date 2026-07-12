@@ -510,11 +510,13 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "Long-running PAPER stays PAPER-only" in text
     assert "Ready. No PAPER run currently attached." in text
     assert "Last historical refusal" in text
-    assert "Selected duration exceeds the current governed PAPER lease max" in text
+    assert "Selected duration exceeds the current bounded PAPER lease max" in text
+    assert "data-run-paper-stop-control" in text
+    assert '"data-intent": "paper-stop"' in text
     assert "Custom minutes / hours / days" in text
     assert "604800" not in text
     assert "/operator/intent/paper/start" in text
-    assert "Start Governed PAPER Run" in text
+    assert "Start Bounded PAPER Run" in text
     assert "Portfolio Snapshot" in text
     assert "Current Assets / Positions Preview" in text
     assert "AI Quant Advisor" in text
@@ -534,6 +536,7 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert "paperBaseline" in text
     assert "data-paper-baseline-panel" in text
     assert "data-paper-baseline-advanced" in text
+    assert 'baseline.protectedSymbols || baseline.positionSymbols || []' in text
     assert ".paper-baseline-panel" in css
     assert ".stack-shutdown-panel" in css
     assert "readOnlyPreflightAuthorized" in text
@@ -553,6 +556,43 @@ def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     assert ".credential-preflight-panel" in css
     assert ".credential-preflight-field" in css
     assert ".stale-reconcile-panel" in css
+
+
+def test_runtime_vitality_animation_requires_fresh_backend_heartbeat_truth():
+    text = _app_text()
+    css = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert "runtimeVitalityTruth" in text
+    assert "pulseAnimationAllowed" in text
+    assert "marketDataFresh" in text
+    assert "data-bot-pulse" in text
+    assert "data-bot-ecg" in text
+    assert "data-bot-vital" in text
+    assert "data-market-vital" in text
+    assert 'data-pulse-animating="${vitality.botLive ? "true" : "false"}"' in text
+    assert "Account time-series evidence is not loaded. No trend is inferred." in text
+    assert "0,48 28,43 56,46" not in text
+    assert ".scan-strip.is-live .scan-pulse" in css
+    assert ".heart.is-live" in css
+    assert ".ecg-line.is-live path" in css
+    assert "animation: none" in css
+    assert "@media (max-width: 1023px)" in css
+    assert "position: static" in css
+
+
+def test_deprecated_paper_readiness_labels_never_render_from_ui_sources():
+    combined = "\n".join(
+        (
+            _app_text(),
+            MOCK_JS.read_text(encoding="utf-8"),
+            Path("ui/operator-control-panel/contracts.json").read_text(encoding="utf-8"),
+        )
+    )
+    lowered = combined.lower()
+
+    assert "READY_FOR_GOVERNED_PAPER" not in combined
+    assert "DEGRADED_BUT_RUNNABLE" not in combined
+    assert "governed paper" not in lowered
 
 
 def test_backend_connected_run_paper_never_keeps_mock_authority():

@@ -20,8 +20,15 @@ if ([string]::IsNullOrWhiteSpace($LogBase)) {
 }
 $LogRoot = Join-Path $LogBase "PovertyKiller\operator-launcher"
 $LaunchLog = Join-Path $LogRoot "launcher-control.log"
+$OperatorStateBase = [Environment]::GetFolderPath("LocalApplicationData")
+if ([string]::IsNullOrWhiteSpace($OperatorStateBase)) {
+    $OperatorStateBase = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".local\state"
+}
+$OperatorStateRoot = Join-Path $OperatorStateBase "PovertyKiller\state\operator"
+[Environment]::SetEnvironmentVariable("PK_OPERATOR_STATE_DIR", $OperatorStateRoot, "Process")
 
 New-Item -Path $LogRoot -ItemType Directory -Force | Out-Null
+New-Item -Path $OperatorStateRoot -ItemType Directory -Force | Out-Null
 
 function ConvertTo-SafeLauncherText {
     param([object]$Value)

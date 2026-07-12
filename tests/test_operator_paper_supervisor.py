@@ -55,9 +55,11 @@ class FakeRunner:
         self.repo_root = Path(tempfile.mkdtemp(prefix="pk-operator-supervisor-test-"))
         self.started_specs: list[ProcessStartSpec] = []
         self.stop_requests = 0
+        self.wait_requests = 0
         self.shutdown_requests = 0
         self.stop_request_pids: list[int] = []
         self.process = FakeProcess()
+        self.on_stop = None
 
     def is_available(self, repo_root: Path):
         assert repo_root == self.repo_root
@@ -70,7 +72,16 @@ class FakeRunner:
     def request_graceful_stop(self, handle: FakeProcess):
         self.stop_requests += 1
         self.stop_request_pids.append(int(handle.pid))
+        if callable(self.on_stop):
+            self.on_stop()
+        if hasattr(handle, "exit_code"):
+            handle.exit_code = 0
         return True, "CTRL_BREAK_EVENT_SENT"
+
+    def wait_for_exit(self, handle: FakeProcess, *, timeout_seconds: float):
+        del timeout_seconds
+        self.wait_requests += 1
+        return handle.poll() is not None
 
     def shutdown_process_group(self, handle: FakeProcess, *, timeout_seconds: float = 5.0):
         del timeout_seconds
@@ -474,18 +485,83 @@ def test_supervisor_persists_session_and_parses_child_log_paths(tmp_path):
     assert reloaded.status_snapshot()["latest_session"]["session_id"] == result["session_id"]
 
 
-def test_supervisor_stop_requests_graceful_process_stop_without_broker_call():
+def test_governed_stop_halts_loop_releases_lease_without_broker_mutation_and_preserves_positions(monkeypatch):
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    accepted = accept_existing_position_baseline(
+        {
+            **_baseline_snapshot(),
+            "position_count": 4,
+            "positions": [
+                {"symbol": "AVAXUSD", "asset_class": "crypto", "qty": "10", "side": "long"},
+                {"symbol": "ETHUSD", "asset_class": "crypto", "qty": "2", "side": "long"},
+                {"symbol": "LINKUSD", "asset_class": "crypto", "qty": "25", "side": "long"},
+                {"symbol": "SOLUSD", "asset_class": "crypto", "qty": "8", "side": "long"},
+            ],
+        },
+        accepted_by="Shan/local operator",
+    )
+    state_dir = runner.repo_root / "durable_operator_state"
+    state_dir.mkdir(parents=True)
+    baseline_path = state_dir / "paper_baseline.json"
+    baseline_path.write_text(json.dumps(accepted), encoding="utf-8")
+    supervisor = OperatorPaperSupervisor(
+        config=_supervisor_config(runner, operator_state_dir=str(state_dir)),
+        runner=runner,
+    )
+    mutation_calls: list[str] = []
+    monkeypatch.setattr(
+        "app.execution.alpaca_paper_adapter.AlpacaPaperBrokerAdapter.submit_order",
+        lambda *args, **kwargs: mutation_calls.append("submit_order"),
+    )
+    monkeypatch.setattr(
+        "app.execution.alpaca_paper_adapter.AlpacaPaperBrokerAdapter.cancel_order",
+        lambda *args, **kwargs: mutation_calls.append("cancel_order"),
+    )
+    monkeypatch.setattr(
+        "app.execution.order_router.OrderRouter.close_all_positions",
+        lambda *args, **kwargs: mutation_calls.append("close_all_positions"),
+    )
     supervisor.start_paper(_valid_request())
 
     stopped = supervisor.stop_paper({})
+    snapshot = supervisor.status_snapshot()
+    persisted = json.loads(baseline_path.read_text(encoding="utf-8"))
 
     assert stopped["allowed"] is True
-    assert stopped["reason_code"] == "CTRL_BREAK_EVENT_SENT"
+    assert stopped["reason_code"] == "GOVERNED_STOP_COMPLETED_NO_BROKER_MUTATION"
+    assert stopped["stop_signal_reason"] == "CTRL_BREAK_EVENT_SENT"
+    assert stopped["run_loop_halted"] is True
+    assert stopped["new_entries_ceased"] is True
+    assert stopped["lease_released"] is True
+    assert stopped["child_process_terminated"] is True
+    assert stopped["broker_position_mutation_requested"] is False
+    assert stopped["broker_positions_reconciled_after_stop"] is False
+    assert stopped["broker_positions_preservation_status"] == "UNKNOWN_PENDING_FINAL_BROKER_RECONCILIATION"
+    assert stopped["governed_position_lifecycle_authority_unchanged"] is True
+    assert stopped["governed_position_lifecycle_active_after_stop"] is False
+    assert stopped["final_reconciliation_required"] is True
     assert stopped["broker_call_occurred"] is False
+    assert stopped["broker_mutation_occurred"] is False
+    assert stopped["order_submission_occurred"] is False
+    assert stopped["cancel_occurred"] is False
+    assert stopped["liquidation_occurred"] is False
+    assert stopped["close_position_occurred"] is False
     assert stopped["runtime_mutation_occurred"] is True
     assert runner.stop_requests == 1
+    assert runner.wait_requests == 1
+    assert snapshot["state"] == "IDLE"
+    assert snapshot["latest_session"]["status"] == "STOPPED"
+    assert snapshot["active_session"] is None
+    assert snapshot["paper_stop_allowed"] is False
+    assert mutation_calls == []
+    assert persisted == accepted
+    assert stopped["paper_baseline_runtime_context"]["same_symbol_baseline_guard_active"] is True
+    assert stopped["paper_baseline_runtime_context"]["protected_symbols_normalized"] == [
+        "AVAXUSD",
+        "ETHUSD",
+        "LINKUSD",
+        "SOLUSD",
+    ]
 
 
 def test_supervisor_refuses_stop_without_active_run():
@@ -562,6 +638,19 @@ def test_supervisor_auto_reconciles_dead_prior_pid_on_startup_without_broker_cal
 
 def test_supervisor_adopts_running_prior_pid_on_startup_and_allows_governed_stop():
     runner = FakeRunner()
+    process_running = True
+
+    def liveness(_pid):
+        return (
+            process_running,
+            "STALE_SESSION_PROCESS_STILL_RUNNING" if process_running else "STALE_SESSION_PROCESS_NOT_RUNNING",
+        )
+
+    def mark_stopped():
+        nonlocal process_running
+        process_running = False
+
+    runner.on_stop = mark_stopped
     store = OperatorSessionStore(runner.repo_root / "state" / "operator" / "sessions.jsonl")
     store.write_session(
         {
@@ -580,7 +669,7 @@ def test_supervisor_adopts_running_prior_pid_on_startup_and_allows_governed_stop
         config=_supervisor_config(runner, session_store_path=str(store.path)),
         runner=runner,
         session_store=store,
-        pid_liveness_probe=lambda pid: (True, "STALE_SESSION_PROCESS_STILL_RUNNING"),
+        pid_liveness_probe=liveness,
     )
     snapshot = supervisor.status_snapshot()
     stopped = supervisor.stop_paper({})
@@ -592,6 +681,7 @@ def test_supervisor_adopts_running_prior_pid_on_startup_and_allows_governed_stop
     assert snapshot["startup_lifecycle_reconciliation"]["status"] == "ADOPTED_RUNNING_PID"
     assert stopped["allowed"] is True
     assert runner.stop_requests == 1
+    assert runner.wait_requests == 1
     assert runner.stop_request_pids[-1] == 24680
     assert stopped["broker_call_occurred"] is False
 

@@ -4,6 +4,7 @@ import inspect
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
@@ -131,6 +132,10 @@ def test_run_visibility_snapshot_combines_fresh_heartbeat_and_supervisor(tmp_pat
     assert snapshot["fills"]["count"] == 2
     assert snapshot["fills"]["source"] == "execution_heartbeat"
     assert snapshot["latency_degraded_count"] == 3
+    assert snapshot["bot_vital_status"] == "LIVE"
+    assert snapshot["pulse_animation_allowed"] is True
+    assert snapshot["market_vital_status"] == "FRESH"
+    assert snapshot["market_data_fresh"] is True
     assert snapshot["broker_mutation_occurred"] is False
     assert snapshot["secrets_values_exposed"] is False
 
@@ -225,6 +230,67 @@ def test_supervisor_status_flips_after_process_death(tmp_path):
     assert snapshot["status"] in {"FAILED", "STOPPED"}
     assert snapshot["supervisor"]["child_running"] is False
     assert snapshot["supervisor"]["manual_restart_required"] is True
+
+
+def test_killed_bot_pulse_freezes_within_heartbeat_stale_threshold(tmp_path, monkeypatch):
+    stdout_path = tmp_path / "logs" / "paper_runs" / "child.out.log"
+    heartbeat_path = tmp_path / DEFAULT_HEARTBEAT_PATH
+    supervisor_path = tmp_path / DEFAULT_SUPERVISOR_STATUS_PATH
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text("2026-06-18 00:00:01.000 | INFO | alive\n", encoding="utf-8")
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        heartbeat = build_runtime_heartbeat_payload(
+            {
+                "running": True,
+                "active_symbols": ["AVAX/USD", "ETH/USD", "LINK/USD", "SOL/USD"],
+                "execution": {"is_running": True},
+                "risk": {"can_trade": True},
+                "main_loop": {},
+                "order_router": {},
+            },
+            pid=process.pid,
+            started_at=utc_now_iso(),
+            started_monotonic=time.monotonic(),
+            run_state="RUNNING",
+            last_loop_ts=utc_now_iso(),
+            last_error=None,
+        )
+        supervisor = build_supervisor_status_payload(
+            state="RUNNING",
+            pid=process.pid,
+            started_at=utc_now_iso(),
+            uptime_seconds=0.1,
+            child_running=True,
+            exit_code=None,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stdout_path.with_suffix(".err.log")),
+            heartbeat_path=str(heartbeat_path),
+            stale_after_seconds=0.05,
+        )
+        atomic_write_json(heartbeat_path, heartbeat)
+        atomic_write_json(supervisor_path, supervisor)
+        clock = {
+            "now": datetime.fromisoformat(heartbeat["heartbeat_ts"].replace("Z", "+00:00")).timestamp()
+        }
+        monkeypatch.setattr("app.run_visibility.time.time", lambda: clock["now"])
+        live = read_run_visibility_snapshot(tmp_path, stale_after_seconds=0.05)
+        assert live["bot_vital_status"] == "LIVE"
+        assert live["pulse_animation_allowed"] is True
+
+        process.terminate()
+        process.wait(timeout=5)
+        clock["now"] += 0.051
+
+        stale = read_run_visibility_snapshot(tmp_path, stale_after_seconds=0.05)
+        assert stale["heartbeat_age_seconds"] >= stale["stale_after_seconds"]
+        assert stale["heartbeat_stale"] is True
+        assert stale["bot_vital_status"] == "STALE"
+        assert stale["pulse_animation_allowed"] is False
+        assert stale["market_data_fresh"] is False
+    finally:
+        if process.poll() is None:
+            process.kill()
 
 
 def test_operator_run_visibility_endpoint_and_page_are_read_only(tmp_path):

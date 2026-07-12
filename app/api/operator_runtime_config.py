@@ -39,10 +39,24 @@ DEFAULT_ALLOWED_DURATIONS = (
 DEFAULT_MIN_PAPER_DURATION_SECONDS = 60
 RUNNER_MAX_PAPER_DURATION_SECONDS = 432000
 DEFAULT_MAX_PAPER_DURATION_SECONDS = RUNNER_MAX_PAPER_DURATION_SECONDS
+OPERATOR_STATE_SOURCE_OS_DURABLE = "OS_DURABLE_DEFAULT"
+OPERATOR_STATE_SOURCE_ENV = "PK_OPERATOR_STATE_DIR"
+OPERATOR_STATE_SOURCE_EXPLICIT_ROOT = "EXPLICIT_REPO_ROOT_ISOLATION"
 
 
 def repo_root_from_here() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def default_durable_operator_state_dir(env: Mapping[str, str] | None = None) -> Path:
+    env_map = os.environ if env is None else env
+    local_app_data = str(env_map.get("LOCALAPPDATA") or "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "PovertyKiller" / "state" / "operator"
+    xdg_state_home = str(env_map.get("XDG_STATE_HOME") or "").strip()
+    if xdg_state_home:
+        return Path(xdg_state_home) / "poverty_killer" / "operator"
+    return Path.home() / ".local" / "state" / "poverty_killer" / "operator"
 
 
 def _truthy(value: str | None, *, default: bool = False) -> bool:
@@ -98,10 +112,11 @@ class OperatorRuntimeConfig:
     runtime_profile: str = "LOCAL_PAPER"
     data_dir: Path = field(default_factory=lambda: repo_root_from_here() / "data")
     log_dir: Path = field(default_factory=lambda: repo_root_from_here() / "logs")
-    operator_state_dir: Path = field(default_factory=lambda: repo_root_from_here() / "state" / "operator")
+    operator_state_dir: Path = field(default_factory=default_durable_operator_state_dir)
     operator_session_store_path: Path = field(
-        default_factory=lambda: repo_root_from_here() / "state" / "operator" / "sessions.jsonl"
+        default_factory=lambda: default_durable_operator_state_dir() / "sessions.jsonl"
     )
+    operator_state_dir_source: str = OPERATOR_STATE_SOURCE_OS_DURABLE
     world_awareness_cache_path: Path = field(
         default_factory=lambda: repo_root_from_here() / "state" / "world_awareness" / "operator_events.jsonl"
     )
@@ -133,11 +148,23 @@ class OperatorRuntimeConfig:
             profile = "LOCAL_PAPER"
         data_dir = _path_from_env(root, env_map.get("PK_DATA_DIR"), "data")
         log_dir = _path_from_env(root, env_map.get("PK_LOG_DIR"), "logs")
-        operator_state_dir = _path_from_env(root, env_map.get("PK_OPERATOR_STATE_DIR"), "state/operator")
-        session_store = _path_from_env(
-            root,
-            env_map.get("PK_OPERATOR_SESSION_STORE_PATH") or env_map.get("PK_OPERATOR_DB_PATH"),
-            "state/operator/sessions.jsonl",
+        configured_operator_state = str(env_map.get("PK_OPERATOR_STATE_DIR") or "").strip()
+        if configured_operator_state:
+            operator_state_dir = _path_from_env(root, configured_operator_state, "state/operator")
+            operator_state_source = OPERATOR_STATE_SOURCE_ENV
+        elif repo_root is None:
+            operator_state_dir = default_durable_operator_state_dir(env_map)
+            operator_state_source = OPERATOR_STATE_SOURCE_OS_DURABLE
+        else:
+            operator_state_dir = root / "state" / "operator"
+            operator_state_source = OPERATOR_STATE_SOURCE_EXPLICIT_ROOT
+        configured_session_store = str(
+            env_map.get("PK_OPERATOR_SESSION_STORE_PATH") or env_map.get("PK_OPERATOR_DB_PATH") or ""
+        ).strip()
+        session_store = (
+            _path_from_env(root, configured_session_store, "state/operator/sessions.jsonl")
+            if configured_session_store
+            else operator_state_dir / "sessions.jsonl"
         )
         world_cache = _path_from_env(
             root,
@@ -166,6 +193,7 @@ class OperatorRuntimeConfig:
             log_dir=log_dir,
             operator_state_dir=operator_state_dir,
             operator_session_store_path=session_store,
+            operator_state_dir_source=operator_state_source,
             world_awareness_cache_path=world_cache,
             max_session_history=_positive_int(env_map.get("PK_MAX_SESSION_HISTORY"), 250),
             max_event_cache=_positive_int(env_map.get("PK_MAX_EVENT_CACHE"), 250),
@@ -200,6 +228,8 @@ class OperatorRuntimeConfig:
             "data_dir": str(self.data_dir),
             "log_dir": str(self.log_dir),
             "operator_state_dir": str(self.operator_state_dir),
+            "operator_state_dir_source": self.operator_state_dir_source,
+            "operator_state_dir_durable_default": self.operator_state_dir_source == OPERATOR_STATE_SOURCE_OS_DURABLE,
             "operator_session_store_path": str(self.operator_session_store_path),
             "world_awareness_cache_path": str(self.world_awareness_cache_path),
             "max_session_history": self.max_session_history,

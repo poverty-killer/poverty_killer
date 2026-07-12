@@ -1082,7 +1082,7 @@
       return {
         valid: false,
         reason: "WATCHLIST_REQUIRED",
-        detail: "Enter at least one governed PAPER watchlist symbol."
+        detail: "Enter at least one bounded PAPER watchlist symbol."
       };
     }
     if (durationSeconds < effectiveBounds.minDuration) {
@@ -1096,7 +1096,7 @@
       return {
         valid: false,
         reason: "DURATION_EXCEEDS_MAX_LEASE",
-        detail: `Selected duration ${formatDuration(durationSeconds)} exceeds the current governed PAPER lease max ${formatDuration(effectiveBounds.maxDuration)}.`
+        detail: `Selected duration ${formatDuration(durationSeconds)} exceeds the current bounded PAPER lease max ${formatDuration(effectiveBounds.maxDuration)}.`
       };
     }
     return {
@@ -1165,7 +1165,7 @@
       const startState = card.querySelector("[data-run-paper-start-state]");
       if (startState) {
         startState.classList.toggle("error", Boolean(effectiveDisabledReason));
-        startState.textContent = effectiveDisabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.";
+        startState.textContent = effectiveDisabledReason || "Ready to request the bounded PAPER /operator/intent/paper/start endpoint after confirmations are checked.";
       }
       const draftNotice = card.querySelector("[data-paper-draft-status]");
       if (draftNotice) {
@@ -2406,7 +2406,7 @@
       ["stderr", escapeHtml(sup.wrapperStderrPath || sup.stderrPath || "not available")],
       ["child_stdout", escapeHtml(sup.childStdoutPath || "not available")],
       ["child_stderr", escapeHtml(sup.childStderrPath || "not available")],
-      ["next_safe_action", escapeHtml(runPaperState().nextSafeAction || (active ? "Monitor the active PAPER run." : "Review readiness before starting another governed PAPER run."))]
+      ["next_safe_action", escapeHtml(runPaperState().nextSafeAction || (active ? "Monitor the active PAPER run." : "Review readiness before starting another bounded PAPER run."))]
     ];
     const content = `
         <div class="split">
@@ -2749,8 +2749,9 @@
       ? "green"
       : (accountPin.actualSuffix && accountPin.expectedSuffix && accountPin.actualSuffix !== accountPin.expectedSuffix ? "red" : "yellow");
     const accountPinDetail = `Expected suffix ${accountPin.expectedSuffix || "unknown"}; broker reported ${accountPin.actualSuffix || "unknown"}. ${accountPin.detail || accountPin.reasonCode || ""}`;
+    const baselineSymbols = (baseline.protectedSymbols || baseline.positionSymbols || []).join(" / ");
     const baselineSummary = baseline.accepted === true
-      ? `Accepted baseline: ${baseline.positionCount || 0} positions, ${baseline.openOrderCount || 0} open orders.`
+      ? `Accepted baseline: ${baseline.positionCount || 0} positions${baselineSymbols ? ` (${baselineSymbols})` : ""}, ${baseline.openOrderCount || 0} open orders.`
       : `Baseline not accepted: ${baseline.positionCount || 0} positions, ${baseline.openOrderCount || 0} open orders.`;
     const sessionSummary = sup.sessionId && sup.sessionId !== "none"
       ? `Session ${sup.sessionId}; ${runtime.label || runtimeAttachment}`
@@ -2761,7 +2762,7 @@
           <h3>Run PAPER Command Center</h3>
           ${badge(overall.label || overall.code || "UNKNOWN", severityColor(overall.severity || overall.code))}
         </div>
-        <p class="muted">PAPER Launch Control. Starts the existing governed PAPER runner only. Current execution-authority max lease: ${escapeHtml(formatDuration(maxDuration))}. Long-running PAPER stays PAPER-only, lease-bound, supervised, and restart-auditable.</p>
+        <p class="muted">PAPER Launch Control. Starts the existing bounded PAPER runner only. Current execution-authority max lease: ${escapeHtml(formatDuration(maxDuration))}. Long-running PAPER stays PAPER-only, lease-bound, supervised, and restart-auditable.</p>
         <div class="run-paper-status-banner ${escapeHtml(severityColor(overall.severity || overall.code))}" data-run-paper-top-status>
           <div>
             <div class="run-paper-status-title">${escapeHtml(overall.label || overall.code || "Readiness unknown")}</div>
@@ -2845,7 +2846,7 @@
           <div class="launch-confirm-panel">
             <div class="launch-confirm-title">Safety confirmations</div>
             <div class="confirmation-grid">
-              <label class="checkline"><input data-paper-profile-alpha type="checkbox" ${draft.profileAlpha !== false ? "checked" : ""}> PAPER_EXPLORATION_ALPHA</label>
+              <label class="checkline"><input data-paper-profile-alpha type="checkbox" ${draft.profileAlpha !== false ? "checked" : ""}> Alpha profile</label>
               <label class="checkline"><input data-paper-confirm-paper type="checkbox" ${draft.confirmPaper === true ? "checked" : ""}> PAPER-only</label>
               <label class="checkline"><input data-paper-confirm-live-locked type="checkbox" ${draft.confirmLiveLocked === true ? "checked" : ""}> Live locked</label>
               <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox" ${draft.confirmRealMoneyBlocked === true ? "checked" : ""}> Real-money blocked</label>
@@ -2855,7 +2856,7 @@
         </div>
         <div class="button-row">
           ${Button({
-            label: "Start Governed PAPER Run",
+            label: "Start Bounded PAPER Run",
             variant: "primary",
             className: "primary-action",
             disabled: Boolean(startDisabled),
@@ -2867,13 +2868,24 @@
             }
           })}
           ${Button({
+            label: "Stop PAPER Run",
+            variant: "secondary",
+            className: "paper",
+            disabled: sup.paperStopAllowed !== true,
+            reason: sup.paperStopAllowed === true ? "" : (sup.paperStopRefusalReason || "No active PAPER run."),
+            attrs: {
+              "data-intent": "paper-stop",
+              "data-run-paper-stop-control": true
+            }
+          })}
+          ${Button({
             label: "Reset draft",
             variant: "secondary",
             attrs: { "data-paper-draft-reset": formId }
           })}
           <span class="badge red">No manual trades / force trade unavailable</span>
         </div>
-        <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the governed /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
+        <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the bounded PAPER /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
         <details class="ai-context-details" data-run-paper-advanced>
           <summary>Advanced endpoint and start proof</summary>
           <div class="notice">Endpoint proof: ${escapeHtml(endpoint.display || launch.paperEndpointDisplay || "unavailable")} (${escapeHtml(endpoint.family || launch.paperEndpointFamily || "unknown")}; ${escapeHtml(endpoint.source || launch.paperEndpointSource || "UNKNOWN")}). Raw blocker code is kept here: ${escapeHtml(endpoint.blockerCode || launch.paperEndpointBlockerCode || "none")}.</div>
@@ -3150,14 +3162,47 @@
     return `<div class="cockpit-truth-banner ${stale ? "warning" : "ok"}">${escapeHtml(text)}</div>`;
   }
 
+  function runtimeVitalityTruth() {
+    const visibility = data.runVisibility || {};
+    const botStatus = String(visibility.botVitalStatus || "UNKNOWN").toUpperCase();
+    const marketStatus = String(visibility.marketVitalStatus || "UNKNOWN").toUpperCase();
+    const botLive = visibility.pulseAnimationAllowed === true && botStatus === "LIVE";
+    const marketFresh = visibility.marketDataFresh === true && marketStatus === "FRESH";
+    const heartbeatAge = visibility.heartbeatAgeSeconds;
+    const marketAge = visibility.marketDataAgeSeconds;
+    const staleAfter = visibility.staleAfterSeconds;
+    return {
+      botStatus,
+      marketStatus,
+      botLive,
+      marketFresh,
+      botClass: botLive ? "is-live" : (botStatus === "STALE" ? "is-stale" : "is-off"),
+      marketClass: marketFresh ? "is-live" : (marketStatus === "STALE" ? "is-stale" : "is-off"),
+      heartbeatDetail: heartbeatAge === null || heartbeatAge === undefined ? "heartbeat unavailable" : `heartbeat ${heartbeatAge}s old`,
+      marketDetail: marketAge === null || marketAge === undefined ? "market event unavailable" : `market event ${marketAge}s old`,
+      staleAfterDetail: staleAfter === null || staleAfter === undefined ? "stale threshold unknown" : `stale after ${staleAfter}s`
+    };
+  }
+
+  function renderVitalityLights(vitality) {
+    return `
+      <div class="vitality-lights" aria-label="runtime and market freshness">
+        <span class="vital-light ${vitality.botClass}" data-bot-vital><i aria-hidden="true"></i><b>BOT</b> ${escapeHtml(vitality.botStatus)} <small>${escapeHtml(vitality.heartbeatDetail)}</small></span>
+        <span class="vital-light ${vitality.marketClass}" data-market-vital><i aria-hidden="true"></i><b>MKT</b> ${escapeHtml(vitality.marketStatus)} <small>${escapeHtml(vitality.marketDetail)}</small></span>
+      </div>
+    `;
+  }
+
   function renderScanStrip() {
     const universe = (data.status.universe || data.supervisor.allowedWatchlist || []).slice(0, 8);
     const symbols = universe.length ? universe : ["BTC/USD", "ETH/USD", "SOL/USD"];
+    const vitality = runtimeVitalityTruth();
     return `
-      <div class="scan-strip" aria-label="bot scanning strip">
-        <span class="scan-pulse"></span>
-        <span>Scanning ${escapeHtml(symbols.join(" / "))}</span>
-        <span class="muted">Last heartbeat: ${escapeHtml(data.status.lastHeartbeat || "unknown")}</span>
+      <div class="scan-strip ${vitality.botClass}" aria-label="bot runtime strip">
+        <span class="scan-pulse" data-bot-pulse data-pulse-animating="${vitality.botLive ? "true" : "false"}"></span>
+        <span>${vitality.botLive ? "Scanning" : "Watchlist"} ${escapeHtml(symbols.join(" / "))}</span>
+        ${renderVitalityLights(vitality)}
+        <span class="muted">${escapeHtml(vitality.staleAfterDetail)}</span>
       </div>
     `;
   }
@@ -3228,6 +3273,7 @@
     const endpointDisplay = (caps.endpoint && caps.endpoint.paperEndpointDisplay) || data.status.endpoint || "endpoint unknown";
     const brokerTruth = portfolio.status || portfolio.dataSource || sourceLabel();
     const heartbeat = data.status.lastHeartbeat || data.supervisor.lastHeartbeat || "unknown";
+    const vitality = runtimeVitalityTruth();
     const cash = summary.cash;
     const equity = summary.totalEquity;
     const grossExposure = summary.grossExposure || summary.totalMarketValue || "unknown";
@@ -3252,21 +3298,21 @@
         <div class="card vitals-card">
           <span class="eyebrow">Runtime vitals</span>
           <div class="status-row">
-            <div class="heart" aria-hidden="true">PK</div>
+            <div class="heart ${vitality.botClass}" data-bot-heart data-pulse-animating="${vitality.botLive ? "true" : "false"}" aria-hidden="true">PK</div>
             <div>
               <div class="big">${escapeHtml(runtimeState)}</div>
-              <div class="sub">Last heartbeat ${escapeHtml(heartbeat)} - ${escapeHtml(endpointStatus)}</div>
+              <div class="sub">Last supervisor check ${escapeHtml(heartbeat)} - ${escapeHtml(endpointStatus)}</div>
             </div>
           </div>
+          ${renderVitalityLights(vitality)}
           <div class="vrow">
             <div><div class="k">Run authority</div><div class="v">${escapeHtml(launch.finalLaunchReadiness || "UNKNOWN")}</div></div>
             <div><div class="k">Positions</div><div class="v mono">${escapeHtml(positionCount)}</div></div>
             <div><div class="k">Open orders</div><div class="v mono">${escapeHtml(openOrderCount)}</div></div>
             <div><div class="k">Endpoint</div><div class="v">${escapeHtml(endpointDisplay)}</div></div>
           </div>
-          <svg class="ecg-line" viewBox="0 0 600 74" preserveAspectRatio="none" aria-hidden="true">
-            <defs><linearGradient id="cockpit-ecg" x1="0" x2="1"><stop offset="0" stop-color="#46C28E" stop-opacity="0"/><stop offset=".5" stop-color="#46C28E" stop-opacity=".9"/><stop offset="1" stop-color="#46C28E" stop-opacity="0"/></linearGradient></defs>
-            <path d="M0,58 L28,58 L36,52 L42,58 L58,58 L64,62 L70,18 L76,70 L84,54 L96,58 L132,58 L140,52 L146,58 L164,58 L170,62 L176,18 L182,70 L190,54 L202,58 L238,58 L246,52 L252,58 L270,58 L276,62 L282,18 L288,70 L296,54 L308,58 L344,58 L352,52 L358,58 L376,58 L382,62 L388,18 L394,70 L402,54 L414,58 L450,58 L458,52 L464,58 L482,58 L488,62 L494,18 L500,70 L508,54 L520,58 L600,58" fill="none" stroke="url(#cockpit-ecg)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+          <svg class="ecg-line ${vitality.botClass}" data-bot-ecg data-pulse-animating="${vitality.botLive ? "true" : "false"}" viewBox="0 0 600 74" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M0,58 L28,58 L36,52 L42,58 L58,58 L64,62 L70,18 L76,70 L84,54 L96,58 L132,58 L140,52 L146,58 L164,58 L170,62 L176,18 L182,70 L190,54 L202,58 L238,58 L246,52 L252,58 L270,58 L276,62 L282,18 L288,70 L296,54 L308,58 L344,58 L352,52 L358,58 L376,58 L382,62 L388,18 L394,70 L402,54 L414,58 L450,58 L458,52 L464,58 L482,58 L488,62 L494,18 L500,70 L508,54 L520,58 L600,58" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
           </svg>
         </div>
         <div class="card money-card">
@@ -3276,9 +3322,7 @@
             ${badge(`Cash ${prettyMoney(cash)}`, cash ? "green" : "yellow")}
             ${badge(`Unrealized ${prettyMoney(unrealized)}`, statusColor(unrealized))}
           </div>
-          <svg class="sparkline" viewBox="0 0 360 60" preserveAspectRatio="none" aria-hidden="true">
-            <polyline points="0,48 28,43 56,46 84,36 112,39 140,30 168,34 196,25 224,29 252,20 280,24 308,17 336,19 360,14" fill="none" stroke="#EBBA6A" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-          </svg>
+          <div class="series-evidence-unavailable">Account time-series evidence is not loaded. No trend is inferred.</div>
           <div class="since">${escapeHtml(brokerTruth)} - gross exposure ${escapeHtml(compactMoney(grossExposure))} - account ${escapeHtml(summary.accountId || "broker account hidden")}</div>
         </div>
       </div>
@@ -3779,7 +3823,7 @@
   function renderCockpitControls() {
     const caps = currentCockpitCapabilities();
     return `
-      ${header("Controls & Settings", "Governed PAPER controls and gated future-mode selectors.", caps.activeAssetClass || "crypto")}
+      ${header("Controls & Settings", "Bounded PAPER controls and gated future-mode selectors.", caps.activeAssetClass || "crypto")}
       ${cockpitTruthBanner()}
       <div class="grid cockpit-grid">
         <div class="card span-12 cockpit-control-panel" data-cockpit-mandate-panel>
@@ -4017,7 +4061,7 @@
     const actionCounts = data.actionCenter.counts || {};
     const launch = data.launchReadiness || {};
     return `
-      ${header("Run PAPER", "Start or review a governed PAPER run. Portfolio Home stays focused on what you own.", s.safetyVerdict)}
+      ${header("Run PAPER", "Start or review a bounded PAPER run. Portfolio Home stays focused on what you own.", s.safetyVerdict)}
       <div class="grid">
         ${renderPaperLaunchControl("command")}
         ${metric("Bot Status", s.botStatus, "green")}
@@ -4499,7 +4543,7 @@
         ])}</div>
         ${renderPaperLaunchControl("activity")}
         ${renderStackShutdownPanel()}
-        <div class="card span-12"><h3>Governed PAPER Intents</h3>
+        <div class="card span-12"><h3>Bounded PAPER Intents</h3>
           <div class="stack">
             ${Button({
               label: "Use Run PAPER Command Center above",
@@ -5080,7 +5124,7 @@
       ["ai_overlay", "ai_wide", "Wide advisor", "button", "WIRED", "read_only", "", null, "toggle_ai_dock_width"],
       ["controls", "paper_watchlist", "Watchlist", "input", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
       ["controls", "paper_duration", "Run length", "select+number", "WIRED", "governed_paper_start", "", null, "paper_start_payload"],
-      ["controls", "paper_start", "Start Governed PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "governed_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
+      ["controls", "paper_start", "Start Bounded PAPER Run", "button", disabledPaperReason ? "DISABLED_WITH_REASON" : "WIRED", "bounded_paper_start", disabledPaperReason, "POST", "/operator/intent/paper/start"],
       ["controls", "paper_baseline_accept", "Accept PAPER baseline", "button", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_operator_state_write", backendConnected() ? "" : "backend unavailable", "POST", "/operator/paper-baseline/accept"],
       ["advisor", "home_ai_question", "Home AI Quant Advisor question", "input", "WIRED", "read_only", "", null, "local_page_context"],
       ["advisor", "home_ai_answer_modes", "Home AI answer modes", "button group", backendConnected() ? "WIRED" : "DISABLED_WITH_REASON", "local_advisory_write", backendConnected() ? "" : "backend unavailable; local fallback labeled", "POST", "/operator/ai/ask"],
@@ -5300,7 +5344,7 @@
       markets: ["MarketTruthSnapshot executable truth remains separate from advisory world/news evidence."],
       advisor: ["AI recommendations route through governance and remain can_execute=false."],
       health: ["Bot Health exposes statuses, paths, endpoint failures, and UI wiring only; no raw secrets or environment values are included."],
-      controls: ["Controls uses summarized runtime state, governed PAPER intent, and gated future-mode selectors; no manual trade buttons exist."],
+      controls: ["Controls uses summarized runtime state, bounded PAPER intent, and gated future-mode selectors; no manual trade buttons exist."],
       connections: ["Provider readiness is credential presence/validation truth only; secret values are never sent to the browser or AI context."],
       log: ["Activity Log uses summarized events, run archive, and report paths only; raw log contents are not included."],
       command: ["Current page uses summarized runtime state, not raw logs."],
@@ -7818,9 +7862,20 @@
       dataSource: pick(item.data_source, "LOCAL_RUNTIME_ARTIFACTS"),
       pid: pick(item.pid || heartbeat.pid, null),
       uptimeSeconds: pick(item.uptime_seconds || (heartbeat && heartbeat.uptime_seconds), null),
+      heartbeatTs: pick(item.heartbeat_ts || heartbeat.heartbeat_ts, null),
       heartbeatAgeSeconds: pick(item.heartbeat_age_seconds, null),
       heartbeatPresent: item.heartbeat_present === true,
+      heartbeatFresh: item.heartbeat_fresh === true,
       heartbeatStale: item.heartbeat_stale === true,
+      staleAfterSeconds: pick(item.stale_after_seconds, null),
+      botVitalStatus: pick(item.bot_vital_status, "UNKNOWN"),
+      pulseAnimationAllowed: item.pulse_animation_allowed === true,
+      marketVitalStatus: pick(item.market_vital_status, "UNKNOWN"),
+      marketDataLastEventTs: pick(item.market_data_last_event_ts, null),
+      marketDataAgeSeconds: pick(item.market_data_age_seconds, null),
+      marketDataFresh: item.market_data_fresh === true,
+      marketDataStale: item.market_data_stale === true,
+      marketFreshnessSource: pick(item.market_freshness_source, "UNKNOWN"),
       logProgressStale: item.log_progress_stale === true,
       openOrdersCount: pick(openOrders.count, 0),
       openOrdersBrokerConfirmed: openOrders.broker_confirmed === true,
@@ -7881,7 +7936,7 @@
         runIncrementalEquityPnl: null,
         runIncrementalEquityPnlLabel: "Bot incremental P&L requires run fill attribution.",
         baselineCarryPnlLabel: "Total account P&L includes accepted baseline carry.",
-        runTradePnlLabel: "Run trade P&L appears after governed PAPER fills.",
+        runTradePnlLabel: "Run trade P&L appears after bounded PAPER fills.",
         cleanBaselineClaimed: false
       },
       brokerMutationOccurred: false,
@@ -7913,10 +7968,10 @@
     const reasonCodes = uniqueCodes((c.reasonCodes && c.reasonCodes.length ? c.reasonCodes : [c.dominantBlocker || "PAPER_START_BLOCKED"]).concat(accountPinBlocksStart ? [accountPinBlocker] : []));
     const baseline = paperBaselineFromControlState(c);
     const label = allowed
-      ? "Ready for governed PAPER"
+      ? "Ready for bounded PAPER"
       : (activeRuntime ? "PAPER supervisor running" : (accountPinBlocksStart ? "Pinned PAPER account not proven" : (c.dominantBlocker || "Start blocked")));
     const detail = allowed
-      ? "Backend paper-control-state says governed PAPER start is allowed with current safety locks."
+      ? "Backend paper-control-state says bounded PAPER start is allowed with current safety locks."
       : (activeRuntime
         ? "PAPER supervisor process is attached; duplicate start is blocked."
         : (accountPinBlocksStart
@@ -7940,7 +7995,7 @@
         usesExistingGovernedStartIntent: "/operator/intent/paper/start",
         requiresOperatorConfirmations: true
       },
-      nextSafeAction: c.nextSafeAction || (allowed ? "Choose duration and confirmations, then request governed PAPER start." : "Resolve the current backend blocker before pressing Start."),
+      nextSafeAction: c.nextSafeAction || (allowed ? "Choose duration and confirmations, then request bounded PAPER start." : "Resolve the current backend blocker before pressing Start."),
       endpoint: {
         label: endpointValid ? `Alpaca PAPER endpoint confirmed: ${c.endpointDisplay || c.endpointHost}` : "PAPER endpoint authority unavailable",
         display: c.endpointDisplay || c.endpointHost || "unavailable",
@@ -9068,6 +9123,7 @@
   async function fetchLifecyclePayload() {
     const tasks = [
       ["paperControlState", "/operator/paper-control-state"],
+      ["runVisibility", "/operator/run-visibility/status"],
       ["latestRun", "/operator/latest-run"],
       ["status", "/operator/status"],
       ["runtime", "/operator/runtime"]
@@ -9090,6 +9146,9 @@
       if (payload.paperControlState && payload.paperControlState.source) {
         data.paperControlState = normalizePaperControlState(payload.paperControlState);
         applyPaperControlState(data, data.paperControlState);
+      }
+      if (payload.runVisibility && payload.runVisibility.source) {
+        data.runVisibility = normalizeRunVisibilityStatus(payload.runVisibility);
       }
       applyRuntimeLifecycleTruth(data, payload);
       data.meta.lastUpdated = new Date().toISOString();
@@ -9289,7 +9348,7 @@
         const formId = sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "controls";
         const form = paperRunFormValues(formId);
         if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked || !form.confirmNoManualTrades) {
-          window.alert("Confirm PAPER-only, live locked, real-money blocked, and no manual trades before requesting the governed PAPER start.");
+          window.alert("Confirm PAPER-only, live locked, real-money blocked, and no manual trades before requesting the bounded PAPER start.");
           return;
         }
         if (form.validation && form.validation.valid !== true) {
@@ -9298,11 +9357,11 @@
           return;
         }
         if (form.durationSeconds > form.maxDurationSeconds) {
-          window.alert(`Selected duration exceeds the current governed PAPER lease max of ${formatDuration(form.maxDurationSeconds)}.`);
+          window.alert(`Selected duration exceeds the current bounded PAPER lease max of ${formatDuration(form.maxDurationSeconds)}.`);
           return;
         }
         const confirmed = window.confirm(
-          `Request governed PAPER start?\n\nProfile: ${form.profile}\nWatchlist: ${form.watchlist.join(", ")}\nDuration: ${formatDuration(form.durationSeconds)} (${form.durationSeconds} seconds)\n\nNo live trading or manual order will be sent by the UI.`
+          `Request bounded PAPER start?\n\nProfile: ${form.profile}\nWatchlist: ${form.watchlist.join(", ")}\nDuration: ${formatDuration(form.durationSeconds)} (${form.durationSeconds} seconds)\n\nNo live trading or manual order will be sent by the UI.`
         );
         if (!confirmed) return;
         const result = await postIntent("/operator/intent/paper/start", {
@@ -9345,7 +9404,7 @@
         message = `${result.status}: ${result.reason_code}`;
       }
       if (intent === "paper-stop") {
-        const confirmed = window.confirm("Request governed PAPER stop? This sends only the supervisor stop intent and preserves broker positions.");
+        const confirmed = window.confirm("Request bounded PAPER stop? This sends only the supervisor stop intent and preserves broker positions.");
         if (!confirmed) return;
         const result = await postIntent("/operator/intent/paper/stop", {});
         message = `${result.status}: ${result.reason_code}`;

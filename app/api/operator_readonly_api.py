@@ -1799,7 +1799,7 @@ class OperatorSnapshotProvider:
         next_safe_action = (
             "Monitor the attached PAPER supervisor. Do not start a second run."
             if supervisor_running
-            else "Start governed PAPER from the Run PAPER cockpit."
+            else "Start bounded PAPER from the Run PAPER cockpit."
             if local_start_ready
             else "Resolve the listed blocker before starting PAPER."
         )
@@ -1946,6 +1946,7 @@ class OperatorSnapshotProvider:
             "secrets_values_exposed": False,
         }
         if active_session:
+            heartbeat_live = snapshot.get("pulse_animation_allowed") is True
             snapshot.update(
                 {
                     "status": "RUNNING",
@@ -1956,9 +1957,17 @@ class OperatorSnapshotProvider:
                         "Operator supervisor has an attached PAPER session. Heartbeat, fills, positions, and open-order "
                         "counts remain local/runtime artifact evidence unless separately broker-confirmed."
                     ),
+                    "bot_vital_status": "LIVE" if heartbeat_live else "STALE",
+                    "pulse_animation_allowed": heartbeat_live,
                 }
             )
         elif latest_session and not artifact_session_match:
+            latest_status = str(latest_session.get("status") or "").upper()
+            if latest_status in {"EXITED", "COMPLETED", "FAILED", "STOPPED", "REFUSED"}:
+                snapshot["bot_vital_status"] = "STOPPED"
+                snapshot["pulse_animation_allowed"] = False
+                snapshot["market_vital_status"] = "NO_RUNTIME"
+                snapshot["market_data_fresh"] = False
             snapshot["runtime_artifact_note"] = (
                 "Latest supervisor session and local heartbeat artifact do not have the same PID; use broker portfolio "
                 "and supervisor session state for final truth."
@@ -2292,7 +2301,7 @@ class OperatorSnapshotProvider:
             response = (
                 "Refused or redirected. The Chief Quant Advisor cannot trade, call broker, enable live, "
                 "handle secrets, bypass safety gates, submit/cancel/liquidate orders, or mutate strategy. "
-                "Safe path: use governed PAPER readiness, Provider Setup, Portfolio Home, or ask for a Codex packet."
+                "Safe path: use bounded PAPER readiness, Provider Setup, Portfolio Home, or ask for a Codex packet."
             )
             status = "REFUSED"
             refusal_reason = classification["reason_code"]
@@ -3315,7 +3324,7 @@ class OperatorSnapshotProvider:
             if truth["historical_duplicate"]:
                 answer.append("- Historical duplicate refusal exists as audit context only; it is not current start authority.")
             if self._ai_paper_runnable_truth(truth):
-                answer.append("Next step: Shan may use the Start PAPER button for a governed PAPER run. AI cannot start it.")
+                answer.append("Next step: Shan may use the Start PAPER button for a bounded PAPER run. AI cannot start it.")
             else:
                 reason = str((truth["blocking_codes"] or ["UNKNOWN_BLOCKER"])[0])
                 answer.append(f"Next step: resolve current blocker {reason}.")
@@ -3511,7 +3520,7 @@ class OperatorSnapshotProvider:
         if self._ai_paper_runnable_truth(truth):
             return "\n".join(
                 [
-                    "Yes - governed PAPER is ready and start is allowed.",
+                    "Yes - bounded PAPER is ready and start is allowed.",
                     f"- Launch readiness: {truth['launch']}",
                     f"- Supervisor: {truth['supervisor']}; no active PAPER run attached.",
                     f"- Paper start allowed: {str(truth['paper_start_allowed']).lower()}",

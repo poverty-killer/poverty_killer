@@ -223,6 +223,9 @@ class PaperProcessRunner(Protocol):
     def request_graceful_stop(self, handle: PaperProcessHandle) -> tuple[bool, str]:
         ...
 
+    def wait_for_exit(self, handle: PaperProcessHandle, *, timeout_seconds: float) -> bool:
+        ...
+
     def shutdown_process_group(self, handle: PaperProcessHandle, *, timeout_seconds: float = 5.0) -> tuple[bool, str]:
         ...
 
@@ -298,13 +301,13 @@ class SubprocessPaperRunner:
         if handle.poll() is not None:
             return True, "PROCESS_ALREADY_EXITED"
         ok, reason = self.request_graceful_stop(handle)
-        if ok and self._wait_for_exit(handle, timeout_seconds):
+        if ok and self.wait_for_exit(handle, timeout_seconds=timeout_seconds):
             return True, reason
         if os.name == "nt":
             return self._force_windows_process_tree(handle)
         return self._force_posix_process_group(handle)
 
-    def _wait_for_exit(self, handle: PaperProcessHandle, timeout_seconds: float) -> bool:
+    def wait_for_exit(self, handle: PaperProcessHandle, *, timeout_seconds: float) -> bool:
         deadline = time.monotonic() + max(float(timeout_seconds or 0), 0.0)
         while time.monotonic() < deadline:
             if handle.poll() is not None:
@@ -684,17 +687,81 @@ class OperatorPaperSupervisor:
         self._session.status = "STOP_REQUESTED"
         self._session.stop_requested_at = utc_now_iso()
         self._session.stop_reason = reason
-        event = self._record_event("paper_stop", True, reason, self._session.session_id, True)
+        self._persist_session(self._session)
+
+        exited = self.runner.wait_for_exit(
+            self._process,
+            timeout_seconds=self.config.shutdown_wait_seconds,
+        )
+        if not exited:
+            timeout_reason = "GOVERNED_STOP_PROCESS_EXIT_TIMEOUT"
+            self._session.stop_reason = timeout_reason
+            event = self._record_event("paper_stop", False, timeout_reason, self._session.session_id, True)
+            self._session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(self._session)
+            response = self._intent_response(
+                intent="paper_stop",
+                allowed=False,
+                reason_code=timeout_reason,
+                audit_event=event,
+                session=self._session,
+                runtime_mutation_occurred=True,
+            )
+            response.update(
+                {
+                    "stop_signal_reason": reason,
+                    "run_loop_halted": False,
+                    "new_entries_ceased": False,
+                    "lease_released": False,
+                    "child_process_terminated": False,
+                    "broker_position_mutation_requested": False,
+                    "broker_positions_reconciled_after_stop": False,
+                    "broker_positions_preservation_status": "UNKNOWN_PROCESS_EXIT_TIMEOUT",
+                    "governed_position_lifecycle_authority_unchanged": True,
+                    "governed_position_lifecycle_active_after_stop": None,
+                    "final_reconciliation_required": True,
+                }
+            )
+            return response
+
+        self._refresh_process_state()
+        lease_released = self._session.status not in ACTIVE_SESSION_STATUSES
+        clean_exit = self._session.exit_code == 0 and lease_released
+        completion_reason = (
+            "GOVERNED_STOP_COMPLETED_NO_BROKER_MUTATION"
+            if clean_exit
+            else "GOVERNED_STOP_CHILD_EXIT_NONZERO"
+        )
+        self._session.stop_reason = completion_reason
+        self._session.ended_at = self._session.ended_at or utc_now_iso()
+        self._process = None
+        event = self._record_event("paper_stop", clean_exit, completion_reason, self._session.session_id, True)
         self._session.audit_event_ids.append(event.audit_event_id)
         self._persist_session(self._session)
-        return self._intent_response(
+        response = self._intent_response(
             intent="paper_stop",
-            allowed=True,
-            reason_code=reason,
+            allowed=clean_exit,
+            reason_code=completion_reason,
             audit_event=event,
             session=self._session,
             runtime_mutation_occurred=True,
         )
+        response.update(
+            {
+                "stop_signal_reason": reason,
+                "run_loop_halted": lease_released,
+                "new_entries_ceased": lease_released,
+                "lease_released": lease_released,
+                "child_process_terminated": True,
+                "broker_position_mutation_requested": False,
+                "broker_positions_reconciled_after_stop": False,
+                "broker_positions_preservation_status": "UNKNOWN_PENDING_FINAL_BROKER_RECONCILIATION",
+                "governed_position_lifecycle_authority_unchanged": True,
+                "governed_position_lifecycle_active_after_stop": False,
+                "final_reconciliation_required": True,
+            }
+        )
+        return response
 
     def shutdown_active_processes(self, reason: str = "API_SHUTDOWN") -> dict[str, Any]:
         self._refresh_process_state()

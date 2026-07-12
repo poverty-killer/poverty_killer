@@ -91,7 +91,7 @@ def _paper_preflight_snapshot(*, existing_positions: bool = False) -> dict[str, 
     return {
         "endpoint_family": "paper",
         "account": {
-            "id": "test-account-123456",
+            "id": "test-account-045ded",
             "status": "ACTIVE",
             "equity": "50000",
             "buying_power": "75000",
@@ -546,7 +546,7 @@ def test_ai_ask_ready_paper_run_answers_yes_without_fake_blocker(tmp_path):
     answer = payload["answer"]
 
     assert payload["mode"] == "RUN_PLANNER"
-    assert answer.startswith("Yes - governed PAPER is ready and start is allowed.")
+    assert answer.startswith("Yes - bounded PAPER is ready and start is allowed.")
     assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
     assert "Supervisor: IDLE" in answer
     assert "Paper start allowed: true" in answer
@@ -621,7 +621,7 @@ def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_pat
     assert payload["route_decision"]["reason_code"] == "RUN_PLANNER_LOCAL_RUNTIME_TRUTH"
     assert payload["model_call_attempted"] is False
     assert payload["model_call_occurred"] is False
-    assert answer.startswith("Yes - governed PAPER is ready and start is allowed.")
+    assert answer.startswith("Yes - bounded PAPER is ready and start is allowed.")
     assert "Launch readiness: READY_FOR_BOUNDED_PAPER" in answer
     assert "Current state: READY_IDLE_NO_ACTIVE_RUNTIME" not in answer
     assert "READY_IDLE_NO_ACTIVE_RUNTIME" in " ".join(payload["known_facts"])

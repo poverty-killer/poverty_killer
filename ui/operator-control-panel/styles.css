@@ -1144,6 +1144,12 @@ body.ai-docked-open.ai-docked-wide .shell {
   width: 8px;
   height: 8px;
   border-radius: 999px;
+  background: var(--faint);
+  box-shadow: none;
+  animation: none;
+}
+
+.scan-strip.is-live .scan-pulse {
   background: var(--green);
   box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
   animation: scan-pulse 2.4s ease-in-out infinite;
@@ -2534,7 +2540,17 @@ body.ai-docked-open.ai-docked-wide .shell {
   background: rgba(70, 194, 142, 0.14);
   color: var(--green);
   font-weight: 900;
+  animation: none;
+}
+
+.heart.is-live {
   animation: cockpit-beat 2.6s ease-in-out infinite;
+}
+
+.heart.is-stale,
+.heart.is-off {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--faint);
 }
 
 @keyframes cockpit-beat {
@@ -2585,7 +2601,64 @@ body.ai-docked-open.ai-docked-wide .shell {
   inset: auto 0 0 0;
   width: 100%;
   height: 74px;
+  color: var(--faint);
+  opacity: 0.35;
+}
+
+.ecg-line path {
+  animation: none;
+}
+
+.ecg-line.is-live {
+  color: var(--green);
   opacity: 0.9;
+}
+
+.ecg-line.is-live path {
+  stroke-dasharray: 18 8;
+  animation: cockpit-ecg-flow 1.6s linear infinite;
+}
+
+@keyframes cockpit-ecg-flow {
+  to { stroke-dashoffset: -52; }
+}
+
+.vitality-lights {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 10px;
+}
+
+.vital-light {
+  display: inline-grid;
+  grid-template-columns: 8px auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vital-light i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.vital-light.is-live i {
+  background: var(--green);
+}
+
+.vital-light.is-stale i {
+  background: var(--yellow);
+}
+
+.vital-light small {
+  min-width: 0;
+  color: var(--faint);
+  overflow-wrap: anywhere;
 }
 
 .money-card .label {
@@ -2608,10 +2681,12 @@ body.ai-docked-open.ai-docked-wide .shell {
   gap: 8px;
 }
 
-.sparkline {
-  width: 100%;
-  height: 60px;
+.series-evidence-unavailable {
   margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+  color: var(--faint);
+  font-size: 12px;
 }
 
 .since {
@@ -2704,6 +2779,7 @@ body.ai-docked-open.ai-docked-wide .shell {
   }
 
   .topbar {
+    position: static;
     grid-template-columns: 1fr;
     grid-template-areas:
       "status"

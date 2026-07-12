@@ -109,7 +109,7 @@ TCA values stay unknown until broker-confirmed or existing runtime evidence is
 available.
 
 ## Operator API
-The supported API path is `/operator/*`. It is read-only except governed PAPER
+The supported API path is `/operator/*`. It is read-only except bounded PAPER
 process intents and advisory queues explicitly modeled as safe local state.
 
 ## Supervisor

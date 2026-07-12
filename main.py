@@ -187,6 +187,7 @@ def resolve_execution_broker_gateway(config: Config) -> tuple[str, str, Any | No
     if execution_broker == ALPACA_PAPER_EXECUTION_BROKER:
         try:
             adapter = AlpacaPaperBrokerAdapter.from_env()
+            adapter.assert_expected_account_pin()
         except BrokerGatewayError as exc:
             detail = str(exc.reason_code)
             message = str(getattr(exc, "message", "") or "").strip().lower()

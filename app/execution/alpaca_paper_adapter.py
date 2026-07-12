@@ -335,6 +335,7 @@ class AlpacaPaperBrokerAdapter:
             else broker_read_profile_from_env(os.environ)
         )
         self._request_counts = {"GET": 0, "POST": 0}
+        self._account_pin_assertion: dict[str, Any] | None = None
         self._validate_credentials()
 
     @classmethod
@@ -374,6 +375,52 @@ class AlpacaPaperBrokerAdapter:
     @property
     def broker_read_permission_profile(self) -> BrokerReadPermissionProfile:
         return self._read_profile
+
+    @property
+    def account_pin_assertion(self) -> dict[str, Any]:
+        return dict(self._account_pin_assertion or {})
+
+    def assert_expected_account_pin(self) -> dict[str, Any]:
+        """Fail closed unless broker-reported PAPER account identity matches the Board pin."""
+        expected = normalize_alpaca_account_suffix(expected_alpaca_paper_account_suffix()) or ""
+        response = self.get_account()
+        account = response.payload if response.ok and isinstance(response.payload, Mapping) else {}
+        actual = normalize_alpaca_account_suffix(account.get("id") or account.get("account_id"))
+        assertion = {
+            "source": "ALPACA_PAPER_BROKER_CONNECT_ACCOUNT_PIN",
+            "status": "PASS" if expected and actual == expected else "BLOCKED",
+            "reason_code": (
+                "ALPACA_PAPER_ACCOUNT_PIN_OK"
+                if expected and actual == expected
+                else (
+                    "ALPACA_PAPER_ACCOUNT_PIN_MISMATCH"
+                    if actual
+                    else "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN"
+                )
+            ),
+            "expected_suffix": expected,
+            "actual_suffix": actual,
+            "account_pin_verified": bool(expected and actual == expected),
+            "broker_read_occurred": True,
+            "account_request_occurred": True,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "liquidation_occurred": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+        self._account_pin_assertion = assertion
+        if assertion["account_pin_verified"] is not True:
+            raise BrokerGatewayError(
+                str(assertion["reason_code"]).lower(),
+                message=(
+                    f"expected_suffix={expected or 'missing'},"
+                    f"actual_suffix={actual or 'not_proven'}"
+                ),
+            )
+        return dict(assertion)
 
     def get_account(self) -> BrokerGatewayResponse:
         return self._request("GET", "/v2/account")

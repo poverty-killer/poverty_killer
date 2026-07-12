@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.api.operator_runtime_config import (
+    OPERATOR_STATE_SOURCE_ENV,
+    OPERATOR_STATE_SOURCE_EXPLICIT_ROOT,
+    OPERATOR_STATE_SOURCE_OS_DURABLE,
+    OperatorRuntimeConfig,
+)
 
 
 def test_operator_runtime_config_defaults_are_safe(tmp_path):
@@ -16,6 +21,8 @@ def test_operator_runtime_config_defaults_are_safe(tmp_path):
     assert cfg.allowed_watchlist == ("BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD")
     assert cfg.min_paper_duration_seconds == 60
     assert cfg.max_paper_duration_seconds == 432000
+    assert cfg.operator_state_dir == tmp_path / "state" / "operator"
+    assert cfg.operator_state_dir_source == OPERATOR_STATE_SOURCE_EXPLICIT_ROOT
     assert cfg.operator_session_store_path == tmp_path / "state" / "operator" / "sessions.jsonl"
     assert cfg.world_awareness_cache_path == tmp_path / "state" / "world_awareness" / "operator_events.jsonl"
 
@@ -44,6 +51,8 @@ def test_operator_runtime_config_env_overrides_without_secret_values(tmp_path):
     assert str(cfg.data_dir).replace("\\", "/").endswith("/var/lib/pk/data")
     assert cfg.log_dir == tmp_path / "runtime_logs"
     assert cfg.operator_state_dir == tmp_path / "operator_state"
+    assert cfg.operator_state_dir_source == OPERATOR_STATE_SOURCE_ENV
+    assert cfg.operator_session_store_path == tmp_path / "operator_state" / "sessions.jsonl"
     assert cfg.allowed_watchlist == ("BTC/USD", "SOL/USD")
     assert cfg.allowed_durations == (300, 1200)
     assert cfg.max_paper_duration_seconds == 432000
@@ -68,3 +77,16 @@ def test_operator_runtime_config_caps_duration_to_runner_authority(tmp_path):
     assert cfg.max_paper_duration_seconds == 432000
     assert cfg.allowed_durations == (300, 86400, 432000)
     assert cfg.safe_summary()["runner_max_paper_duration_seconds"] == 432000
+
+
+def test_operator_runtime_config_cold_boot_uses_os_durable_state_outside_repo(tmp_path):
+    local_app_data = tmp_path / "LocalAppData"
+
+    cfg = OperatorRuntimeConfig.from_env({"LOCALAPPDATA": str(local_app_data)})
+
+    expected = local_app_data / "PovertyKiller" / "state" / "operator"
+    assert cfg.operator_state_dir == expected
+    assert cfg.operator_state_dir_source == OPERATOR_STATE_SOURCE_OS_DURABLE
+    assert cfg.operator_session_store_path == expected / "sessions.jsonl"
+    assert cfg.safe_summary()["operator_state_dir_durable_default"] is True
+    assert "poverty_killer_phase_g_runtime" not in str(cfg.safe_summary()).lower()

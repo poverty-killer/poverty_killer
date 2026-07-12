@@ -49,6 +49,20 @@ def test_operator_launchers_import_paper_env_without_logging_secret_values():
     assert "Import-OperatorPaperEnvFile | Out-Null" in start_backend
 
 
+def test_operator_launchers_pin_durable_operator_state_outside_repo_and_temp():
+    hidden = _launcher_text()
+    visible = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+
+    for text in (hidden, visible):
+        assert 'GetFolderPath("LocalApplicationData")' in text
+        assert '"PovertyKiller\\state\\operator"' in text
+        assert 'SetEnvironmentVariable("PK_OPERATOR_STATE_DIR", $OperatorStateRoot, "Process")' in text
+        assert "New-Item -Path $OperatorStateRoot" in text
+        state_block = text[text.index("$OperatorStateBase") : text.index("New-Item -Path $LogRoot")]
+        assert "$env:TEMP" not in state_block
+        assert "$RepoRoot" not in state_block
+
+
 def test_hidden_launcher_requires_operator_health_before_browser_open():
     text = _launcher_text()
 

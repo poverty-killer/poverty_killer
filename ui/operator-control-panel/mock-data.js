@@ -852,7 +852,7 @@
           providerId: "alpaca_paper",
           displayName: "Alpaca Paper Broker/Data",
           category: "broker",
-          purpose: "Governed PAPER broker and account/order/fill truth source.",
+          purpose: "Bounded PAPER broker and account/order/fill truth source.",
           status: "MISSING_CREDENTIALS",
           requiredEnvVars: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
           optionalEnvVars: ["APCA_API_BASE_URL"],

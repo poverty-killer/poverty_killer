@@ -251,6 +251,31 @@ def test_read_only_methods_exist_and_normalize_stubbed_responses():
     assert all(call["method"] == "GET" for call in transport.calls)
 
 
+def test_broker_connect_account_pin_uses_get_and_rejects_mismatch_without_post():
+    matching_transport = StubTransport(
+        {("GET", "/v2/account"): (200, {"id": "paper-account-045ded", "status": "ACTIVE"})}
+    )
+    matching = AlpacaPaperBrokerAdapter(_creds(), transport=matching_transport)
+
+    assertion = matching.assert_expected_account_pin()
+
+    assert assertion["status"] == "PASS"
+    assert assertion["actual_suffix"] == "045ded"
+    assert matching.request_counts == {"GET": 1, "POST": 0}
+
+    mismatch_transport = StubTransport(
+        {("GET", "/v2/account"): (200, {"id": "paper-account-104e2a", "status": "ACTIVE"})}
+    )
+    mismatch = AlpacaPaperBrokerAdapter(_creds(), transport=mismatch_transport)
+
+    with pytest.raises(BrokerGatewayError, match="expected_suffix=045ded,actual_suffix=104e2a"):
+        mismatch.assert_expected_account_pin()
+
+    assert mismatch.account_pin_assertion["reason_code"] == "ALPACA_PAPER_ACCOUNT_PIN_MISMATCH"
+    assert mismatch.request_counts == {"GET": 1, "POST": 0}
+    assert all(call["method"] == "GET" for call in mismatch_transport.calls)
+
+
 def test_submit_method_shape_normalizes_stubbed_buy_limit_ack_without_auto_execution():
     transport = StubTransport(
         {

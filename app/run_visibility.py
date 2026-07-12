@@ -375,10 +375,21 @@ def read_run_visibility_snapshot(
     supervisor = read_json_file(supervisor_file)
     now = time.time()
     heartbeat_age = _age_seconds(heartbeat.get("heartbeat_ts"), now) if heartbeat else None
+    market_event_ts = (heartbeat or {}).get("last_loop_ts")
+    market_event_age = _age_seconds(market_event_ts, now)
     supervisor_age = _age_seconds(supervisor.get("supervisor_ts"), now) if supervisor else None
     child_running = bool(supervisor and supervisor.get("child_running") is True)
     external_state = str((supervisor or {}).get("state") or "").upper()
-    heartbeat_stale = bool(child_running and (heartbeat_age is None or heartbeat_age > stale_after_seconds))
+    heartbeat_run_state = str((heartbeat or {}).get("run_state") or "").upper()
+    heartbeat_fresh = bool(
+        heartbeat is not None
+        and heartbeat_age is not None
+        and heartbeat_age <= stale_after_seconds
+    )
+    heartbeat_stale = bool(
+        (child_running or heartbeat_run_state in {"STARTING", "RUNNING"})
+        and not heartbeat_fresh
+    )
     supervisor_stale = bool(child_running and (supervisor_age is None or supervisor_age > stale_after_seconds))
     log_stale = bool((supervisor or {}).get("log_progress_stale"))
     if child_running and not heartbeat_stale and not supervisor_stale and not log_stale:
@@ -387,10 +398,38 @@ def read_run_visibility_snapshot(
         status = "STALE"
     elif external_state in {"EXITED", "FAILED", "STOPPED", "STALE", "NO_PROGRESS"}:
         status = "STOPPED" if external_state in {"EXITED", "STOPPED"} else external_state
-    elif heartbeat and heartbeat_age is not None and heartbeat_age <= stale_after_seconds:
-        status = str(heartbeat.get("run_state") or "RUNNING").upper()
+    elif heartbeat and heartbeat_fresh:
+        status = heartbeat_run_state or "RUNNING"
+    elif heartbeat_run_state in {"STARTING", "RUNNING"}:
+        status = "STALE"
     else:
         status = "NO_STATUS"
+
+    bot_vital_status = (
+        "LIVE"
+        if heartbeat_run_state == "RUNNING" and heartbeat_fresh
+        else (
+            "STALE"
+            if heartbeat_run_state in {"STARTING", "RUNNING"}
+            else (
+                "STOPPED"
+                if heartbeat_run_state in {"STOPPED", "EXITED", "FAILED"}
+                or external_state in {"STOPPED", "EXITED", "FAILED"}
+                else "UNKNOWN"
+            )
+        )
+    )
+    pulse_animation_allowed = bot_vital_status == "LIVE"
+    market_data_fresh = bool(
+        pulse_animation_allowed
+        and market_event_age is not None
+        and market_event_age <= stale_after_seconds
+    )
+    market_vital_status = (
+        "FRESH"
+        if market_data_fresh
+        else ("STALE" if pulse_animation_allowed else ("NO_RUNTIME" if bot_vital_status == "STOPPED" else "UNKNOWN"))
+    )
 
     heartbeat_open_orders = _safe_mapping((heartbeat or {}).get("open_orders"))
     heartbeat_positions = _safe_mapping((heartbeat or {}).get("positions"))
@@ -425,9 +464,20 @@ def read_run_visibility_snapshot(
         "supervisor_status_path": str(supervisor_file),
         "heartbeat_present": heartbeat is not None,
         "supervisor_present": supervisor is not None,
+        "stale_after_seconds": float(stale_after_seconds),
+        "heartbeat_ts": (heartbeat or {}).get("heartbeat_ts"),
         "heartbeat_age_seconds": heartbeat_age,
         "supervisor_age_seconds": supervisor_age,
         "heartbeat_stale": heartbeat_stale,
+        "heartbeat_fresh": heartbeat_fresh,
+        "bot_vital_status": bot_vital_status,
+        "pulse_animation_allowed": pulse_animation_allowed,
+        "market_vital_status": market_vital_status,
+        "market_data_last_event_ts": market_event_ts,
+        "market_data_age_seconds": market_event_age,
+        "market_data_fresh": market_data_fresh,
+        "market_data_stale": pulse_animation_allowed and not market_data_fresh,
+        "market_freshness_source": "RUNTIME_HEARTBEAT_LAST_LOOP_EVENT_NOT_EXECUTABLE_MARKET_TRUTH",
         "supervisor_stale": supervisor_stale,
         "log_progress_stale": log_stale,
         "pid": (supervisor or {}).get("pid") or (heartbeat or {}).get("pid"),

@@ -112,6 +112,17 @@ def _crypto_preflight(*, account_id: str = "paper-account-045ded") -> dict[str, 
     )
 
 
+def _funded_account_crypto_preflight() -> dict[str, object]:
+    return _preflight(
+        positions=[
+            {"symbol": "AVAXUSD", "asset_class": "crypto", "qty": "10", "side": "long"},
+            {"symbol": "ETHUSD", "asset_class": "crypto", "qty": "2", "side": "long"},
+            {"symbol": "LINKUSD", "asset_class": "crypto", "qty": "25", "side": "long"},
+            {"symbol": "SOLUSD", "asset_class": "crypto", "qty": "8", "side": "long"},
+        ]
+    )
+
+
 def test_existing_positions_without_baseline_require_adoption_not_reset() -> None:
     state = build_baseline_adoption_state(current_snapshot=_preflight())
 
@@ -387,6 +398,37 @@ def test_runtime_context_blocks_buy_and_sell_for_protected_symbol_without_signal
     assert buy["mutation_permitted"] is False
     assert sell["mutation_permitted"] is False
     assert buy["module_evidence"][0]["details"]["normalized_symbol"] == "BTCUSD"
+
+
+def test_funded_account_protected_symbols_refuse_new_entries_before_route() -> None:
+    accepted = accept_existing_position_baseline(
+        _funded_account_crypto_preflight(),
+        accepted_by="Shan/local operator",
+    )
+    context = build_paper_baseline_runtime_context(
+        accepted,
+        source_path="durable/operator/paper_baseline.json",
+    ).to_dict()
+    config = SimpleNamespace(
+        broker_mode="paper",
+        preferred_trading_portal="alpaca_paper",
+        allow_portal_fallback=False,
+        paper_baseline_runtime_context=context,
+    )
+
+    for symbol in ("AVAX/USD", "ETH/USD", "LINK/USD", "SOL/USD"):
+        verdict = _build_pre_trade_guardrail_verdict(
+            config=config,
+            symbol=symbol,
+            signal=SimpleNamespace(side="buy", quantity=Decimal("1"), metadata={}),
+            runtime=SimpleNamespace(last_price=Decimal("100")),
+            is_attack=False,
+        )
+
+        assert verdict["verdict"] == "BLOCK", symbol
+        assert verdict["route_permitted"] is False, symbol
+        assert verdict["mutation_permitted"] is False, symbol
+        assert PAPER_BASELINE_SYMBOL_PROTECTED in verdict["reason_codes"], symbol
 
 
 def test_runtime_context_does_not_baseline_block_unprotected_symbol() -> None:

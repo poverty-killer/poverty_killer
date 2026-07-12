@@ -692,6 +692,8 @@ def test_operator_run_visibility_uses_supervisor_overlay_for_active_session(tmp_
     assert visibility["data_source"] == "OPERATOR_SUPERVISOR_AND_LOCAL_RUNTIME_ARTIFACTS"
     assert visibility["operator_supervisor"]["active_session_id"] == started["session_id"]
     assert visibility["operator_supervisor"]["paper_stop_allowed"] is True
+    assert visibility["bot_vital_status"] == "STALE"
+    assert visibility["pulse_animation_allowed"] is False
     assert visibility["broker_call_occurred"] is False
     assert visibility["broker_mutation_occurred"] is False
     assert visibility["order_submission_occurred"] is False

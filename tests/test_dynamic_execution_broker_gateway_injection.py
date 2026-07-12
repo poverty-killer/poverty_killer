@@ -11,15 +11,40 @@ from app.execution.broker_gateway import (
     BrokerAdapterIdentity,
     BrokerCredentialStatus,
     BrokerEnvironment,
+    BrokerGatewayError,
 )
 from app.execution.order_router import OrderRouter
 from app.models import OrderRequest
 from app.models.enums import OrderSide, OrderType, SleeveType
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Adapter:
     identity: BrokerAdapterIdentity
+    actual_suffix: str = "045ded"
+    pin_checks: int = 0
+    post_calls: int = 0
+
+    def assert_expected_account_pin(self) -> dict[str, object]:
+        self.pin_checks += 1
+        if self.actual_suffix != "045ded":
+            raise BrokerGatewayError(
+                "alpaca_paper_account_pin_mismatch",
+                message=f"expected_suffix=045ded,actual_suffix={self.actual_suffix}",
+            )
+        return {
+            "status": "PASS",
+            "reason_code": "ALPACA_PAPER_ACCOUNT_PIN_OK",
+            "expected_suffix": "045ded",
+            "actual_suffix": self.actual_suffix,
+            "broker_mutation_occurred": False,
+        }
+
+
+def _patch_pinned_adapter(monkeypatch, *, actual_suffix: str = "045ded") -> _Adapter:
+    adapter = _Adapter(_identity(), actual_suffix=actual_suffix)
+    monkeypatch.setattr(main.AlpacaPaperBrokerAdapter, "from_env", lambda: adapter)
+    return adapter
 
 
 def _identity(
@@ -75,13 +100,15 @@ def test_alpaca_paper_resolver_wires_gateway_adapter_from_configured_env(monkeyp
     monkeypatch.setenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
     monkeypatch.setenv("APCA_API_KEY_ID", "paper-key")
     monkeypatch.setenv("APCA_API_SECRET_KEY", "paper-secret")
+    expected_adapter = _patch_pinned_adapter(monkeypatch)
 
     broker, primary_exchange, adapter, adapter_id = main.resolve_execution_broker_gateway(_config())
 
     assert broker == "alpaca_paper"
     assert primary_exchange == "alpaca"
-    assert adapter is not None
+    assert adapter is expected_adapter
     assert adapter_id == "alpaca_paper_rest"
+    assert expected_adapter.pin_checks == 1
 
 
 def test_kraken_feed_can_remain_separate_from_alpaca_execution(monkeypatch):
@@ -90,6 +117,7 @@ def test_kraken_feed_can_remain_separate_from_alpaca_execution(monkeypatch):
     monkeypatch.setenv("APCA_API_KEY_ID", "paper-key")
     monkeypatch.setenv("APCA_API_SECRET_KEY", "paper-secret")
     config = SimpleNamespace(broker_mode="paper", primary_feed_venue="kraken")
+    _patch_pinned_adapter(monkeypatch)
 
     broker, primary_exchange, adapter, _adapter_id = main.resolve_execution_broker_gateway(config)
 
@@ -97,6 +125,20 @@ def test_kraken_feed_can_remain_separate_from_alpaca_execution(monkeypatch):
     assert broker == "alpaca_paper"
     assert primary_exchange == "alpaca"
     assert adapter.identity.venue_id == "alpaca"
+
+
+def test_child_broker_connect_rejects_mismatched_account_pin_before_order_one(monkeypatch):
+    monkeypatch.setenv(main.EXECUTION_BROKER_ENV_VAR, "alpaca_paper")
+    adapter = _patch_pinned_adapter(monkeypatch, actual_suffix="104e2a")
+
+    with pytest.raises(
+        main.ExecutionBrokerSelectionError,
+        match="alpaca_paper_account_pin_mismatch",
+    ):
+        main.resolve_execution_broker_gateway(_config())
+
+    assert adapter.pin_checks == 1
+    assert adapter.post_calls == 0
 
 
 def test_external_paper_gateway_routes_without_internal_paper_fallback(monkeypatch):
@@ -142,15 +184,24 @@ def test_unsupported_or_invalid_external_broker_fails_closed(monkeypatch):
 
 def test_missing_credentials_and_live_endpoint_fail_closed(monkeypatch):
     monkeypatch.setenv(main.EXECUTION_BROKER_ENV_VAR, "alpaca_paper")
-    monkeypatch.setenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
-    monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
-    monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
+    monkeypatch.setattr(
+        main.AlpacaPaperBrokerAdapter,
+        "from_env",
+        lambda: (_ for _ in ()).throw(BrokerGatewayError("credentials_missing")),
+    )
     with pytest.raises(main.ExecutionBrokerSelectionError, match="credentials_missing"):
         main.resolve_execution_broker_gateway(_config())
 
-    monkeypatch.setenv("APCA_API_BASE_URL", "https://api.alpaca.markets")
-    monkeypatch.setenv("APCA_API_KEY_ID", "paper-key")
-    monkeypatch.setenv("APCA_API_SECRET_KEY", "paper-secret")
+    monkeypatch.setattr(
+        main.AlpacaPaperBrokerAdapter,
+        "from_env",
+        lambda: (_ for _ in ()).throw(
+            BrokerGatewayError(
+                "live_or_nonpaper_endpoint_blocked",
+                message="live_endpoint_blocked",
+            )
+        ),
+    )
     with pytest.raises(main.ExecutionBrokerSelectionError, match="live_or_nonpaper_endpoint_blocked"):
         main.resolve_execution_broker_gateway(_config())
 
