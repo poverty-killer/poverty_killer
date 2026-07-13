@@ -266,26 +266,66 @@ function Get-WorkingTreeLabel {
     return "Local files present"
 }
 
+function Get-OperatorShortcutPaths {
+    $shortcutName = "POVERTY_KILLER Operator.lnk"
+    $desktopCandidates = @([Environment]::GetFolderPath("Desktop"))
+    foreach ($oneDriveRoot in @($env:OneDrive, $env:OneDriveConsumer)) {
+        if (-not [string]::IsNullOrWhiteSpace($oneDriveRoot)) {
+            $desktopCandidates += Join-Path $oneDriveRoot "Desktop"
+        }
+    }
+    $desktopCandidates = @($desktopCandidates | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_)
+    } | Select-Object -Unique)
+
+    $existingShortcuts = @($desktopCandidates | ForEach-Object {
+        $candidate = Join-Path $_ $shortcutName
+        if (Test-Path -LiteralPath $candidate) {
+            $candidate
+        }
+    })
+    if ($existingShortcuts.Count -gt 0) {
+        return $existingShortcuts
+    }
+
+    $primaryDesktop = $desktopCandidates | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Container
+    } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($primaryDesktop)) {
+        return @()
+    }
+    return ,(Join-Path $primaryDesktop $shortcutName)
+}
+
 function Ensure-OperatorShortcut {
     try {
-        $desktop = [Environment]::GetFolderPath("Desktop")
-        if ([string]::IsNullOrWhiteSpace($desktop)) {
+        $shortcutPaths = @(Get-OperatorShortcutPaths)
+        if ($shortcutPaths.Count -eq 0) {
             return
         }
-        $shortcutPath = Join-Path $desktop "POVERTY_KILLER Operator.lnk"
         $scriptPath = $PSCommandPath
         if ([string]::IsNullOrWhiteSpace($scriptPath)) {
             $scriptPath = Join-Path $PSScriptRoot "open_operator_console.ps1"
         }
+        $iconPath = Join-Path $RepoRoot "ui\operator-control-panel\assets\poverty-killer-operator.ico"
+        $iconAvailable = Test-Path -LiteralPath $iconPath -PathType Leaf
+        if (-not $iconAvailable) {
+            Write-LauncherLog "operator_icon_missing=$iconPath"
+        }
         $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = "powershell.exe"
-        $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$scriptPath`""
-        $shortcut.WorkingDirectory = $RepoRoot
-        $shortcut.WindowStyle = 1
-        $shortcut.Description = "POVERTY_KILLER Operator"
-        $shortcut.Save()
-        Write-LauncherLog "operator_shortcut_ready=$shortcutPath"
+        foreach ($shortcutPath in $shortcutPaths) {
+            $shortcut = $shell.CreateShortcut($shortcutPath)
+            $shortcut.TargetPath = "powershell.exe"
+            $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$scriptPath`""
+            $shortcut.WorkingDirectory = $RepoRoot
+            $shortcut.WindowStyle = 1
+            $shortcut.Description = "POVERTY_KILLER Operator"
+            if ($iconAvailable) {
+                $shortcut.IconLocation = "$iconPath,0"
+            }
+            $shortcut.Save()
+            Write-LauncherLog "operator_shortcut_ready=$shortcutPath"
+        }
     } catch {
         Write-LauncherLog "operator_shortcut_failed=$($_.Exception.GetType().Name)"
     }

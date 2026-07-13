@@ -163,6 +163,28 @@ Completed on 2026-07-12. Full evidence is in
 - No production source, guard, threshold, risk, NetEdge, TTL, sizing, masking, OMS, broker-governor, or strategy logic changed.
 - No PAPER run, live mode, real-money path, broker mutation, secret exposure, or tracked runtime-state edit occurred.
 
+## Launcher / App Icon Upgrade
+
+Completed on 2026-07-12 as a reversible post-G operator UX seam. Full evidence
+is in `reports/completion/LAUNCHER_APP_ICON_UPGRADE_REPORT.md`.
+
+- PASS - the generic `shell32.dll,220` launcher glyph was replaced by one
+  tracked product identity in editable SVG and exact multi-resolution Windows
+  ICO formats.
+- PASS - `Ensure-OperatorShortcut` remains the sole shortcut owner, applies the
+  icon, and updates an existing Windows/OneDrive Desktop shortcut without
+  creating a second launcher identity.
+- PASS - the existing OneDrive Desktop shortcut target and arguments were
+  verified unchanged after its icon metadata update.
+- PASS - the operator cockpit uses the same identity for its favicon; the live
+  local server returned HTTP 200 for both SVG and ICO assets.
+- Validation: 22 focused launcher tests passed; 97 launcher/UI/API tests passed;
+  PowerShell syntax passed; exact 16 through 256 pixel rendered frames were
+  visually inspected on light and dark backgrounds.
+- Browser automation was unavailable, so no browser-tab screenshot claim is
+  made. No PAPER run, broker read/mutation, live mode, real money, threshold,
+  guard, strategy, OMS, readiness, or tracked runtime-state change occurred.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from protected runtime files and pre-existing

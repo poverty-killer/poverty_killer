@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="Poverty Killer Operator">
+  <defs>
+    <linearGradient id="plate" x1="8" y1="5" x2="40" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#182328"/>
+      <stop offset="1" stop-color="#091013"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="44" height="44" rx="10" fill="url(#plate)" stroke="#34464c"/>
+  <path d="M23.25 9.5 12.5 14.75l1.7 15.75 9.05 8.3" fill="none" stroke="#46c28e" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m24.75 9.5 10.75 5.25-1.7 15.75-9.05 8.3" fill="none" stroke="#6fa8c4" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="20.9" y="15.5" width="6.2" height="17" rx="3.1" fill="#eaf1ee"/>
+  <rect x="22.45" y="19" width="3.1" height="10" rx="1.55" fill="#ebba6a"/>
+</svg>

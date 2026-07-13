@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 
@@ -7,6 +8,8 @@ HIDDEN_LAUNCHER = Path("scripts/open_operator_console_hidden.ps1")
 VISIBLE_LAUNCHER = Path("scripts/open_operator_console.ps1")
 OPERATOR_UI_BUILD_PLACEHOLDER = "operator-ui-build"
 STALE_OPERATOR_UI_VERSION = "operator-activation-e2e-truth6-20260602"
+OPERATOR_ICON_SVG = Path("ui/operator-control-panel/assets/poverty-killer-operator.svg")
+OPERATOR_ICON_ICO = Path("ui/operator-control-panel/assets/poverty-killer-operator.ico")
 
 
 def _launcher_text() -> str:
@@ -312,8 +315,43 @@ def test_visible_launcher_creates_stable_taskbar_pin_shortcut_identity():
     assert "open_operator_console.ps1" in text
     assert "$shortcut.WorkingDirectory = $RepoRoot" in text
     assert '$shortcut.Description = "POVERTY_KILLER Operator"' in text
+    assert '"ui\\operator-control-panel\\assets\\poverty-killer-operator.ico"' in text
+    assert '$shortcut.IconLocation = "$iconPath,0"' in text
+    assert "operator_icon_missing=$iconPath" in text
+    assert "$env:OneDrive" in text
+    assert "$env:OneDriveConsumer" in text
+    assert "if ($existingShortcuts.Count -gt 0)" in text
     assert "APCA_API_SECRET_KEY" not in text
     assert "DEEPSEEK_API_KEY" not in text
+
+
+def test_operator_icon_is_a_legible_multi_resolution_product_asset():
+    svg = OPERATOR_ICON_SVG.read_text(encoding="utf-8")
+    assert 'viewBox="0 0 48 48"' in svg
+    assert "#46c28e" in svg
+    assert "#6fa8c4" in svg
+    assert "#ebba6a" in svg
+    assert "<text" not in svg
+    assert ">PK<" not in svg
+
+    data = OPERATOR_ICON_ICO.read_bytes()
+    reserved, icon_type, count = struct.unpack_from("<HHH", data)
+    assert reserved == 0
+    assert icon_type == 1
+    assert count >= 5
+    dimensions = set()
+    for index in range(count):
+        offset = 6 + (index * 16)
+        width, height = struct.unpack_from("<BB", data, offset)
+        dimensions.add((width or 256, height or 256))
+    assert {(16, 16), (24, 24), (32, 32), (48, 48), (256, 256)} <= dimensions
+
+
+def test_operator_ui_uses_the_same_product_icon_as_its_favicon():
+    text = Path("ui/operator-control-panel/index.html").read_text(encoding="utf-8")
+
+    assert 'rel="icon" type="image/svg+xml" href="assets/poverty-killer-operator.svg"' in text
+    assert 'rel="alternate icon" href="assets/poverty-killer-operator.ico"' in text
 
 
 def test_operator_ui_assets_are_cache_busted_for_desktop_launcher():

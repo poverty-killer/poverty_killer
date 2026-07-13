@@ -1,10 +1,31 @@
-# Codex Session Handoff - Run Path Green / Phase G Close Preserved
+# Codex Session Handoff - Commercial Launcher Identity / Run Path Green Preserved
 
 Date: 2026-07-12 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Active packet completed: pre-arming run-path-green disposition.
-Latest committed/pushed work before this seam: `289d047 close phase G pre-arming controls`.
+Active seam completed: launcher/app icon commercial-grade upgrade.
+Latest committed/pushed work before this seam: `4f97ff0 make pre-arming run path green`.
+
+## Launcher / App Icon Upgrade
+
+Implementation and evidence are in
+`reports/completion/LAUNCHER_APP_ICON_UPGRADE_REPORT.md`.
+
+- The generic `shell32.dll,220` glyph was the root cause of the developer-tool
+  appearance. `Ensure-OperatorShortcut` previously assigned no product icon.
+- One original protected-command mark now exists as editable SVG plus exact
+  multi-resolution Windows ICO frames from 16 through 256 pixels.
+- The mark deliberately avoids readiness, profit, liveness, market direction,
+  currency, candlestick, checkmark, and typography semantics.
+- The existing OneDrive Desktop shortcut was updated in place. Target and
+  arguments verified unchanged; no duplicate shortcut was created.
+- The cockpit references the same SVG/ICO identity as its favicon. The running
+  local operator server returned HTTP 200 with correct image content types.
+- Validation: 22 focused launcher tests; 97 launcher/UI/API tests; PowerShell
+  syntax; exact-size rendered contact-sheet inspection on light/dark grounds.
+- Automated browser control was unavailable, so no captured browser favicon
+  claim is made. No broker read/mutation, PAPER run, live mode, real money,
+  threshold/guard/readiness/trading logic, or tracked runtime state was touched.
 
 ## PK-G-CLOSE Pre-Arming Seam
 
