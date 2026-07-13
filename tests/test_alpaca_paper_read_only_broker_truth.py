@@ -19,6 +19,8 @@ from app.utils.time_utils import now_ns
 
 
 EXPECTED_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+BROKER_READ_AUTH_ENV = "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ"
+BROKER_READ_AUTH_VALUE = "YES_D4_BOARD_AUTHORIZED"
 ALLOWED_GET_PATHS = frozenset(
     {
         "/v2/account",
@@ -202,7 +204,10 @@ def _mask(value: str | None) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+@pytest.mark.broker_read
 def test_alpaca_paper_read_only_gets_map_into_25t_snapshot_without_mutation():
+    if os.environ.get(BROKER_READ_AUTH_ENV) != BROKER_READ_AUTH_VALUE:
+        pytest.skip(f"broker read deferred; requires {BROKER_READ_AUTH_ENV}={BROKER_READ_AUTH_VALUE}")
     env = _alpaca_env_or_skip()
     client = AlpacaReadOnlyHttpClient(env)
 

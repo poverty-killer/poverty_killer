@@ -396,6 +396,11 @@ def test_g4_live_runtime_correlation_slash_runs_before_netedge(monkeypatch):
     metadata = _canonical_metadata("ETH/USD", market_truth, snapshot)
     metadata["correlation_pairs"] = {("ETH/USD", "BTC/USD"): Decimal("0.90")}
     metadata["correlation_truth_status"] = "FRESH"
+    metadata["stale_data_observation"] = {
+        "current_ts_ns": current_ns,
+        "exchange_ts_ns": current_ns,
+        "local_received_ts_ns": current_ns,
+    }
     signal = _strategy_signal(
         symbol="ETH/USD",
         candle_id=snapshot["candle_id"],
@@ -439,11 +444,17 @@ def test_p3d_live_runtime_per_symbol_cap_clamps_before_netedge_and_broker_route(
     current_ns = T0_NS + 14 * NS_PER_SECOND
     monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
     market_truth, _, snapshot = _snapshot_payload(symbol="ETH/USD", current_ns=current_ns)
+    metadata = _canonical_metadata("ETH/USD", market_truth, snapshot)
+    metadata["stale_data_observation"] = {
+        "current_ts_ns": current_ns,
+        "exchange_ts_ns": current_ns,
+        "local_received_ts_ns": current_ns,
+    }
     signal = _strategy_signal(
         symbol="ETH/USD",
         candle_id=snapshot["candle_id"],
         expected_move_bps="200",
-        metadata=_canonical_metadata("ETH/USD", market_truth, snapshot),
+        metadata=metadata,
     )
     signal.quantity = 1.0
     original_qty = Decimal(str(signal.quantity))

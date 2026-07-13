@@ -42,7 +42,13 @@ def _signal(
         price=None,
         exchange_ts_ns=exchange_ts_ns,
         reason="dispatch_admission_diag_test",
-        metadata={},
+        metadata={
+            "stale_data_observation": {
+                "current_ts_ns": exchange_ts_ns,
+                "exchange_ts_ns": exchange_ts_ns,
+                "local_received_ts_ns": exchange_ts_ns,
+            }
+        },
     )
 
 

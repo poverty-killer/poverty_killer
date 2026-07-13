@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import os
@@ -489,7 +490,14 @@ def test_authority_surfaces_remain_unactivated_for_planning_only_packet():
         assert "StrategyAllocator" not in source
         assert "SovereignGovernor" not in source
 
-    plan_source = inspect.getsource(validate_tiny_order_arming)
+    module_source = Path(__file__).read_text(encoding="utf-8")
+    module_tree = ast.parse(module_source)
+    plan_node = next(
+        node
+        for node in module_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "validate_tiny_order_arming"
+    )
+    plan_source = ast.get_source_segment(module_source, plan_node) or ""
     assert "urlopen" not in plan_source
     assert ".post(" not in plan_source
     assert ".delete(" not in plan_source

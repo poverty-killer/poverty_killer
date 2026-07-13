@@ -11,7 +11,12 @@ from app.brain.recalibrator import Recalibrator
 from app.brain.ring_buffer import RingBuffer
 from app.brain.rolling_stats import RollingStats
 from app.brain.shadow_front_state import ShadowFrontStateMachine, WhaleContext
-from app.brain.shans_curve import ShansCurve, ShansCurveSignal, _savitzky_golay
+from app.brain.shans_curve import (
+    ShansCurve,
+    ShansCurveSignal,
+    _NUMBA_AVAILABLE,
+    _savitzky_golay,
+)
 from app.brain.topological_engine import TopologicalEngine
 from app.models import OrderBookSnapshot
 
@@ -40,14 +45,17 @@ def _shans_curve(window: int = 12) -> ShansCurve:
     )
 
 
-def test_shans_curve_savitzky_golay_nopython_path_runs_on_numeric_arrays():
+def test_shans_curve_savitzky_golay_runs_with_optional_nopython_acceleration():
     y = np.array([1.0, 1.4, 2.1, 2.9, 4.2, 5.1, 6.0, 7.4, 8.9], dtype=np.float64)
 
     smoothed = _savitzky_golay(y, 7, 2)
 
     assert smoothed.shape == y.shape
     assert np.all(np.isfinite(smoothed))
-    assert _savitzky_golay.signatures
+    if _NUMBA_AVAILABLE:
+        assert _savitzky_golay.signatures
+    else:
+        assert not hasattr(_savitzky_golay, "signatures")
 
 
 def test_shans_curve_preserves_not_ready_warmup_without_fake_signal():

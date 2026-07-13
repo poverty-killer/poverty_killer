@@ -65,6 +65,15 @@ def _make_signal(
     metadata: Optional[dict] = None,
 ):
     """Stand-in for app.models.signals.StrategySignal (duck-typed)."""
+    signal_metadata = {} if metadata is None else dict(metadata)
+    signal_metadata.setdefault(
+        "stale_data_observation",
+        {
+            "current_ts_ns": exchange_ts_ns,
+            "exchange_ts_ns": exchange_ts_ns,
+            "local_received_ts_ns": exchange_ts_ns,
+        },
+    )
     return types.SimpleNamespace(
         strategy="sector_rotation",
         symbol=symbol,
@@ -74,7 +83,7 @@ def _make_signal(
         price=None,
         exchange_ts_ns=exchange_ts_ns,
         reason="test_signal",
-        metadata={} if metadata is None else dict(metadata),
+        metadata=signal_metadata,
         regime=None,
     )
 

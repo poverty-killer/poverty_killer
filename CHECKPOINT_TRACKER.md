@@ -1,13 +1,13 @@
 # POVERTY_KILLER Completion Checkpoint Tracker
 
-Updated: 2026-07-11
+Updated: 2026-07-12
 Branch: master
 
 ## Checkpoint Summary
 
 | Checkpoint | Status | Evidence |
 | --- | --- | --- |
-| A - Repo Validation Clean | PASS | `reports/completion/PHASE_A_REPORT.md` |
+| A - Repo Validation Clean | COLLECTION/SYNTAX PROVEN; NOT A FULL-SUITE PASS | `reports/completion/PHASE_A_REPORT.md`; full-suite red baseline recorded at G-CLOSE |
 | B - Module Truth Map Complete | PASS | `reports/completion/PHASE_B_MODULE_TRUTH_MAP.md`; Phase C-corrected 397 countable modules plus 2 excluded generated cache artifacts |
 | C - Authority Graph Implemented | PASS | `reports/completion/PHASE_C_AUTHORITY_GRAPH_REPORT.md`; 7 owners named in code; 9 Phase B conflicts resolved as owner/contributor/reference boundaries |
 | D - PAPER Readiness Truthful | PASS | `reports/completion/PHASE_D_REPORT.md`; D0-D7 PASS after D4 Board-armed read-only Alpaca PAPER baseline |
@@ -19,12 +19,15 @@ Branch: master
 
 ## Phase A Result
 
-Phase A structural health gate passed on 2026-07-09:
+Phase A proved its structural collection/import gate on 2026-07-09. It did not
+run or prove a repository-wide behavioral suite, so it must not be cited as a
+full-suite pass. The later G-CLOSE baseline recorded `1762 passed, 49 failed, 6
+skipped`.
 
-- A1 PASS - root and intended collection clean.
-- A2 PASS - py_compile clean across scoped tree.
-- A3 PASS - app/core import smoke clean.
-- A4 PASS - `_repo_quarantine` excluded from intended pytest collection.
+- A1 PROVEN - root and intended collection clean.
+- A2 PROVEN - py_compile clean across scoped tree.
+- A3 PROVEN - app/core import smoke clean.
+- A4 PROVEN - `_repo_quarantine` excluded from intended pytest collection.
 
 ## Phase B Result
 
@@ -130,6 +133,36 @@ Phase G completed on 2026-07-11 under the Board-authorized Bounded PAPER Run REA
 - No PAPER run, broker mutation, live mode, real-money path, order submit, cancel, close, liquidate, flatten, threshold change, secret exposure, or tracked runtime-state edit occurred.
 - Commit pushed: `a861142 complete phase G bounded paper readiness`.
 
+## Phase G Close Pre-Arming Seam
+
+PK-G-CLOSE completed its scoped implementation on 2026-07-11. Full evidence is
+in `reports/completion/PHASE_G_CLOSE_REPORT.md`.
+
+- G-C1 PASS at the test/process-harness rung: Stop waits for terminal child state, releases the lease, emits no broker mutation, and is visible beside Start. Post-stop broker positions remain explicitly unreconciled until final reconciliation; no PAPER run was authorized.
+- G-C2 PASS: production operator state now defaults to `%LOCALAPPDATA%\PovertyKiller\state\operator`; the `045ded` baseline was created through governed acceptance and survived a cold backend boot with `READY_FOR_BOUNDED_PAPER` and Start allowed.
+- G-C3 PASS: BOT and MKT vitality are separate; pulse/ECG motion requires fresh heartbeat evidence; killed-process stale proof freezes animation.
+- G-C4 PASS: `READY_FOR_GOVERNED_PAPER`, `governed PAPER`, and `DEGRADED_BUT_RUNNABLE` are absent from UI render sources.
+- G-C5 PASS: final Edge/CDP desktop 1440 and mobile 390 proof has no horizontal overflow; Start is enabled, Stop is visible/idle-disabled, pin/broker/four-symbol truth is visible, and no `C:\tmp` dependency appears.
+- Child account-pin bypass closed in `main.resolve_execution_broker_gateway()` through `AlpacaPaperBrokerAdapter.assert_expected_account_pin()` before adapter return/order #1.
+- Four-symbol protected-baseline refusal is now tested for AVAX, ETH, LINK, and SOL.
+- Scoped gate: 240 tests passed. Current full suite: 1762 passed, 49 failed, 6 skipped; clean `e8ef247` baseline: 1749 passed, 54 failed, 6 skipped. All 49 current failures pre-exist in the clean-HEAD set and are logged in the close report.
+- No PAPER run, live mode, real money, broker mutation, threshold change, secret exposure, tracked runtime-state edit, or SovereignExecutionGuard activation occurred.
+- Exact 27-file seam commit pushed: `289d047 close phase G pre-arming controls`.
+
+## Run-Path Green Pre-Arming Disposition
+
+Completed on 2026-07-12. Full evidence is in
+`reports/completion/PHASE_RUNPATH_GREEN_REPORT.md`.
+
+- Reported G-CLOSE baseline: `1762 passed, 49 failed, 6 skipped`.
+- The 49 were dispositioned by cluster: 33 stale run-path fixtures; 3 real-broker GET tests missing an explicit Board-read gate; 9 stale GammaFront diagnostic tests; 4 stale/optional off-path contract tests.
+- Run-path binary exit gate: PASS, `119 passed`, covering decision-frame orchestration, deterministic E2E, integrated readiness, risk-gate ordering, replay parity, dispatch admission, and upstream dispatch.
+- Final full suite: PASS with documented deferrals, `1803 passed, 14 skipped, 0 failed`. Seven real-broker/access tests now skip before credentials/network unless `PK_BOARD_AUTHORIZED_PAPER_BROKER_READ=YES_D4_BOARD_AUTHORIZED`; the historical 26G machine also retains its separate mutation approval.
+- GammaFront classification: `WIRED_EXIT_ONLY / ENTRY_FEED_DORMANT`; production strategy logic remains unchanged.
+- Refusal tests now require an immutable no-submit DecisionRecord plus zero execution submission instead of expecting the audit compiler to remain unreachable.
+- No production source, guard, threshold, risk, NetEdge, TTL, sizing, masking, OMS, broker-governor, or strategy logic changed.
+- No PAPER run, live mode, real-money path, broker mutation, secret exposure, or tracked runtime-state edit occurred.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from protected runtime files and pre-existing
@@ -149,5 +182,6 @@ clean/stash/reset.
 - Shan authorized D4-ACCOUNT-PIN to hard-pin PAPER operation to funded account suffix `045ded`. Result: account identity assertion is wired into readiness/supervisor start, mismatch fails closed, demoted/drained suffix `104e2a` is rejected in tests, and Phase F is unblocked.
 - Phase F UI cockpit is complete. Result: Run PAPER cockpit renders account-pin truth, disables Start without proven pin, and passed desktop/mobile browser validation. Phase G bounded PAPER run remains Board-gated.
 - Shan authorized Phase G Bounded PAPER Run READY with D4 read-only broker re-arm. Result: Phase G readiness is PASS with broker-read-only and browser proof; actual PAPER execution remains Shan/Board-gated.
+- Shan directed the pre-arming run-path-green disposition: root-cause the reported 49 by cluster, require zero named run-path failures, preserve off-path deferrals, and do not weaken any guard, threshold, or assertion. Result: run path and full local suite have zero failures; external broker proofs remain explicitly environment-gated.
 - No PAPER run was authorized.
 - No live mode, live read-only mode, or broker mutation was authorized.

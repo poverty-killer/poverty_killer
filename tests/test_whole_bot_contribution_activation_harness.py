@@ -60,6 +60,8 @@ from app.utils.time_utils import now_ns
 
 
 EXPECTED_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+BROKER_READ_AUTH_ENV = "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ"
+BROKER_READ_AUTH_VALUE = "YES_D4_BOARD_AUTHORIZED"
 ALLOWED_GET_PATHS = frozenset({"/v2/account", "/v2/positions", "/v2/orders", "/v2/account/activities", "/v2/clock"})
 T0_NS = 1_777_948_800_000_000_000
 MAX_SNAPSHOT_AGE_NS = 5_000_000_000
@@ -462,7 +464,10 @@ def _entries() -> tuple[EntryEvidence, ...]:
     return (_ranking_evidence(), _gamma_entry(), _adaptive_entry(), _strategy_entry("sector_rotation"), _strategy_entry("liquidity_void"))
 
 
+@pytest.mark.broker_read
 def test_alpaca_paper_read_only_truth_can_contribute_to_activation_context_when_env_available():
+    if os.environ.get(BROKER_READ_AUTH_ENV) != BROKER_READ_AUTH_VALUE:
+        pytest.skip(f"broker read deferred; requires {BROKER_READ_AUTH_ENV}={BROKER_READ_AUTH_VALUE}")
     base_url, key_id, secret_key = _env_or_skip()
     client = ReadOnlyAlpacaClient(base_url, key_id, secret_key)
     account = client.get_json("/v2/account")

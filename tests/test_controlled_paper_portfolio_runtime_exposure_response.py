@@ -18,6 +18,8 @@ from app.utils.time_utils import now_ns
 
 EXPECTED_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 FORBIDDEN_LIVE_BASE_URL = "https://api.alpaca.markets"
+BROKER_READ_AUTH_ENV = "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ"
+BROKER_READ_AUTH_VALUE = "YES_D4_BOARD_AUTHORIZED"
 EXPECTED_EXPOSURE_SYMBOLS = ("AAPL", "NVDA", "AMZN", "GOOGL", "TSLA", "SPY", "QQQ")
 KNOWN_26B_SKIPPED = {
     "AAPL": "existing_position_present",
@@ -404,7 +406,10 @@ def test_read_only_client_and_approval_guard_reject_mutation_without_network():
         AlpacaPaperReadOnlyClient(FORBIDDEN_LIVE_BASE_URL, "key", "secret")._validate_get("/v2/account", None)
 
 
+@pytest.mark.broker_read
 def test_real_alpaca_paper_exposure_response_consumes_current_broker_truth_get_only():
+    if os.environ.get(BROKER_READ_AUTH_ENV) != BROKER_READ_AUTH_VALUE:
+        pytest.skip(f"broker read deferred; requires {BROKER_READ_AUTH_ENV}={BROKER_READ_AUTH_VALUE}")
     assert all(is_set is False for is_set in _approval_flags_absent().values())
     base_url, key_id, secret_key = _alpaca_env_or_fail()
     client = AlpacaPaperReadOnlyClient(base_url, key_id, secret_key)

@@ -44,6 +44,8 @@ from app.utils.time_utils import now_ns
 
 
 EXPECTED_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+BROKER_READ_AUTH_ENV = "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ"
+BROKER_READ_AUTH_VALUE = "YES_D4_BOARD_AUTHORIZED"
 MAX_SNAPSHOT_AGE_NS = 5_000_000_000
 ALLOWED_GET_PATHS = frozenset(
     {
@@ -339,7 +341,10 @@ def _static_snapshot(**overrides: Any) -> ReadOnlyBrokerSnapshot:
     return ReadOnlyBrokerSnapshot(**fields)
 
 
+@pytest.mark.broker_read
 def test_alpaca_paper_read_only_truth_feeds_reconciliation_no_go_classifier():
+    if os.environ.get(BROKER_READ_AUTH_ENV) != BROKER_READ_AUTH_VALUE:
+        pytest.skip(f"broker read deferred; requires {BROKER_READ_AUTH_ENV}={BROKER_READ_AUTH_VALUE}")
     env = _alpaca_env_or_skip()
     client = AlpacaReadOnlyHttpClient(env)
 

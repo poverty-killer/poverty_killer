@@ -49,6 +49,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.commander import Commander
 from app.main_loop import MainLoop
 from app.models import OrderFill, OrderRequest, StrategySignal
 from app.models.enums import (
@@ -89,7 +90,13 @@ def _make_strategy_signal(
         price=price,
         exchange_ts_ns=exchange_ts_ns,
         reason="harness_signal",
-        metadata={},
+        metadata={
+            "stale_data_observation": {
+                "current_ts_ns": exchange_ts_ns,
+                "exchange_ts_ns": exchange_ts_ns,
+                "local_received_ts_ns": exchange_ts_ns,
+            }
+        },
         regime=None,
     )
 
@@ -162,6 +169,7 @@ def _make_test_loop(
 
     loop = types.SimpleNamespace()
     loop.config = types.SimpleNamespace(broker_mode=broker_mode)
+    loop.commander = Commander()
 
     loop.strategy_router = MagicMock()
     loop.strategy_router.update_macro_state = MagicMock()
@@ -178,6 +186,7 @@ def _make_test_loop(
 
     loop.execution_engine = MagicMock()
     loop.execution_engine.submit_signal = MagicMock(return_value=True)
+    loop.execution_engine.get_status.return_value = {"last_latency_truth": {}}
 
     loop._build_truth_frame = MagicMock(return_value="truth-frame-stub")
     loop._update_shadow_front_overlays = MagicMock()
@@ -191,19 +200,55 @@ def _make_test_loop(
         orders_submitted=0, orders_rejected=0, compilation_cycles=0
     )
     loop.insider_engine = MagicMock()
+    loop.signal_fusion = MagicMock()
+    loop.signal_fusion._telemetry = {}
 
+    loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(loop, MainLoop)
     loop._consume_observed_pair_sector_rotation = (
         MainLoop._consume_observed_pair_sector_rotation.__get__(loop, MainLoop)
     )
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
     )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
+    )
+    loop._classify_shadow_front_decline = MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
+    loop._classify_sector_rotation_observed_pair = (
+        MainLoop._classify_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._clear_stale_sector_rotation_observed_pair = (
+        MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._runtime_module_frame_evidence = MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    loop._apply_signal_economic_metadata = MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = MainLoop._compile_scorecard_frame_no_submit.__get__(loop, MainLoop)
+    loop._primary_no_submit_reason_code = MainLoop._primary_no_submit_reason_code
 
     return loop
 
 
 def _bind(loop, method_name: str):
     return getattr(MainLoop, method_name).__get__(loop, MainLoop)
+
+
+def _assert_refusal_decision_recorded(loop) -> None:
+    """A lawful decline is compiled for audit, but never reaches execution."""
+    loop.decision_compiler.compile.assert_called_once()
+    _, compile_kwargs = loop.decision_compiler.compile.call_args
+    assert compile_kwargs["strategy_votes"] == []
+    additional_inputs = compile_kwargs["additional_inputs"]
+    assert additional_inputs["no_submit_reason_code"] in {
+        "DECISION_FRAME_BLOCKED",
+        "DECISION_FRAME_NO_TRADE",
+    }
+    lifecycle = additional_inputs["candidate_lifecycle"]
+    assert lifecycle["execution_verdict"] == "BLOCKED"
+    assert lifecycle["broker_post"] is False
+    loop.execution_engine.submit_signal.assert_not_called()
+    assert loop._metrics.orders_submitted == 0
+    assert loop._metrics.compilation_cycles == 1
 
 
 def _strategy_signal_to_order_request(
@@ -341,8 +386,8 @@ class TestDispatchToSubmitDeterministic:
         assert submit_kwargs.get("signal") is sf_signal
         assert submit_kwargs.get("is_attack") is False
 
-    def test_missing_observed_pair_blocks_compile_and_submit(self):
-        """SF declines, SR stash is None. Neither compile nor submit runs."""
+    def test_missing_observed_pair_records_refusal_without_submit(self):
+        """SF declines and the missing SR pair is recorded without execution."""
         loop = _make_test_loop()
         runtime = _make_runtime(
             shadow_strategy=MagicMock(),
@@ -352,12 +397,9 @@ class TestDispatchToSubmitDeterministic:
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", runtime, fusion=_make_fusion(ts), exchange_ts_ns=ts)
 
-        loop.decision_compiler.compile.assert_not_called()
-        loop.execution_engine.submit_signal.assert_not_called()
-        assert loop._metrics.orders_submitted == 0
-        assert loop._metrics.compilation_cycles == 0
+        _assert_refusal_decision_recorded(loop)
 
-    def test_stale_observed_pair_blocks_compile_and_submit(self):
+    def test_stale_observed_pair_records_refusal_without_submit(self):
         """
         Reproduces the SOL/USD proof-log topology: SR stash carries a prior
         candle's (signal, vote); current candle ts differs by ~10.4h. Strict
@@ -379,10 +421,9 @@ class TestDispatchToSubmitDeterministic:
             "SOL/USD", runtime, fusion=_make_fusion(candle_ts), exchange_ts_ns=candle_ts
         )
 
-        loop.decision_compiler.compile.assert_not_called()
-        loop.execution_engine.submit_signal.assert_not_called()
+        _assert_refusal_decision_recorded(loop)
 
-    def test_one_nanosecond_offset_still_blocks(self):
+    def test_one_nanosecond_offset_records_refusal_without_submit(self):
         """Strict equality, not range — even +1 ns drift blocks the SR fallback."""
         loop = _make_test_loop()
         stored_ts = 5_000_000_000_000
@@ -398,10 +439,9 @@ class TestDispatchToSubmitDeterministic:
             "ETH/USD", runtime, fusion=_make_fusion(candle_ts), exchange_ts_ns=candle_ts
         )
 
-        loop.decision_compiler.compile.assert_not_called()
-        loop.execution_engine.submit_signal.assert_not_called()
+        _assert_refusal_decision_recorded(loop)
 
-    def test_non_paper_broker_blocks_sr_fallback(self):
+    def test_non_paper_broker_records_refusal_without_submit(self):
         """Paper-only proving lane: live broker_mode hard-blocks SR admission."""
         loop = _make_test_loop(broker_mode="live")
         ts = 6_000_000_000_000
@@ -414,8 +454,7 @@ class TestDispatchToSubmitDeterministic:
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", runtime, fusion=_make_fusion(ts), exchange_ts_ns=ts)
 
-        loop.decision_compiler.compile.assert_not_called()
-        loop.execution_engine.submit_signal.assert_not_called()
+        _assert_refusal_decision_recorded(loop)
 
 
 # =============================================================================
@@ -503,7 +542,7 @@ class TestEndToEndChain:
         loop = _make_test_loop()
         # Replace submit_signal with a capturer that still returns True so
         # _metrics.orders_submitted ticks (no production behavior changed).
-        def _capture(signal, current_price, is_attack):
+        def _capture(signal, current_price, is_attack, **_execution_context):
             captured.append(
                 {"signal": signal, "current_price": current_price, "is_attack": is_attack}
             )
@@ -563,13 +602,13 @@ class TestEndToEndNegativeChain:
     Mirrors TestEndToEndChain but with an invalid upstream candidate. Because
     the dispatch leg legitimately declines, no signal is captured and no fill
     can be produced. We assert ALL of:
-        - compile not called,
+        - an immutable refusal decision is compiled,
         - submit_signal not called,
         - the (intentionally not built) OrderRequest path is never invoked.
     This is the harness-level equivalent of "no fake success."
     """
 
-    def test_missing_observed_pair_yields_no_compile_no_submit_no_fill(self):
+    def test_missing_observed_pair_yields_refusal_record_no_submit_no_fill(self):
         captured: List[Any] = []
 
         loop = _make_test_loop()
@@ -587,15 +626,14 @@ class TestEndToEndNegativeChain:
         dispatch = _bind(loop, "_dispatch_fusion")
         dispatch("ETH/USD", runtime, fusion=_make_fusion(ts), exchange_ts_ns=ts)
 
-        assert loop.decision_compiler.compile.call_count == 0
-        assert loop.execution_engine.submit_signal.call_count == 0
+        _assert_refusal_decision_recorded(loop)
         assert captured == []
 
         # And no OrderRouter is constructed: a downstream fill is impossible
         # by construction here, which is exactly the invariant.
         assert loop._metrics.orders_submitted == 0
 
-    def test_stale_observed_pair_yields_no_compile_no_submit_no_fill(self):
+    def test_stale_observed_pair_yields_refusal_record_no_submit_no_fill(self):
         captured: List[Any] = []
 
         loop = _make_test_loop()
@@ -617,6 +655,5 @@ class TestEndToEndNegativeChain:
             "ETH/USD", runtime, fusion=_make_fusion(candle_ts), exchange_ts_ns=candle_ts
         )
 
-        assert loop.decision_compiler.compile.call_count == 0
-        assert loop.execution_engine.submit_signal.call_count == 0
+        _assert_refusal_decision_recorded(loop)
         assert captured == []

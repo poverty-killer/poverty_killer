@@ -14,6 +14,8 @@ Covers:
 All timing is exchange_ts_ns. No wall-clock.
 """
 
+from decimal import Decimal
+
 import pytest
 from unittest.mock import Mock
 
@@ -139,7 +141,7 @@ class TestInit:
 
     def test_not_in_position(self):
         s = _make_strategy()
-        assert not s._in_position
+        assert not s._local_in_position
 
     def test_print_count_zero(self):
         s = _make_strategy()
@@ -155,7 +157,7 @@ class TestInit:
 
     def test_no_position_state(self):
         s = _make_strategy()
-        assert s._entry_price is None
+        assert s._local_entry_price is None
         assert s._entry_ts_ns is None
         assert s._entry_side is None
 
@@ -322,11 +324,11 @@ class TestEntrySignalContract:
 
     def test_entry_latches_in_position(self):
         s, _ = self._trigger_entry()
-        assert s._in_position
+        assert s._local_in_position
 
     def test_entry_latches_entry_price(self):
         s, _ = self._trigger_entry()
-        assert s._entry_price == 100.0
+        assert s._local_entry_price == 100.0
 
     def test_entry_latches_entry_ts_ns(self):
         s, _ = self._trigger_entry()
@@ -400,8 +402,8 @@ class TestExitConditions:
         s = _make_strategy()
         self._enter(s)
         s.update_price(self._ENTRY_PRICE * 1.025, self._ENTRY_TS_NS + 1_000_000_000)
-        assert not s._in_position
-        assert s._entry_price is None
+        assert not s._local_in_position
+        assert s._local_entry_price is None
         assert s._entry_ts_ns is None
         assert s._entry_side is None
 
@@ -449,11 +451,12 @@ class TestPerformanceAndReset:
         s = _make_strategy()
         perf = s.get_performance()
         assert perf["symbol"] == "SPY"
-        assert perf["trade_count"] == 0
-        assert perf["win_count"] == 0
-        assert perf["total_pnl"] == 0.0
-        assert not perf["in_position"]
-        assert perf["print_count"] == 0
+        assert perf["diagnostic_trade_count"] == 0
+        assert perf["diagnostic_win_count"] == 0
+        assert perf["diagnostic_provisional_pnl"] == 0.0
+        assert not perf["diagnostic_position_active"]
+        assert perf["diagnostic_baseline_print_count"] == 0
+        assert perf["semantics_declaration"] == "LOCAL_DIAGNOSTIC_ONLY_NOT_LEDGER_TRUTH"
 
     def test_get_performance_after_winning_trade(self):
         s = _make_strategy()
@@ -461,10 +464,10 @@ class TestPerformanceAndReset:
         s.update_dark_pool(_make_big_print(ts_ns=5_000_000_000))
         s.update_price(100.0 * 1.025, 6_000_000_000)
         perf = s.get_performance()
-        assert perf["trade_count"] == 1
-        assert perf["win_count"] == 1
-        assert perf["total_pnl"] > 0
-        assert perf["win_rate"] == 1.0
+        assert perf["diagnostic_trade_count"] == 1
+        assert perf["diagnostic_win_count"] == 1
+        assert perf["diagnostic_provisional_pnl"] > 0
+        assert perf["diagnostic_win_rate_estimate"] == 1.0
 
     def test_get_performance_after_losing_trade(self):
         s = _make_strategy()
@@ -472,23 +475,23 @@ class TestPerformanceAndReset:
         s.update_dark_pool(_make_big_print(ts_ns=5_000_000_000))
         s.update_price(100.0 * 0.984, 6_000_000_000)
         perf = s.get_performance()
-        assert perf["trade_count"] == 1
-        assert perf["win_count"] == 0
-        assert perf["total_pnl"] < 0
+        assert perf["diagnostic_trade_count"] == 1
+        assert perf["diagnostic_win_count"] == 0
+        assert perf["diagnostic_provisional_pnl"] < 0
 
     def test_reset_clears_all_state(self):
         s = _make_strategy()
         _warm_baseline(s, n=4)
         s.update_dark_pool(_make_big_print())
         s.reset()
-        assert not s._in_position
-        assert s._entry_price is None
+        assert not s._local_in_position
+        assert s._local_entry_price is None
         assert s._entry_ts_ns is None
         assert s._entry_side is None
         assert s._print_count == 0
-        assert s._trade_count == 0
-        assert s._win_count == 0
-        assert s._total_pnl == 0.0
+        assert s._local_trade_count == 0
+        assert s._local_win_count == 0
+        assert s._provisional_pnl == Decimal("0.0")
         assert s._cooldown_until_ns == 0
         assert not s._macro_kill_active
         assert not s._macro_pause_active

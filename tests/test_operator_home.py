@@ -102,14 +102,14 @@ def test_home_control_inventory_covers_required_pages_and_forbidden_controls_abs
     text = _app_text()
 
     required_inventory_fragments = [
-        '["command", "paper_start"',
-        '["command", "home_ai_answer_modes"',
-        '["positions", "open_run_paper"',
-        '["positions", "open_keys_providers"',
-        '["activity", "paper_stop"',
-        '["positions", "positions_preview_table"',
-        '["positions", "open_orders_preview_table"',
-        '["providers", `credential_save_${providerId}`',
+        '["controls", "paper_start"',
+        '["advisor", "home_ai_answer_modes"',
+        '["trades", "open_run_paper"',
+        '["connections", "open_keys_providers"',
+        '["log", "paper_stop"',
+        '["trades", "positions_preview_table"',
+        '["trades", "open_orders_preview_table"',
+        '["connections", `credential_save_${providerId}`',
         '["ai_overlay", "ai_answer_mode_deterministic"',
     ]
     for fragment in required_inventory_fragments:

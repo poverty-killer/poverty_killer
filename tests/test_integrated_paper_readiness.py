@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import types
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -15,7 +14,8 @@ from app.commander import Commander
 from app.execution.engine import ExecutionEngine
 from app.execution.order_router import OrderRouter
 from app.execution.paper_broker import PaperMarketContext, PriceLevel
-from app.models import OrderFill, OrderRequest, StrategySignal
+from app.main_loop import _classify_candle_execution_truth
+from app.models import OrderRequest, StrategySignal
 from app.models.enums import (
     BookIntegrity,
     ExecutionMode,
@@ -104,6 +104,10 @@ def _candle(t0_ns: int) -> Candle:
         close=2500.0,
         volume=125.0,
         timeframe="1m",
+        candle_close_ts_ns=t0_ns,
+        latest_batch_candle=True,
+        candle_freshness_policy_ms=60_000.0,
+        data_source_type="runtime",
     )
 
 
@@ -117,7 +121,13 @@ def _sector_signal(t0_ns: int) -> StrategySignal:
         price=None,
         exchange_ts_ns=t0_ns,
         reason="integrated_paper_readiness",
-        metadata={},
+        metadata={
+            "stale_data_observation": {
+                "current_ts_ns": t0_ns,
+                "exchange_ts_ns": t0_ns,
+                "local_received_ts_ns": t0_ns,
+            }
+        },
     )
 
 
@@ -169,6 +179,8 @@ def _loop_stub(execution_engine: ExecutionEngine) -> types.SimpleNamespace:
         compilation_cycles=0,
     )
     loop.insider_engine = MagicMock()
+    loop.signal_fusion = MagicMock()
+    loop.signal_fusion._telemetry = {}
 
     from app.main_loop import MainLoop
 
@@ -178,6 +190,10 @@ def _loop_stub(execution_engine: ExecutionEngine) -> types.SimpleNamespace:
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
     )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
+    )
+    loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(loop, MainLoop)
     loop._classify_shadow_front_decline = MainLoop._classify_shadow_front_decline.__get__(
         loop, MainLoop
     )
@@ -187,6 +203,11 @@ def _loop_stub(execution_engine: ExecutionEngine) -> types.SimpleNamespace:
     loop._clear_stale_sector_rotation_observed_pair = (
         MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
     )
+    loop._runtime_module_frame_evidence = MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    loop._apply_signal_economic_metadata = MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = MainLoop._compile_scorecard_frame_no_submit.__get__(loop, MainLoop)
+    loop._primary_no_submit_reason_code = MainLoop._primary_no_submit_reason_code
     loop._dispatch_fusion = MainLoop._dispatch_fusion.__get__(loop, MainLoop)
     return loop
 
@@ -413,7 +434,7 @@ def _limit_order(signal: StrategySignal) -> OrderRequest:
     )
 
 
-def test_integrated_paper_readiness_coexists_without_new_authority_or_recovery_automation(tmp_path):
+def test_integrated_paper_readiness_refuses_fill_without_liquidity_truth(tmp_path):
     ranking_metadata = _entry_ranking_metadata()
     assert ranking_metadata["fresh_entry_authorized"] is False
     assert ranking_metadata["execution_authority"] is False
@@ -470,6 +491,13 @@ def test_integrated_paper_readiness_coexists_without_new_authority_or_recovery_a
     with ReplayTimeContext(T0_NS):
         runtime, signal, vote = _runtime_with_entry_vote(T0_NS)
         loop = _loop_stub(engine)
+        candle_execution_truth = _classify_candle_execution_truth(
+            symbol="ETH/USD",
+            runtime=runtime,
+            candle=runtime.last_candle,
+            exchange_ts_ns=T0_NS,
+            current_ns=T0_NS,
+        )
         loop._dispatch_fusion(
             "ETH/USD",
             runtime,
@@ -481,58 +509,44 @@ def test_integrated_paper_readiness_coexists_without_new_authority_or_recovery_a
                 shadow_front_eligible=True,
             ),
             exchange_ts_ns=T0_NS,
+            candle_execution_truth=candle_execution_truth,
         )
         loop.decision_compiler.compile.assert_called_once()
         assert loop.decision_compiler.compile.call_args.kwargs["strategy_votes"] == [vote]
         assert signal.metadata["decision_uuid"] == DECISION_UUID
+        admission_block = engine.get_last_admission_block_result()
+        assert admission_block is None, (
+            admission_block.reason_code,
+            admission_block.message,
+            {
+                key: (admission_block.block_evidence or {}).get(key)
+                for key in (
+                    "data_health_reason_code",
+                    "candle_freshness_reason_code",
+                    "snapshot_status",
+                    "snapshot_reason_codes",
+                    "candle_fresh",
+                    "book_fresh",
+                    "executable_market_truth",
+                )
+            },
+        )
         queued = engine._execution_queue.get_nowait()
         assert queued.signal is signal
         assert queued.decision_uuid == DECISION_UUID
-        engine._execute_signal(queued)
+        execution_result = engine._execute_signal(queued)
+        assert execution_result is not None, engine.get_status()
+        assert execution_result.normalized_status == "pending", execution_result
+        assert execution_result.route == "paper_broker"
 
     with engine._lock:
         fills = list(engine._state.filled_orders)
-    assert len(fills) == 1
-    fill = fills[0]
-    assert isinstance(fill, OrderFill)
-    assert fill.symbol == "ETH/USD"
-    assert fill.side == OrderSide.BUY
-    assert fill.quantity == Decimal("0.5")
-    assert fill.price > Decimal("0")
-    assert fill.fee >= Decimal("0")
-    assert fill.fee_currency == "USD"
-    risk_guard.record_fees.assert_called_once_with(fill.fee)
+    assert fills == []
+    risk_guard.record_fees.assert_not_called()
     masking_layer.mask_order.assert_called_once_with(0.5)
 
     events = telemetry_store.get_events_by_type("fill", limit=10)
-    assert len(events) == 1
-    payload = json.loads(events[0]["payload_json"])
-    assert payload["decision_uuid"] == DECISION_UUID
-    assert payload["order_intent_id"] == fill.order_id
-    assert payload["execution_event_id"] == fill.order_id
-    assert Decimal(payload["requested_qty"]) == Decimal("0.5")
-    assert Decimal(payload["quantity"]) == fill.quantity
-    assert Decimal(payload["price"]) == fill.price
-    assert Decimal(payload["fee"]) == fill.fee
-    assert payload["fee_currency"] == "USD"
-    assert payload["strategy"] == "sector_rotation"
-    assert payload["sleeve"] == "sector_rotation"
-    assert payload["paper_mode"] is True
-    lifecycle = payload["order_lifecycle_replay_context"]
-    assert Decimal(lifecycle["remaining_qty"]) == Decimal("0")
-    assert Decimal(lifecycle["avg_fill_price"]) == fill.price
-    assert Decimal(lifecycle["cumulative_fee"]) == fill.fee
-    assert lifecycle["terminal_state"] == "filled"
-    for invented_field in (
-        "slippage_bps",
-        "expected_fill_price",
-        "arrival_price",
-        "net_pnl",
-        "net_edge",
-        "profitability",
-    ):
-        assert invented_field not in payload
-        assert invented_field not in lifecycle
+    assert events == []
 
     snapshot = router._paper_broker.get_snapshot(
         current_prices={"ETH/USD": Decimal("2500.00")},
@@ -546,7 +560,8 @@ def test_integrated_paper_readiness_coexists_without_new_authority_or_recovery_a
     )
     restored_broker.restore_from_snapshot(snapshot)
     assert restored_broker.validate_invariants()["valid"] is True
-    assert restored_broker.open_orders == {}
+    assert set(restored_broker.open_orders) == {execution_result.client_order_id}
+    assert restored_broker.positions == {}
 
     recovered_runtime = SymbolRuntime("ETH/USD")
     assert recovered_runtime.is_ready() is False

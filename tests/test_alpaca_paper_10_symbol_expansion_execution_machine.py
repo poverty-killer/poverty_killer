@@ -21,6 +21,8 @@ FORBIDDEN_LIVE_BASE_URL = "https://api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 APPROVAL_ENV_26G = "POVERTY_KILLER_APPROVE_ALPACA_PAPER_10_SYMBOL_EXPANSION_26G"
 APPROVAL_VALUE_26G = "YES_I_APPROVE_10_MORE_ALPACA_PAPER_BUY_LIMIT_DAY_ORDERS_26G"
+BROKER_READ_AUTH_ENV = "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ"
+BROKER_READ_AUTH_VALUE = "YES_D4_BOARD_AUTHORIZED"
 OLD_APPROVAL_VALUES = {
     "POVERTY_KILLER_APPROVE_ALPACA_PAPER_TINY_ORDER_25Z": "YES_I_APPROVE_ONE_PAPER_LIMIT_ORDER",
     "POVERTY_KILLER_APPROVE_ALPACA_PAPER_10_SYMBOL_BATCH_26B": "YES_I_APPROVE_10_PAPER_LIMIT_ORDERS",
@@ -607,7 +609,10 @@ def _classify_order_status(order: dict[str, Any]) -> str:
     return "unknown_requires_followup"
 
 
+@pytest.mark.broker_access
 def test_real_26g_alpaca_paper_expansion_machine_blocks_without_approval_or_executes_when_approved():
+    if os.environ.get(BROKER_READ_AUTH_ENV) != BROKER_READ_AUTH_VALUE:
+        pytest.skip(f"broker access deferred; requires {BROKER_READ_AUTH_ENV}={BROKER_READ_AUTH_VALUE}")
     base_url, key_id, secret_key = _alpaca_env_or_skip()
     approval_present = _approval_26g_present()
     trading = AlpacaPaperTradingClient(base_url, key_id, secret_key, approval_present=approval_present)

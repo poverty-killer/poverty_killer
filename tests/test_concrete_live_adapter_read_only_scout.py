@@ -75,7 +75,7 @@ def test_order_router_contains_read_only_fetch_foundation_but_mixes_mutating_aut
     assert '"environment"' not in order_router[order_router.index("def get_exchange_truth_snapshot") : order_router.index("def submit_order")]
 
 
-def test_config_defaults_to_paper_and_credentials_are_optional_not_read_only_gated():
+def test_config_defaults_to_paper_with_optional_credentials_and_default_off_safety_gate():
     config = Config()
     config_source = _source(CONFIG)
 
@@ -83,12 +83,13 @@ def test_config_defaults_to_paper_and_credentials_are_optional_not_read_only_gat
     assert config.kraken_api_key in {None, ""}
     assert config.kraken_api_secret in {None, ""}
     assert config.alpaca_paper is True
+    assert config.shadow_read_only is False
     assert 'broker_mode: Literal["paper", "live"] = Field(default="paper"' in config_source
     assert "kraken_api_key: Optional[str]" in config_source
     assert "kraken_api_secret: Optional[str]" in config_source
     assert "alpaca_api_key: Optional[str]" in config_source
     assert "alpaca_api_secret: Optional[str]" in config_source
-    assert "read_only" not in config_source
+    assert "shadow_read_only: bool" in config_source
     assert "sandbox_read_only" not in config_source
 
 

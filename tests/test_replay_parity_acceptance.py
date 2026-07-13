@@ -65,6 +65,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.commander import Commander
 from app.main_loop import MainLoop
 from app.models import OrderFill, OrderRequest, StrategySignal
 from app.models.enums import OrderSide, OrderType, SleeveType
@@ -126,7 +127,13 @@ def _build_strategy_signal(
         price=None,
         exchange_ts_ns=t0_ns,
         reason="replay_parity_acceptance",
-        metadata={},
+        metadata={
+            "stale_data_observation": {
+                "current_ts_ns": t0_ns,
+                "exchange_ts_ns": t0_ns,
+                "local_received_ts_ns": t0_ns,
+            }
+        },
         regime=None,
     )
 
@@ -167,6 +174,7 @@ def _build_test_loop(*, broker_mode: str = "paper") -> types.SimpleNamespace:
     """
     loop = types.SimpleNamespace()
     loop.config = types.SimpleNamespace(broker_mode=broker_mode)
+    loop.commander = Commander()
 
     loop.strategy_router = MagicMock()
     loop.strategy_router.update_macro_state = MagicMock()
@@ -190,6 +198,7 @@ def _build_test_loop(*, broker_mode: str = "paper") -> types.SimpleNamespace:
 
     loop.execution_engine = MagicMock()
     loop.execution_engine.submit_signal = MagicMock(return_value=True)
+    loop.execution_engine.get_status.return_value = {"last_latency_truth": {}}
 
     loop._build_truth_frame = MagicMock(return_value="truth-frame-stub")
     loop._update_shadow_front_overlays = MagicMock()
@@ -200,18 +209,48 @@ def _build_test_loop(*, broker_mode: str = "paper") -> types.SimpleNamespace:
         orders_submitted=0, orders_rejected=0, compilation_cycles=0
     )
     loop.insider_engine = MagicMock()
+    loop.signal_fusion = MagicMock()
+    loop.signal_fusion._telemetry = {}
 
+    loop._active_threshold_profile = MainLoop._active_threshold_profile.__get__(loop, MainLoop)
     loop._consume_observed_pair_sector_rotation = (
         MainLoop._consume_observed_pair_sector_rotation.__get__(loop, MainLoop)
     )
     loop._consume_observed_pair_liquidity_void = (
         MainLoop._consume_observed_pair_liquidity_void.__get__(loop, MainLoop)
     )
+    loop._consume_observed_pair_moving_floor = (
+        MainLoop._consume_observed_pair_moving_floor.__get__(loop, MainLoop)
+    )
+    loop._classify_shadow_front_decline = MainLoop._classify_shadow_front_decline.__get__(loop, MainLoop)
+    loop._classify_sector_rotation_observed_pair = (
+        MainLoop._classify_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._clear_stale_sector_rotation_observed_pair = (
+        MainLoop._clear_stale_sector_rotation_observed_pair.__get__(loop, MainLoop)
+    )
+    loop._runtime_module_frame_evidence = MainLoop._runtime_module_frame_evidence.__get__(loop, MainLoop)
+    loop._apply_signal_economic_metadata = MainLoop._apply_signal_economic_metadata.__get__(loop, MainLoop)
+    loop._net_edge_frame_evidence = MainLoop._net_edge_frame_evidence
+    loop._compile_scorecard_frame_no_submit = MainLoop._compile_scorecard_frame_no_submit.__get__(loop, MainLoop)
+    loop._primary_no_submit_reason_code = MainLoop._primary_no_submit_reason_code
     return loop
 
 
 def _bind(loop, method_name: str):
     return getattr(MainLoop, method_name).__get__(loop, MainLoop)
+
+
+def _refusal_compile_observables(loop) -> Dict[str, Any]:
+    _, compile_kwargs = loop.decision_compiler.compile.call_args
+    additional_inputs = compile_kwargs["additional_inputs"]
+    lifecycle = additional_inputs["candidate_lifecycle"]
+    return {
+        "compile_vote_count": len(compile_kwargs["strategy_votes"]),
+        "no_submit_reason_code": additional_inputs["no_submit_reason_code"],
+        "execution_verdict": lifecycle["execution_verdict"],
+        "broker_post": lifecycle["broker_post"],
+    }
 
 
 def _strategy_signal_to_order_request(
@@ -288,7 +327,7 @@ def _run_happy_path(t0_ns: int) -> Dict[str, Any]:
 
         loop = _build_test_loop(broker_mode="paper")
 
-        def _capture(signal, current_price, is_attack):
+        def _capture(signal, current_price, is_attack, **_execution_context):
             captured.append(
                 {
                     "signal": signal,
@@ -401,6 +440,7 @@ def _run_negative_stale(t0_ns: int, *, delta_ns: int = 60_000_000_000) -> Dict[s
 
     return {
         "compile_calls": compile_calls,
+        **_refusal_compile_observables(loop),
         "submit_calls": submit_calls,
         "captured_count": len(captured),
         "metrics_orders_submitted": loop._metrics.orders_submitted,
@@ -442,6 +482,7 @@ def _run_negative_missing(t0_ns: int) -> Dict[str, Any]:
 
     return {
         "compile_calls": compile_calls,
+        **_refusal_compile_observables(loop),
         "submit_calls": submit_calls,
         "captured_count": len(captured),
         "metrics_orders_submitted": loop._metrics.orders_submitted,
@@ -771,11 +812,14 @@ class TestReplayParityNegativeControls:
         )
 
         # Sanity-pin the rejection signature itself.
-        assert run_a["compile_calls"] == 0
+        assert run_a["compile_calls"] == 1
+        assert run_a["compile_vote_count"] == 0
+        assert run_a["execution_verdict"] == "BLOCKED"
+        assert run_a["broker_post"] is False
         assert run_a["submit_calls"] == 0
         assert run_a["captured_count"] == 0
         assert run_a["metrics_orders_submitted"] == 0
-        assert run_a["metrics_compilation_cycles"] == 0
+        assert run_a["metrics_compilation_cycles"] == 1
         assert run_a["replay_active_after"] is False
 
     def test_one_nanosecond_offset_rejects_identically_in_both_runs(self):
@@ -787,7 +831,8 @@ class TestReplayParityNegativeControls:
         run_b = _run_negative_stale(T0_NS, delta_ns=1)
 
         assert run_a == run_b
-        assert run_a["compile_calls"] == 0
+        assert run_a["compile_calls"] == 1
+        assert run_a["compile_vote_count"] == 0
         assert run_a["submit_calls"] == 0
         assert run_a["captured_count"] == 0
 
@@ -801,11 +846,12 @@ class TestReplayParityNegativeControls:
         run_b = _run_negative_missing(T0_NS)
 
         assert run_a == run_b
-        assert run_a["compile_calls"] == 0
+        assert run_a["compile_calls"] == 1
+        assert run_a["compile_vote_count"] == 0
         assert run_a["submit_calls"] == 0
         assert run_a["captured_count"] == 0
         assert run_a["metrics_orders_submitted"] == 0
-        assert run_a["metrics_compilation_cycles"] == 0
+        assert run_a["metrics_compilation_cycles"] == 1
 
     def test_live_broker_mode_rejects_same_clock_pair_identically(self):
         """
@@ -835,6 +881,7 @@ class TestReplayParityNegativeControls:
                 )
                 return {
                     "compile_calls": loop.decision_compiler.compile.call_count,
+                    **_refusal_compile_observables(loop),
                     "submit_calls": loop.execution_engine.submit_signal.call_count,
                     "metrics_orders_submitted": loop._metrics.orders_submitted,
                 }
@@ -843,7 +890,8 @@ class TestReplayParityNegativeControls:
         run_b = _run_live_block(T0_NS)
 
         assert run_a == run_b
-        assert run_a["compile_calls"] == 0
+        assert run_a["compile_calls"] == 1
+        assert run_a["compile_vote_count"] == 0
         assert run_a["submit_calls"] == 0
         assert run_a["metrics_orders_submitted"] == 0
 

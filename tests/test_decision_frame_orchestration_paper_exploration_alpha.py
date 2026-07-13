@@ -37,6 +37,7 @@ from app.models import (
 from app.models.enums import SignalType, SleeveType, StrategyID, TruthStatus
 from app.models.market_data import Candle
 from app.models.signals import StrategySignal
+from app.risk.exposure_manager import ExposureManager
 
 
 LOGGER_NAME = "app.main_loop"
@@ -75,7 +76,13 @@ def _signal(side: str = "buy", confidence: float = 0.70) -> StrategySignal:
         price=2500.0,
         exchange_ts_ns=T0_NS,
         reason="decision_frame_test",
-        metadata={},
+        metadata={
+            "stale_data_observation": {
+                "current_ts_ns": T0_NS + 61 * NS_PER_SECOND,
+                "exchange_ts_ns": T0_NS + 61 * NS_PER_SECOND,
+                "local_received_ts_ns": T0_NS + 61 * NS_PER_SECOND,
+            }
+        },
     )
 
 
@@ -180,6 +187,7 @@ def _loop(*, config=None, submit_result=False):
         reason_code="QUOTE_SESSION_TRUTH_MISSING",
         message="hard blocker for non-mutating test",
     )
+    loop.exposure_manager = ExposureManager(initial_equity=Decimal("20000"))
     loop._build_truth_frame = MagicMock(return_value=_truth_frame())
     loop._update_shadow_front_overlays = MagicMock()
     loop._generate_signal_and_vote = MagicMock(return_value=(None, None))
@@ -444,6 +452,8 @@ def test_moving_floor_protective_exit_reaches_mocked_submit_as_sell_to_close():
             ),
             "expected_move_bps": "120",
             "gross_edge_bps": "120",
+            "action": "sell_to_close",
+            "execution_action": "sell_to_close",
             "order_action": "sell_to_close",
         }
     )
@@ -486,14 +496,19 @@ def test_moving_floor_protective_exit_reaches_mocked_submit_as_sell_to_close():
     )
 
     loop.decision_compiler.compile.assert_called_once()
+    additional_inputs = loop.decision_compiler.compile.call_args.kwargs["additional_inputs"]
+    frame = additional_inputs["decision_frame"]
+    assert frame["frame_output"] == FRAME_OUTPUT_SELL, "|".join(frame["frame_reason_codes"])
+    assert frame["frame_status"] == "PASS", frame["frame_reason_codes"]
+    assert additional_inputs["pre_trade_guardrail_verdict"]["route_permitted"] is True, (
+        additional_inputs["pre_trade_guardrail_verdict"]["reason_codes"]
+    )
     loop.execution_engine.submit_signal.assert_called_once()
     submitted_signal = loop.execution_engine.submit_signal.call_args.kwargs["signal"]
     assert submitted_signal.strategy == "moving_floor"
     assert submitted_signal.side == "sell"
     assert submitted_signal.metadata["execution_action"] == "sell_to_close"
     assert submitted_signal.metadata["sell_intent_classification"] == "SELL_EXIT_EXISTING_BROKER_POSITION"
-    frame = loop.decision_compiler.compile.call_args.kwargs["additional_inputs"]["decision_frame"]
-    assert frame["frame_output"] == FRAME_OUTPUT_SELL
     assert frame["module_evidence"]["MovingFloor"]["reason_codes"] == (
         "MOVING_FLOOR_PROTECTIVE_EXIT_CANDIDATE",
     )
