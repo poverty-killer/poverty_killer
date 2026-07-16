@@ -135,6 +135,8 @@ from app.world_awareness.scheduler import WorldAwarenessProviderRuntime
 API_VERSION = "operator-backend-v1"
 OPERATOR_ACTIVATION_VERSION = "operator-activation-e2e-truth6-20260602"
 OPERATOR_UI_ASSET_VERSION = "ui4-enforce-unblock"
+OPERATOR_UI_IDLE_SHUTDOWN_ENV = "PK_OPERATOR_IDLE_EXIT_ON_UI_DISCONNECT"
+DEFAULT_OPERATOR_UI_DISCONNECT_GRACE_SECONDS = 8.0
 
 
 def _utc_now() -> str:
@@ -366,6 +368,8 @@ class OperatorSnapshotProvider:
         account_identity_checker: Callable[[Mapping[str, str]], dict[str, Any]] | None = None,
         historical_tests: HistoricalTestService | None = None,
         stack_exit_callback: Callable[[], None] | None = None,
+        operator_ui_idle_shutdown_enabled: bool | None = None,
+        operator_ui_disconnect_grace_seconds: float = DEFAULT_OPERATOR_UI_DISCONNECT_GRACE_SECONDS,
     ) -> None:
         if runtime_config is not None:
             self.runtime_config = runtime_config
@@ -461,11 +465,24 @@ class OperatorSnapshotProvider:
         self.research_registry = research_registry or ResearchRegistry()
         self.historical_tests_service = historical_tests or HistoricalTestService()
         self.last_credential_save_diagnostic: dict[str, Any] | None = None
+        self._process_lifecycle_lock = threading.RLock()
         self._shutdown_lock = threading.Lock()
         self._shutdown_requested = False
         self._shutdown_hook_installed = False
         self._previous_signal_handlers: dict[int, Any] = {}
         self._stack_exit_callback = stack_exit_callback or self._default_stack_exit_callback
+        configured_idle_shutdown = str(self.process_env.get(OPERATOR_UI_IDLE_SHUTDOWN_ENV) or "").strip().lower()
+        self._operator_ui_idle_shutdown_enabled = (
+            operator_ui_idle_shutdown_enabled
+            if operator_ui_idle_shutdown_enabled is not None
+            else configured_idle_shutdown in {"1", "true", "yes", "on"}
+        )
+        self._operator_ui_disconnect_grace_seconds = max(0.0, float(operator_ui_disconnect_grace_seconds))
+        self._operator_ui_lock = threading.Lock()
+        self._operator_ui_connections = 0
+        self._operator_ui_disconnect_generation = 0
+        self._operator_ui_disconnect_timer: threading.Timer | None = None
+        self._operator_ui_last_disconnect_action = "NO_DISCONNECT_OBSERVED"
 
     def _backend_process_identity(self) -> dict[str, Any]:
         return {
@@ -530,6 +547,75 @@ class OperatorSnapshotProvider:
                 }
             self._shutdown_requested = True
         return self.supervisor.shutdown_active_processes(reason)
+
+    def operator_ui_connection_status(self) -> dict[str, Any]:
+        with self._operator_ui_lock:
+            return {
+                "source": "OPERATOR_UI_EVENT_STREAM_OWNERSHIP",
+                "connected_clients": self._operator_ui_connections,
+                "idle_shutdown_enabled": self._operator_ui_idle_shutdown_enabled,
+                "disconnect_grace_seconds": self._operator_ui_disconnect_grace_seconds,
+                "last_disconnect_action": self._operator_ui_last_disconnect_action,
+                "broker_call_occurred": False,
+                "broker_mutation_occurred": False,
+                "secrets_values_exposed": False,
+            }
+
+    def operator_ui_connected(self) -> dict[str, Any]:
+        with self._operator_ui_lock:
+            self._operator_ui_connections += 1
+            self._operator_ui_disconnect_generation += 1
+            timer = self._operator_ui_disconnect_timer
+            self._operator_ui_disconnect_timer = None
+            self._operator_ui_last_disconnect_action = "COCKPIT_CONNECTED"
+        if timer is not None:
+            timer.cancel()
+        return self.operator_ui_connection_status()
+
+    def operator_ui_disconnected(self) -> dict[str, Any]:
+        timer: threading.Timer | None = None
+        with self._operator_ui_lock:
+            self._operator_ui_connections = max(0, self._operator_ui_connections - 1)
+            self._operator_ui_disconnect_generation += 1
+            generation = self._operator_ui_disconnect_generation
+            if self._operator_ui_connections > 0:
+                self._operator_ui_last_disconnect_action = "OTHER_COCKPIT_CLIENTS_REMAIN"
+            elif not self._operator_ui_idle_shutdown_enabled:
+                self._operator_ui_last_disconnect_action = "IDLE_SHUTDOWN_DISABLED"
+            elif self._shutdown_requested:
+                self._operator_ui_last_disconnect_action = "STACK_SHUTDOWN_ALREADY_REQUESTED"
+            else:
+                self._operator_ui_last_disconnect_action = "IDLE_SHUTDOWN_GRACE_PENDING"
+                timer = threading.Timer(
+                    self._operator_ui_disconnect_grace_seconds,
+                    self._shutdown_after_last_operator_ui_disconnect,
+                    args=(generation,),
+                )
+                timer.daemon = True
+                self._operator_ui_disconnect_timer = timer
+        if timer is not None:
+            timer.start()
+        return self.operator_ui_connection_status()
+
+    def _shutdown_after_last_operator_ui_disconnect(self, generation: int) -> None:
+        with self._operator_ui_lock:
+            if generation != self._operator_ui_disconnect_generation or self._operator_ui_connections != 0:
+                return
+            self._operator_ui_disconnect_timer = None
+        result = self.stack_shutdown_intent(
+            {
+                "confirm_shutdown_stack": True,
+                "confirm_api_process_exit": True,
+                "confirm_preserve_broker_positions": True,
+                "confirm_no_broker_cleanup_requested": True,
+                "require_idle_supervisor": True,
+                "requested_by": "operator_ui_last_client_disconnected",
+            }
+        )
+        with self._operator_ui_lock:
+            self._operator_ui_last_disconnect_action = str(
+                result.get("reason_code") or result.get("status") or "UNKNOWN_DISCONNECT_RESULT"
+            )
 
     def _default_stack_exit_callback(self) -> None:
         def _exit_after_response() -> None:
@@ -791,6 +877,7 @@ class OperatorSnapshotProvider:
     def launcher_status(self) -> dict[str, Any]:
         started_ns = time.perf_counter_ns()
         supervisor = self._local_supervisor_summary()
+        operator_ui = self.operator_ui_connection_status()
         identity = self._backend_process_identity()
         degraded_reasons: list[str] = []
         if self.loaded_git_commit_short == "UNKNOWN_NOT_AVAILABLE":
@@ -817,6 +904,10 @@ class OperatorSnapshotProvider:
             "backend_mode": "PAPER_OPERATOR_API",
             "supervisor_state": supervisor.get("state") or "UNKNOWN",
             "active_run_id": supervisor.get("active_session_id"),
+            "operator_ui_connection_count": operator_ui["connected_clients"],
+            "operator_ui_idle_shutdown_enabled": operator_ui["idle_shutdown_enabled"],
+            "operator_ui_disconnect_grace_seconds": operator_ui["disconnect_grace_seconds"],
+            "operator_ui_last_disconnect_action": operator_ui["last_disconnect_action"],
             "timestamp_utc": _utc_now(),
             "elapsed_ms": elapsed_ms,
             "degraded_reason_codes": degraded_reasons,
@@ -2010,6 +2101,26 @@ class OperatorSnapshotProvider:
                     ),
                     "bot_vital_status": "LIVE" if heartbeat_live else "STALE",
                     "pulse_animation_allowed": heartbeat_live,
+                }
+            )
+        elif str(supervisor.get("state") or "").upper() == "IDLE":
+            artifact_status = str(snapshot.get("status") or "NO_STATUS")
+            artifact_heartbeat_stale = snapshot.get("heartbeat_stale") is True
+            snapshot.update(
+                {
+                    "status": "IDLE",
+                    "prominent_state": "IDLE",
+                    "data_source": "OPERATOR_SUPERVISOR_AND_LOCAL_RUNTIME_ARTIFACTS",
+                    "runtime_artifact_note": (
+                        "Operator supervisor is IDLE with no attached PAPER session. Historical runtime artifacts "
+                        f"remain read-only evidence (artifact status {artifact_status}; stale heartbeat "
+                        f"{artifact_heartbeat_stale}) and do not define current bot vitality."
+                    ),
+                    "bot_vital_status": "IDLE",
+                    "pulse_animation_allowed": False,
+                    "market_vital_status": "NO_RUNTIME",
+                    "market_data_fresh": False,
+                    "market_data_stale": False,
                 }
             )
         elif latest_session and not artifact_session_match:
@@ -4002,7 +4113,15 @@ class OperatorSnapshotProvider:
         return self.supervisor.generic_refusal(intent_name, reason)
 
     def paper_start_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._process_lifecycle_lock:
+            return self._paper_start_intent_locked(payload)
+
+    def _paper_start_intent_locked(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = payload or {}
+        with self._shutdown_lock:
+            shutdown_requested = self._shutdown_requested
+        if shutdown_requested:
+            return self.supervisor.generic_refusal("paper_start", "STACK_SHUTDOWN_IN_PROGRESS")
         mode = str(body.get("mode") or "PAPER").strip().upper()
         if mode != "PAPER" or body.get("live") is True or body.get("real_money") is True:
             return self.supervisor.start_paper(body)
@@ -4094,6 +4213,10 @@ class OperatorSnapshotProvider:
         return result
 
     def stack_shutdown_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._process_lifecycle_lock:
+            return self._stack_shutdown_intent_locked(payload)
+
+    def _stack_shutdown_intent_locked(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = payload or {}
         required_confirmations = {
             "confirm_shutdown_stack": "MISSING_STACK_SHUTDOWN_CONFIRMATION",
@@ -4108,6 +4231,23 @@ class OperatorSnapshotProvider:
                 response["api_exit_scheduled"] = False
                 response["process_only_shutdown"] = True
                 return response
+        require_idle_supervisor = body.get("require_idle_supervisor") is True
+        supervisor_state = self._supervisor_health_state()
+        if require_idle_supervisor and supervisor_state != "IDLE":
+            response = self.refused_intent(
+                "stack_shutdown",
+                "ACTIVE_OR_UNCERTAIN_RUNTIME_PROTECTED_FROM_AUTOMATIC_SHUTDOWN",
+            )
+            response.update(
+                {
+                    "api_exit_scheduled": False,
+                    "process_only_shutdown": True,
+                    "idle_only_shutdown": True,
+                    "supervisor_state": supervisor_state,
+                    "requested_by": str(body.get("requested_by") or "unknown"),
+                }
+            )
+            return response
         shutdown = self.shutdown_runtime("STACK_SHUTDOWN_INTENT")
         api_exit_scheduled = shutdown.get("allowed") is True
         if api_exit_scheduled and body.get("dry_run") is not True:
@@ -4118,6 +4258,9 @@ class OperatorSnapshotProvider:
                 "stack_shutdown_requested": True,
                 "api_exit_scheduled": api_exit_scheduled and body.get("dry_run") is not True,
                 "process_only_shutdown": True,
+                "idle_only_shutdown": require_idle_supervisor,
+                "supervisor_state": supervisor_state,
+                "requested_by": str(body.get("requested_by") or "unknown"),
                 "broker_call_occurred": False,
                 "broker_mutation_occurred": False,
                 "order_submission_occurred": False,
@@ -4286,7 +4429,7 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
                 return [stable_event_state(item) for item in value]
             return value
 
-        async def stream():
+        async def event_payloads():
             fingerprints: dict[str, str] = {}
             last_keepalive = time.monotonic()
             while True:
@@ -4308,6 +4451,14 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
                     yield ": keepalive\n\n"
                     last_keepalive = time.monotonic()
                 await asyncio.sleep(1)
+
+        async def stream():
+            provider.operator_ui_connected()
+            try:
+                async for chunk in event_payloads():
+                    yield chunk
+            finally:
+                provider.operator_ui_disconnected()
 
         return StreamingResponse(
             stream(),

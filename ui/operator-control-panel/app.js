@@ -3388,6 +3388,7 @@
     const botStatus = String(visibility.botVitalStatus || "UNKNOWN").toUpperCase();
     const marketStatus = String(visibility.marketVitalStatus || "UNKNOWN").toUpperCase();
     const botLive = visibility.pulseAnimationAllowed === true && botStatus === "LIVE";
+    const botIdle = botStatus === "IDLE";
     const marketFresh = visibility.marketDataFresh === true && marketStatus === "FRESH";
     const heartbeatAge = visibility.heartbeatAgeSeconds;
     const marketAge = visibility.marketDataAgeSeconds;
@@ -3399,8 +3400,12 @@
       marketFresh,
       botClass: botLive ? "is-live" : (botStatus === "STALE" ? "is-stale" : "is-off"),
       marketClass: marketFresh ? "is-live" : (marketStatus === "STALE" ? "is-stale" : "is-off"),
-      heartbeatDetail: heartbeatAge === null || heartbeatAge === undefined ? "heartbeat unavailable" : `heartbeat ${heartbeatAge}s old`,
-      marketDetail: marketAge === null || marketAge === undefined ? "market event unavailable" : `market event ${marketAge}s old`,
+      heartbeatDetail: botIdle
+        ? "no run attached; heartbeat not expected"
+        : (heartbeatAge === null || heartbeatAge === undefined ? "heartbeat unavailable" : `heartbeat ${heartbeatAge}s old`),
+      marketDetail: marketStatus === "NO_RUNTIME"
+        ? "runtime market stream inactive"
+        : (marketAge === null || marketAge === undefined ? "market event unavailable" : `market event ${marketAge}s old`),
       staleAfterDetail: staleAfter === null || staleAfter === undefined ? "stale threshold unknown" : `stale after ${staleAfter}s`
     };
   }

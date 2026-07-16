@@ -690,6 +690,9 @@ def test_runtime_vitality_animation_requires_fresh_backend_heartbeat_truth():
     assert "runtimeVitalityTruth" in text
     assert "pulseAnimationAllowed" in text
     assert "marketDataFresh" in text
+    assert 'const botIdle = botStatus === "IDLE"' in text
+    assert "no run attached; heartbeat not expected" in text
+    assert "runtime market stream inactive" in text
     assert "data-bot-pulse" in text
     assert "data-bot-ecg" in text
     assert "data-bot-vital" in text

@@ -211,6 +211,9 @@ def test_visible_launcher_stop_backend_is_port_and_operator_process_scoped():
     assert "confirm_api_process_exit" in text
     assert "confirm_preserve_broker_positions" in text
     assert "confirm_no_broker_cleanup_requested" in text
+    assert "require_idle_supervisor" in text
+    assert "idle_only_backend_stop_preserved" in text
+    assert "ACTIVE_OR_UNCERTAIN_RUNTIME" not in text  # backend owns the exact refusal reason
     assert "stack_shutdown_port_still_listening_fallback_to_scoped_process_stop" in text
     assert "Get-OperatorBackendProcesses" in text
     assert "app.api.operator_readonly_api:create_operator_app" in text
@@ -240,8 +243,33 @@ def test_hidden_launcher_uses_stack_shutdown_before_stale_backend_force_stop():
     assert "confirm_api_process_exit" in text
     assert "confirm_preserve_broker_positions" in text
     assert "confirm_no_broker_cleanup_requested" in text
+    assert "require_idle_supervisor = $true" in text
+    assert "stale_backend_preserved_active_or_uncertain" in text
     assert "hidden_launcher_stale_backend" in text
     assert text.index("Request-OperatorStackShutdown \"hidden_launcher_stale_backend\"") < text.index("Stop-Process -Id $processId -Force")
+
+
+def test_launcher_owns_idle_backend_lifecycle_without_unload_or_broad_process_kill():
+    visible = VISIBLE_LAUNCHER.read_text(encoding="utf-8")
+    hidden = _launcher_text()
+
+    for text in (visible, hidden):
+        assert 'SetEnvironmentVariable("PK_OPERATOR_IDLE_EXIT_ON_UI_DISCONNECT", "true", "Process")' in text
+        assert "Stop-Process -Name" not in text
+        assert "taskkill" not in text.lower()
+        assert "beforeunload" not in text.lower()
+        assert "sendBeacon" not in text
+
+    assert "function Ensure-FreshIdleBackend" in visible
+    assert "$orphaned = $Model.OperatorUiConnectionCount -eq 0" in visible
+    assert "$activeOrUncertain = $Model.SupervisorState -ne \"IDLE\"" in visible
+    assert "startup_backend_preserved_active_or_uncertain" in visible
+    assert "Restart-Backend -RequireIdle" in visible
+    assert "Stop-Backend -RequireIdle" in visible
+    assert "$form.Add_FormClosing" in visible
+    assert "$statusPollTimer.Interval = 2000" in visible
+    assert "Cockpit clients:" in visible
+    assert "Idle exit on last cockpit close:" in visible
 
 
 def test_visible_launcher_diagnostics_include_launch_artifacts_and_redacted_log_tails():

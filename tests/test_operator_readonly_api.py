@@ -148,6 +148,8 @@ def _verified_provider(
     supervisor: OperatorPaperSupervisor,
     *,
     stack_exit_callback=None,
+    operator_ui_idle_shutdown_enabled: bool | None = None,
+    operator_ui_disconnect_grace_seconds: float = 8.0,
 ) -> tuple[OperatorSnapshotProvider, dict]:
     _write_canonical_paper_env()
     snapshot = _verified_broker_snapshot()
@@ -156,6 +158,8 @@ def _verified_provider(
         provider_env=dict(PAPER_ENV),
         portfolio_client=FakeReadOnlyClient(snapshot),
         stack_exit_callback=stack_exit_callback,
+        operator_ui_idle_shutdown_enabled=operator_ui_idle_shutdown_enabled,
+        operator_ui_disconnect_grace_seconds=operator_ui_disconnect_grace_seconds,
     )
     accepted = provider.paper_baseline_accept(
         {
@@ -182,6 +186,15 @@ def _endpoint(app, path: str, method: str = "GET"):
 
             return call
     raise AssertionError(f"route not found: {method} {path}")
+
+
+def _wait_until(predicate, *, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return bool(predicate())
 
 
 def _app(tmp_path):
@@ -293,14 +306,17 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
 
 
 def test_operator_event_stream_emits_changes_not_idle_one_second_duplicates(tmp_path):
-    app = _app(tmp_path)
+    provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
+    app = create_operator_app(provider=provider)
     response = _endpoint(app, "/operator/events")()
 
     async def collect_initial_then_wait_for_duplicate():
         iterator = response.body_iterator.__aiter__()
         initial = [await iterator.__anext__() for _ in range(3)]
+        assert provider.operator_ui_connection_status()["connected_clients"] == 1
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(iterator.__anext__(), timeout=2.2)
+        await iterator.aclose()
         return initial
 
     initial = asyncio.run(collect_initial_then_wait_for_duplicate())
@@ -311,6 +327,143 @@ def test_operator_event_stream_emits_changes_not_idle_one_second_duplicates(tmp_
         "event: launcher_status",
         "event: runtime_minimal",
     ]
+    connection = provider.operator_ui_connection_status()
+    assert connection["connected_clients"] == 0
+    assert connection["last_disconnect_action"] == "IDLE_SHUTDOWN_DISABLED"
+
+
+def test_operator_ui_last_disconnect_stops_only_after_all_clients_and_reconnect_grace(tmp_path):
+    exit_calls: list[str] = []
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        stack_exit_callback=lambda: exit_calls.append("scheduled"),
+        operator_ui_idle_shutdown_enabled=True,
+        operator_ui_disconnect_grace_seconds=0.04,
+    )
+
+    first = provider.operator_ui_connected()
+    second = provider.operator_ui_connected()
+    one_left = provider.operator_ui_disconnected()
+
+    assert first["connected_clients"] == 1
+    assert second["connected_clients"] == 2
+    assert one_left["connected_clients"] == 1
+    assert one_left["last_disconnect_action"] == "OTHER_COCKPIT_CLIENTS_REMAIN"
+    time.sleep(0.06)
+    assert exit_calls == []
+
+    pending = provider.operator_ui_disconnected()
+    assert pending["last_disconnect_action"] == "IDLE_SHUTDOWN_GRACE_PENDING"
+    time.sleep(0.01)
+    reconnected = provider.operator_ui_connected()
+    assert reconnected["connected_clients"] == 1
+    time.sleep(0.06)
+    assert exit_calls == []
+
+    provider.operator_ui_disconnected()
+    assert _wait_until(lambda: exit_calls == ["scheduled"])
+    status = provider.operator_ui_connection_status()
+    assert status["connected_clients"] == 0
+    assert status["last_disconnect_action"] == "NO_ACTIVE_RUN"
+    assert status["broker_call_occurred"] is False
+    assert status["broker_mutation_occurred"] is False
+
+
+def test_operator_ui_disconnect_preserves_attached_paper_runtime(tmp_path):
+    _write_canonical_paper_env()
+    runner = FakeRunner()
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
+        runner=runner,
+    )
+    exit_calls: list[str] = []
+    provider, _verified = _verified_provider(
+        supervisor,
+        stack_exit_callback=lambda: exit_calls.append("scheduled"),
+        operator_ui_idle_shutdown_enabled=True,
+        operator_ui_disconnect_grace_seconds=0.01,
+    )
+    started = provider.paper_start_intent(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD"],
+            "approve_autonomous_paper": True,
+            "real_money": False,
+            "live": False,
+        }
+    )
+    assert started["allowed"] is True
+
+    provider.operator_ui_connected()
+    provider.operator_ui_disconnected()
+    assert _wait_until(
+        lambda: provider.operator_ui_connection_status()["last_disconnect_action"]
+        == "ACTIVE_OR_UNCERTAIN_RUNTIME_PROTECTED_FROM_AUTOMATIC_SHUTDOWN"
+    )
+
+    assert exit_calls == []
+    assert runner.shutdown_requests == 0
+    assert supervisor.status_snapshot()["state"] == "RUNNING"
+    assert supervisor.status_snapshot()["paper_stop_allowed"] is True
+
+    refused = provider.stack_shutdown_intent(
+        {
+            "confirm_shutdown_stack": True,
+            "confirm_api_process_exit": True,
+            "confirm_preserve_broker_positions": True,
+            "confirm_no_broker_cleanup_requested": True,
+            "require_idle_supervisor": True,
+            "requested_by": "active_runtime_race_test",
+        }
+    )
+    assert refused["allowed"] is False
+    assert refused["reason_code"] == "ACTIVE_OR_UNCERTAIN_RUNTIME_PROTECTED_FROM_AUTOMATIC_SHUTDOWN"
+    assert refused["api_exit_scheduled"] is False
+    assert refused["broker_call_occurred"] is False
+    assert refused["broker_mutation_occurred"] is False
+    assert runner.shutdown_requests == 0
+
+
+def test_idle_stack_shutdown_blocks_later_start_without_broker_mutation(tmp_path):
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        stack_exit_callback=lambda: None,
+    )
+    shutdown = provider.stack_shutdown_intent(
+        {
+            "confirm_shutdown_stack": True,
+            "confirm_api_process_exit": True,
+            "confirm_preserve_broker_positions": True,
+            "confirm_no_broker_cleanup_requested": True,
+            "require_idle_supervisor": True,
+            "dry_run": True,
+            "requested_by": "idle_shutdown_race_test",
+        }
+    )
+    refused_start = provider.paper_start_intent(
+        {
+            "mode": "PAPER",
+            "profile": "PAPER_EXPLORATION_ALPHA",
+            "duration_seconds": 300,
+            "watchlist": ["BTC/USD"],
+            "approve_autonomous_paper": True,
+            "real_money": False,
+            "live": False,
+        }
+    )
+
+    assert shutdown["allowed"] is True
+    assert shutdown["idle_only_shutdown"] is True
+    assert shutdown["supervisor_state"] == "IDLE"
+    assert shutdown["api_exit_scheduled"] is False
+    assert shutdown["broker_call_occurred"] is False
+    assert shutdown["broker_mutation_occurred"] is False
+    assert refused_start["allowed"] is False
+    assert refused_start["reason_code"] == "STACK_SHUTDOWN_IN_PROGRESS"
+    assert refused_start["broker_call_occurred"] is False
+    assert refused_start["broker_mutation_occurred"] is False
 
 
 def test_operator_intents_are_refused_without_mutation(tmp_path):
@@ -902,6 +1055,9 @@ def test_operator_control_lane_endpoints_are_local_only(tmp_path):
     assert launcher_status["paper_only"] is True
     assert launcher_status["live_locked"] is True
     assert launcher_status["real_money_blocked"] is True
+    assert launcher_status["operator_ui_connection_count"] == 0
+    assert launcher_status["operator_ui_idle_shutdown_enabled"] is False
+    assert launcher_status["operator_ui_disconnect_grace_seconds"] == 8.0
     assert launcher_status["broker_call_occurred"] is False
     assert launcher_status["broker_mutation_occurred"] is False
 

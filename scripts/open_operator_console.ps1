@@ -26,6 +26,7 @@ if ([string]::IsNullOrWhiteSpace($OperatorStateBase)) {
 }
 $OperatorStateRoot = Join-Path $OperatorStateBase "PovertyKiller\state\operator"
 [Environment]::SetEnvironmentVariable("PK_OPERATOR_STATE_DIR", $OperatorStateRoot, "Process")
+[Environment]::SetEnvironmentVariable("PK_OPERATOR_IDLE_EXIT_ON_UI_DISCONNECT", "true", "Process")
 
 New-Item -Path $LogRoot -ItemType Directory -Force | Out-Null
 New-Item -Path $OperatorStateRoot -ItemType Directory -Force | Out-Null
@@ -114,6 +115,7 @@ $script:LastStdoutLog = "none"
 $script:LastStderrLog = "none"
 $script:LastCommand = "none"
 $script:LastHealthUrl = "$BaseUrl/operator/health"
+$script:LauncherBusy = $false
 
 function Set-LauncherFailure {
     param(
@@ -368,21 +370,26 @@ function Invoke-OperatorJson {
 }
 
 function Request-OperatorStackShutdown {
-    param([string]$RequestedBy = "desktop_launcher")
+    param(
+        [string]$RequestedBy = "desktop_launcher",
+        [bool]$RequireIdle = $false
+    )
     try {
         $payload = @{
             confirm_shutdown_stack = $true
             confirm_api_process_exit = $true
             confirm_preserve_broker_positions = $true
             confirm_no_broker_cleanup_requested = $true
+            require_idle_supervisor = $RequireIdle
             requested_by = $RequestedBy
         } | ConvertTo-Json -Compress
-        Invoke-WebRequest -Uri "$BaseUrl/operator/intent/stack/shutdown" -Method POST -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 2 | Out-Null
-        Write-LauncherLog "stack_shutdown_intent_sent endpoint=/operator/intent/stack/shutdown requested_by=$RequestedBy"
-        return $true
+        $response = Invoke-WebRequest -Uri "$BaseUrl/operator/intent/stack/shutdown" -Method POST -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 2
+        $result = $response.Content | ConvertFrom-Json
+        Write-LauncherLog "stack_shutdown_intent_result endpoint=/operator/intent/stack/shutdown requested_by=$RequestedBy require_idle=$RequireIdle allowed=$($result.allowed) reason=$($result.reason_code)"
+        return $result
     } catch {
         Write-LauncherLog "stack_shutdown_intent_failed=$($_.Exception.GetType().Name):$($_.Exception.Message)"
-        return $false
+        return $null
     }
 }
 
@@ -420,6 +427,10 @@ function Get-LauncherStatus {
     $healthState = "Offline"
     $healthDetail = "Backend is not listening."
     $uiOpenStatus = if ($script:UiOpenedAt) { "Opened by launcher at $script:UiOpenedAt" } else { "Not opened by launcher" }
+    $supervisorState = "UNKNOWN"
+    $activeRunId = "none"
+    $operatorUiConnectionCount = -1
+    $operatorUiIdleShutdownEnabled = $false
 
     if ($script:LauncherStateOverride -eq "FAILED") {
         $status = "FAILED"
@@ -470,7 +481,13 @@ function Get-LauncherStatus {
                 $loadedBranch = First-TextValue $launcherStatus.loaded_branch $loadedBranch
                 $startTime = First-TextValue $launcherStatus.process_start_time $startTime
                 $backendPid = First-TextValue $launcherStatus.pid $backendPid
-                $healthDetail = "Launcher status OK; supervisor $($launcherStatus.supervisor_state); active run $($launcherStatus.active_run_id)."
+                $supervisorState = First-TextValue $launcherStatus.supervisor_state "UNKNOWN"
+                $activeRunId = First-TextValue $launcherStatus.active_run_id "none"
+                if ($null -ne $launcherStatus.operator_ui_connection_count) {
+                    $operatorUiConnectionCount = [int]$launcherStatus.operator_ui_connection_count
+                }
+                $operatorUiIdleShutdownEnabled = $launcherStatus.operator_ui_idle_shutdown_enabled -eq $true
+                $healthDetail = "Supervisor $supervisorState; active run $activeRunId; cockpit clients $operatorUiConnectionCount."
                 if ($launcherStatus.api_status -ne "OK") {
                     $status = "DEGRADED"
                     $warning = "Launcher status degraded: $($launcherStatus.degraded_reason_codes -join ',')."
@@ -541,6 +558,10 @@ function Get-LauncherStatus {
         Health = $healthText
         HealthState = $healthState
         HealthDetail = $healthDetail
+        SupervisorState = $supervisorState
+        ActiveRunId = $activeRunId
+        OperatorUiConnectionCount = $operatorUiConnectionCount
+        OperatorUiIdleShutdownEnabled = $operatorUiIdleShutdownEnabled
         FreshnessStatus = $freshnessStatus
         FreshnessDetail = $freshnessDetail
         UiOpenStatus = $uiOpenStatus
@@ -613,6 +634,7 @@ function Start-Backend {
 }
 
 function Stop-Backend {
+    param([switch]$RequireIdle)
     $script:LauncherStateOverride = "STOPPING"
     $script:LastStopAttemptTime = (Get-Date).ToString("o")
     Write-LauncherLog "stop_backend_requested port=$Port"
@@ -624,19 +646,25 @@ function Stop-Backend {
         }
         Write-LauncherLog "stop_backend_no_operator_process port=$Port"
         Clear-LauncherTransition
-        return
+        return $true
     }
-    if (Request-OperatorStackShutdown "visible_launcher_stop_backend") {
+    $shutdown = Request-OperatorStackShutdown "visible_launcher_stop_backend" ([bool]$RequireIdle)
+    if ($null -ne $shutdown -and $shutdown.allowed -eq $true) {
         for ($i = 0; $i -lt 24; $i += 1) {
             Start-Sleep -Milliseconds 250
             [System.Windows.Forms.Application]::DoEvents()
             if (-not (Test-PortListening)) {
                 Write-LauncherLog "backend_stop_confirmed_via_stack_shutdown port=$Port"
                 Clear-LauncherTransition
-                return
+                return $true
             }
         }
         Write-LauncherLog "stack_shutdown_port_still_listening_fallback_to_scoped_process_stop port=$Port"
+    } elseif ($RequireIdle) {
+        $reason = if ($null -ne $shutdown) { [string]$shutdown.reason_code } else { "IDLE_ONLY_SHUTDOWN_UNAVAILABLE" }
+        Write-LauncherLog "idle_only_backend_stop_preserved reason=$reason"
+        Clear-LauncherTransition
+        return $false
     }
     foreach ($process in $processes) {
         Write-LauncherLog "stopping_backend_pid=$($process.ProcessId)"
@@ -662,12 +690,18 @@ function Stop-Backend {
     }
     Write-LauncherLog "backend_stop_confirmed port=$Port"
     Clear-LauncherTransition
+    return $true
 }
 
 function Restart-Backend {
+    param([switch]$RequireIdle)
     Write-LauncherLog "restart_backend_requested port=$Port"
     try {
-        Stop-Backend
+        $stopped = Stop-Backend -RequireIdle:$RequireIdle
+        if ($stopped -ne $true) {
+            Write-LauncherLog "restart_backend_preserved_active_or_uncertain_runtime"
+            return $false
+        }
     } catch {
         if ($script:LastFailurePhase -eq "none") {
             Set-LauncherFailure "stop_failed" $_.Exception.Message
@@ -686,6 +720,32 @@ function Restart-Backend {
         }
         throw
     }
+    return $true
+}
+
+function Ensure-FreshIdleBackend {
+    param($Model)
+    if ($null -eq $Model -or $Model.Status -notin @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT")) {
+        return $Model
+    }
+    $activeOrUncertain = $Model.SupervisorState -ne "IDLE" -or $Model.ActiveRunId -ne "none"
+    $orphaned = $Model.OperatorUiConnectionCount -eq 0
+    $lifecycleUpgradeRequired = $Model.OperatorUiConnectionCount -lt 0 -or -not $Model.OperatorUiIdleShutdownEnabled
+    $codeRefreshRequired = $Model.FreshnessStatus -in @("Stale", "Unknown")
+    if (-not ($orphaned -or $lifecycleUpgradeRequired -or $codeRefreshRequired)) {
+        Write-LauncherLog "startup_backend_reused_current_attached_cockpit clients=$($Model.OperatorUiConnectionCount)"
+        return $Model
+    }
+    if ($activeOrUncertain) {
+        Write-LauncherLog "startup_backend_preserved_active_or_uncertain supervisor=$($Model.SupervisorState) active_run=$($Model.ActiveRunId)"
+        return $Model
+    }
+    Write-LauncherLog "startup_fresh_idle_backend_requested orphaned=$orphaned lifecycle_upgrade=$lifecycleUpgradeRequired code_refresh=$codeRefreshRequired"
+    $restarted = Restart-Backend -RequireIdle
+    if ($restarted -ne $true) {
+        return (Refresh-LauncherStatus)
+    }
+    return (Wait-ForBackendReady)
 }
 
 function Open-OperatorUi {
@@ -719,6 +779,10 @@ function Get-DiagnosticsText {
         "Backend loaded branch: $($Model.LoadedBranch)",
         "Backend PID: $($Model.BackendPid)",
         "Spawned launcher PID: $($Model.SpawnedPid)",
+        "Supervisor state: $($Model.SupervisorState)",
+        "Active run: $($Model.ActiveRunId)",
+        "Cockpit clients: $($Model.OperatorUiConnectionCount)",
+        "Idle exit on last cockpit close: $($Model.OperatorUiIdleShutdownEnabled)",
         "Port listening: $($Model.PortListening)",
         "Backend process start: $($Model.ProcessStartTime)",
         "Last health: $($Model.Health)",
@@ -1073,6 +1137,7 @@ $form.Controls.Add($safetyLabel)
 
 function Set-Busy {
     param([bool]$Busy, [string]$StateText)
+    $script:LauncherBusy = $Busy
     $startButton.Enabled = -not $Busy
     $stopButton.Enabled = -not $Busy
     $restartButton.Enabled = -not $Busy
@@ -1269,11 +1334,13 @@ $stopButton.Add_Click({
 $restartButton.Add_Click({
     try {
         Set-Busy $true "RESTARTING"
-        Restart-Backend
-        $model = Wait-ForBackendReady
+        $restarted = Restart-Backend -RequireIdle
+        $model = if ($restarted -eq $true) { Wait-ForBackendReady } else { Refresh-LauncherStatus }
         if ($model.Status -eq "RUNNING" -and -not $model.Warning) {
             Open-OperatorUi
             Refresh-LauncherStatus | Out-Null
+        } elseif ($restarted -ne $true) {
+            $warningLabel.Text = "Restart preserved an active or uncertain runtime. Use governed Stop before restarting."
         }
     } catch {
         $warningLabel.Text = "Restart failed: $($_.Exception.Message)"
@@ -1316,6 +1383,9 @@ $startupTimer.Add_Tick({
             Set-Busy $true "STARTING"
             Start-Backend
             $model = Wait-ForBackendReady
+        } else {
+            Set-Busy $true "CHECKING LIFECYCLE"
+            $model = Ensure-FreshIdleBackend $model
         }
         if ($model.Status -eq "RUNNING" -and -not $model.Warning -and -not $NoAutoOpen.IsPresent) {
             Open-OperatorUi
@@ -1334,6 +1404,35 @@ $form.Add_Shown({
     $statusLabel.Text = "Backend status: CHECKING"
     [System.Windows.Forms.Application]::DoEvents()
     $startupTimer.Start()
+})
+
+$statusPollTimer = New-Object System.Windows.Forms.Timer
+$statusPollTimer.Interval = 2000
+$statusPollTimer.Add_Tick({
+    if (-not $script:LauncherBusy) {
+        try {
+            Refresh-LauncherStatus | Out-Null
+        } catch {
+            Write-LauncherLog "status_poll_failed=$($_.Exception.GetType().Name):$($_.Exception.Message)"
+        }
+    }
+})
+$statusPollTimer.Start()
+
+$form.Add_FormClosing({
+    $statusPollTimer.Stop()
+    try {
+        $model = Get-LauncherStatus
+        if ($model.Status -in @("RUNNING", "RUNNING_STATUS_TIMEOUT", "RUNNING_LAUNCHER_STATUS_TIMEOUT") -and
+            $model.OperatorUiConnectionCount -le 0 -and
+            $model.SupervisorState -eq "IDLE") {
+            Stop-Backend -RequireIdle | Out-Null
+        } else {
+            Write-LauncherLog "launcher_window_close_preserved_backend supervisor=$($model.SupervisorState) cockpit_clients=$($model.OperatorUiConnectionCount)"
+        }
+    } catch {
+        Write-LauncherLog "launcher_window_close_cleanup_failed=$($_.Exception.GetType().Name):$($_.Exception.Message)"
+    }
 })
 
 Write-LauncherLog "launcher_window_opened base_url=$BaseUrl"

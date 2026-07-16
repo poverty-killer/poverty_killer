@@ -39,6 +39,7 @@ if ([string]::IsNullOrWhiteSpace($OperatorStateBase)) {
 }
 $OperatorStateRoot = Join-Path $OperatorStateBase "PovertyKiller\state\operator"
 [Environment]::SetEnvironmentVariable("PK_OPERATOR_STATE_DIR", $OperatorStateRoot, "Process")
+[Environment]::SetEnvironmentVariable("PK_OPERATOR_IDLE_EXIT_ON_UI_DISCONNECT", "true", "Process")
 
 New-Item -Path $LogRoot -ItemType Directory -Force | Out-Null
 New-Item -Path $OperatorStateRoot -ItemType Directory -Force | Out-Null
@@ -203,14 +204,16 @@ function Request-OperatorStackShutdown {
             confirm_api_process_exit = $true
             confirm_preserve_broker_positions = $true
             confirm_no_broker_cleanup_requested = $true
+            require_idle_supervisor = $true
             requested_by = $RequestedBy
         } | ConvertTo-Json -Compress
-        Invoke-WebRequest -Uri "$BaseUrl/operator/intent/stack/shutdown" -Method POST -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 2 | Out-Null
-        Write-LaunchLog "stack_shutdown_intent_sent endpoint=/operator/intent/stack/shutdown requested_by=$RequestedBy"
-        return $true
+        $response = Invoke-WebRequest -Uri "$BaseUrl/operator/intent/stack/shutdown" -Method POST -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 2
+        $result = $response.Content | ConvertFrom-Json
+        Write-LaunchLog "stack_shutdown_intent_result endpoint=/operator/intent/stack/shutdown requested_by=$RequestedBy require_idle=true allowed=$($result.allowed) reason=$($result.reason_code)"
+        return $result
     } catch {
         Write-LaunchLog "stack_shutdown_intent_failed=$($_.Exception.GetType().Name):$($_.Exception.Message)"
-        return $false
+        return $null
     }
 }
 
@@ -226,8 +229,13 @@ function Stop-StaleOperatorBackend {
             $commandLine = [string]$process.CommandLine
             if ($commandLine -like "*app.api.operator_readonly_api:create_operator_app*") {
                 Write-LaunchLog "Stopping stale operator backend pid=$processId"
-                $graceful = Request-OperatorStackShutdown "hidden_launcher_stale_backend"
-                if ($graceful) {
+                $shutdown = Request-OperatorStackShutdown "hidden_launcher_stale_backend"
+                if ($null -eq $shutdown -or $shutdown.allowed -ne $true) {
+                    $reason = if ($null -ne $shutdown) { [string]$shutdown.reason_code } else { "IDLE_ONLY_SHUTDOWN_UNAVAILABLE" }
+                    Write-LaunchLog "stale_backend_preserved_active_or_uncertain pid=$processId reason=$reason"
+                    continue
+                }
+                if ($shutdown.allowed -eq $true) {
                     Start-Sleep -Milliseconds 1000
                 }
                 if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {

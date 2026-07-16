@@ -293,7 +293,7 @@ def test_killed_bot_pulse_freezes_within_heartbeat_stale_threshold(tmp_path, mon
             process.kill()
 
 
-def test_operator_run_visibility_endpoint_and_page_are_read_only(tmp_path):
+def test_operator_run_visibility_endpoint_prefers_idle_supervisor_over_orphan_running_artifacts(tmp_path):
     _write_running_artifacts(tmp_path)
     runtime_config = OperatorRuntimeConfig.from_env({}, repo_root=tmp_path)
     app = create_operator_app(provider=OperatorSnapshotProvider(runtime_config=runtime_config))
@@ -302,7 +302,12 @@ def test_operator_run_visibility_endpoint_and_page_are_read_only(tmp_path):
     page = _endpoint(app, "/operator/run-visibility")()
     html = page.body.decode("utf-8")
 
-    assert status["status"] == "RUNNING"
+    assert status["status"] == "IDLE"
+    assert status["prominent_state"] == "IDLE"
+    assert status["bot_vital_status"] == "IDLE"
+    assert status["pulse_animation_allowed"] is False
+    assert status["market_vital_status"] == "NO_RUNTIME"
+    assert "Historical runtime artifacts remain read-only evidence" in status["runtime_artifact_note"]
     assert status["controls_available"] is False
     assert status["broker_mutation_occurred"] is False
     assert status["live_enabled"] is False
