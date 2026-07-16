@@ -246,6 +246,38 @@ PAPER Start control, but observed no result. Full evidence is in
   live/real-money path, order, cancel, close, liquidation, threshold change, or
   tracked runtime-state edit occurred.
 
+## Operator Process Lifecycle Recovery
+
+Completed on 2026-07-15 after Shan showed `NO_ACTIVE_PAPER_RUN` together with
+`BOT STALE` and requested fresh launcher/backend ownership. Full evidence is in
+`reports/completion/OPERATOR_PROCESS_LIFECYCLE_RECOVERY_REPORT.md`.
+
+- Root cause: the backend was current and supervisor-idle, not stale; a
+  historical heartbeat artifact was incorrectly overriding current vitality.
+- PASS - idle cockpit truth is now `BOT IDLE` / `MKT NO_RUNTIME`; both vitality
+  animations are frozen and the historical artifact remains disclosed.
+- PASS - closing the last cockpit event stream starts an eight-second grace and
+  exits only an idle operator API through the existing stack-shutdown owner.
+- PASS - reconnects/multiple tabs cancel or defer exit; active or uncertain
+  PAPER runtimes are refused automatic shutdown and remain under governed Stop.
+- PASS - a new launcher replaces an orphaned, lifecycle-old, or code-stale idle
+  backend and preserves any active/uncertain runtime.
+- Validation: 111 focused tests passed; 279 broader operator tests passed; full
+  suite `1820 passed, 14 skipped, 0 failed`; Python/JavaScript/PowerShell syntax
+  passed.
+- Browser/runtime proof: desktop 1440 and mobile 390 rendered BOT IDLE / MKT
+  NO_RUNTIME with frozen pulses and no overflow; last-tab closure stopped two
+  isolated idle backends in 10.254s and 9.64s.
+- Current deployment: commit `3e71c55`, backend PID `20824`, supervisor `IDLE`,
+  lifecycle enabled, attached cockpit clients present.
+- Board-authorized PAPER GET-only proof: `READY_FOR_BOUNDED_PAPER`, Start
+  allowed, suffix `045ded`, `BROKER_CONFIRMED`, 4 protected positions, zero open
+  orders, and zero broker mutation.
+- No PAPER run, Start click, order, cancel, close, liquidation, live/real-money
+  action, threshold change, or protected state staging occurred.
+- Safety ruling surfaced: browser closure never kills an active or uncertain
+  runtime; browser chrome is not a trading-lifecycle authority.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from protected runtime files and pre-existing

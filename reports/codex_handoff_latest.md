@@ -1,134 +1,93 @@
-# Codex Session Handoff - Four-Hour PAPER Start Interaction Recovery
+# Codex Session Handoff - Operator Process Lifecycle Recovery
 
 Date: 2026-07-15 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Starting commit: `a2b8000 restore truthful operator controls`
-Full report: `reports/completion/PAPER_START_INTERACTION_RECOVERY_REPORT.md`
+Starting commit: `e958abd make bounded paper start explicit`
+Code commit: `3e71c55 make operator backend lifecycle truthful`
+Full report: `reports/completion/OPERATOR_PROCESS_LIFECYCLE_RECOVERY_REPORT.md`
 
 ## Current Verdict
 
-The browser-side Start dead end is fixed and the repository suite is green.
+The screenshot's `BOT STALE` state was false current vitality, not a stale
+backend. The current supervisor was idle while a historical heartbeat artifact
+was overriding it. The cockpit and local process lifecycle are fixed.
 
-- Integrated operator gate: `178 passed, 72 warnings`.
-- Full suite: `1816 passed, 14 skipped, 384 warnings, 0 failed`.
-- JavaScript syntax: PASS.
-- Desktop/mobile browser proof: PASS with the Start POST intercepted.
-- No real PAPER run was started by Codex and no broker mutation occurred.
+- Full suite: `1820 passed, 14 skipped, 0 failed`.
+- Desktop/mobile browser proof: BOT IDLE, MKT NO_RUNTIME, frozen pulses, no
+  horizontal overflow.
+- Isolated last-cockpit shutdown proof: idle backend exited in 10.254s and 9.64s.
+- No PAPER run, broker mutation, live mode, or real money.
 
-## Original Attempt Truth
+## Implemented Contract
 
-Shan selected a four-hour bounded PAPER run and pressed Start. Immediate live
-inspection proved:
+1. `/operator/events` counts attached cockpit streams.
+2. Closing the last stream starts an eight-second reconnect grace.
+3. Grace expiry requests the existing stack-shutdown owner with
+   `require_idle_supervisor=true`.
+4. The backend refuses automatic shutdown unless the supervisor is exactly
+   `IDLE`; active/uncertain runtimes are preserved.
+5. Start and shutdown admission are serialized, so a Start cannot race an
+   accepted shutdown.
+6. Launcher startup replaces an orphaned/lifecycle-old/code-stale idle backend
+   and opens the current cockpit.
+7. Existing `Stop Backend` remains the explicit process-only operator command.
 
-- backend `a2b8000`, supervisor `IDLE`;
-- `NO_ACTIVE_RUNTIME_ATTACHED`;
-- no session, child PID, exit code, or Start refusal;
-- no Start event in durable `sessions.jsonl`;
-- `14400` present in the backend allowed-duration set;
-- backend readiness `READY_FOR_BOUNDED_PAPER`, Start allowed;
-- no broker mutation.
+No unload callback, broad process-name kill, new shutdown subsystem, or browser
+authority over trading lifecycle was added.
 
-The request stopped in the browser before `POST /operator/intent/paper/start`.
-The exact pre-POST dialog branch is unknown.
+## Current Live Truth
 
-## Root Cause and Fix
+The updated launcher replaced backend PID `17708` with PID `20824` and loaded
+commit `3e71c55`.
 
-Backend green state and draft validity enabled the primary button, but four
-unchecked-by-default safety confirmations were enforced later inside the click
-handler. Missing confirmations or a dismissed native dialog returned with no
-inline or durable result, so the button appeared dead.
+- supervisor: `IDLE`; no active run
+- idle exit: enabled; cockpit clients attached
+- final readiness: `READY_FOR_BOUNDED_PAPER`
+- Start allowed: true; Stop allowed: false while idle
+- expected/actual account suffix: `045ded` / `045ded`
+- portfolio: `BROKER_CONFIRMED`
+- positions: 4 (`AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`)
+- open orders: 0
+- visibility: BOT `IDLE`, MKT `NO_RUNTIME`, pulse false
+- broker read: true; broker/order/cancel/close/liquidation mutation: false
 
-The repaired flow:
+The GET-only verification is process-scoped and must be repeated after a future
+backend restart. Codex did not press Start.
 
-1. Start review is disabled until backend readiness, draft validity, and all
-   four confirmations pass.
-2. The page shows `0/4` through `4/4` and names every missing item.
-3. `Review & Start Bounded PAPER Run` creates an inline review and explicitly
-   says `Start not sent`.
-4. `Confirm & Start Bounded PAPER Run` sends the frozen reviewed payload only if
-   the draft and readiness still match.
-5. An `aria-live=polite` surface shows pending, accepted, refused, cancelled,
-   invalidated, failed, and response-unknown states.
-6. A lost response clears the reviewed payload and forbids a blind retry until
-   runtime state is refreshed and understood.
+## Honest Validation Notes
 
-The supervisor, fresh broker preflight, account pin, runner, Stop, Risk, OMS,
-strategies, and all thresholds are unchanged.
-
-## Four-Hour Positive Proof
-
-`test_four_hour_start_reaches_existing_fake_runner_after_fresh_preflight`
-proves that a `14400`-second request:
-
-- passes the existing fake GET-only broker preflight;
-- is accepted by the existing supervisor;
-- reaches the existing fake runner command unchanged;
-- emits no broker/order mutation.
-
-This is test proof, not a real PAPER child run.
-
-## Browser Proof
-
-The in-app browser was unavailable because its tool bootstrap returned
-`missing field sandboxPolicy`; Edge/CDP was used as the recorded fallback.
-
-- initial button disabled with all four missing confirmations named;
-- four-hour selection retained after all four confirmations;
-- review panel showed profile, `4 hours (14400s)`, six-symbol watchlist, and
-  PAPER-only/live-locked/no-manual-trades authority;
-- intercepted requests before final confirmation: 0;
-- one final test-only intercepted payload preserved `duration_seconds=14400`,
-  `live=false`, and `real_money=false`;
-- inline result rendered `INTERCEPTED_TEST_ONLY_NO_RUN` as a refusal;
-- desktop and 390-pixel mobile horizontal overflow: false;
-- browser exceptions and console errors: 0.
-
-Post-proof live backend truth remained unattached with no session and Stop not
-allowed. Temporary screenshots are not staging artifacts.
-
-## Relabel Log
-
-- UI duration/start tests moved from removed popup/direct-Start copy to command
-  readiness, two-step intents, exact payload signature, and result-state proof.
-- The renderer test now executes both incomplete and complete confirmation
-  states and inspects the full button tag for `disabled`.
-- `test_home_paper_launch_control_requires_all_safety_confirmations` now asserts
-  the four canonical fields and live two-step gate instead of one literal popup
-  sentence.
-
-No assertion, guard, or threshold weakened.
+- Default pytest temp and `C:\tmp` were access-denied on two attempts; the same
+  tests passed using a workspace-owned temp base.
+- One malformed wildcard command collected zero tests and was replaced by an
+  explicit file list.
+- In-app browser bootstrap failed (`missing field sandboxPolicy`); Edge/CDP was
+  the recorded browser fallback.
+- A collided CDP port showed an old tab and was rejected as evidence; proof was
+  repeated on unused port 9333.
+- A cleanup helper overmatched its own PowerShell command only; no operator or
+  trading process was killed by that mistake.
+- A post-deploy poll used obsolete field `loaded_git_commit_short`; canonical
+  `loaded_commit` proved the new backend was already current.
 
 ## Safety Boundary
 
-- Shan's original browser click was the explicit four-hour authorization/attempt,
-  but it never reached the backend.
-- Codex did not automatically resend it.
-- No real PAPER child launch during repair.
-- No broker POST/mutation, order, cancel, replace, close, liquidation, or manual
-  trade control.
-- No live or real money.
-- `SovereignExecutionGuard` remains dormant.
-- Existing automated position lifecycle and governed Stop remain unchanged.
+The literal "kill all on browser close" behavior is intentionally bounded:
+closing the last cockpit stops only an idle API. It never kills an active or
+uncertain PAPER runtime. Governed Stop remains the run-lifecycle authority and
+protected positions remain under the bot's automated lifecycle.
 
-## Exact Commit Scope
+No Risk, NetEdge, sizing, TTL, masking, strategy, OMS, broker-governor, or
+execution threshold changed. `SovereignExecutionGuard` remains dormant.
 
-Stage only:
+## Exact Remaining Staging
 
-1. `ui/operator-control-panel/app.js`
-2. `tests/test_operator_ui_wiring.py`
-3. `tests/test_operator_home.py`
-4. `tests/test_operator_broker_preflight.py`
-5. `reports/completion/PAPER_START_INTERACTION_RECOVERY_REPORT.md`
-6. `CHECKPOINT_TRACKER.md`
-7. `reports/codex_handoff_latest.md`
+Stage exactly:
 
-Never stage protected `state/*`, `.pytest_tmp/`, `.test-*`, screenshots, secrets,
-logs, old handoffs, operator-performance reports, or untracked audit scripts.
+1. `reports/completion/OPERATOR_PROCESS_LIFECYCLE_RECOVERY_REPORT.md`
+2. `CHECKPOINT_TRACKER.md`
+3. `reports/codex_handoff_latest.md`
 
-## Operator Boundary
-
-After the committed backend/UI is reopened and GET-only verification restored,
-Shan must check the four visible confirmations, select `4 hours`, press
-`Review & Start`, inspect the exact inline request, then press `Confirm & Start`.
-Codex must not perform that final action without a new explicit instruction.
+Never stage protected `state/*`, `.pytest_tmp/`, screenshots, logs, secrets,
+old handoffs, UI proposal packets, operator-performance output, or untracked
+audit scripts.
