@@ -36,12 +36,15 @@ from app.operator_activation.paper_baseline import (
     PAPER_BASELINE_ENV_REQUIRED,
     PaperBaselineRuntimeContext,
     PaperBaselineStore,
+    accepted_baseline_account_suffix,
+    build_baseline_adoption_state,
     build_paper_baseline_runtime_context,
 )
 from app.operator_credentials.store import (
     ALPACA_ENDPOINT_SOURCE_ENV_KEY,
     alpaca_endpoint_authority,
     alpaca_paper_account_pin_env,
+    normalize_alpaca_account_suffix,
 )
 
 
@@ -58,6 +61,16 @@ DURATION_BOUND_EXCEEDED = "DURATION_BOUND_EXCEEDED"
 BOUNDED_RUNTIME_ACTIVE = "BOUNDED_RUNTIME_ACTIVE"
 ACTIVE_SESSION_STATUSES = {"STARTING", "RUNNING", "STOP_REQUESTED"}
 PR_SET_PDEATHSIG = 1
+PAPER_BROKER_READ_AUTH_ENV = "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ"
+PAPER_BROKER_READ_AUTH_VALUE = "YES_D4_BOARD_AUTHORIZED"
+PAPER_BROKER_PREFLIGHT_REQUIRED = "PAPER_BROKER_PREFLIGHT_REQUIRED"
+PAPER_BROKER_PREFLIGHT_FAILED = "PAPER_BROKER_PREFLIGHT_FAILED"
+PAPER_BROKER_PREFLIGHT_CONFIRMATIONS = {
+    "confirm_paper_read_only": "MISSING_PAPER_READ_ONLY_CONFIRMATION",
+    "confirm_account_positions_orders_get_only": "MISSING_GET_ONLY_SCOPE_CONFIRMATION",
+    "confirm_no_broker_mutation": "MISSING_NO_BROKER_MUTATION_CONFIRMATION",
+    "confirm_process_scoped_authorization": "MISSING_PROCESS_SCOPED_AUTHORIZATION_CONFIRMATION",
+}
 
 
 def utc_now_iso() -> str:
@@ -471,6 +484,11 @@ class OperatorPaperSupervisor:
         self._account_identity_checker_requires_board_read = account_identity_checker is None
         self._account_identity_cache: dict[str, Any] | None = None
         self._account_identity_cache_at_monotonic: float | None = None
+        self._process_paper_broker_read_authorized = False
+        self._paper_broker_read_authorized_at: str | None = None
+        self._paper_broker_preflight: dict[str, Any] = self._empty_paper_broker_preflight(
+            PAPER_BROKER_PREFLIGHT_REQUIRED
+        )
         store_path = Path(self.config.session_store_path) if self.config.session_store_path else (
             self.config.repo_root / "state" / "operator" / "sessions.jsonl"
         )
@@ -501,7 +519,15 @@ class OperatorPaperSupervisor:
         active_session = latest_session if is_active else None
         paper_key_refusal = self._paper_key_refusal()
         endpoint_authority = self._paper_endpoint_authority()
-        account_identity = self._paper_account_identity_assertion()
+        preflight = self.paper_broker_preflight_status()
+        account_identity = (
+            dict(preflight.get("account_identity_assertion") or {})
+            if isinstance(preflight.get("account_identity_assertion"), Mapping)
+            else blocked_account_identity_assertion(
+                str(preflight.get("reason_code") or PAPER_BROKER_PREFLIGHT_REQUIRED),
+                "Pinned account identity will be checked by the governed GET-only PAPER broker verification.",
+            )
+        )
         paper_start_refusal = self._paper_start_prerequisite_refusal(account_identity=account_identity)
         broker_read_profile = self._broker_read_profile().to_dict()
         return {
@@ -544,6 +570,8 @@ class OperatorPaperSupervisor:
                 "real_money_touched": False,
             },
             "broker_read_permission_profile": broker_read_profile,
+            "paper_broker_read_authorization": self.paper_broker_read_authorization_status(),
+            "paper_broker_preflight": self.paper_broker_preflight_status(),
             "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
             "startup_lifecycle_reconciliation": dict(self._startup_lifecycle_event),
             "process_lifecycle": {
@@ -922,6 +950,221 @@ class OperatorPaperSupervisor:
             runtime_mutation_occurred=False,
         )
 
+    def paper_broker_read_authorization_status(self) -> dict[str, Any]:
+        env_authorized = (
+            str(self.config.process_env.get(PAPER_BROKER_READ_AUTH_ENV) or "").strip().upper()
+            == PAPER_BROKER_READ_AUTH_VALUE
+        )
+        authorized = env_authorized or self._process_paper_broker_read_authorized
+        source = (
+            "PROCESS_ENV_BOARD_AUTHORIZATION"
+            if env_authorized
+            else "OPERATOR_PROCESS_CONFIRMATION"
+            if self._process_paper_broker_read_authorized
+            else "NOT_AUTHORIZED"
+        )
+        return {
+            "source": source,
+            "authorized": authorized,
+            "scope": "CURRENT_OPERATOR_PROCESS_ONLY" if self._process_paper_broker_read_authorized else (
+                "CURRENT_PROCESS_ENV" if env_authorized else "NONE"
+            ),
+            "authorized_at": self._paper_broker_read_authorized_at,
+            "persists_across_backend_restart": None if env_authorized else False,
+            "restart_persistence_status": (
+                "PARENT_ENV_CONFIGURATION_DEPENDENT"
+                if env_authorized
+                else "RESETS_ON_BACKEND_RESTART"
+                if self._process_paper_broker_read_authorized
+                else "NOT_AUTHORIZED"
+            ),
+            "allowed_methods": ["GET"],
+            "allowed_families": ["account", "orders", "positions"],
+            "broker_mutation_authorized": False,
+            "order_submission_authorized": False,
+            "cancel_authorized": False,
+            "liquidation_authorized": False,
+            "live_enabled": False,
+            "real_money_enabled": False,
+            "secrets_values_exposed": False,
+        }
+
+    def paper_broker_read_is_authorized(self) -> bool:
+        return self.paper_broker_read_authorization_status()["authorized"] is True
+
+    def paper_broker_read_env(self) -> dict[str, str]:
+        env = dict(self.config.process_env)
+        if self.paper_broker_read_is_authorized():
+            env[PAPER_BROKER_READ_AUTH_ENV] = PAPER_BROKER_READ_AUTH_VALUE
+        env.update(self._broker_read_profile().to_env())
+        return env
+
+    def authorize_paper_broker_read(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        request = payload or {}
+        self._refresh_process_state()
+        if self._session and self._session.status in ACTIVE_SESSION_STATUSES:
+            return self.generic_refusal(
+                "paper_broker_preflight",
+                "PAPER_RUNTIME_ACTIVE_READ_VERIFICATION_UNAVAILABLE",
+            )
+        mode = str(request.get("mode") or "PAPER").strip().upper()
+        if mode != "PAPER" or request.get("live") is True or request.get("real_money") is True:
+            return self.generic_refusal("paper_broker_preflight", "PAPER_MODE_REQUIRED")
+        for field, reason_code in PAPER_BROKER_PREFLIGHT_CONFIRMATIONS.items():
+            if request.get(field) is not True:
+                response = self.generic_refusal("paper_broker_preflight", reason_code)
+                response["missing_confirmation"] = field
+                return response
+
+        self._process_paper_broker_read_authorized = True
+        self._paper_broker_read_authorized_at = utc_now_iso()
+        self._account_identity_cache = None
+        self._account_identity_cache_at_monotonic = None
+        event = self._record_event(
+            "paper_broker_preflight",
+            True,
+            "PAPER_BROKER_READ_AUTHORIZED_FOR_PROCESS",
+            self._session.session_id if self._session else None,
+            False,
+        )
+        return {
+            "intent": "paper_broker_preflight",
+            "intent_id": f"intent_{uuid.uuid4().hex[:16]}",
+            "allowed": True,
+            "status": "AUTHORIZED",
+            "reason_code": "PAPER_BROKER_READ_AUTHORIZED_FOR_PROCESS",
+            "audit_event_id": event.audit_event_id,
+            "audit_event_written": True,
+            "authorization": self.paper_broker_read_authorization_status(),
+            "operator_process_state_mutation_occurred": True,
+            "runtime_mutation_occurred": False,
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+            "close_position_occurred": False,
+            "live_endpoint_touched": False,
+            "real_money_touched": False,
+            "secrets_values_exposed": False,
+        }
+
+    def record_paper_broker_preflight(self, snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
+        portfolio = dict(snapshot or {})
+        identity = self._paper_account_identity_assertion(force=True)
+        baseline_store = PaperBaselineStore(self._baseline_store_path())
+        accepted_baseline = baseline_store.current()
+        baseline_state = build_baseline_adoption_state(
+            current_snapshot=portfolio,
+            accepted_baseline=accepted_baseline if accepted_baseline.get("accepted") is True else None,
+        )
+        summary = portfolio.get("summary") if isinstance(portfolio.get("summary"), Mapping) else {}
+        positions = portfolio.get("positions") if isinstance(portfolio.get("positions"), list) else []
+        open_orders = portfolio.get("open_orders") if isinstance(portfolio.get("open_orders"), list) else []
+        portfolio_account_suffix = normalize_alpaca_account_suffix(summary.get("account_id"))
+        identity_account_suffix = normalize_alpaca_account_suffix(identity.get("actual_suffix"))
+        baseline_account_suffix = accepted_baseline_account_suffix(
+            accepted_baseline if accepted_baseline.get("accepted") is True else None
+        )
+        refusal: str | None = None
+        if not self.paper_broker_read_is_authorized():
+            refusal = PAPER_BROKER_PREFLIGHT_REQUIRED
+        elif portfolio.get("broker_read_occurred") is not True or str(portfolio.get("data_source") or "") != "BROKER_CONFIRMED":
+            refusal = str(portfolio.get("unavailable_reason") or PAPER_BROKER_PREFLIGHT_FAILED)
+        elif any(
+            portfolio.get(field) is True
+            for field in (
+                "broker_mutation_occurred",
+                "order_submission_occurred",
+                "cancel_occurred",
+                "liquidation_occurred",
+            )
+        ):
+            refusal = "PAPER_BROKER_PREFLIGHT_MUTATION_DETECTED"
+        elif not account_identity_assertion_passed(identity):
+            refusal = str(identity.get("reason_code") or ACCOUNT_PIN_NOT_PROVEN)
+        elif not portfolio_account_suffix or portfolio_account_suffix != identity_account_suffix:
+            refusal = "PAPER_BROKER_PREFLIGHT_ACCOUNT_READ_MISMATCH"
+        elif baseline_account_suffix and baseline_account_suffix != identity_account_suffix:
+            refusal = "PAPER_BASELINE_ACCOUNT_PIN_MISMATCH"
+        elif str(summary.get("account_status") or "").upper() != "ACTIVE":
+            refusal = "PAPER_ACCOUNT_NOT_ACTIVE"
+        elif summary.get("trading_blocked") is True or summary.get("account_blocked") is True:
+            refusal = "PAPER_ACCOUNT_BLOCKED"
+        elif baseline_state.get("start_ready") is not True:
+            refusal = str(baseline_state.get("status") or PAPER_BROKER_PREFLIGHT_FAILED)
+
+        status = "PASS" if refusal is None else "BLOCKED"
+        self._paper_broker_preflight = {
+            "source": "OPERATOR_PAPER_BROKER_PREFLIGHT",
+            "status": status,
+            "reason_code": "PAPER_BROKER_PREFLIGHT_PASS" if refusal is None else refusal,
+            "verified_at": utc_now_iso(),
+            "authorization": self.paper_broker_read_authorization_status(),
+            "account_identity_assertion": dict(identity),
+            "account_status": summary.get("account_status"),
+            "account_id": summary.get("account_id"),
+            "position_count": len(positions),
+            "position_symbols": [str(row.get("symbol") or "UNKNOWN") for row in positions if isinstance(row, Mapping)],
+            "open_order_count": len(open_orders),
+            "baseline_state": baseline_state,
+            "fresh_start_revalidation_required": True,
+            "broker_call_occurred": portfolio.get("broker_read_occurred") is True or identity.get("broker_read_occurred") is True,
+            "broker_read_occurred": portfolio.get("broker_read_occurred") is True,
+            "account_request_occurred": identity.get("account_request_occurred") is True,
+            "positions_request_occurred": portfolio.get("broker_read_occurred") is True,
+            "open_orders_request_occurred": portfolio.get("broker_read_occurred") is True,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+            "close_position_occurred": False,
+            "live_endpoint_touched": False,
+            "real_money_touched": False,
+            "secrets_values_exposed": False,
+        }
+        return self.paper_broker_preflight_status()
+
+    def paper_broker_preflight_status(self) -> dict[str, Any]:
+        return dict(self._paper_broker_preflight)
+
+    def paper_start_request_refusal(self, payload: dict[str, Any] | None = None) -> str | None:
+        """Validate a Start request without starting a process or touching the broker."""
+        return self._validate_start_request(payload or {})
+
+    def invalidate_paper_broker_preflight(self, reason_code: str, *, revoke_process_authorization: bool = False) -> None:
+        self._paper_broker_preflight = self._empty_paper_broker_preflight(reason_code)
+        self._account_identity_cache = None
+        self._account_identity_cache_at_monotonic = None
+        if revoke_process_authorization:
+            self._process_paper_broker_read_authorized = False
+            self._paper_broker_read_authorized_at = None
+
+    def _empty_paper_broker_preflight(self, reason_code: str) -> dict[str, Any]:
+        return {
+            "source": "OPERATOR_PAPER_BROKER_PREFLIGHT",
+            "status": "NOT_RUN",
+            "reason_code": reason_code,
+            "verified_at": None,
+            "fresh_start_revalidation_required": True,
+            "broker_call_occurred": False,
+            "broker_read_occurred": False,
+            "account_request_occurred": False,
+            "positions_request_occurred": False,
+            "open_orders_request_occurred": False,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+            "close_position_occurred": False,
+            "live_endpoint_touched": False,
+            "real_money_touched": False,
+            "secrets_values_exposed": False,
+        }
+
     def _validate_start_request(self, request: dict[str, Any]) -> str | None:
         self._refresh_process_state()
         if self._session and self._session.status in {"STARTING", "RUNNING", "STOP_REQUESTED"}:
@@ -961,7 +1204,8 @@ class OperatorPaperSupervisor:
         allowed = set(self.config.allowed_watchlist)
         if any(symbol not in allowed for symbol in watchlist):
             return "UNSUPPORTED_WATCHLIST_SYMBOL"
-        prerequisite_refusal = self._paper_start_prerequisite_refusal(force_account_pin=True)
+        preflight_passed = self._paper_broker_preflight.get("status") == "PASS"
+        prerequisite_refusal = self._paper_start_prerequisite_refusal(force_account_pin=not preflight_passed)
         if prerequisite_refusal:
             return prerequisite_refusal
         return None
@@ -1003,7 +1247,7 @@ class OperatorPaperSupervisor:
         env.update(pin_env)
         if (
             self._account_identity_checker_requires_board_read
-            and str(env.get("PK_BOARD_AUTHORIZED_PAPER_BROKER_READ") or "").strip().upper() != "YES_D4_BOARD_AUTHORIZED"
+            and not self.paper_broker_read_is_authorized()
         ):
             assertion = blocked_account_identity_assertion(
                 ACCOUNT_PIN_NOT_PROVEN,
@@ -1041,6 +1285,8 @@ class OperatorPaperSupervisor:
         endpoint_authority = self._paper_endpoint_authority()
         if endpoint_authority["reason_code"]:
             return endpoint_authority["reason_code"]
+        if self._paper_broker_preflight.get("status") != "PASS":
+            return str(self._paper_broker_preflight.get("reason_code") or PAPER_BROKER_PREFLIGHT_REQUIRED)
         identity_assertion = (
             dict(account_identity)
             if isinstance(account_identity, Mapping)
@@ -1196,6 +1442,8 @@ class OperatorPaperSupervisor:
         if baseline_context.baseline_loaded:
             process_env.update(baseline_context.to_env())
         process_env.update(self._broker_read_profile().to_env())
+        if self.paper_broker_read_is_authorized():
+            process_env[PAPER_BROKER_READ_AUTH_ENV] = PAPER_BROKER_READ_AUTH_VALUE
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         stdout_path = log_dir / f"operator_paper_{stamp}_{session_id}.out.log"
         stderr_path = log_dir / f"operator_paper_{stamp}_{session_id}.err.log"

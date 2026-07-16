@@ -98,7 +98,7 @@
   };
   const RUNTIME_ACTIVE_STATUSES = new Set(["STARTING", "RUNNING", "STOP_REQUESTED"]);
   const RUNTIME_TERMINAL_STATUSES = new Set(["EXITED", "COMPLETED", "FAILED", "STOPPED", "REFUSED"]);
-  const LIFECYCLE_RECONCILE_INTERVAL_MS = 5000;
+  const LIFECYCLE_FALLBACK_POLL_INTERVAL_MS = 15000;
   const PAPER_DRAFT_RESET_REASONS = {
     INITIAL_LOAD: "INITIAL_LOAD",
     USER_RESET: "USER_RESET",
@@ -1186,6 +1186,14 @@
       if (nextAction) {
         const op = runPaperState();
         nextAction.textContent = `Next safe action: ${op.nextSafeAction || "Review launch readiness and do not run PAPER without approval."}`;
+      }
+      const preflight = card.querySelector("[data-paper-broker-preflight-state]");
+      if (preflight) {
+        const proof = (data.paperControlState && data.paperControlState.paperBrokerPreflight) || {};
+        preflight.textContent = proof.status === "PASS"
+          ? `Verified ${proof.positionCount || 0} positions and ${proof.openOrderCount || 0} open orders at ${proof.verifiedAt || "unknown time"}. Start will verify again.`
+          : `Verification required: ${proof.reasonCode || "PAPER_BROKER_PREFLIGHT_REQUIRED"}.`;
+        preflight.classList.toggle("error", proof.status !== "PASS");
       }
     });
   }
@@ -2713,6 +2721,11 @@
     const runtime = op.runtime || {};
     const brokerTruth = op.brokerTruth || {};
     const safetyLocks = op.safetyLocks || {};
+    const credentialConfigured = credentials.configured === true || launch.alpacaPaperCredentialsConfigured === true;
+    const endpointValid = endpoint.valid === true || launch.paperEndpointOnly === true;
+    const activeRuntime = RUNTIME_ACTIVE_STATUSES.has(
+      String(runtime.state || sup.state || "").trim().toUpperCase()
+    );
     const backendDisabledReason = paperLaunchDisabledReason();
     const draft = paperRunDraftForRender(formId);
     const bounds = paperDurationBounds();
@@ -2856,6 +2869,25 @@
         </div>
         <div class="button-row">
           ${Button({
+            label: "Verify PAPER account and portfolio",
+            variant: "secondary",
+            className: "paper",
+            disabled: !backendConnected() || !credentialConfigured || !endpointValid || activeRuntime,
+            reason: !backendConnected()
+              ? "Operator backend unavailable."
+              : !credentialConfigured
+                ? "Configure Alpaca PAPER credentials first."
+                : !endpointValid
+                  ? "A confirmed Alpaca PAPER endpoint is required."
+                  : activeRuntime
+                    ? "Verification is unavailable while a PAPER run is active."
+                    : "",
+            attrs: {
+              "data-intent": "paper-verify-readonly",
+              "data-paper-verify-readonly-control": true
+            }
+          })}
+          ${Button({
             label: "Start Bounded PAPER Run",
             variant: "primary",
             className: "primary-action",
@@ -2885,6 +2917,11 @@
           })}
           <span class="badge red">No manual trades / force trade unavailable</span>
         </div>
+        <div class="notice ${((data.paperControlState || {}).paperBrokerPreflight || {}).status === "PASS" ? "" : "error"}" data-paper-broker-preflight-state>${escapeHtml(
+          ((data.paperControlState || {}).paperBrokerPreflight || {}).status === "PASS"
+            ? `Verified ${((data.paperControlState || {}).paperBrokerPreflight || {}).positionCount || 0} positions and ${((data.paperControlState || {}).paperBrokerPreflight || {}).openOrderCount || 0} open orders. Start will verify again.`
+            : `Verification required: ${((data.paperControlState || {}).paperBrokerPreflight || {}).reasonCode || "PAPER_BROKER_PREFLIGHT_REQUIRED"}.`
+        )}</div>
         <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the bounded PAPER /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
         <details class="ai-context-details" data-run-paper-advanced>
           <summary>Advanced endpoint and start proof</summary>
@@ -2892,7 +2929,7 @@
           ${kv(runPaperAdvancedRows(op, launch))}
           <div class="status-strip detail-strip">${(launch.checks || []).map((check) => badge(`${check.checkId}:${check.status}`, statusColor(check.status))).join("")}</div>
         </details>
-        <div class="notice mono">Endpoint target: /operator/intent/paper/start only. Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
+        <div class="notice mono">Verification: /operator/intent/paper/verify-readonly (GET-only). Start: /operator/intent/paper/start. Last intent: ${escapeHtml(sup.lastIntentResult || "none")}</div>
       </div>
     `;
   }
@@ -3922,7 +3959,7 @@
             `).join("")}
             <div class="button-row">
               ${Button({ label: "Save local credentials", variant: "primary", className: "primary-action", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-save": "alpaca_paper" } })}
-              ${Button({ label: "Validate read-only", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable; read-only validation cannot run.", attrs: { "data-credential-validate": "alpaca_paper" } })}
+              ${Button({ label: "Check credential setup", variant: "secondary", disabled: !backendConnected(), reason: "Backend unavailable; credential setup check cannot run.", attrs: { "data-credential-validate": "alpaca_paper" } })}
               ${Button({ label: "Delete local", variant: "danger", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-delete": "alpaca_paper" } })}
             </div>
             <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus.alpaca_paper || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed"))}</div>
@@ -3969,7 +4006,7 @@
                           `).join("")}
                           <div class="button-row">
                             ${Button({ label: "Save local credentials", variant: "primary", className: "primary-action", disabled: Boolean(disabled), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-save": providerId } })}
-                            ${Button({ label: "Validate read-only", variant: "secondary", disabled: Boolean(disabled), reason: "Backend unavailable; read-only validation cannot run.", attrs: { "data-credential-validate": providerId } })}
+                            ${Button({ label: "Check credential setup", variant: "secondary", disabled: Boolean(disabled), reason: "Backend unavailable; credential setup check cannot run.", attrs: { "data-credential-validate": providerId } })}
                             ${Button({ label: "Delete local", variant: "danger", disabled: Boolean(disabled), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-delete": providerId } })}
                           </div>
                         </details>
@@ -4665,11 +4702,13 @@
     return `
       ${header("AI Advisor", "Highest-reasoning Chief Quant Advisor for strategy, risk, TCA, provider readiness, operation, and proof.", ai.providerState)}
       <div class="grid">
-        ${metric("Provider", ai.provider, statusColor(ai.providerState))}
+        ${metric("Selected provider", ai.provider, statusColor(ai.providerState))}
         ${metric("Active Router", `${providerDisplayLabel(activeRoute.providerId || routing.activeProvider || "deterministic_local")} / ${activeRoute.modelName || routing.activeModel || "deterministic-local-guide"}`, "blue")}
         ${metric("Active provider", providerDisplayLabel(activeRoute.providerId || routing.activeProvider || "deterministic_local"), "blue")}
         ${metric("Active model", activeRoute.modelName || routing.activeModel || "deterministic-local-guide", "gray")}
-        ${metric("Current answer source", lastAiResult.answerSource || "none yet", statusColor(lastAiResult.answerSource || "UNKNOWN"))}
+        ${metric("Gateway default", `${providerDisplayLabel((ai.gatewayDefault || {}).providerId || "disabled")} / ${(ai.gatewayDefault || {}).modelName || "not configured"}`, "gray")}
+        ${metric("Last actual route", `${providerDisplayLabel((ai.lastActualRoute || {}).actualProvider || "none")} / ${(ai.lastActualRoute || {}).actualModel || "none yet"}`, "gray")}
+        ${metric("Current answer source", lastAiResult.answerSource || (ai.lastActualRoute || {}).answerSource || "none yet", statusColor(lastAiResult.answerSource || (ai.lastActualRoute || {}).answerSource || "UNKNOWN"))}
         ${metric("Last provider error", lastAiResult.providerErrorCategory || "none", lastAiResult.providerErrorCategory ? "yellow" : "gray")}
         ${metric("State", ai.providerState, statusColor(ai.providerState))}
         ${metric("Provider Mode", ai.providerMode || "NOT_CONFIGURED", statusColor(ai.providerMode || "NOT_CONFIGURED"))}
@@ -4904,7 +4943,7 @@
                         `).join("")}
                         <div class="button-row">
                           ${Button({ label: "Save local credentials", variant: "primary", className: "paper primary-action", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-save": providerId } })}
-                          ${Button({ label: "Validate read-only", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable; read-only validation cannot run.", attrs: { "data-credential-validate": providerId } })}
+                          ${Button({ label: "Check credential setup", variant: "secondary", className: "paper", disabled: !backendConnected(), reason: "Backend unavailable; credential setup check cannot run.", attrs: { "data-credential-validate": providerId } })}
                           ${Button({ label: "Delete local", variant: "danger", disabled: !backendConnected(), reason: "Backend unavailable; local secret store cannot be changed.", attrs: { "data-credential-delete": providerId } })}
                         </div>
                         <div class="notice mono credential-feedback">${escapeHtml(credentialActionStatus[providerId] || (backendConnected() ? "ready" : "backend unavailable; local secret store cannot be changed from static mock mode"))}</div>
@@ -6464,11 +6503,12 @@
           </div>
           <div class="ai-route-state">
             <div class="ai-route-summary-grid">
-              <div><span>Saved/configured</span><strong>${escapeHtml(providerDisplayLabel(routing.activeProvider || "deterministic_local"))}</strong></div>
+              <div><span>Gateway default</span><strong>${escapeHtml(providerDisplayLabel((data.ai.gatewayDefault || {}).providerId || "disabled"))} / ${escapeHtml((data.ai.gatewayDefault || {}).modelName || "not configured")}</strong></div>
               <div><span>Selected active provider</span><strong>${escapeHtml(routeLabels.selectedProviderDisplay)}</strong></div>
               <div><span>Default router mode</span><strong>${escapeHtml(routeLabels.routeMode || "LOCAL_GUIDE")}</strong></div>
               <div><span>Active model</span><strong>${escapeHtml(routeLabels.activeModel || "deterministic-local-guide")}</strong></div>
-              <div><span>Last answer source</span><strong>${escapeHtml(answerSource)}</strong></div>
+              <div><span>Last actual route</span><strong>${escapeHtml((data.ai.lastActualRoute || {}).actualProvider || "none yet")} / ${escapeHtml((data.ai.lastActualRoute || {}).actualModel || "none yet")}</strong></div>
+              <div><span>Last answer source</span><strong>${escapeHtml((data.ai.lastActualRoute || {}).answerSource || answerSource)}</strong></div>
               <div><span>Last provider error</span><strong>${escapeHtml(providerError || "none")}</strong></div>
             </div>
             <div class="button-row compact-actions">
@@ -7778,6 +7818,8 @@
     const control = payload || {};
     const artifactPaths = control.artifact_paths || {};
     const baselineContext = control.baseline_runtime_context || {};
+    const brokerPreflight = control.paper_broker_preflight || {};
+    const brokerAuthorization = control.paper_broker_read_authorization || {};
     return {
       source: pick(control.source, ""),
       schemaVersion: pick(control.schema_version, "paper-control-state-v1"),
@@ -7821,6 +7863,25 @@
       paperAccountPinned: control.paper_account_pinned === true,
       paperAccountExpectedSuffix: pick(control.paper_account_expected_suffix, null),
       paperAccountActualSuffix: pick(control.paper_account_actual_suffix, null),
+      paperBrokerReadAuthorization: {
+        source: pick(brokerAuthorization.source, "NOT_AUTHORIZED"),
+        authorized: brokerAuthorization.authorized === true,
+        scope: pick(brokerAuthorization.scope, "NONE"),
+        persistsAcrossBackendRestart: brokerAuthorization.persists_across_backend_restart === true
+      },
+      paperBrokerPreflight: {
+        status: pick(brokerPreflight.status, "NOT_RUN"),
+        reasonCode: pick(brokerPreflight.reason_code, "PAPER_BROKER_PREFLIGHT_REQUIRED"),
+        verifiedAt: pick(brokerPreflight.verified_at, null),
+        accountStatus: pick(brokerPreflight.account_status, null),
+        accountId: pick(brokerPreflight.account_id, null),
+        positionCount: pick(brokerPreflight.position_count, 0),
+        positionSymbols: Array.isArray(brokerPreflight.position_symbols) ? brokerPreflight.position_symbols : [],
+        openOrderCount: pick(brokerPreflight.open_order_count, 0),
+        brokerReadOccurred: brokerPreflight.broker_read_occurred === true,
+        brokerMutationOccurred: brokerPreflight.broker_mutation_occurred === true,
+        freshStartRevalidationRequired: brokerPreflight.fresh_start_revalidation_required !== false
+      },
       dominantBlocker: pick(control.dominant_blocker, "PAPER_START_BLOCKED"),
       reasonCodes: Array.isArray(control.reason_codes) ? control.reason_codes : [],
       maxLeaseSeconds: pick(control.max_lease_seconds, 432000),
@@ -8507,15 +8568,36 @@
       next.systemMap.reportPath = pick(systemMap.report_path || systemMap.summary.report_path, next.systemMap.reportPath);
       next.systemMap.sections = Array.isArray(systemMap.summary.sections) ? systemMap.summary.sections : next.systemMap.sections;
     }
-    next.ai.provider = pick(aiStatus.gateway && aiStatus.gateway.provider && aiStatus.gateway.provider.provider, next.ai.provider);
-    next.ai.providerState = pick(aiStatus.gateway && aiStatus.gateway.provider && aiStatus.gateway.provider.provider_state, next.ai.providerState);
     const aiGateway = aiStatus.gateway || {};
     const aiProvider = aiGateway.provider || {};
     const aiPolicy = aiGateway.model_policy || {};
-    next.ai.providerMode = pick(aiProvider.provider_mode || aiPolicy.provider_mode, next.ai.providerMode || "NOT_CONFIGURED");
-    next.ai.modelName = pick(aiProvider.model_name || aiProvider.model || aiPolicy.model_name, next.ai.modelName || null);
-    next.ai.modelQuality = pick(aiProvider.model_quality || aiPolicy.model_quality, next.ai.modelQuality || "FALLBACK_ONLY");
-    next.ai.reasoningPolicy = pick(aiProvider.reasoning_policy || aiPolicy.reasoning_policy, next.ai.reasoningPolicy || "FALLBACK_ONLY_LIMITED");
+    const selectedRoutes = aiStatus.selected_routes || {};
+    const selectedActiveRoute = selectedRoutes.active || {};
+    const gatewayDefault = aiStatus.configured_gateway_default || {};
+    const lastActualRoute = aiStatus.last_actual_route || {};
+    next.ai.provider = pick(selectedActiveRoute.provider_id || aiStatus.active_provider, next.ai.provider);
+    next.ai.providerState = pick(selectedActiveRoute.status, next.ai.providerState);
+    next.ai.providerMode = pick(aiStatus.response_mode, next.ai.providerMode || "LOCAL_GUIDE");
+    next.ai.modelName = pick(selectedActiveRoute.model_name || aiStatus.active_model, next.ai.modelName || null);
+    next.ai.modelQuality = pick(selectedActiveRoute.model_quality, next.ai.modelQuality || "UNKNOWN");
+    next.ai.reasoningPolicy = pick(selectedActiveRoute.reasoning_capability, next.ai.reasoningPolicy || "UNKNOWN");
+    next.ai.gatewayDefault = {
+      providerId: pick(gatewayDefault.provider_id || aiProvider.provider_id || aiProvider.provider, "disabled"),
+      modelName: pick(gatewayDefault.model_name || aiProvider.model_name || aiProvider.model || aiPolicy.model_name, null),
+      providerMode: pick(gatewayDefault.provider_mode || aiProvider.provider_mode || aiPolicy.provider_mode, "NOT_CONFIGURED"),
+      providerState: pick(gatewayDefault.provider_state || aiProvider.provider_state, "UNKNOWN")
+    };
+    next.ai.selectedRoutes = selectedRoutes;
+    next.ai.lastActualRoute = {
+      status: pick(lastActualRoute.status, "NO_ANSWER_IN_PROCESS"),
+      selectedProvider: pick(lastActualRoute.selected_provider, null),
+      selectedModel: pick(lastActualRoute.selected_model, null),
+      actualProvider: pick(lastActualRoute.actual_provider, null),
+      actualModel: pick(lastActualRoute.actual_model, null),
+      answerSource: pick(lastActualRoute.answer_source, null),
+      fallbackUsed: lastActualRoute.fallback_used === true,
+      fallbackReason: pick(lastActualRoute.fallback_reason, null)
+    };
     next.ai.modelSuitableForGovernance = aiProvider.model_suitable_for_governance === true || aiPolicy.model_suitable_for_governance === true;
     next.ai.modelQualityWarning = pick(aiProvider.model_quality_warning || aiPolicy.warning, next.ai.modelQualityWarning || "");
     const aiRegistry = aiGateway.provider_registry || {};
@@ -9113,20 +9195,46 @@
     const selected = normalizeScreenId(activeScreenId || "overview");
     if (selected === "controls") {
       refreshRunPaperControlDom();
-    } else {
-      renderScreens(selected);
     }
+    refreshRuntimeVitalityDom();
     renderRail();
-    renderAiChiefOverlay();
+  }
+
+  function refreshRuntimeVitalityDom() {
+    const vitality = runtimeVitalityTruth();
+    const setStateClass = (element, baseClass, stateClass) => {
+      if (!element) return;
+      element.classList.remove("is-live", "is-stale", "is-off");
+      element.classList.add(baseClass, stateClass);
+    };
+    document.querySelectorAll("[data-bot-pulse]").forEach((element) => {
+      element.dataset.pulseAnimating = vitality.botLive ? "true" : "false";
+    });
+    document.querySelectorAll("[data-bot-heart]").forEach((element) => {
+      setStateClass(element, "heart", vitality.botClass);
+      element.dataset.pulseAnimating = vitality.botLive ? "true" : "false";
+    });
+    document.querySelectorAll("[data-bot-ecg]").forEach((element) => {
+      setStateClass(element, "ecg-line", vitality.botClass);
+      element.dataset.pulseAnimating = vitality.botLive ? "true" : "false";
+    });
+    document.querySelectorAll("[data-bot-vital]").forEach((element) => {
+      setStateClass(element, "vital-light", vitality.botClass);
+      element.innerHTML = `<i aria-hidden="true"></i><b>BOT</b> ${escapeHtml(vitality.botStatus)} <small>${escapeHtml(vitality.heartbeatDetail)}</small>`;
+    });
+    document.querySelectorAll("[data-market-vital]").forEach((element) => {
+      setStateClass(element, "vital-light", vitality.marketClass);
+      element.innerHTML = `<i aria-hidden="true"></i><b>MKT</b> ${escapeHtml(vitality.marketStatus)} <small>${escapeHtml(vitality.marketDetail)}</small>`;
+    });
+    document.querySelectorAll(".scan-strip").forEach((element) => {
+      setStateClass(element, "scan-strip", vitality.botClass);
+    });
   }
 
   async function fetchLifecyclePayload() {
     const tasks = [
       ["paperControlState", "/operator/paper-control-state"],
-      ["runVisibility", "/operator/run-visibility/status"],
-      ["latestRun", "/operator/latest-run"],
-      ["status", "/operator/status"],
-      ["runtime", "/operator/runtime"]
+      ["runVisibility", "/operator/run-visibility/status"]
     ];
     const results = await Promise.allSettled(tasks.map(([key, path]) => fetchJson(path).then((payload) => ({ key, payload }))));
     const payload = {};
@@ -9170,25 +9278,38 @@
   }
 
   function startRuntimeLifecycleObservers() {
-    if (!lifecyclePollTimer) {
+    const startFallbackPolling = () => {
+      if (lifecyclePollTimer) return;
       lifecyclePollTimer = window.setInterval(() => {
-        scheduleLifecycleRefresh("poll", 0);
-      }, LIFECYCLE_RECONCILE_INTERVAL_MS);
-    }
+        scheduleLifecycleRefresh("poll-fallback", 0);
+      }, LIFECYCLE_FALLBACK_POLL_INTERVAL_MS);
+    };
+    const stopFallbackPolling = () => {
+      if (!lifecyclePollTimer) return;
+      window.clearInterval(lifecyclePollTimer);
+      lifecyclePollTimer = null;
+    };
     if (!lifecycleEventSource && "EventSource" in window) {
       try {
         lifecycleEventSource = new EventSource(`${operatorApiBase()}/operator/events`);
+        lifecycleEventSource.onopen = () => {
+          stopFallbackPolling();
+        };
         ["backend_status", "launcher_status", "runtime_minimal", "paper_control_state", "supervisor_state", "run_event"].forEach((eventName) => {
           lifecycleEventSource.addEventListener(eventName, () => {
             scheduleLifecycleRefresh(`sse:${eventName}`, 500);
           });
         });
         lifecycleEventSource.onerror = () => {
+          startFallbackPolling();
           scheduleLifecycleRefresh("sse-error-poll-fallback", 0);
         };
       } catch (error) {
         logBackendFetchFailure("runtime-lifecycle:sse", error);
+        startFallbackPolling();
       }
+    } else if (!("EventSource" in window)) {
+      startFallbackPolling();
     }
   }
 
@@ -9343,6 +9464,23 @@
         if (!confirmed) return;
         const result = await postIntent("/operator/paper-baseline/accept", payload);
         message = `${result.status || "UNKNOWN"}: ${result.baseline_snapshot_id || result.reason_code || "paper_baseline"}`;
+      }
+      if (intent === "paper-verify-readonly") {
+        const confirmed = window.confirm(
+          "Verify Alpaca PAPER account and portfolio?\n\nThis authorizes GET /v2/account, GET /v2/positions, and GET /v2/orders?status=open for this operator process only. It checks the pinned account, current positions, open orders, and protected baseline.\n\nIt will not start PAPER, submit, cancel, replace, close, liquidate, enable live, or touch real money. Authorization resets when the backend restarts."
+        );
+        if (!confirmed) return;
+        const result = await postIntent("/operator/intent/paper/verify-readonly", {
+          mode: "PAPER",
+          live: false,
+          real_money: false,
+          confirm_paper_read_only: true,
+          confirm_account_positions_orders_get_only: true,
+          confirm_no_broker_mutation: true,
+          confirm_process_scoped_authorization: true
+        });
+        const proof = result.preflight || {};
+        message = `${result.status || "UNKNOWN"}: ${result.reason_code || "paper_broker_preflight"}; positions=${proof.position_count || 0}; open_orders=${proof.open_order_count || 0}; account_suffix=${((proof.account_identity_assertion || {}).actual_suffix) || "unknown"}`;
       }
       if (intent === "paper-start") {
         const formId = sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "controls";

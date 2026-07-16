@@ -142,7 +142,10 @@ def _plain_check_detail(check: dict[str, Any]) -> str:
     if check_id == "alpaca_paper_account_pin":
         return str(check.get("detail") or "Alpaca PAPER account identity does not match the pinned target account.")
     if check_id == "paper_read_only_preflight_gate":
-        return "Read-only Alpaca PAPER preflight has not run and requires explicit Shan approval before Alpaca is called."
+        return str(
+            check.get("detail")
+            or "Read-only Alpaca PAPER preflight has not run and requires explicit Shan approval before Alpaca is called."
+        )
     if check_id == "paper_existing_position_baseline":
         return "Existing PAPER positions require protected baseline adoption before PAPER can start."
     if check_id == "paper_baseline_position_aware_policy":
@@ -230,8 +233,15 @@ def _next_safe_action(
         return "Populate ~/.poverty_killer_alpaca_paper_env with Alpaca PAPER key ID and secret; do not paste secrets into chat or commit them."
     if any(str(check.get("check_id") or "") == "alpaca_paper_account_pin" for check in blockers):
         return "Do not start PAPER; resolve the Alpaca PAPER account pin mismatch or missing identity proof first."
-    if any(str(check.get("check_id") or "") == "paper_read_only_preflight_gate" for check in blockers):
-        return "Do not start PAPER; request explicit Shan approval for read-only Alpaca account, open-orders, and positions preflight first."
+    preflight_blocker = next(
+        (check for check in blockers if str(check.get("check_id") or "") == "paper_read_only_preflight_gate"),
+        None,
+    )
+    if preflight_blocker:
+        detail = _plain_check_detail(preflight_blocker)
+        if "has not run" in detail.lower() or "run the governed" in detail.lower():
+            return "Do not start PAPER; request explicit Shan approval for read-only Alpaca account, open-orders, and positions preflight first."
+        return f"Do not start PAPER; resolve the broker verification refusal ({detail}) and rerun GET-only verification."
     if any(str(check.get("check_id") or "") == "paper_existing_position_baseline" for check in blockers):
         return "Accept current PAPER positions as the protected starting baseline before a short position-aware PAPER smoke packet."
     if blockers:
@@ -243,8 +253,32 @@ def _next_safe_action(
     return "Review the supervisor refusal reason before trying to start PAPER."
 
 
-def _broker_truth_summary(*, alpaca_configured: bool, endpoint_ok: bool, endpoint_authority: dict[str, Any]) -> dict[str, Any]:
-    if not alpaca_configured:
+def _broker_truth_summary(
+    *,
+    alpaca_configured: bool,
+    endpoint_ok: bool,
+    endpoint_authority: dict[str, Any],
+    paper_broker_preflight: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    preflight = paper_broker_preflight or {}
+    preflight_passed = preflight.get("status") == "PASS"
+    broker_read_occurred = preflight.get("broker_read_occurred") is True
+    if preflight_passed:
+        status = "BROKER_CONFIRMED"
+        label = "Broker-confirmed PAPER account and portfolio"
+        detail = (
+            f"Verified {int(preflight.get('position_count') or 0)} positions and "
+            f"{int(preflight.get('open_order_count') or 0)} open orders through GET-only preflight."
+        )
+    elif broker_read_occurred:
+        status = "BROKER_CONFIRMED_START_BLOCKED"
+        label = "Broker-confirmed PAPER portfolio; Start blocked"
+        detail = (
+            f"Read {int(preflight.get('position_count') or 0)} positions and "
+            f"{int(preflight.get('open_order_count') or 0)} open orders, then refused Start on "
+            f"{preflight.get('reason_code') or 'PAPER_BROKER_PREFLIGHT_FAILED'}."
+        )
+    elif not alpaca_configured:
         status = "UNAVAILABLE_MISSING_CREDENTIALS"
         label = "Broker portfolio truth unavailable"
         detail = "No broker portfolio read is attempted because Alpaca PAPER credentials are missing."
@@ -260,9 +294,9 @@ def _broker_truth_summary(*, alpaca_configured: bool, endpoint_ok: bool, endpoin
         "status": status,
         "label": label,
         "detail": detail,
-        "broker_confirmed": False,
-        "broker_read_occurred": False,
-        "broker_read_attempted": False,
+        "broker_confirmed": broker_read_occurred,
+        "broker_read_occurred": broker_read_occurred,
+        "broker_read_attempted": preflight.get("broker_call_occurred") is True,
         "broker_mutation_occurred": False,
         "order_submission_occurred": False,
         "cancel_occurred": False,
@@ -278,6 +312,7 @@ def _build_paper_credential_setup(
     endpoint_ok: bool,
     paper_start_allowed: bool,
     paper_baseline_state: dict[str, Any] | None = None,
+    paper_broker_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     field_rows = _credential_field_setup_rows(alpaca)
     missing = [str(row.get("name")) for row in field_rows if row.get("present") is not True]
@@ -286,6 +321,12 @@ def _build_paper_credential_setup(
         endpoint_ok=endpoint_ok,
         endpoint_authority=endpoint_authority,
     )
+    preflight = paper_broker_preflight or {}
+    preflight_passed = preflight.get("status") == "PASS"
+    preflight_blocked = preflight.get("status") == "BLOCKED"
+    preflight_reason_code = str(preflight.get("reason_code") or "PAPER_BROKER_PREFLIGHT_REQUIRED")
+    preflight_authorization = preflight.get("authorization") if isinstance(preflight.get("authorization"), dict) else {}
+    preflight_authorized = preflight_authorization.get("authorized") is True
     preflight_status = _preflight_gate_status(alpaca_configured=alpaca_configured, endpoint_ok=endpoint_ok)
     preflight_detail = (
         "Read-only preflight is blocked until Alpaca PAPER credentials and a PAPER trading endpoint are present."
@@ -293,15 +334,42 @@ def _build_paper_credential_setup(
         else "Read-only preflight is ready to request after explicit Shan approval; no Alpaca call has occurred in this view."
     )
     baseline_state = paper_baseline_state or {}
-    baseline_ready = baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
+    blocked_matches_baseline = preflight_reason_code == str(baseline_state.get("status") or "")
+    baseline_ready = (
+        preflight_passed
+        and baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
+    )
     if baseline_ready:
-        preflight_status = "accepted_existing_positions"
-        preflight_detail = "Read-only PAPER preflight is represented by an accepted protected existing-position baseline."
+        preflight_status = "broker_confirmed"
+        preflight_detail = "PAPER account, positions, and open orders were broker-confirmed through the governed GET-only preflight."
         setup_status = {
             "code": "PREFLIGHT_READY",
-            "label": "Position-aware PAPER baseline accepted",
-            "severity": "warning",
-            "detail": "Credential presence and protected existing-position baseline are confirmed; this is short-smoke readiness, not 72-hour readiness.",
+            "label": "PAPER account and portfolio verified",
+            "severity": "ready",
+            "detail": "Credential presence, pinned PAPER account, current broker portfolio, and protected baseline agree.",
+        }
+    elif preflight_passed:
+        preflight_status = "broker_confirmed_start_blocked"
+        preflight_detail = str(
+            baseline_state.get("reason")
+            or "Broker account and portfolio were read successfully, but the current baseline contract blocks Start."
+        )
+        setup_status = {
+            "code": "PREFLIGHT_BLOCKED",
+            "label": "PAPER portfolio verified; Start blocked",
+            "severity": "blocked",
+            "detail": preflight_detail,
+        }
+    elif preflight_blocked:
+        preflight_status = "broker_verification_blocked"
+        preflight_detail = f"GET-only PAPER verification was refused: {preflight_reason_code}."
+        if blocked_matches_baseline and baseline_state.get("reason"):
+            preflight_detail = f"{preflight_detail} {baseline_state['reason']}"
+        setup_status = {
+            "code": "PREFLIGHT_BLOCKED",
+            "label": "PAPER verification blocked",
+            "severity": "blocked",
+            "detail": preflight_detail,
         }
     return {
         "source": "OPERATOR_LAUNCH_READINESS_DERIVED_VIEW",
@@ -337,21 +405,28 @@ def _build_paper_credential_setup(
             ),
         },
         "preflight_gate": {
-            "read_only_preflight_authorized": baseline_ready,
-            "read_only_preflight_available": baseline_ready or preflight_status == "ready_to_run_after_approval",
+            "read_only_preflight_authorized": preflight_authorized,
+            "broker_verification_passed": preflight_passed,
+            "read_only_preflight_available": preflight_passed or preflight_blocked or preflight_status == "ready_to_run_after_approval",
             "account_check_status": preflight_status,
             "open_orders_check_status": preflight_status,
             "positions_check_status": preflight_status,
-            "last_preflight_at": baseline_state.get("accepted_at") if baseline_ready else None,
-            "last_preflight_result": baseline_state.get("status") if baseline_ready else None,
-            "status_label": "Position-aware PAPER baseline accepted" if baseline_ready else "Read-only PAPER preflight not run",
+            "last_preflight_at": preflight.get("verified_at") if preflight_passed or preflight_blocked else None,
+            "last_preflight_result": preflight.get("reason_code") if preflight_passed or preflight_blocked else None,
+            "status_label": (
+                "PAPER account and portfolio verified"
+                if preflight_passed
+                else "PAPER verification blocked"
+                if preflight_blocked
+                else "Read-only PAPER preflight not run"
+            ),
             "detail": preflight_detail,
-            "explicit_approval_required": not baseline_ready,
+            "explicit_approval_required": not preflight_authorized,
             "future_checks": ["GET /v2/account", "GET /v2/orders?status=open", "GET /v2/positions"],
-            "alpaca_network_call_occurred": False,
-            "account_request_occurred": False,
-            "open_orders_request_occurred": False,
-            "positions_request_occurred": False,
+            "alpaca_network_call_occurred": preflight.get("broker_call_occurred") is True,
+            "account_request_occurred": preflight.get("account_request_occurred") is True,
+            "open_orders_request_occurred": preflight.get("open_orders_request_occurred") is True,
+            "positions_request_occurred": preflight.get("positions_request_occurred") is True,
             "broker_mutation_occurred": False,
             "order_submission_occurred": False,
             "cancel_occurred": False,
@@ -372,7 +447,12 @@ def _build_paper_credential_setup(
             if not alpaca_configured
             else (
                 str(baseline_state.get("next_safe_action"))
-                if baseline_ready and baseline_state.get("next_safe_action")
+                if preflight_blocked and blocked_matches_baseline and baseline_state.get("next_safe_action")
+                else f"Resolve {preflight_reason_code}, then rerun the GET-only PAPER verification before Start."
+                if preflight_blocked
+                else
+                str(baseline_state.get("next_safe_action"))
+                if preflight_passed and baseline_state.get("next_safe_action")
                 else "Request explicit Shan approval for read-only Alpaca PAPER preflight before any account, open-orders, or positions request."
             )
         ),
@@ -405,6 +485,7 @@ def _build_run_paper_operator_state(
     health: dict[str, Any],
     paper_baseline_state: dict[str, Any] | None = None,
     account_identity_assertion: dict[str, Any] | None = None,
+    paper_broker_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blocker_codes = [str(check.get("check_id") or "unknown") for check in blockers]
     warning_codes = [str(check.get("check_id") or "unknown") for check in warnings]
@@ -429,6 +510,7 @@ def _build_run_paper_operator_state(
         endpoint_ok=endpoint_ok,
         paper_start_allowed=paper_start_allowed and not blockers,
         paper_baseline_state=paper_baseline_state,
+        paper_broker_preflight=paper_broker_preflight,
     )
     baseline_runtime_context = (
         supervisor.get("paper_baseline_runtime_context")
@@ -495,6 +577,7 @@ def _build_run_paper_operator_state(
             alpaca_configured=alpaca_configured,
             endpoint_ok=endpoint_ok,
             endpoint_authority=endpoint_authority,
+            paper_broker_preflight=paper_broker_preflight,
         ),
         "safety_locks": {
             "live": {"label": "Live locked", "locked": True, "enabled": False},
@@ -559,6 +642,7 @@ def build_launch_readiness(
     ai_status: dict[str, Any],
     effective_env: dict[str, str],
     paper_baseline: dict[str, Any] | None = None,
+    paper_broker_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     alpaca = _find_provider(provider_readiness, "alpaca_paper")
@@ -590,13 +674,66 @@ def build_launch_readiness(
         )
     )
 
+    preflight = paper_broker_preflight or {}
+    preflight_passed = preflight.get("status") == "PASS"
+    preflight_available = alpaca_configured and endpoint_ok
+    preflight_reason_code = str(preflight.get("reason_code") or "PAPER_BROKER_PREFLIGHT_REQUIRED")
+    preflight_baseline_detail = (
+        preflight.get("baseline_state")
+        if isinstance(preflight.get("baseline_state"), dict)
+        else {}
+    )
+    preflight_identity = (
+        preflight.get("account_identity_assertion")
+        if isinstance(preflight.get("account_identity_assertion"), dict)
+        else {}
+    )
+    if preflight_passed:
+        preflight_detail = "Broker-confirmed account, positions, and open orders agree with the pinned account and protected baseline."
+    elif preflight.get("status") == "BLOCKED":
+        if (
+            preflight_reason_code == str(preflight_identity.get("reason_code") or "")
+            and preflight_identity.get("detail")
+        ):
+            preflight_detail = str(preflight_identity["detail"])
+        else:
+            preflight_detail = f"GET-only PAPER broker verification was refused: {preflight_reason_code}."
+        if preflight_reason_code == str(preflight_baseline_detail.get("status") or "") and preflight_baseline_detail.get("reason"):
+            preflight_detail = f"{preflight_detail} {preflight_baseline_detail['reason']}"
+    else:
+        preflight_detail = (
+            "Read-only Alpaca PAPER preflight has not run and requires explicit Shan approval before Alpaca is called."
+        )
+    checks.append(
+        _check(
+            "paper_read_only_preflight_gate",
+            "GET-only PAPER broker verification",
+            "PASS" if preflight_passed else ("BLOCKED" if preflight_available else "DEGRADED"),
+            preflight_detail,
+            blocker=preflight_available and not preflight_passed,
+            warning=not preflight_available and not preflight_passed,
+        )
+    )
+    if preflight_reason_code == "PAPER_BASELINE_ACCOUNT_PIN_MISMATCH":
+        checks.append(
+            _check(
+                "paper_baseline_account_pin_mismatch",
+                "Baseline account matches pinned PAPER account",
+                "BLOCKED",
+                "The accepted baseline belongs to a different PAPER account. Verify the pinned account, then accept its current broker-confirmed positions as the protected baseline.",
+                blocker=True,
+            )
+        )
+
     account_identity_assertion = (
         supervisor.get("paper_account_identity_assertion")
         if isinstance(supervisor.get("paper_account_identity_assertion"), dict)
         else {}
     )
     account_pin_ok = account_identity_assertion_passed(account_identity_assertion)
-    account_pin_required = alpaca_configured and endpoint_ok
+    account_pin_required = alpaca_configured and endpoint_ok and (
+        preflight_passed or account_identity_assertion.get("actual_suffix") is not None
+    )
     expected_suffix = str(account_identity_assertion.get("expected_suffix") or "unknown")
     actual_suffix = account_identity_assertion.get("actual_suffix")
     account_pin_detail = (
@@ -719,7 +856,8 @@ def build_launch_readiness(
         )
     )
 
-    paper_baseline_state = build_baseline_adoption_state(accepted_baseline=paper_baseline)
+    preflight_baseline_state = preflight_baseline_detail or None
+    paper_baseline_state = preflight_baseline_state or build_baseline_adoption_state(accepted_baseline=paper_baseline)
     baseline_runtime_context = (
         supervisor.get("paper_baseline_runtime_context")
         if isinstance(supervisor.get("paper_baseline_runtime_context"), dict)
@@ -727,7 +865,10 @@ def build_launch_readiness(
     )
     baseline_context_loaded = baseline_runtime_context.get("baseline_loaded") is True
     same_symbol_guard_active = baseline_runtime_context.get("same_symbol_baseline_guard_active") is True
-    baseline_ready = paper_baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
+    baseline_ready = (
+        preflight_passed
+        and paper_baseline_state.get("status") == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
+    )
     baseline_account_suffix = accepted_baseline_account_suffix(paper_baseline)
     baseline_account_matches_pin = (
         not baseline_account_suffix
@@ -738,7 +879,6 @@ def build_launch_readiness(
         baseline_position_count = int(paper_baseline_state.get("position_count") or 0)
     except (TypeError, ValueError):
         baseline_position_count = 0
-    preflight_gate_open = alpaca_configured and endpoint_ok
     if baseline_ready:
         checks.append(
             _check(
@@ -792,20 +932,14 @@ def build_launch_readiness(
                         blocker=True,
                     )
                 )
-    else:
+    elif preflight_passed:
         checks.append(
             _check(
-                "paper_read_only_preflight_gate",
-                "Read-only PAPER preflight",
+                "paper_existing_position_baseline",
+                "PAPER baseline",
                 "BLOCKED",
-                (
-                    "Read-only Alpaca PAPER account, open-orders, and positions preflight has not run. "
-                    "It requires explicit Shan approval before Alpaca is called."
-                ) if preflight_gate_open else (
-                    "Read-only Alpaca PAPER preflight is blocked until credentials and the PAPER trading endpoint are present."
-                ),
-                blocker=preflight_gate_open,
-                warning=not preflight_gate_open,
+                str(paper_baseline_state.get("reason") or "Current broker portfolio does not agree with an accepted protected baseline."),
+                blocker=True,
             )
         )
 
@@ -833,6 +967,7 @@ def build_launch_readiness(
         health=health,
         paper_baseline_state=paper_baseline_state,
         account_identity_assertion=account_identity_assertion,
+        paper_broker_preflight=preflight,
     )
     return {
         "source": "OPERATOR_LAUNCH_READINESS",
@@ -854,6 +989,7 @@ def build_launch_readiness(
         "paper_account_pinned": account_pin_ok,
         "paper_account_expected_suffix": account_identity_assertion.get("expected_suffix"),
         "paper_account_actual_suffix": account_identity_assertion.get("actual_suffix"),
+        "paper_broker_preflight": preflight,
         "alpaca_endpoint_configured": endpoint_authority["alpaca_endpoint_configured"],
         "alpaca_paper_endpoint_valid": endpoint_authority["alpaca_paper_endpoint_valid"],
         "alpaca_live_endpoint_blocked": endpoint_authority["alpaca_live_endpoint_blocked"],

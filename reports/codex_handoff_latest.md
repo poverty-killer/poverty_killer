@@ -1,143 +1,131 @@
-# Codex Session Handoff - Commercial Launcher Identity / Run Path Green Preserved
+# Codex Session Handoff - Operator Usability Recovery
 
-Date: 2026-07-12 America/Chicago
+Date: 2026-07-15 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Active seam completed: launcher/app icon commercial-grade upgrade.
-Latest committed/pushed work before this seam: `4f97ff0 make pre-arming run path green`.
+Starting commit: `07ec0aa verify pre-arm run gate`
+Active seam: operator controls, broker-verification reachability, and truthful
+interaction lifecycle.
 
-## Launcher / App Icon Upgrade
+## Current Verdict
 
-Implementation and evidence are in
-`reports/completion/LAUNCHER_APP_ICON_UPGRADE_REPORT.md`.
+The scoped recovery is complete and locally green. Full evidence is in
+`reports/completion/OPERATOR_USABILITY_RECOVERY_REPORT.md`.
 
-- The generic `shell32.dll,220` glyph was the root cause of the developer-tool
-  appearance. `Ensure-OperatorShortcut` previously assigned no product icon.
-- One original protected-command mark now exists as editable SVG plus exact
-  multi-resolution Windows ICO frames from 16 through 256 pixels.
-- The mark deliberately avoids readiness, profit, liveness, market direction,
-  currency, candlestick, checkmark, and typography semantics.
-- The existing OneDrive Desktop shortcut was updated in place. Target and
-  arguments verified unchanged; no duplicate shortcut was created.
-- The cockpit references the same SVG/ICO identity as its favicon. The running
-  local operator server returned HTTP 200 with correct image content types.
-- Validation: 22 focused launcher tests; 97 launcher/UI/API tests; PowerShell
-  syntax; exact-size rendered contact-sheet inspection on light/dark grounds.
-- Automated browser control was unavailable, so no captured browser favicon
-  claim is made. No broker read/mutation, PAPER run, live mode, real money,
-  threshold/guard/readiness/trading logic, or tracked runtime state was touched.
+- Full suite: `1815 passed, 14 skipped, 384 warnings, 0 failed`.
+- Focused operator suite: `177 passed, 72 warnings, 0 failed`.
+- Python compilation and JavaScript syntax checks pass.
+- Runtime and browser wiring were proved against the durable LocalAppData state.
+- Alpaca PAPER account/positions/open-orders were validated through the governed
+  GET-only path.
+- No PAPER run, Start click, broker mutation, live mode, or real-money path was
+  used.
 
-## PK-G-CLOSE Pre-Arming Seam
+## Root Causes Closed
 
-Implementation is complete and documented in
-`reports/completion/PHASE_G_CLOSE_REPORT.md`. The scoped gate is green; no PAPER
-run was executed.
+1. The cockpit displayed a broker-proof requirement but provided no lawful UI
+   action that could satisfy it.
+2. Start did not force current broker reconciliation immediately before child
+   launch.
+3. SSE, parallel polling, unchanged rapid events, and broad rerenders could
+   churn requests and destroy active input focus.
+4. `Validate read-only` claimed more than the local credential check proved.
+5. AI gateway default, selected route, and actual answer route were conflated.
+6. Exact broker-confirmed refusal reasons could be masked as not run.
+7. The Controls renderer referenced three undefined variables, raised
+   `ReferenceError`, and left the operator on Overview.
 
-Key current truth:
+## Implemented Contract
 
-- Child broker connect now asserts the broker-reported PAPER account suffix against `045ded` before returning the adapter.
-- Protected-baseline entry attempts for AVAX, ETH, LINK, and SOL are refused before routing.
-- Governed Stop is in `OperatorPaperSupervisor`, waits for child exit, releases the lease, and never calls submit/cancel/close/liquidate/flatten. Post-stop broker positions are not claimed as reconciled without a broker read.
-- Production operator state is durable at `%LOCALAPPDATA%\PovertyKiller\state\operator`; the accepted baseline was created through the governed acceptance endpoint and cold-booted successfully.
-- Runtime/API proof is `READY_FOR_BOUNDED_PAPER`, Start allowed, pin `045ded`, four broker-confirmed positions, zero open orders, zero broker mutation.
-- Cockpit BOT/MKT vitality is evidence-bound; the idle backend renders BOT STALE, MKT UNKNOWN, and a frozen ECG.
-- Final Edge/CDP desktop 1440 and mobile 390 proof has no horizontal overflow; Start enabled; Stop visible and idle-disabled; pin, broker truth, four symbols, and safety locks visible; deprecated labels and `C:\tmp` references absent.
-- G-CLOSE scoped suite: 240 passed. Its full-suite red baseline was `1762 passed / 49 failed / 6 skipped`; that historical red state is now dispositioned, not hidden.
+- `POST /operator/intent/paper/verify-readonly` requires explicit PAPER,
+  GET-only, no-mutation, process-scope confirmations.
+- It is unavailable while a PAPER child is active and rejects live/real-money
+  requests before broker access.
+- Proof is owned by `OperatorPaperSupervisor`, resets on backend restart, and is
+  invalidated by PAPER credential or accepted-baseline changes.
+- Start first validates the request without broker access, then performs a fresh
+  account/positions/open-orders preflight, then delegates to the existing
+  supervisor only if proof passes.
+- UI display and readiness consume proof; neither owns broker truth.
+- SSE is primary with 15-second polling only as a fallback. Server keepalives do
+  not carry duplicate status payloads.
+- Lifecycle updates use targeted DOM refresh and preserve active inputs.
+- Controls derives credential, endpoint, and runtime flags before rendering;
+  the production renderer is executed by a regression test.
+- AI status separates `configured_gateway_default`, `selected_routes`, and
+  `last_actual_route`.
 
-## PK-RUNPATH-GREEN
+## Final Runtime Truth
 
-Implementation and evidence are in
-`reports/completion/PHASE_RUNPATH_GREEN_REPORT.md`.
+Durable state root:
 
-- Reported 49-failure baseline clustered as 33 run-path fixtures, 3 ungated real-broker tests, 9 stale GammaFront tests, and 4 stale/optional off-path tests.
-- Named run-path gate: `119 passed, 0 failed`.
-- Final full suite: `1803 passed, 14 skipped, 0 failed`.
-- Seven real-broker/access tests are deferred before credentials/network unless `PK_BOARD_AUTHORIZED_PAPER_BROKER_READ=YES_D4_BOARD_AUTHORIZED`; 26G also retains its separate mutation approval.
-- Refusal tests now prove a no-submit DecisionRecord, `execution_verdict=BLOCKED`, `broker_post=false`, and zero `submit_signal` calls.
-- GammaFront is `WIRED_EXIT_ONLY / ENTRY_FEED_DORMANT`; no strategy logic changed.
-- No production source changed in this seam. No guard, threshold, risk, NetEdge, TTL, sizing, masking, OMS, broker-governor, or strategy assertion weakened.
+`%LOCALAPPDATA%\PovertyKiller\state\operator`
 
-## 1. Verdict
+After explicit GET-only verification:
 
-Phase G and G-CLOSE remain complete for readiness proof. The pre-arming run path
-and repository suite now have zero local failures, with external broker proofs
-explicitly deferred rather than treated as local passes.
+- `final_launch_readiness=READY_FOR_BOUNDED_PAPER`
+- `paper_start_allowed=true`
+- `paper_stop_allowed=false` while idle
+- expected/actual suffix: `045ded` / `045ded`
+- account status: `ACTIVE`
+- portfolio status: `BROKER_CONFIRMED`
+- positions: 4 (`AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`)
+- open orders: 0
+- live blocked: true
+- real money blocked: true
+- broker/order/cancel/replace/close/liquidation mutation flags: false
 
-No PAPER run was executed. The actual run remains Shan/Board-gated.
+The external GET total is not globally instrumented and is unknown. Verification
+reads account, positions, and open orders; the independent pin assertion also
+reads account; browser hydration can issue later approved portfolio GETs. Do not
+convert that into an exact-call-count claim.
 
-## 2. Final Proof Snapshot
+## Browser Proof
 
-Final backend read-only proof:
+The bundled in-app browser failed with `missing field sandboxPolicy`, so Edge
+CDP was used and the fallback is recorded honestly.
 
-- `launch_final=READY_FOR_BOUNDED_PAPER`
-- `launch_start_allowed=true`
-- `launch_paper_endpoint_status=PAPER_ENDPOINT_CONFIRMED`
-- `launch_live_blocked=true`
-- `launch_real_money_blocked=true`
-- `launch_paper_account_pinned=true`
-- expected/actual suffix: `045ded`
-- `control_dominant_blocker=READY_FOR_BOUNDED_PAPER`
-- `control_baseline_account_suffix=045ded`
-- `control_baseline_account_matches_pin=true`
-- max lease: `432000` seconds
-- final reconciliation required: true
+- real Overview-to-Controls click succeeded after the fix;
+- no post-fix console error or runtime exception;
+- input focus/value remained stable for 20 seconds;
+- zero requests during that stable 20-second window;
+- desktop 1440 and mobile 390 showed no horizontal overflow;
+- Verify and Start were enabled on current proof; Stop was visible and idle
+  disabled;
+- suffix, broker truth, four symbols, and bounded readiness were visible;
+- idle BOT was STALE, MKT was UNKNOWN, and ECG animation was frozen.
 
-Broker-confirmed account baseline:
+Screenshots were inspected and removed; no screenshot artifact is staged.
 
-- account: `redacted_suffix:045ded`
-- status: `ACTIVE`
-- cash: `990112.68`
-- buying power: `3960450.72`
-- final backend snapshot equity: `1000426.67`
-- open orders: `0`
-- positions: `AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`
+## Relabels
 
-Browser proof:
+- Account-pin positive/refusal tests now pass through governed verification.
+- Local baseline acceptance now explicitly proves it cannot bypass external
+  preflight.
+- A historical duplicate-run refusal remains audit history, while restart now
+  requires fresh process proof.
+- Positive fake-runner fixtures were raised to accept a lawful baseline and use
+  fake GET-only proof before Start.
+- Fast status fixtures now refuse Start from credentials/local state alone.
+- UI lifecycle coverage now asserts SSE primary/fallback polling and no broad
+  remount.
 
-- desktop: `scrollWidth=1440`, `clientWidth=1440`, no horizontal overflow
-- mobile: `scrollWidth=390`, `clientWidth=390`, no horizontal overflow
-- UI shows pin proven, broker-confirmed portfolio, four non-flat baseline symbols, Start allowed on green backend, live locked, real-money blocked
-- screenshots/metrics under `C:\tmp\poverty_killer_phase_g_runtime\`
+No test, guard, threshold, or assertion was weakened.
 
-## 3. Key Fixes
+## Safety State
 
-- Direct PowerShell bounded-paper launcher now validates the broker-reported account suffix after read-only preflight.
-- Accepted baseline account suffix must match the pinned paper account suffix, or readiness/control-state fail closed.
-- Supervisor baseline runtime context now honors configured `PK_OPERATOR_STATE_DIR`.
-- Protected nonzero baseline can be ready only when baseline runtime context is loaded and same-symbol baseline guard is active.
-- `/operator-ui` no-slash route now hydrates correctly with `/operator-ui/...` asset URLs.
-- Run PAPER UI no longer falls back to a legacy disabled reason when canonical `OPERATOR_PAPER_CONTROL_STATE` is green.
-- Stale “Not 72-hour ready yet” copy was replaced with the real bounded-position-aware baseline condition.
+- No PAPER run and no real child launch.
+- No broker mutation or manual trade control.
+- No live/real-money enablement.
+- No Risk, NetEdge, stale/TTL, sizing, masking, strategy, OMS, broker-governor,
+  or MarketTruthSnapshot change.
+- Existing automated position lifecycle and governed Stop are untouched.
+- `SovereignExecutionGuard` remains dormant.
+- No raw secrets printed, staged, or exposed.
 
-## 4. Important Condition
+## Dirty Tree Protection
 
-The tracked default `state/operator/paper_baseline.json` remains stale for
-`redacted_suffix:104e2a` and was not edited or staged. Production operator state
-defaults to `%LOCALAPPDATA%\PovertyKiller\state\operator`; G-CLOSE created the
-accepted `045ded` baseline there through the governed acceptance action and
-proved a cold boot from that durable path.
-
-## 5. Tests
-
-- Run-path exit gate: `119 passed, 78 warnings`.
-- Final post-red-team full suite: `1803 passed, 14 skipped, 384 warnings in 129.22s`.
-- Restored paper matching path after removing the unnecessary production edit: `23 passed, 78 warnings`.
-- Exact skip reasons are recorded in `PHASE_RUNPATH_GREEN_REPORT.md`.
-
-## 6. Safety
-
-No broker mutation, PAPER run, live endpoint, real-money path, order placement,
-cancel, replace, close, liquidation, flattening, threshold change, state cleanup,
-raw secret exposure, or broad refactor occurred.
-
-An intermediate full run exposed historical tests that performed Alpaca PAPER
-GETs merely because credentials were present. No POST/mutation occurred, those
-results are not claimed as proof, and the tests now require the explicit Board
-read gate before credential loading/network access.
-
-## 7. Dirty Tree / Do Not Stage
-
-Do not stage:
+Do not stage, clean, reset, stash, or delete:
 
 - `state/override_log.jsonl`
 - `state/risk_state.backup`
@@ -150,23 +138,21 @@ Do not stage:
 - old untracked `reports/codex_handoff_*`
 - `reports/operator_perf/`
 - untracked audit scripts under `scripts/`
-- screenshots/metrics in `C:\tmp`
-- secrets/logs/runtime files
+- secrets, logs, databases, screenshots, and runtime files
 
-## 8. Commit / Push State
+The tree is intentionally not clean; the baseline tag remains deferred.
 
-Phase G and G-CLOSE were committed and pushed. Latest prior commit:
+## Exact Commit Scope
 
-- `289d047 close phase G pre-arming controls`
+The exact 15-file staging list is recorded in the completion report. It contains
+four production files, eight test files, the completion report, tracker, and
+this handoff. Nothing under `state/*` or the protected dirty/untracked list may
+enter the commit.
 
-This run-path-green handoff is staged in the same exact commit as its tests,
-tracker entry, and completion report. Protected runtime state and unrelated
-untracked artifacts remain excluded.
+## Next Operator Boundary
 
-## 9. Next Work
-
-Await Shan's explicit bounded PAPER run packet. The run must use the durable
-operator-state baseline, remain bounded, keep live/real-money blocked, and
-require final broker reconciliation. Environment-gated historical broker proofs
-remain deferred unless separately authorized; they are not arming blockers for
-the now-green local run path.
+The repaired cockpit can obtain current read-only broker proof and display an
+enabled Start when all readiness laws pass. This seam does not authorize or
+execute the PAPER run. Start remains Shan's explicit action, and any future run
+must retain its lease, automatic position lifecycle, governed Stop, and final
+reconciliation requirements.

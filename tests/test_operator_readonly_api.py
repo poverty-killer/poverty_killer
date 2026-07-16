@@ -12,6 +12,7 @@ from app.api.operator_readonly_api import API_VERSION, OPERATOR_ACTIVATION_VERSI
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
+from app.operator_activation.paper_baseline import BASELINE_POLICY_PROTECTED
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
 
@@ -75,30 +76,99 @@ def _write_canonical_paper_env(path: Path | None = None, *, base_url: str | None
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _verified_broker_snapshot() -> dict:
+    return {
+        "endpoint_family": "paper",
+        "account": {
+            "id": "paper-account-045ded",
+            "status": "ACTIVE",
+            "equity": "10000",
+            "portfolio_value": "10000",
+            "cash": "7500",
+            "buying_power": "15000",
+            "currency": "USD",
+            "trading_blocked": False,
+            "account_blocked": False,
+            "transfers_blocked": False,
+            "pattern_day_trader": False,
+        },
+        "positions": [
+            {
+                "symbol": "BTCUSD",
+                "asset_class": "crypto",
+                "qty": "0.1",
+                "side": "long",
+                "avg_entry_price": "50000",
+                "current_price": "51000",
+                "cost_basis": "5000",
+                "market_value": "5100",
+                "unrealized_pl": "100",
+                "unrealized_plpc": "0.02",
+            }
+        ],
+        "position_count": 1,
+        "open_orders": [],
+        "open_order_count": 0,
+    }
+
+
 class FakeReadOnlyClient:
-    def __init__(self):
+    def __init__(self, snapshot: dict | None = None):
         self.calls = []
+        self.snapshot = snapshot or {
+            **_verified_broker_snapshot(),
+            "positions": [],
+            "position_count": 0,
+        }
 
     def get_json(self, path, headers):
         self.calls.append(("GET", path))
-        if path.startswith("/v2/account"):
-            return {
-                "status": "ACTIVE",
-                "equity": "10000",
-                "portfolio_value": "10000",
-                "cash": "7500",
-                "buying_power": "15000",
-                "currency": "USD",
-                "trading_blocked": False,
-                "account_blocked": False,
-                "transfers_blocked": False,
-                "pattern_day_trader": False,
-            }
+        if path == "/v2/account":
+            return dict(self.snapshot["account"])
         if path.startswith("/v2/positions"):
-            return []
+            return list(self.snapshot.get("positions") or [])
         if path.startswith("/v2/orders"):
-            return []
+            return list(self.snapshot.get("open_orders") or [])
         raise AssertionError(f"unexpected read-only path: {path}")
+
+
+def _paper_read_confirmations() -> dict:
+    return {
+        "mode": "PAPER",
+        "live": False,
+        "real_money": False,
+        "confirm_paper_read_only": True,
+        "confirm_account_positions_orders_get_only": True,
+        "confirm_no_broker_mutation": True,
+        "confirm_process_scoped_authorization": True,
+    }
+
+
+def _verified_provider(
+    supervisor: OperatorPaperSupervisor,
+    *,
+    stack_exit_callback=None,
+) -> tuple[OperatorSnapshotProvider, dict]:
+    _write_canonical_paper_env()
+    snapshot = _verified_broker_snapshot()
+    provider = OperatorSnapshotProvider(
+        supervisor=supervisor,
+        provider_env=dict(PAPER_ENV),
+        portfolio_client=FakeReadOnlyClient(snapshot),
+        stack_exit_callback=stack_exit_callback,
+    )
+    accepted = provider.paper_baseline_accept(
+        {
+            "preflight_snapshot": snapshot,
+            "policy": BASELINE_POLICY_PROTECTED,
+            "accepted_by_operator": "offline API test",
+        }
+    )
+    assert accepted["accepted"] is True
+    verified = provider.paper_broker_preflight_intent(_paper_read_confirmations())
+    assert verified["allowed"] is True
+    assert verified["broker_mutation_occurred"] is False
+    return provider, verified
 
 
 def _endpoint(app, path: str, method: str = "GET"):
@@ -211,6 +281,7 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/operator/paper-control-state" in paths
     assert "/operator/paper-baseline" in paths
     assert "/operator/paper-baseline/accept" in paths
+    assert "/operator/intent/paper/verify-readonly" in paths
     assert "/operator/launch-readiness" in paths
     assert "/operator/research" in paths
     assert "/operator/research/evidence-graph" in paths
@@ -219,6 +290,27 @@ def test_operator_app_does_not_include_legacy_mutating_dashboard_routes(tmp_path
     assert "/operator/historical-tests/run" in paths
     assert "/operator/historical-tests/{test_id}" in paths
     assert "/operator/historical-tests/{test_id}/report" in paths
+
+
+def test_operator_event_stream_emits_changes_not_idle_one_second_duplicates(tmp_path):
+    app = _app(tmp_path)
+    response = _endpoint(app, "/operator/events")()
+
+    async def collect_initial_then_wait_for_duplicate():
+        iterator = response.body_iterator.__aiter__()
+        initial = [await iterator.__anext__() for _ in range(3)]
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(iterator.__anext__(), timeout=2.2)
+        return initial
+
+    initial = asyncio.run(collect_initial_then_wait_for_duplicate())
+    event_names = [chunk.split("\n", 1)[0] for chunk in initial]
+
+    assert event_names == [
+        "event: backend_status",
+        "event: launcher_status",
+        "event: runtime_minimal",
+    ]
 
 
 def test_operator_intents_are_refused_without_mutation(tmp_path):
@@ -282,7 +374,8 @@ def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
         config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
         runner=runner,
     )
-    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=supervisor, provider_env=dict(PAPER_ENV)))
+    provider, verified = _verified_provider(supervisor)
+    app = create_operator_app(provider=provider)
     start = _endpoint(app, "/operator/intent/paper/start", "POST")
     runtime = _endpoint(app, "/operator/runtime")
 
@@ -298,7 +391,9 @@ def test_operator_api_starts_and_tracks_paper_with_injected_supervisor():
 
     assert result["allowed"] is True
     assert result["reason_code"] == "PAPER_RUN_STARTED"
-    assert result["broker_call_occurred"] is False
+    assert verified["broker_read_occurred"] is True
+    assert result["broker_call_occurred"] is True
+    assert result["broker_mutation_occurred"] is False
     assert result["runtime_mutation_occurred"] is True
     runtime_payload = runtime()
     assert runtime_payload["process_state"] == "RUNNING"
@@ -331,17 +426,17 @@ def test_paper_control_state_is_canonical_safe_run_paper_payload(tmp_path):
     assert payload["endpoint_family"] == "paper"
     assert payload["endpoint_host"] == "paper-api.alpaca.markets"
     assert payload["credential_status"] == "CONFIGURED"
-    assert payload["paper_account_pinned"] is True
+    assert payload["paper_account_pinned"] is False
     assert payload["paper_account_expected_suffix"] == "045ded"
-    assert payload["paper_account_actual_suffix"] == "045ded"
-    assert payload["paper_account_identity_assertion"]["reason_code"] == "ALPACA_PAPER_ACCOUNT_PIN_OK"
+    assert payload["paper_account_actual_suffix"] is None
+    assert payload["paper_account_identity_assertion"]["reason_code"] == "PAPER_BROKER_PREFLIGHT_REQUIRED"
     assert payload["portfolio_truth_status"] == "PORTFOLIO_READ_AVAILABLE_SEPARATELY"
     assert payload["portfolio_data_source"] == "CONTROL_STATE_FAST_PATH_NO_BROKER_READ"
     assert payload["positions_count"] == 0
     assert payload["open_orders_count"] == 0
     assert payload["paper_start_allowed"] is False
-    assert payload["dominant_blocker"] == "paper_read_only_preflight_gate"
-    assert "paper_read_only_preflight_gate" in payload["reason_codes"]
+    assert payload["dominant_blocker"] == "PAPER_BROKER_PREFLIGHT_REQUIRED"
+    assert "PAPER_BROKER_PREFLIGHT_REQUIRED" in payload["reason_codes"]
     assert payload["max_lease_seconds"] == 432000
     assert 432000 in payload["allowed_durations"]
     assert isinstance(payload["total_elapsed_ms"], float)
@@ -410,6 +505,7 @@ def test_paper_control_state_dominant_blocker_is_active_supervisor_when_running(
         config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
         runner=runner,
     )
+    provider, _verified = _verified_provider(supervisor)
     started = supervisor.start_paper(
         {
             "mode": "PAPER",
@@ -419,13 +515,7 @@ def test_paper_control_state_dominant_blocker_is_active_supervisor_when_running(
             "approve_autonomous_paper": True,
         }
     )
-    app = create_operator_app(
-        provider=OperatorSnapshotProvider(
-            supervisor=supervisor,
-            provider_env=dict(PAPER_ENV),
-            portfolio_client=FakeReadOnlyClient(),
-        )
-    )
+    app = create_operator_app(provider=provider)
 
     payload = _endpoint(app, "/operator/paper-control-state")()
 
@@ -438,7 +528,7 @@ def test_paper_control_state_dominant_blocker_is_active_supervisor_when_running(
     assert "SUPERVISOR_PROCESS_RUNNING_OR_RECENT" in payload["reason_codes"]
 
 
-def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
+def test_historical_duplicate_refusal_is_not_current_blocker_but_restart_requires_fresh_preflight(tmp_path):
     _write_canonical_paper_env()
     runner = FakeRunner()
     store_path = tmp_path / "state" / "operator" / "sessions.jsonl"
@@ -452,6 +542,7 @@ def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
         runner=runner,
         session_store=store,
     )
+    _provider, _verified = _verified_provider(supervisor)
     first = supervisor.start_paper(
         {
             "mode": "PAPER",
@@ -490,13 +581,14 @@ def test_historical_duplicate_refusal_is_not_current_runtime_blocker(tmp_path):
     assert first["allowed"] is True
     assert duplicate["allowed"] is False
     assert duplicate["reason_code"] == "DUPLICATE_ACTIVE_RUN"
-    assert status["dominant_blocker"] == "READY_IDLE_NO_ACTIVE_PAPER_RUN"
-    assert status["runtime_attachment_detail"] == "Ready. No PAPER run currently attached."
+    assert status["dominant_blocker"] == "PAPER_BROKER_PREFLIGHT_REQUIRED"
+    assert "start blocked by PAPER_BROKER_PREFLIGHT_REQUIRED" in status["runtime_attachment_detail"]
     assert status["last_historical_refusal_reason"] == "DUPLICATE_ACTIVE_RUN"
     assert runtime["process_state"] == "NO_ACTIVE_RUNTIME_ATTACHED"
     assert runtime["current_runtime_attached"] is False
     assert runtime["historical_refusal_reason"] == "DUPLICATE_ACTIVE_RUN"
-    assert runtime["paper_start_allowed"] is True
+    assert runtime["paper_start_allowed"] is False
+    assert runtime["paper_start_refusal_reason"] == "PAPER_BROKER_PREFLIGHT_REQUIRED"
     assert launch["final_launch_readiness"] == "BLOCKED"
     assert "paper_read_only_preflight_gate" in launch["reason_codes"]
 
@@ -532,11 +624,13 @@ def test_operator_status_runtime_launch_and_diagnostics_share_safe_paper_endpoin
     assert status["supervisor"]["paper_credentials_configured"] is True
     assert status["supervisor"]["paper_endpoint_only"] is True
     assert status["supervisor"]["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
-    assert status["supervisor"]["paper_start_allowed"] is True
+    assert status["supervisor"]["paper_start_allowed"] is False
+    assert status["supervisor"]["paper_start_refusal_reason"] == "PAPER_BROKER_PREFLIGHT_REQUIRED"
     assert runtime["paper_credentials_configured"] is True
     assert runtime["paper_endpoint_only"] is True
     assert runtime["paper_endpoint_status"] == "PAPER_ENDPOINT_CONFIRMED"
-    assert runtime["paper_start_allowed"] is True
+    assert runtime["paper_start_allowed"] is False
+    assert runtime["paper_start_refusal_reason"] == "PAPER_BROKER_PREFLIGHT_REQUIRED"
     assert launch["final_launch_readiness"] == "BLOCKED"
     assert launch["paper_start_allowed"] is False
     assert launch["paper_credential_setup"]["preflight_gate"]["read_only_preflight_authorized"] is False
@@ -604,7 +698,8 @@ def test_operator_api_exposes_stale_reconcile_intent_without_broker_call(tmp_pat
     assert result["broker_mutation_occurred"] is False
     assert result["runtime_mutation_occurred"] is True
     assert latest["state"] == "IDLE"
-    assert latest["paper_start_allowed"] is True
+    assert latest["paper_start_allowed"] is False
+    assert latest["paper_start_refusal_reason"] == "PAPER_BROKER_PREFLIGHT_REQUIRED"
     assert "/operator/intent/paper/reconcile-stale" in contracts["disabled_intents"]
 
 
@@ -616,13 +711,11 @@ def test_operator_api_stack_shutdown_is_confirmed_process_only_lifecycle_intent(
         runner=runner,
     )
     exit_calls = []
-    app = create_operator_app(
-        provider=OperatorSnapshotProvider(
-            supervisor=supervisor,
-            provider_env=dict(PAPER_ENV),
-            stack_exit_callback=lambda: exit_calls.append("scheduled"),
-        )
+    provider, _verified = _verified_provider(
+        supervisor,
+        stack_exit_callback=lambda: exit_calls.append("scheduled"),
     )
+    app = create_operator_app(provider=provider)
     started = _endpoint(app, "/operator/intent/paper/start", "POST")(
         {
             "mode": "PAPER",
@@ -671,7 +764,8 @@ def test_operator_run_visibility_uses_supervisor_overlay_for_active_session(tmp_
         config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=dict(PAPER_ENV)),
         runner=runner,
     )
-    app = create_operator_app(provider=OperatorSnapshotProvider(supervisor=supervisor, provider_env=dict(PAPER_ENV)))
+    provider, _verified = _verified_provider(supervisor)
+    app = create_operator_app(provider=provider)
 
     started = _endpoint(app, "/operator/intent/paper/start", "POST")(
         {

@@ -108,16 +108,49 @@ def _paper_preflight_snapshot(*, existing_positions: bool = False) -> dict[str, 
     }
 
 
-def _accept_ready_baseline(provider: OperatorSnapshotProvider, *, existing_positions: bool = False) -> None:
+class _PaperReadClient:
+    def __init__(self, snapshot: dict[str, object]) -> None:
+        self.snapshot = snapshot
+
+    def get_json(self, path, headers):
+        assert headers["APCA-API-KEY-ID"] == "test-paper-key"
+        if path == "/v2/account":
+            return dict(self.snapshot["account"])
+        if path == "/v2/positions":
+            return list(self.snapshot.get("positions") or [])
+        if path.startswith("/v2/orders?"):
+            return []
+        raise AssertionError(f"unexpected broker path: {path}")
+
+
+def _paper_read_confirmations() -> dict[str, object]:
+    return {
+        "mode": "PAPER",
+        "live": False,
+        "real_money": False,
+        "confirm_paper_read_only": True,
+        "confirm_account_positions_orders_get_only": True,
+        "confirm_no_broker_mutation": True,
+        "confirm_process_scoped_authorization": True,
+    }
+
+
+def _accept_and_verify_ready_baseline(provider: OperatorSnapshotProvider, *, existing_positions: bool = False) -> None:
+    snapshot = _paper_preflight_snapshot(existing_positions=existing_positions)
+    provider.portfolio_client = _PaperReadClient(snapshot)
     accepted = provider.paper_baseline_accept(
         {
-            "preflight_snapshot": _paper_preflight_snapshot(existing_positions=existing_positions),
+            "preflight_snapshot": snapshot,
             "policy": BASELINE_POLICY_PROTECTED if existing_positions else BASELINE_POLICY_CLEAN_ONLY,
             "accepted_by_operator": "Shan/local operator",
         }
     )
     assert accepted["accepted"] is True
     assert accepted["broker_mutation_occurred"] is False
+    verified = provider.paper_broker_preflight_intent(_paper_read_confirmations())
+    assert verified["allowed"] is True
+    assert verified["broker_read_occurred"] is True
+    assert verified["broker_mutation_occurred"] is False
 
 
 def _ready_app(tmp_path):
@@ -129,11 +162,12 @@ def _ready_app(tmp_path):
         provider_env={},
         credential_store=store,
     )
-    _accept_ready_baseline(provider)
+    _accept_and_verify_ready_baseline(provider)
     return create_operator_app(provider=provider)
 
 
 def _ready_app_with_historical_duplicate(tmp_path):
+    _write_canonical_paper_env()
     runner = FakeRunner()
     repo_root = runner.repo_root
     store_path = repo_root / "state" / "session_journal.jsonl"
@@ -146,7 +180,13 @@ def _ready_app_with_historical_duplicate(tmp_path):
         runner=runner,
         session_store=OperatorSessionStore(path=store_path),
     )
-    supervisor.start_paper(
+    initial_provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=repo_root),
+        supervisor=supervisor,
+        provider_env=dict(PAPER_ENV),
+    )
+    _accept_and_verify_ready_baseline(initial_provider)
+    first = supervisor.start_paper(
         {
             "profile": "PAPER_EXPLORATION_ALPHA",
             "duration_seconds": 300,
@@ -154,7 +194,7 @@ def _ready_app_with_historical_duplicate(tmp_path):
             "approve_autonomous_paper": True,
         }
     )
-    supervisor.start_paper(
+    duplicate = supervisor.start_paper(
         {
             "profile": "PAPER_EXPLORATION_ALPHA",
             "duration_seconds": 300,
@@ -162,6 +202,9 @@ def _ready_app_with_historical_duplicate(tmp_path):
             "approve_autonomous_paper": True,
         }
     )
+    assert first["allowed"] is True
+    assert duplicate["allowed"] is False
+    assert duplicate["reason_code"] == "DUPLICATE_ACTIVE_RUN"
     runner.process.exit_code = 0
     supervisor.status_snapshot()
     reloaded = OperatorPaperSupervisor(
@@ -178,6 +221,10 @@ def _ready_app_with_historical_duplicate(tmp_path):
         supervisor=reloaded,
         provider_env=dict(PAPER_ENV),
     )
+    provider.portfolio_client = _PaperReadClient(_paper_preflight_snapshot())
+    verified = provider.paper_broker_preflight_intent(_paper_read_confirmations())
+    assert verified["allowed"] is True
+    assert provider.runtime()["historical_refusal_reason"] == "DUPLICATE_ACTIVE_RUN"
     return create_operator_app(provider=provider)
 
 
@@ -402,6 +449,47 @@ def test_ai_status_exposes_gateway_route_truth_owner(tmp_path):
     assert payload["trading_mutation_occurred"] is False
 
 
+def test_ai_status_separates_gateway_default_selected_route_and_last_actual_answer(tmp_path):
+    provider = OperatorSnapshotProvider(
+        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        ai_config=AIChiefConfig(provider="openai", enabled=True, openai_configured=True),
+    )
+    app = create_operator_app(provider=provider)
+    saved = _endpoint(app, "/operator/ai/router/settings", "POST")(
+        {
+            "default_mode": "LOCAL_GUIDE",
+            "active_provider": "deepseek",
+            "active_model": "deepseek-chat",
+            "light_provider": "openai",
+            "light_model": "gpt-5-mini",
+            "high_reasoning_provider": "openai",
+            "high_reasoning_model": "gpt-5.5-pro",
+            "local_model": "local-model",
+        }
+    )
+
+    before = _endpoint(app, "/operator/ai/status")()
+    answer = _endpoint(app, "/operator/ai/ask", "POST")(
+        {
+            "question": "are you alive?",
+            "answer_mode": "DETERMINISTIC",
+            "page_context": {"page_id": "ai", "page_title": "AI Advisor"},
+        }
+    )
+    after = _endpoint(app, "/operator/ai/status")()
+
+    assert saved["settings"]["active_provider"] == "deepseek"
+    assert before["configured_gateway_default"]["provider_id"] == "openai"
+    assert before["selected_routes"]["active"]["provider_id"] == "deepseek"
+    assert before["selected_routes"]["active"]["model_name"] == "deepseek-chat"
+    assert before["last_actual_route"]["status"] == "NO_ANSWER_IN_PROCESS"
+    assert answer["actual_provider"] == "deterministic_local"
+    assert after["last_actual_route"]["actual_provider"] == "deterministic_local"
+    assert after["last_actual_route"]["answer_source"] == "LOCAL_DETERMINISTIC"
+    assert after["advisory_only"] is True
+    assert after["broker_call_occurred"] is False
+
+
 def test_ai_ask_returns_evidence_contract_and_canonical_blockers(tmp_path):
     provider = OperatorSnapshotProvider(runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path))
     app = create_operator_app(provider=provider)
@@ -581,7 +669,7 @@ def test_ai_ask_ready_paper_run_bypasses_stale_external_run_planner_text(tmp_pat
         provider_env={},
         credential_store=store,
     )
-    _accept_ready_baseline(provider)
+    _accept_and_verify_ready_baseline(provider)
 
     def fail_if_external_called(url, headers, body, timeout_seconds):
         raise AssertionError("RUN_PLANNER readiness truth must not call an external provider")
@@ -1227,7 +1315,7 @@ def test_ai_ask_quant_smoke_run_live_contradiction_is_replaced_with_backend_trut
         provider_env={},
         credential_store=store,
     )
-    _accept_ready_baseline(provider)
+    _accept_and_verify_ready_baseline(provider)
     provider.ai_gateway = AIProviderGateway(
         AIChiefConfig.from_env(provider.provider_env),
         credential_env=provider.provider_env,

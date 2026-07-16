@@ -139,6 +139,33 @@ def _paper_env() -> dict[str, str]:
     }
 
 
+def _with_proven_broker_preflight(supervisor: OperatorPaperSupervisor) -> OperatorPaperSupervisor:
+    """Place lifecycle-focused tests after the separately tested GET-only gate."""
+    supervisor._process_paper_broker_read_authorized = True
+    supervisor._paper_broker_preflight = {
+        "source": "TEST_PROVEN_PAPER_BROKER_PREFLIGHT",
+        "status": "PASS",
+        "reason_code": "PAPER_BROKER_PREFLIGHT_PASS",
+        "verified_at": "2026-07-13T00:00:00+00:00",
+        "account_identity_assertion": _account_pin_ok_assertion(),
+        "broker_call_occurred": True,
+        "broker_read_occurred": True,
+        "account_request_occurred": True,
+        "positions_request_occurred": True,
+        "open_orders_request_occurred": True,
+        "broker_mutation_occurred": False,
+        "order_submission_occurred": False,
+        "cancel_occurred": False,
+        "replace_occurred": False,
+        "liquidation_occurred": False,
+        "close_position_occurred": False,
+        "live_endpoint_touched": False,
+        "real_money_touched": False,
+        "secrets_values_exposed": False,
+    }
+    return supervisor
+
+
 def _baseline_snapshot() -> dict:
     return {
         "endpoint_family": "paper",
@@ -175,7 +202,9 @@ def _supervisor_config(runner: FakeRunner, **overrides) -> PaperSupervisorConfig
 
 def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
 
     result = supervisor.start_paper(_valid_request())
 
@@ -208,7 +237,9 @@ def test_supervisor_accepts_valid_paper_start_and_builds_safe_command():
 def test_supervisor_passes_protected_baseline_context_to_bounded_run_spec():
     runner = FakeRunner()
     accepted = _write_accepted_baseline(runner.repo_root)
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
 
     snapshot = supervisor.status_snapshot()
     result = supervisor.start_paper(_valid_request())
@@ -264,9 +295,11 @@ def test_supervisor_fails_closed_when_required_baseline_artifact_missing():
     env = dict(_paper_env())
     env[PAPER_BASELINE_ENV_REQUIRED] = "1"
     env[PAPER_BASELINE_ENV_PATH] = str(missing_path)
-    supervisor = OperatorPaperSupervisor(
-        config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=env),
-        runner=runner,
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(
+            config=PaperSupervisorConfig(repo_root=runner.repo_root, process_env=env),
+            runner=runner,
+        )
     )
 
     snapshot = supervisor.status_snapshot()
@@ -281,7 +314,9 @@ def test_supervisor_fails_closed_when_required_baseline_artifact_missing():
 def test_watchlist_overlap_can_start_only_when_baseline_guard_context_is_active():
     runner = FakeRunner()
     _write_accepted_baseline(runner.repo_root)
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
 
     result = supervisor.start_paper(_valid_request())
 
@@ -300,7 +335,7 @@ def test_supervisor_allows_missing_base_url_by_safe_paper_default():
             "APCA_API_SECRET_KEY": "test-paper-secret",
         },
     )
-    supervisor = OperatorPaperSupervisor(config=config, runner=runner)
+    supervisor = _with_proven_broker_preflight(OperatorPaperSupervisor(config=config, runner=runner))
 
     snapshot = supervisor.status_snapshot()
     result = supervisor.start_paper(_valid_request())
@@ -324,7 +359,7 @@ def test_supervisor_normalizes_paper_endpoint_variant_before_start_authority():
             "APCA_API_BASE_URL": " HTTPS://PAPER-API.ALPACA.MARKETS/v2 ",
         },
     )
-    supervisor = OperatorPaperSupervisor(config=config, runner=runner)
+    supervisor = _with_proven_broker_preflight(OperatorPaperSupervisor(config=config, runner=runner))
 
     snapshot = supervisor.status_snapshot()
     result = supervisor.start_paper(_valid_request())
@@ -365,7 +400,9 @@ def test_supervisor_splits_live_endpoint_block_from_key_presence():
 
 def test_supervisor_rejects_duplicate_active_run():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
     first = supervisor.start_paper(_valid_request())
     second = supervisor.start_paper(_valid_request())
 
@@ -405,7 +442,9 @@ def test_supervisor_rejects_missing_approval_and_out_of_range_duration():
 
 def test_supervisor_accepts_custom_duration_up_to_five_days():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
 
     result = supervisor.start_paper(dict(_valid_request(), duration_seconds=432000))
     snapshot = supervisor.status_snapshot()
@@ -431,7 +470,9 @@ def test_supervisor_rejects_duration_above_five_day_runner_authority():
 
 def test_supervisor_tracks_exit_code_and_status():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
     supervisor.start_paper(_valid_request())
     runner.process.exit_code = 0
 
@@ -446,13 +487,15 @@ def test_supervisor_tracks_exit_code_and_status():
 def test_supervisor_persists_session_and_parses_child_log_paths(tmp_path):
     runner = FakeRunner()
     store = OperatorSessionStore(path=tmp_path / "state" / "operator" / "sessions.jsonl")
-    supervisor = OperatorPaperSupervisor(
-        config=_supervisor_config(
-            runner,
-            session_store_path=str(tmp_path / "state" / "operator" / "sessions.jsonl"),
-        ),
-        runner=runner,
-        session_store=store,
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(
+            config=_supervisor_config(
+                runner,
+                session_store_path=str(tmp_path / "state" / "operator" / "sessions.jsonl"),
+            ),
+            runner=runner,
+            session_store=store,
+        )
     )
     result = supervisor.start_paper(_valid_request())
     wrapper_stdout = Path(result["session"]["stdout_path"])
@@ -504,9 +547,11 @@ def test_governed_stop_halts_loop_releases_lease_without_broker_mutation_and_pre
     state_dir.mkdir(parents=True)
     baseline_path = state_dir / "paper_baseline.json"
     baseline_path.write_text(json.dumps(accepted), encoding="utf-8")
-    supervisor = OperatorPaperSupervisor(
-        config=_supervisor_config(runner, operator_state_dir=str(state_dir)),
-        runner=runner,
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(
+            config=_supervisor_config(runner, operator_state_dir=str(state_dir)),
+            runner=runner,
+        )
     )
     mutation_calls: list[str] = []
     monkeypatch.setattr(
@@ -578,7 +623,9 @@ def test_supervisor_refuses_stop_without_active_run():
 
 def test_supervisor_refuses_when_runner_unavailable():
     runner = FakeRunner(available=False, unavailable_reason="WINDOWS_POWERSHELL_REQUIRED")
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
 
     result = supervisor.start_paper(_valid_request())
 
@@ -618,11 +665,13 @@ def test_supervisor_auto_reconciles_dead_prior_pid_on_startup_without_broker_cal
         }
     )
 
-    supervisor = OperatorPaperSupervisor(
-        config=_supervisor_config(runner, session_store_path=str(store.path)),
-        runner=runner,
-        session_store=store,
-        pid_liveness_probe=lambda pid: (False, "STALE_SESSION_PROCESS_NOT_RUNNING"),
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(
+            config=_supervisor_config(runner, session_store_path=str(store.path)),
+            runner=runner,
+            session_store=store,
+            pid_liveness_probe=lambda pid: (False, "STALE_SESSION_PROCESS_NOT_RUNNING"),
+        )
     )
     snapshot = supervisor.status_snapshot()
     start = supervisor.start_paper(_valid_request())
@@ -722,7 +771,9 @@ def test_supervisor_fails_closed_when_prior_pid_liveness_is_ambiguous():
 
 def test_supervisor_shutdown_active_process_group_without_broker_call():
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
     supervisor.start_paper(_valid_request())
 
     shutdown = supervisor.shutdown_active_processes("TEST_API_SHUTDOWN")
@@ -763,10 +814,12 @@ def test_supervisor_reconciles_stale_session_after_pid_proof_and_confirmations()
             "started_at": "2026-06-14T04:17:12+00:00",
         }
     )
-    supervisor = OperatorPaperSupervisor(
-        config=_supervisor_config(runner, session_store_path=str(store.path), startup_lifecycle_reconcile=False),
-        runner=runner,
-        session_store=store,
+    supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(
+            config=_supervisor_config(runner, session_store_path=str(store.path), startup_lifecycle_reconcile=False),
+            runner=runner,
+            session_store=store,
+        )
     )
     supervisor._is_pid_running = lambda pid: (False, "STALE_SESSION_PROCESS_NOT_RUNNING")  # type: ignore[method-assign]
 

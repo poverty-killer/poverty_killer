@@ -1,6 +1,6 @@
 # POVERTY_KILLER Completion Checkpoint Tracker
 
-Updated: 2026-07-12
+Updated: 2026-07-15
 Branch: master
 
 ## Checkpoint Summary
@@ -185,6 +185,37 @@ is in `reports/completion/LAUNCHER_APP_ICON_UPGRADE_REPORT.md`.
   made. No PAPER run, broker read/mutation, live mode, real money, threshold,
   guard, strategy, OMS, readiness, or tracked runtime-state change occurred.
 
+## Operator Usability Recovery
+
+Completed on 2026-07-15 after Shan reported that the opened cockpit did not
+allow useful interaction and approved the scoped repairs with `proceed`. Full
+evidence is in
+`reports/completion/OPERATOR_USABILITY_RECOVERY_REPORT.md`.
+
+- PASS - the cockpit now exposes an explicit, process-scoped Alpaca PAPER
+  GET-only verification action. It cannot submit, cancel, replace, close, or
+  liquidate an order and it resets on backend restart.
+- PASS - Start remains fail-closed until current broker proof passes and forces
+  a fresh account/positions/open-orders preflight immediately before fake or
+  real child launch.
+- PASS - the live Controls crash was root-caused to undefined renderer
+  variables. The renderer is fixed and now executed by a Node regression test.
+- PASS - SSE is primary; polling is only a fallback; unchanged server state uses
+  keepalives; background lifecycle updates do not remount active operator input.
+- PASS - credential setup, external broker verification, and Start admission
+  are labeled as separate proofs. AI gateway default, selected route, and last
+  actual answer route are also separate.
+- Final full suite: `1815 passed, 14 skipped, 384 warnings, 0 failed`.
+- Runtime/browser proof: durable LocalAppData cold boot; Controls navigation
+  works; focus stable for 20 seconds; no requests in that stable window; desktop
+  1440 and mobile 390 have no horizontal overflow; truthful BOT/MKT vitality.
+- Board-authorized read-only PAPER proof: suffix `045ded`, account `ACTIVE`, 4
+  positions (`AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`), 0 open orders,
+  `BROKER_CONFIRMED`, `READY_FOR_BOUNDED_PAPER`, Start enabled while idle.
+- Exact total GET count is not instrumented and is recorded as unknown. No
+  PAPER run, Start click, broker mutation, live/real-money path, manual trade,
+  threshold change, or tracked runtime-state edit occurred.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from protected runtime files and pre-existing
@@ -205,5 +236,10 @@ clean/stash/reset.
 - Phase F UI cockpit is complete. Result: Run PAPER cockpit renders account-pin truth, disables Start without proven pin, and passed desktop/mobile browser validation. Phase G bounded PAPER run remains Board-gated.
 - Shan authorized Phase G Bounded PAPER Run READY with D4 read-only broker re-arm. Result: Phase G readiness is PASS with broker-read-only and browser proof; actual PAPER execution remains Shan/Board-gated.
 - Shan directed the pre-arming run-path-green disposition: root-cause the reported 49 by cluster, require zero named run-path failures, preserve off-path deferrals, and do not weaken any guard, threshold, or assertion. Result: run path and full local suite have zero failures; external broker proofs remain explicitly environment-gated.
+- Shan reported that the opened bot did not allow useful interaction, required a
+  360-degree blocker analysis and approval gate, then approved the scoped fixes
+  with `proceed`. Result: the unreachable verification path, stale Start proof,
+  competing update transports, misleading copy, conflated AI route truth, masked
+  refusal reason, and live Controls renderer exception were fixed and proved.
 - No PAPER run was authorized.
 - No live mode, live read-only mode, or broker mutation was authorized.

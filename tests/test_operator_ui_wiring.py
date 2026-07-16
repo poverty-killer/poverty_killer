@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 
@@ -522,6 +523,93 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "AI Quant Advisor" in text
 
 
+def test_command_center_renderer_executes_with_normalized_backend_truth():
+    text = _app_text()
+    start = text.index("  function renderPaperLaunchControl")
+    end = text.index("\n  function renderStackShutdownPanel", start)
+    renderer = text[start:end]
+    harness = r'''
+const RUNTIME_ACTIVE_STATUSES = new Set(["STARTING", "RUNNING", "STOP_REQUESTED"]);
+const data = {
+  meta: { dataSource: "OPERATOR_BACKEND" },
+  launchReadiness: { alpacaPaperCredentialsConfigured: true, paperEndpointOnly: true },
+  supervisor: {
+    state: "IDLE",
+    paperStartAllowed: true,
+    paperStopAllowed: false,
+    paperStopRefusalReason: "NO_ACTIVE_RUN",
+    sessionId: null,
+    lastIntentResult: "none"
+  },
+  paperControlState: {
+    paperBrokerPreflight: { status: "PASS", positionCount: 4, openOrderCount: 0 }
+  },
+  portfolio: {}
+};
+const runState = {
+  source: "OPERATOR_PAPER_CONTROL_STATE",
+  overallStatus: { label: "Ready for bounded PAPER", code: "READY_FOR_BOUNDED_PAPER", severity: "ready", detail: "verified" },
+  canRunPaper: { allowed: true, reason: null },
+  endpoint: { label: "PAPER endpoint confirmed", valid: true, family: "paper", source: "configured", display: "https://paper-api.alpaca.markets" },
+  credentials: { label: "Alpaca PAPER credentials configured", configured: true, source: "CANONICAL_PAPER_ENV_FILE", missingFields: [] },
+  paperCredentialSetup: { overallStatus: { label: "PAPER account and portfolio verified", severity: "ready", detail: "verified" } },
+  paperAccountPin: { pinned: true, expectedSuffix: "045ded", actualSuffix: "045ded", detail: "matched" },
+  paperBaseline: { accepted: true, positionCount: 4, openOrderCount: 0, protectedSymbols: ["AVAXUSD", "ETHUSD", "LINKUSD", "SOLUSD"] },
+  runtime: { state: "IDLE", label: "No active PAPER run", safeStopStatus: "NO_ACTIVE_RUNTIME" },
+  brokerTruth: { label: "Broker-confirmed PAPER account and portfolio", detail: "4 positions, 0 open orders", brokerConfirmed: true },
+  safetyLocks: { live: { locked: true }, realMoney: { blocked: true }, manualTrading: { available: false }, forceTrade: { available: false } },
+  nextSafeAction: "Review confirmations."
+};
+function runPaperState() { return runState; }
+function paperAccountPinFromState() { return runState.paperAccountPin; }
+function paperBaselineFromState() { return runState.paperBaseline; }
+function paperLaunchDisabledReason() { return ""; }
+function paperRunDraftForRender() { return { watchlistRaw: "BTC/USD, ETH/USD, SOL/USD", durationRaw: "300", customAmountRaw: "5", customUnit: "minutes", profileAlpha: true }; }
+function paperDurationBounds() { return { configuredMaxDuration: 432000, runnerMaxDuration: 432000, maxDuration: 432000, defaultDuration: 300, durationOptions: [[300, "5 minutes"]] }; }
+function paperDraftValidation() { return { valid: true, detail: "Draft valid." }; }
+function defaultPaperWatchlist() { return "BTC/USD, ETH/USD, SOL/USD"; }
+function formatDuration(value) { return String(value); }
+function escapeHtml(value) { return String(value == null ? "" : value); }
+function severityColor() { return "green"; }
+function statusColor() { return "green"; }
+function badge(value) { return `<span>${value}</span>`; }
+function backendDegradedCount() { return 0; }
+function renderPaperCredentialSetup() { return ""; }
+function renderPaperBaselinePanel() { return ""; }
+function renderRunPaperProofTile() { return ""; }
+function renderSessionLifecycleCard() { return ""; }
+function renderStaleSessionReconcilePanel() { return ""; }
+function paperDraftDirtyLabel() { return "Draft unchanged."; }
+function runPaperAdvancedRows() { return []; }
+function kv() { return ""; }
+function tokenText(value) { return String(value); }
+function backendConnected() { return true; }
+function Button(options) {
+  const attrs = Object.entries(options.attrs || {}).map(([key, value]) => `${key}="${value}"`).join(" ");
+  return `<button ${attrs} ${options.disabled ? "disabled" : ""}>${options.label}</button>`;
+}
+'''
+    script = harness + "\n" + renderer + r'''
+const html = renderPaperLaunchControl("controls");
+const result = {
+  verify: html.includes('data-intent="paper-verify-readonly"') && !html.match(/data-intent="paper-verify-readonly"[^>]*disabled/),
+  start: html.includes('data-intent="paper-start"') && !html.match(/data-intent="paper-start"[^>]*disabled/),
+  stop: !!html.match(/data-intent="paper-stop"[^>]*disabled/)
+};
+console.log(JSON.stringify(result));
+'''
+    completed = subprocess.run(
+        ["node", "-e", script],
+        cwd=APP_JS.parent.parent.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == '{"verify":true,"start":true,"stop":true}'
+
+
 def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
     text = _app_text()
     css = STYLES_CSS.read_text(encoding="utf-8")
@@ -727,21 +815,49 @@ def test_run_archive_ui_surfaces_report_truth_buckets_and_mock_data_is_labeled()
     assert "NOT_APPROVED_MOCK_DATA" in mock
 
 
-def test_runtime_lifecycle_uses_sse_and_polling_fallback():
+def test_runtime_lifecycle_uses_sse_with_polling_only_as_transport_fallback():
     text = _app_text()
 
-    assert "LIFECYCLE_RECONCILE_INTERVAL_MS = 5000" in text
+    assert "LIFECYCLE_FALLBACK_POLL_INTERVAL_MS = 15000" in text
     assert "function startRuntimeLifecycleObservers" in text
     assert "new EventSource(`${operatorApiBase()}/operator/events`)" in text
     assert "scheduleLifecycleRefresh(`sse:${eventName}`, 500)" in text
     assert "scheduleLifecycleRefresh(\"sse-error-poll-fallback\", 0)" in text
-    assert "window.setInterval(() => {" in text
+    assert "const startFallbackPolling = () =>" in text
+    assert "const stopFallbackPolling = () =>" in text
+    assert "lifecycleEventSource.onopen = () =>" in text
+    assert "stopFallbackPolling();" in text
     assert "reconcileRuntimeLifecycle(reason)" in text
     assert "[\"paperControlState\", \"/operator/paper-control-state\"]" in text
-    assert "[\"latestRun\", \"/operator/latest-run\"]" in text
-    assert "[\"runtime\", \"/operator/runtime\"]" in text
-    assert "state.runArchive.runs = [" in text
+    assert "[\"runVisibility\", \"/operator/run-visibility/status\"]" in text
     assert "startRuntimeLifecycleObservers()" in text
+
+
+def test_paper_verification_control_and_credential_copy_are_truthful():
+    text = _app_text()
+
+    assert "Verify PAPER account and portfolio" in text
+    assert '"data-intent": "paper-verify-readonly"' in text
+    assert "/operator/intent/paper/verify-readonly" in text
+    assert "confirm_account_positions_orders_get_only: true" in text
+    assert "confirm_no_broker_mutation: true" in text
+    assert "confirm_process_scoped_authorization: true" in text
+    assert "Authorization resets when the backend restarts." in text
+    assert "Start will verify again." in text
+    assert "Check credential setup" in text
+    assert "Validate read-only" not in text
+
+
+def test_ai_route_ui_separates_gateway_selected_and_actual_truth():
+    text = _app_text()
+
+    assert "Gateway default" in text
+    assert "Selected active" in text
+    assert "Last actual route" in text
+    assert "Last answer source" in text
+    assert "aiStatus.configured_gateway_default" in text
+    assert "aiStatus.selected_routes" in text
+    assert "aiStatus.last_actual_route" in text
 
 
 def test_run_paper_form_draft_survives_lifecycle_reconciliation():
@@ -765,13 +881,16 @@ def test_run_paper_form_draft_survives_lifecycle_reconciliation():
 
 def test_lifecycle_refresh_patches_run_paper_without_remounting_form_controls():
     text = _app_text()
+    lifecycle_render = text.split("function renderLifecycleState()", 1)[1].split("function refreshRuntimeVitalityDom()", 1)[0]
 
     assert 'if (selected === "controls")' in text
     assert "refreshRunPaperControlDom();" in text
-    assert 'renderScreens(selected);' in text
+    assert "renderScreens" not in lifecycle_render
+    assert "renderAiChiefOverlay" not in lifecycle_render
+    assert "refreshRuntimeVitalityDom();" in lifecycle_render
     assert "syncPaperRunDraftFromDom(formId, { markDirty: false })" in text
     assert '["paperControlState", "/operator/paper-control-state"]' in text
-    assert '["latestRun", "/operator/latest-run"]' in text
+    assert '["runVisibility", "/operator/run-visibility/status"]' in text
     assert "applyPaperControlState(data, data.paperControlState)" in text
     assert "applyRuntimeLifecycleTruth(data, payload)" in text
     assert "sessionCard.outerHTML = renderSessionLifecycleCard" in text

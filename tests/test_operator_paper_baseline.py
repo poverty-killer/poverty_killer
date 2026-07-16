@@ -5,6 +5,8 @@ import json
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_activation.paper_baseline import (
@@ -29,6 +31,13 @@ from app.operator_activation.paper_baseline import (
 )
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from app.main_loop import _build_pre_trade_guardrail_verdict
+
+
+@pytest.fixture(autouse=True)
+def _isolated_canonical_paper_env(monkeypatch, tmp_path):
+    path = tmp_path / "canonical_alpaca_paper.env"
+    monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(path))
+    return path
 
 
 def _account_pin_ok_assertion(_env=None) -> dict[str, object]:
@@ -58,6 +67,35 @@ def _endpoint(app, path: str, method: str = "GET"):
         if route.path == path and method in (route.methods or set()):
             return route.endpoint
     raise AssertionError(f"route not found: {method} {path}")
+
+
+class _PaperReadClient:
+    def __init__(self, snapshot: dict[str, object]) -> None:
+        self.snapshot = snapshot
+        self.calls: list[tuple[str, str]] = []
+
+    def get_json(self, path, headers):
+        assert headers["APCA-API-KEY-ID"] == "test-paper-key"
+        self.calls.append(("GET", path))
+        if path == "/v2/account":
+            return dict(self.snapshot["account"])
+        if path == "/v2/positions":
+            return list(self.snapshot.get("positions") or [])
+        if path.startswith("/v2/orders?"):
+            return list(self.snapshot.get("open_orders") or [])
+        raise AssertionError(f"unexpected broker path: {path}")
+
+
+def _paper_read_confirmations() -> dict[str, object]:
+    return {
+        "mode": "PAPER",
+        "live": False,
+        "real_money": False,
+        "confirm_paper_read_only": True,
+        "confirm_account_positions_orders_get_only": True,
+        "confirm_no_broker_mutation": True,
+        "confirm_process_scoped_authorization": True,
+    }
 
 
 def _preflight(
@@ -174,7 +212,7 @@ def test_baseline_drift_requires_fresh_read_only_preflight() -> None:
     assert "refresh read-only preflight" in state["reason"]
 
 
-def test_operator_baseline_accept_endpoint_is_local_only_and_readiness_uses_it(tmp_path) -> None:
+def test_operator_baseline_accept_is_local_only_and_does_not_bypass_broker_preflight(tmp_path) -> None:
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     store.save_provider("alpaca_paper", {"APCA_API_KEY_ID": "id", "APCA_API_SECRET_KEY": "secret"})
     provider = OperatorSnapshotProvider(
@@ -197,11 +235,12 @@ def test_operator_baseline_accept_endpoint_is_local_only_and_readiness_uses_it(t
     assert accepted["cancel_occurred"] is False
     assert accepted["liquidation_occurred"] is False
     assert baseline["status"] == PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS
-    assert readiness["paper_credential_setup"]["preflight_gate"]["account_check_status"] == "accepted_existing_positions"
-    assert "paper_read_only_preflight_gate" not in readiness["reason_codes"]
+    assert readiness["paper_credential_setup"]["preflight_gate"]["account_check_status"] == "blocked"
+    assert "paper_read_only_preflight_gate" in readiness["reason_codes"]
     assert "paper_baseline_position_aware_policy" not in readiness["reason_codes"]
     checks = {row["check_id"]: row for row in readiness["checks"]}
-    assert checks["paper_baseline_position_aware_policy"]["status"] == "PASS"
+    assert checks["paper_read_only_preflight_gate"]["status"] == "DEGRADED"
+    assert readiness["paper_start_allowed"] is False
     assert readiness["protected_same_symbol_guard_active"] is True
     assert readiness["broker_mutation_occurred"] is False
 
@@ -214,21 +253,27 @@ def test_paper_control_state_allows_protected_position_baseline_when_runtime_gua
     )
     monkeypatch.setenv(ALPACA_PAPER_ENV_PATH_ENV_KEY, str(paper_env))
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
+    snapshot = _preflight()
     provider = OperatorSnapshotProvider(
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
         provider_env={},
         credential_store=store,
+        portfolio_client=_PaperReadClient(snapshot),
         account_identity_checker=_account_pin_ok_assertion,
     )
     app = create_operator_app(provider=provider)
     accepted = _endpoint(app, "/operator/paper-baseline/accept", "POST")(
-        {"preflight_snapshot": _preflight(), "policy": BASELINE_POLICY_PROTECTED, "accepted_by_operator": "Shan/local operator"}
+        {"preflight_snapshot": snapshot, "policy": BASELINE_POLICY_PROTECTED, "accepted_by_operator": "Shan/local operator"}
     )
+    verified = _endpoint(app, "/operator/intent/paper/verify-readonly", "POST")(_paper_read_confirmations())
 
     control = asyncio.run(_endpoint(app, "/operator/paper-control-state")())
     launch = _endpoint(app, "/operator/launch-readiness")()
 
     assert accepted["accepted"] is True
+    assert verified["allowed"] is True
+    assert verified["broker_read_occurred"] is True
+    assert verified["broker_mutation_occurred"] is False
     assert control["paper_start_allowed"] is True
     assert control["dominant_blocker"] == "READY_FOR_BOUNDED_PAPER"
     assert "paper_baseline_position_aware_policy" not in control["reason_codes"]
@@ -288,22 +333,34 @@ def test_stale_baseline_from_wrong_account_blocks_paper_readiness(tmp_path, monk
         accepted_by="stale wrong-account baseline",
     )
     (repo_state / "paper_baseline.json").write_text(json.dumps(stale), encoding="utf-8")
+    current = _crypto_preflight()
     provider = OperatorSnapshotProvider(
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
         provider_env={},
         credential_store=LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json"),
+        portfolio_client=_PaperReadClient(current),
         account_identity_checker=_account_pin_ok_assertion,
     )
     app = create_operator_app(provider=provider)
+    verified = _endpoint(app, "/operator/intent/paper/verify-readonly", "POST")(_paper_read_confirmations())
 
     launch = _endpoint(app, "/operator/launch-readiness")()
     control = asyncio.run(_endpoint(app, "/operator/paper-control-state")())
 
+    assert verified["allowed"] is False
+    assert verified["reason_code"] == "PAPER_BASELINE_ACCOUNT_PIN_MISMATCH"
     assert launch["paper_account_pinned"] is True
     assert launch["final_launch_readiness"] == "BLOCKED"
     assert "paper_baseline_account_pin_mismatch" in launch["reason_codes"]
+    setup = launch["paper_credential_setup"]["preflight_gate"]
+    assert setup["read_only_preflight_authorized"] is True
+    assert setup["broker_verification_passed"] is False
+    assert setup["status_label"] == "PAPER verification blocked"
+    assert setup["last_preflight_result"] == "PAPER_BASELINE_ACCOUNT_PIN_MISMATCH"
+    assert launch["run_paper_operator_state"]["broker_truth"]["status"] == "BROKER_CONFIRMED_START_BLOCKED"
+    assert launch["run_paper_operator_state"]["broker_truth"]["broker_confirmed"] is True
     assert control["paper_start_allowed"] is False
-    assert "paper_baseline_account_pin_mismatch" in control["reason_codes"]
+    assert "PAPER_BASELINE_ACCOUNT_PIN_MISMATCH" in control["reason_codes"]
 
 
 def test_protected_baseline_blocks_same_symbol_trading_without_lot_tracking() -> None:

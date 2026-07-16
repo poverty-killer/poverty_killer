@@ -303,6 +303,7 @@ READ_ONLY_CONTRACTS: dict[str, Any] = {
         "/operator/positions/intelligence": "read_only_position_intelligence",
         "/operator/paper-baseline": "read_only_local_paper_baseline_adoption_state",
         "/operator/paper-baseline/accept": "local_operator_baseline_acceptance_no_broker_call",
+        "/operator/intent/paper/verify-readonly": "process_scoped_get_only_paper_account_positions_orders_preflight",
         "/operator/launch-readiness": "read_only_bounded_paper_launch_readiness",
         "/operator/research": "advisory_research_registry",
         "/operator/research/hypotheses": "advisory_research_hypothesis_queue_only",
@@ -440,6 +441,20 @@ class OperatorSnapshotProvider:
         self.ai_routing_settings = dict(ai_settings_loaded["settings"])
         self.ai_routing_settings_source = str(ai_settings_loaded.get("settings_source") or "DEFAULT_SETTINGS")
         self.ai_routing_settings_last_result = ai_settings_loaded
+        self.last_ai_route_truth: dict[str, Any] = {
+            "status": "NO_ANSWER_IN_PROCESS",
+            "request_id": None,
+            "selected_provider": None,
+            "selected_model": None,
+            "actual_provider": None,
+            "actual_model": None,
+            "answer_source": None,
+            "provider_call_attempted": False,
+            "model_call_occurred": False,
+            "provider_response_received": False,
+            "fallback_used": False,
+            "fallback_reason": None,
+        }
         self.ai_queue = ai_queue or GovernanceQueue(
             path=self.runtime_config.operator_state_dir / "ai_governance_queue.jsonl"
         )
@@ -569,7 +584,13 @@ class OperatorSnapshotProvider:
         refreshed = self.credential_store.effective_env(self.process_env)
         refreshed.update(self.credential_store.effective_provider_values("alpaca_paper", self.process_env))
         if refreshed != self.provider_env:
+            paper_environment_changed = self._paper_process_env(refreshed) != self._paper_process_env(self.provider_env)
             self.provider_env = refreshed
+            if paper_environment_changed:
+                self.supervisor.invalidate_paper_broker_preflight(
+                    "PAPER_BROKER_PREFLIGHT_INVALIDATED_CREDENTIAL_CHANGE",
+                    revoke_process_authorization=True,
+                )
             self.ai_gateway = AIProviderGateway(
                 AIChiefConfig.from_env(refreshed),
                 credential_env=refreshed,
@@ -600,17 +621,23 @@ class OperatorSnapshotProvider:
         state = "RUNNING" if is_active else ("STALE_ACTIVE_SESSION" if stale_after_restart else "IDLE")
         paper_key_refusal = self.supervisor._paper_key_refusal()
         endpoint_authority = self.supervisor._paper_endpoint_authority()
+        paper_broker_preflight = self.supervisor.paper_broker_preflight_status()
+        preflight_passed = paper_broker_preflight.get("status") == "PASS"
         return {
             "supervisor_version": getattr(self.supervisor, "__class__", type("Unknown", (), {})).__name__,
             "state": state,
             "active_session": session_dict if is_active else None,
             "latest_session": session_dict,
             "active_session_id": getattr(session, "session_id", None) if is_active and session else None,
-            "paper_start_allowed": state == "IDLE",
+            "paper_start_allowed": state == "IDLE" and preflight_passed,
             "paper_stop_allowed": is_active,
             "paper_start_refusal_reason": (
                 "DUPLICATE_ACTIVE_RUN" if is_active else (
-                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART" if stale_after_restart else None
+                    "PREVIOUS_SESSION_STATE_UNKNOWN_AFTER_RESTART"
+                    if stale_after_restart
+                    else None
+                    if preflight_passed
+                    else str(paper_broker_preflight.get("reason_code") or "PAPER_BROKER_PREFLIGHT_REQUIRED")
                 )
             ),
             "paper_stop_refusal_reason": None if is_active else "NO_ACTIVE_RUN",
@@ -624,6 +651,8 @@ class OperatorSnapshotProvider:
             "paper_endpoint_operator_action": endpoint_authority["operator_action"],
             "paper_endpoint_authority": endpoint_authority,
             "broker_read_permission_profile": self.supervisor._broker_read_profile().to_dict(),
+            "paper_broker_read_authorization": self.supervisor.paper_broker_read_authorization_status(),
+            "paper_broker_preflight": paper_broker_preflight,
             "paper_baseline_runtime_context": {
                 "source": "NOT_ON_STATUS_FAST_PATH",
                 "baseline_required": None,
@@ -666,6 +695,15 @@ class OperatorSnapshotProvider:
         ready_idle = not watchlist and paper_start_allowed and supervisor.get("state") == "IDLE"
         historical_refusal = self._latest_historical_refusal(supervisor)
         runtime_attachment_state = "READY_IDLE_NO_ACTIVE_PAPER_RUN" if ready_idle else process_state
+        dominant_blocker = (
+            "SUPERVISOR_PROCESS_RUNNING_OR_RECENT"
+            if watchlist
+            else (
+                "READY_IDLE_NO_ACTIVE_PAPER_RUN"
+                if ready_idle
+                else str(supervisor.get("paper_start_refusal_reason") or process_state)
+            )
+        )
         runtime_attachment_detail = (
             "Ready. No PAPER run currently attached."
             if ready_idle
@@ -690,7 +728,7 @@ class OperatorSnapshotProvider:
             "universe": watchlist,
             "asset_classes": ["crypto"] if watchlist else [],
             "last_heartbeat_ts": None,
-            "dominant_blocker": runtime_attachment_state if not watchlist else "SUPERVISOR_PROCESS_RUNNING_OR_RECENT",
+            "dominant_blocker": dominant_blocker,
             "runtime_attachment_state": runtime_attachment_state,
             "runtime_attachment_detail": runtime_attachment_detail,
             "last_historical_refusal": historical_refusal,
@@ -1464,11 +1502,9 @@ class OperatorSnapshotProvider:
         return result
 
     def portfolio(self) -> dict[str, Any]:
-        env = self._refresh_provider_env()
-        broker_read_authorized = (
-            str(env.get("PK_BOARD_AUTHORIZED_PAPER_BROKER_READ") or "").strip().upper()
-            == "YES_D4_BOARD_AUTHORIZED"
-        )
+        self._refresh_provider_env()
+        env = self.supervisor.paper_broker_read_env()
+        broker_read_authorized = self.supervisor.paper_broker_read_is_authorized()
         snapshot = build_portfolio_snapshot(
             env,
             client=self.portfolio_client,
@@ -1557,6 +1593,8 @@ class OperatorSnapshotProvider:
         accepted_by = str(body.get("accepted_by_operator") or "Shan/local operator")
         policy = str(body.get("policy") or BASELINE_POLICY_PROTECTED)
         result = self.paper_baseline_store.accept(snapshot, accepted_by=accepted_by, policy=policy)
+        if result.get("accepted") is True:
+            self.supervisor.invalidate_paper_broker_preflight("PAPER_BROKER_PREFLIGHT_INVALIDATED_BASELINE_CHANGE")
         result.update(
             {
                 "local_acceptance_only": True,
@@ -1586,6 +1624,7 @@ class OperatorSnapshotProvider:
             ai_status=self.ai_status(),
             effective_env=effective_env,
             paper_baseline=baseline if baseline.get("accepted") is True else None,
+            paper_broker_preflight=self.supervisor.paper_broker_preflight_status(),
         )
 
     def paper_control_state(self) -> dict[str, Any]:
@@ -1641,6 +1680,10 @@ class OperatorSnapshotProvider:
         endpoint_authority = run_subcheck("endpoint_authority", lambda: alpaca_endpoint_authority(self._paper_process_env(effective_env)), reason_code="ENDPOINT_AUTHORITY_FAILED") or {}
         accepted_baseline = run_subcheck("accepted_baseline_store", self.paper_baseline_store.current, reason_code="ACCEPTED_BASELINE_STORE_FAILED") or {}
         baseline = run_subcheck("baseline_state", self.paper_baseline, reason_code="BASELINE_STATE_FAILED") or {}
+        paper_broker_preflight = supervisor.get("paper_broker_preflight") if isinstance(supervisor.get("paper_broker_preflight"), dict) else {}
+        verified_baseline = paper_broker_preflight.get("baseline_state") if isinstance(paper_broker_preflight.get("baseline_state"), dict) else {}
+        if verified_baseline:
+            baseline = {**baseline, **verified_baseline}
         git_identity = {
             "repo_head": self.loaded_git_commit_short,
             "loaded_commit": self.loaded_git_commit_short,
@@ -1724,6 +1767,7 @@ class OperatorSnapshotProvider:
         )
         account_identity = supervisor.get("paper_account_identity_assertion") if isinstance(supervisor.get("paper_account_identity_assertion"), dict) else {}
         account_pin_ok = supervisor.get("paper_account_pinned") is True or account_identity.get("status") == "PASS"
+        paper_broker_preflight_passed = paper_broker_preflight.get("status") == "PASS"
         baseline_account_suffix = accepted_baseline_account_suffix(accepted_baseline if accepted_baseline.get("accepted") is True else None)
         expected_account_suffix = normalize_alpaca_account_suffix(account_identity.get("expected_suffix"))
         baseline_account_pin_mismatch = (
@@ -1739,6 +1783,7 @@ class OperatorSnapshotProvider:
             and credential_configured
             and endpoint_valid
             and account_pin_ok
+            and paper_broker_preflight_passed
             and baseline_accepted
             and not baseline_account_pin_mismatch
             and not baseline_position_aware_policy_blocked
@@ -1753,6 +1798,8 @@ class OperatorSnapshotProvider:
             dominant_blocker = "PAPER_CREDENTIALS_MISSING"
         elif not endpoint_valid:
             dominant_blocker = str(endpoint_authority.get("reason_code") or "PAPER_ENDPOINT_NOT_VERIFIED")
+        elif not paper_broker_preflight_passed:
+            dominant_blocker = str(paper_broker_preflight.get("reason_code") or "PAPER_BROKER_PREFLIGHT_REQUIRED")
         elif not account_pin_ok:
             dominant_blocker = str(account_identity.get("reason_code") or "ALPACA_PAPER_ACCOUNT_PIN_NOT_PROVEN")
         elif baseline_adoption_required:
@@ -1801,6 +1848,8 @@ class OperatorSnapshotProvider:
             if supervisor_running
             else "Start bounded PAPER from the Run PAPER cockpit."
             if local_start_ready
+            else "Verify the PAPER account and portfolio through the governed GET-only preflight."
+            if not paper_broker_preflight_passed
             else "Resolve the listed blocker before starting PAPER."
         )
         total_elapsed_ms = elapsed_ms_since(started_ns)
@@ -1829,6 +1878,8 @@ class OperatorSnapshotProvider:
             "paper_account_pinned": account_pin_ok,
             "paper_account_expected_suffix": account_identity.get("expected_suffix"),
             "paper_account_actual_suffix": account_identity.get("actual_suffix"),
+            "paper_broker_read_authorization": supervisor.get("paper_broker_read_authorization") or {},
+            "paper_broker_preflight": paper_broker_preflight,
             "baseline_status": baseline.get("status") or "UNKNOWN",
             "baseline_accepted": baseline_accepted,
             "baseline_snapshot_id": baseline.get("baseline_snapshot_id"),
@@ -2228,15 +2279,53 @@ class OperatorSnapshotProvider:
         gateway_status = self.ai_gateway.status()
         gateway_provider = gateway_status.get("provider") if isinstance(gateway_status.get("provider"), dict) else {}
         gateway_policy = gateway_status.get("model_policy") if isinstance(gateway_status.get("model_policy"), dict) else {}
+        registry = gateway_status.get("provider_registry") if isinstance(gateway_status.get("provider_registry"), dict) else {}
+        providers = {
+            str(row.get("provider_id") or ""): row
+            for row in registry.get("providers") or []
+            if isinstance(row, dict)
+        }
+
+        def selected_route(provider_key: str, model_key: str) -> dict[str, Any]:
+            provider_id = str(self.ai_routing_settings.get(provider_key) or "deterministic_local")
+            model_name = str(self.ai_routing_settings.get(model_key) or "deterministic-local-guide")
+            profile = providers.get(provider_id, {})
+            quality_map = profile.get("model_quality_map") if isinstance(profile.get("model_quality_map"), Mapping) else {}
+            reasoning_map = profile.get("reasoning_capability_map") if isinstance(profile.get("reasoning_capability_map"), Mapping) else {}
+            return {
+                "provider_id": provider_id,
+                "model_name": model_name,
+                "status": profile.get("status") or "UNKNOWN",
+                "configured": profile.get("configured") is True,
+                "implemented": profile.get("implemented") is True,
+                "credential_source": profile.get("credential_source") or "NOT_CONFIGURED",
+                "model_quality": quality_map.get(model_name) or profile.get("model_quality") or "UNKNOWN",
+                "reasoning_capability": reasoning_map.get(model_name) or profile.get("provider_family") or "UNKNOWN",
+            }
+
+        selected_routes = {
+            "active": selected_route("active_provider", "active_model"),
+            "light": selected_route("light_provider", "light_model"),
+            "high_reasoning": selected_route("high_reasoning_provider", "high_reasoning_model"),
+        }
+        selected_active = selected_routes["active"]
         return {
             "source": "AI_CHIEF_OPERATOR",
             "persona": quant_persona_summary(),
             "gateway": gateway_status,
             "route_truth_owner": "app.ai_chief_operator.provider_gateway.AIProviderGateway",
-            "active_provider": gateway_provider.get("provider_id") or gateway_provider.get("provider") or "disabled",
-            "active_model": gateway_provider.get("model_name") or gateway_provider.get("model") or gateway_policy.get("model_name"),
-            "response_mode": gateway_provider.get("provider_mode") or gateway_policy.get("provider_mode") or "NOT_CONFIGURED",
-            "fallback_state": gateway_provider.get("fallback_reason") or gateway_provider.get("provider_state") or "UNKNOWN",
+            "active_provider": selected_active["provider_id"],
+            "active_model": selected_active["model_name"],
+            "response_mode": self.ai_routing_settings.get("default_mode") or "LOCAL_GUIDE",
+            "fallback_state": self.last_ai_route_truth.get("fallback_reason") or self.last_ai_route_truth.get("status"),
+            "configured_gateway_default": {
+                "provider_id": gateway_provider.get("provider_id") or gateway_provider.get("provider") or "disabled",
+                "model_name": gateway_provider.get("model_name") or gateway_provider.get("model") or gateway_policy.get("model_name"),
+                "provider_mode": gateway_provider.get("provider_mode") or gateway_policy.get("provider_mode") or "NOT_CONFIGURED",
+                "provider_state": gateway_provider.get("provider_state") or "UNKNOWN",
+            },
+            "selected_routes": selected_routes,
+            "last_actual_route": dict(self.last_ai_route_truth),
             "routing_settings": dict(self.ai_routing_settings),
             "routing_settings_source": self.ai_routing_settings_source,
             "routing_settings_status": self.ai_routing_settings_last_result.get("status"),
@@ -2661,7 +2750,7 @@ class OperatorSnapshotProvider:
                 "display_source_label": display_source_label,
             }
         )
-        return {
+        result = {
             "source": "AI_QUANT_RESEARCH_CHIEF_ASK",
             "status": status,
             "request_id": request_id,
@@ -2757,6 +2846,21 @@ class OperatorSnapshotProvider:
             "secrets_values_exposed": False,
             "secrets_exposed": False,
         }
+        self.last_ai_route_truth = {
+            "status": result["status"],
+            "request_id": result["request_id"],
+            "selected_provider": result["selected_provider"],
+            "selected_model": result["selected_model"],
+            "actual_provider": result["actual_provider"],
+            "actual_model": result["actual_model"],
+            "answer_source": result["answer_source"],
+            "provider_call_attempted": result["provider_call_attempted"],
+            "model_call_occurred": result["model_call_occurred"],
+            "provider_response_received": result["provider_response_received"],
+            "fallback_used": result["fallback_used"],
+            "fallback_reason": result["fallback_reason"],
+        }
+        return result
 
     def ai_routing_settings_save(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.ai_router_settings_store.save(
@@ -2969,6 +3073,8 @@ class OperatorSnapshotProvider:
                 facts.append("Current state: READY_IDLE_NO_ACTIVE_RUNTIME (ready/idle; no active PAPER run attached).")
             if runtime.get("supervisor_state"):
                 facts.append(f"Supervisor: {runtime.get('supervisor_state')}.")
+            if self._ai_historical_duplicate_refusal(context):
+                facts.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
             facts.append(f"Paper start allowed: {str(canonical_readiness.get('paper_start_allowed') is True).lower()}.")
             max_duration = runtime.get("max_paper_duration_seconds") or runtime.get("runner_max_paper_duration_seconds")
             if max_duration:
@@ -2977,8 +3083,6 @@ class OperatorSnapshotProvider:
                 unknowns.append(f"Canonical readiness blockers: {', '.join(current_blockers)}.")
             else:
                 facts.append("Launch readiness reports no current blocker reason codes.")
-            if self._ai_historical_duplicate_refusal(context):
-                facts.append("Historical duplicate refusal exists as audit context, but it is not current start authority.")
             if self._ai_ready_idle_no_active_runtime(context):
                 unknowns.append(f"{AI_UNKNOWN_EVIDENCE_MESSAGE}: no active DecisionFrame, NetEdge, fills, fees, or TCA evidence exists because no PAPER run is active.")
         return facts[:10], unknowns[:8]
@@ -3898,7 +4002,83 @@ class OperatorSnapshotProvider:
         return self.supervisor.generic_refusal(intent_name, reason)
 
     def paper_start_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.supervisor.start_paper(payload or {})
+        body = payload or {}
+        mode = str(body.get("mode") or "PAPER").strip().upper()
+        if mode != "PAPER" or body.get("live") is True or body.get("real_money") is True:
+            return self.supervisor.start_paper(body)
+        active_session = getattr(self.supervisor, "_session", None)
+        if str(getattr(active_session, "status", "") or "") in {"STARTING", "RUNNING", "STOP_REQUESTED"}:
+            return self.supervisor.start_paper(body)
+        validation_refusal = self.supervisor.paper_start_request_refusal(body)
+        current_preflight_reason = str(
+            self.supervisor.paper_broker_preflight_status().get("reason_code")
+            or "PAPER_BROKER_PREFLIGHT_REQUIRED"
+        )
+        if validation_refusal and validation_refusal != current_preflight_reason:
+            return self.supervisor.start_paper(body)
+        if not self.supervisor.paper_broker_read_is_authorized():
+            return self.supervisor.generic_refusal("paper_start", "PAPER_BROKER_PREFLIGHT_REQUIRED")
+        preflight = self._execute_paper_broker_preflight()
+        if preflight.get("allowed") is not True:
+            response = self.supervisor.generic_refusal(
+                "paper_start",
+                str(preflight.get("reason_code") or "PAPER_BROKER_PREFLIGHT_FAILED"),
+            )
+            response["paper_broker_preflight"] = preflight
+            response["broker_call_occurred"] = preflight.get("broker_call_occurred") is True
+            response["broker_read_occurred"] = preflight.get("broker_read_occurred") is True
+            return response
+        result = self.supervisor.start_paper(body)
+        result["paper_broker_preflight"] = preflight
+        result["broker_call_occurred"] = preflight.get("broker_call_occurred") is True
+        result["broker_read_occurred"] = preflight.get("broker_read_occurred") is True
+        return result
+
+    def paper_broker_preflight_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._refresh_provider_env()
+        authorization = self.supervisor.authorize_paper_broker_read(payload or {})
+        if authorization.get("allowed") is not True:
+            return authorization
+        return self._execute_paper_broker_preflight(authorization=authorization)
+
+    def _execute_paper_broker_preflight(
+        self,
+        *,
+        authorization: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        portfolio = self.portfolio()
+        proof = self.supervisor.record_paper_broker_preflight(portfolio)
+        allowed = proof.get("status") == "PASS"
+        self.snapshot_store.set(
+            "paper_control_snapshot",
+            {},
+            ttl_seconds=-1,
+            source="PAPER_BROKER_PREFLIGHT_INVALIDATED_CONTROL_STATE",
+        )
+        return {
+            "intent": "paper_broker_preflight",
+            "allowed": allowed,
+            "status": "VERIFIED" if allowed else "BLOCKED",
+            "reason_code": proof.get("reason_code"),
+            "authorization": (authorization or {}).get("authorization") or self.supervisor.paper_broker_read_authorization_status(),
+            "preflight": proof,
+            "portfolio_summary": portfolio.get("summary") or {},
+            "positions": portfolio.get("positions") or [],
+            "open_orders": portfolio.get("open_orders") or [],
+            "paper_start_occurred": False,
+            "runtime_mutation_occurred": False,
+            "broker_call_occurred": proof.get("broker_call_occurred") is True,
+            "broker_read_occurred": proof.get("broker_read_occurred") is True,
+            "broker_mutation_occurred": False,
+            "order_submission_occurred": False,
+            "cancel_occurred": False,
+            "replace_occurred": False,
+            "liquidation_occurred": False,
+            "close_position_occurred": False,
+            "live_endpoint_touched": False,
+            "real_money_touched": False,
+            "secrets_values_exposed": False,
+        }
 
     def paper_stop_intent(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.supervisor.stop_paper(payload or {})
@@ -4084,7 +4264,31 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
 
     @router.get("/events")
     async def events():
+        dynamic_event_keys = {
+            "timestamp",
+            "timestamp_utc",
+            "updated_at",
+            "process_uptime_seconds",
+            "uptime_seconds",
+            "elapsed_ms",
+            "total_elapsed_ms",
+            "response_time_ms",
+        }
+
+        def stable_event_state(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                return {
+                    str(key): stable_event_state(item)
+                    for key, item in value.items()
+                    if str(key) not in dynamic_event_keys
+                }
+            if isinstance(value, list):
+                return [stable_event_state(item) for item in value]
+            return value
+
         async def stream():
+            fingerprints: dict[str, str] = {}
+            last_keepalive = time.monotonic()
             while True:
                 payloads = [
                     ("backend_status", await run_local(provider.health)),
@@ -4094,7 +4298,15 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
                 for event_name, payload in payloads:
                     safe_payload = dict(payload)
                     safe_payload["secrets_values_exposed"] = False
+                    fingerprint = json.dumps(stable_event_state(safe_payload), sort_keys=True, default=str)
+                    if fingerprints.get(event_name) == fingerprint:
+                        continue
+                    fingerprints[event_name] = fingerprint
                     yield f"event: {event_name}\ndata: {json.dumps(safe_payload, default=str)}\n\n"
+                    last_keepalive = time.monotonic()
+                if time.monotonic() - last_keepalive >= 15.0:
+                    yield ": keepalive\n\n"
+                    last_keepalive = time.monotonic()
                 await asyncio.sleep(1)
 
         return StreamingResponse(
@@ -4303,6 +4515,10 @@ def get_operator_router(provider: OperatorSnapshotProvider | None = None) -> API
     @router.post("/intent/paper/start")
     def paper_start_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return provider.paper_start_intent(payload)
+
+    @router.post("/intent/paper/verify-readonly")
+    def paper_broker_preflight_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return provider.paper_broker_preflight_intent(payload)
 
     @router.post("/intent/paper/stop")
     def paper_stop_intent(payload: dict[str, Any] | None = None) -> dict[str, Any]:

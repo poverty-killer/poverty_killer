@@ -6,6 +6,7 @@ import pytest
 
 from app.api.operator_readonly_api import OperatorSnapshotProvider, create_operator_app
 from app.api.operator_runtime_config import OperatorRuntimeConfig
+from app.operator_activation.paper_baseline import BASELINE_POLICY_PROTECTED
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from tests.test_operator_paper_supervisor import FakeRunner
 from app.api.operator_paper_supervisor import OperatorPaperSupervisor, PaperSupervisorConfig
@@ -49,6 +50,71 @@ def _endpoint(app, path: str, method: str = "GET"):
         if route.path == path and method in (route.methods or set()):
             return route.endpoint
     raise AssertionError(f"route not found: {method} {path}")
+
+
+def _verified_position_snapshot() -> dict[str, object]:
+    return {
+        "endpoint_family": "paper",
+        "account": {
+            "id": "paper-account-045ded",
+            "status": "ACTIVE",
+            "equity": "10000",
+            "portfolio_value": "10000",
+            "cash": "7500",
+            "buying_power": "15000",
+            "currency": "USD",
+            "trading_blocked": False,
+            "account_blocked": False,
+            "transfers_blocked": False,
+            "pattern_day_trader": False,
+        },
+        "positions": [
+            {
+                "symbol": "BTCUSD",
+                "asset_class": "crypto",
+                "qty": "0.1",
+                "side": "long",
+                "avg_entry_price": "50000",
+                "current_price": "51000",
+                "cost_basis": "5000",
+                "market_value": "5100",
+                "unrealized_pl": "100",
+                "unrealized_plpc": "0.02",
+            }
+        ],
+        "position_count": 1,
+        "open_orders": [],
+        "open_order_count": 0,
+    }
+
+
+class _PaperReadClient:
+    def __init__(self, snapshot: dict[str, object]) -> None:
+        self.snapshot = snapshot
+        self.calls: list[tuple[str, str]] = []
+
+    def get_json(self, path, headers):
+        assert headers["APCA-API-KEY-ID"] == "id"
+        self.calls.append(("GET", path))
+        if path == "/v2/account":
+            return dict(self.snapshot["account"])
+        if path == "/v2/positions":
+            return list(self.snapshot["positions"])
+        if path.startswith("/v2/orders?"):
+            return []
+        raise AssertionError(f"unexpected broker path: {path}")
+
+
+def _paper_read_confirmations() -> dict[str, object]:
+    return {
+        "mode": "PAPER",
+        "live": False,
+        "real_money": False,
+        "confirm_paper_read_only": True,
+        "confirm_account_positions_orders_get_only": True,
+        "confirm_no_broker_mutation": True,
+        "confirm_process_scoped_authorization": True,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -386,15 +452,32 @@ def test_governed_paper_start_uses_existing_intent_and_canonical_credentials_wit
     _write_canonical_paper_env(_isolated_canonical_paper_env, secret_key="super-secret")
     store = LocalCredentialStore(tmp_path / ".operator_secrets" / "provider_credentials.json")
     runner = FakeRunner()
-    supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
+    runtime = OperatorRuntimeConfig.from_env({}, repo_root=tmp_path)
+    supervisor = OperatorPaperSupervisor(
+        config=PaperSupervisorConfig(
+            repo_root=runner.repo_root,
+            operator_state_dir=str(runtime.operator_state_dir),
+        ),
+        runner=runner,
+    )
+    broker_snapshot = _verified_position_snapshot()
     provider = OperatorSnapshotProvider(
         supervisor=supervisor,
-        runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=tmp_path),
+        runtime_config=runtime,
         provider_env={},
         credential_store=store,
+        portfolio_client=_PaperReadClient(broker_snapshot),
     )
     supervisor.config.process_env = provider._paper_process_env()
     app = create_operator_app(provider=provider)
+    accepted = provider.paper_baseline_accept(
+        {
+            "preflight_snapshot": broker_snapshot,
+            "policy": BASELINE_POLICY_PROTECTED,
+            "accepted_by_operator": "offline readiness test",
+        }
+    )
+    verified = _endpoint(app, "/operator/intent/paper/verify-readonly", "POST")(_paper_read_confirmations())
 
     result = _endpoint(app, "/operator/intent/paper/start", "POST")(
         {
@@ -408,9 +491,15 @@ def test_governed_paper_start_uses_existing_intent_and_canonical_credentials_wit
         }
     )
 
+    assert accepted["accepted"] is True
+    assert verified["allowed"] is True
+    assert verified["broker_read_occurred"] is True
+    assert verified["broker_mutation_occurred"] is False
     assert result["allowed"] is True
     assert result["reason_code"] == "PAPER_RUN_STARTED"
-    assert result["broker_call_occurred"] is False
+    assert result["broker_call_occurred"] is True
+    assert result["broker_read_occurred"] is True
+    assert result["broker_mutation_occurred"] is False
     assert result["session"]["duration_seconds"] == 900
     assert "super-secret" not in str(result)
     assert "super-secret" not in " ".join(runner.started_specs[0].command)
