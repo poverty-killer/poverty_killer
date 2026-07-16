@@ -241,17 +241,24 @@ helper PowerShell command; that helper ended, but no operator backend or trading
 runtime matched or was terminated. Exact test PIDs were then used. Test ports
 8766/9333 had no listeners and temporary proof directories were removed.
 
-### Current launcher/runtime proof
+### Launcher/runtime deployment proof
 
-The updated interactive launcher replaced verified-idle backend PID `17708`
-with PID `20824` and loaded commit `3e71c55`. The current launcher status then
+After the code commit, the updated interactive launcher replaced verified-idle
+backend PID `17708` with PID `20824` and loaded commit `3e71c55`. Launcher status then
 reported supervisor `IDLE`, no active run, idle exit enabled, and attached
 cockpit clients. A verification poll initially watched the obsolete
 `loaded_git_commit_short` field and therefore timed out; the canonical
 `loaded_commit` field already contained `3e71c55`. That command error was not
 treated as a failed deployment.
 
-Current live local truth after the Board-authorized Alpaca PAPER GET-only
+After evidence commit `9cf1e25`, the same guarded idle refresh loaded that
+then-current HEAD on PID `4072`; a current cockpit was opened and two event
+streams attached. The final session-close check must be run after the last
+documentation commit and require `loaded_commit == repo_head`. A versioned
+report cannot embed the hash of its own not-yet-created commit, so that exact
+post-report value is reported from terminal truth rather than predicted here.
+
+Live local truth recorded after the Board-authorized Alpaca PAPER GET-only
 preflight:
 
 - `final_launch_readiness=READY_FOR_BOUNDED_PAPER`

@@ -36,10 +36,12 @@ was overriding it. The cockpit and local process lifecycle are fixed.
 No unload callback, broad process-name kill, new shutdown subsystem, or browser
 authority over trading lifecycle was added.
 
-## Current Live Truth
+## Recorded Live Truth and Final Close Gate
 
-The updated launcher replaced backend PID `17708` with PID `20824` and loaded
-commit `3e71c55`.
+The updated launcher first replaced backend PID `17708` with PID `20824` and
+loaded code commit `3e71c55`. After evidence commit `9cf1e25`, a second guarded
+idle refresh loaded that then-current HEAD on PID `4072`; a current cockpit was
+opened and two event streams attached.
 
 - supervisor: `IDLE`; no active run
 - idle exit: enabled; cockpit clients attached
@@ -54,6 +56,12 @@ commit `3e71c55`.
 
 The GET-only verification is process-scoped and must be repeated after a future
 backend restart. Codex did not press Start.
+
+Committing this handoff necessarily changes HEAD again. Session close must
+therefore perform one last guarded idle refresh and re-run the GET-only proof,
+then require `loaded_commit == repo_head`. The exact final commit/PID belongs in
+terminal/final-response evidence; this versioned file does not predict its own
+commit hash.
 
 ## Honest Validation Notes
 

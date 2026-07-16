@@ -268,8 +268,11 @@ Completed on 2026-07-15 after Shan showed `NO_ACTIVE_PAPER_RUN` together with
 - Browser/runtime proof: desktop 1440 and mobile 390 rendered BOT IDLE / MKT
   NO_RUNTIME with frozen pulses and no overflow; last-tab closure stopped two
   isolated idle backends in 10.254s and 9.64s.
-- Current deployment: commit `3e71c55`, backend PID `20824`, supervisor `IDLE`,
-  lifecycle enabled, attached cockpit clients present.
+- Deployment stages: code commit `3e71c55` loaded on verified-idle PID `20824`;
+  after evidence commit `9cf1e25`, guarded refresh loaded that then-current HEAD
+  on PID `4072` with supervisor `IDLE`, lifecycle enabled, and cockpit clients
+  attached. Final session close must re-prove `loaded_commit == repo_head` after
+  the last documentation commit rather than predict its self-referential hash.
 - Board-authorized PAPER GET-only proof: `READY_FOR_BOUNDED_PAPER`, Start
   allowed, suffix `045ded`, `BROKER_CONFIRMED`, 4 protected positions, zero open
   orders, and zero broker mutation.
