@@ -185,11 +185,11 @@ def _confirmations() -> dict[str, object]:
     }
 
 
-def _start_request() -> dict[str, object]:
+def _start_request(*, duration_seconds: int = 300) -> dict[str, object]:
     return {
         "mode": "PAPER",
         "profile": "PAPER_EXPLORATION_ALPHA",
-        "duration_seconds": 300,
+        "duration_seconds": duration_seconds,
         "watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
         "approve_autonomous_paper": True,
         "live": False,
@@ -285,6 +285,22 @@ def test_start_revalidates_fresh_broker_truth_before_launching_fake_runner(tmp_p
     assert started["order_submission_occurred"] is False
     assert started["cancel_occurred"] is False
     assert started["liquidation_occurred"] is False
+
+
+def test_four_hour_start_reaches_existing_fake_runner_after_fresh_preflight(tmp_path):
+    client = FakePaperReadClient()
+    provider, runner = _provider(tmp_path, client)
+
+    verified = provider.paper_broker_preflight_intent(_confirmations())
+    started = provider.paper_start_intent(_start_request(duration_seconds=14400))
+
+    assert verified["allowed"] is True
+    assert started["allowed"] is True
+    assert started["reason_code"] == "PAPER_RUN_STARTED"
+    assert started["session"]["duration_seconds"] == 14400
+    assert "14400" in runner.started_specs[0].command
+    assert started["broker_mutation_occurred"] is False
+    assert started["order_submission_occurred"] is False
 
 
 def test_unrelated_ai_credential_change_preserves_paper_proof_but_paper_credential_change_revokes_it(

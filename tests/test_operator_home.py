@@ -57,7 +57,16 @@ def test_home_paper_launch_control_requires_all_safety_confirmations():
     assert "data-paper-confirm-real-money-blocked" in text
     assert "data-paper-confirm-no-manual-trades" in text
     assert "/operator/intent/paper/start" in text
-    assert "Confirm PAPER-only, live locked, real-money blocked, and no manual trades" in text
+    assert "PAPER_START_CONFIRMATION_FIELDS" in text
+    assert '["confirmPaper", "PAPER-only"]' in text
+    assert '["confirmLiveLocked", "live locked"]' in text
+    assert '["confirmRealMoneyBlocked", "real-money blocked"]' in text
+    assert '["confirmNoManualTrades", "no manual trades"]' in text
+    assert "paperStartConfirmationState" in text
+    assert "paperStartDisabledReason" in text
+    assert "data-paper-confirmation-status" in text
+    assert '"data-intent": "paper-start-review"' in text
+    assert '"data-intent": "paper-start-confirm"' in text
     assert "paperLaunchDisabledReason" in text
 
 

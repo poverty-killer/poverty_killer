@@ -426,7 +426,7 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "data-run-paper-start-state" in text
     assert "data-run-paper-advanced" in text
     assert "run-paper-proof-grid" in text
-    assert "Start readiness" in text
+    assert "Command readiness" in text
     assert "Broker / portfolio truth" in text
     assert "Credential Setup + Read-Only Preflight Gate" in text
     assert "data-paper-credential-setup" in text
@@ -511,7 +511,8 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
     assert "Long-running PAPER stays PAPER-only" in text
     assert "Ready. No PAPER run currently attached." in text
     assert "Last historical refusal" in text
-    assert "Selected duration exceeds the current bounded PAPER lease max" in text
+    assert "DURATION_EXCEEDS_MAX_LEASE" in text
+    assert "exceeds the current bounded PAPER lease max" in text
     assert "data-run-paper-stop-control" in text
     assert '"data-intent": "paper-stop"' in text
     assert "Custom minutes / hours / days" in text
@@ -525,11 +526,21 @@ def test_command_center_has_paper_launch_control_and_safe_duration_options():
 
 def test_command_center_renderer_executes_with_normalized_backend_truth():
     text = _app_text()
+    confirmation_start = text.index("  function paperStartConfirmationList")
+    confirmation_end = text.index("\n  function paperStartActionState", confirmation_start)
+    confirmation_helpers = text[confirmation_start:confirmation_end]
     start = text.index("  function renderPaperLaunchControl")
     end = text.index("\n  function renderStackShutdownPanel", start)
     renderer = text[start:end]
     harness = r'''
 const RUNTIME_ACTIVE_STATUSES = new Set(["STARTING", "RUNNING", "STOP_REQUESTED"]);
+const PAPER_START_CONFIRMATION_FIELDS = [
+  ["confirmPaper", "PAPER-only"],
+  ["confirmLiveLocked", "live locked"],
+  ["confirmRealMoneyBlocked", "real-money blocked"],
+  ["confirmNoManualTrades", "no manual trades"]
+];
+const paperStartReviews = {};
 const data = {
   meta: { dataSource: "OPERATOR_BACKEND" },
   launchReadiness: { alpacaPaperCredentialsConfigured: true, paperEndpointOnly: true },
@@ -564,9 +575,22 @@ function runPaperState() { return runState; }
 function paperAccountPinFromState() { return runState.paperAccountPin; }
 function paperBaselineFromState() { return runState.paperBaseline; }
 function paperLaunchDisabledReason() { return ""; }
-function paperRunDraftForRender() { return { watchlistRaw: "BTC/USD, ETH/USD, SOL/USD", durationRaw: "300", customAmountRaw: "5", customUnit: "minutes", profileAlpha: true }; }
+let renderedDraft = {
+  watchlistRaw: "BTC/USD, ETH/USD, SOL/USD",
+  durationRaw: "300",
+  customAmountRaw: "5",
+  customUnit: "minutes",
+  profileAlpha: true,
+  confirmPaper: true,
+  confirmLiveLocked: true,
+  confirmRealMoneyBlocked: true,
+  confirmNoManualTrades: true
+};
+function paperRunDraftForRender() { return renderedDraft; }
 function paperDurationBounds() { return { configuredMaxDuration: 432000, runnerMaxDuration: 432000, maxDuration: 432000, defaultDuration: 300, durationOptions: [[300, "5 minutes"]] }; }
 function paperDraftValidation() { return { valid: true, detail: "Draft valid." }; }
+function paperDraftKey(value) { return value || "controls"; }
+function paperStartActionState() { return { status: "IDLE", detail: "No Start request sent.", error: false, pending: false }; }
 function defaultPaperWatchlist() { return "BTC/USD, ETH/USD, SOL/USD"; }
 function formatDuration(value) { return String(value); }
 function escapeHtml(value) { return String(value == null ? "" : value); }
@@ -586,15 +610,26 @@ function tokenText(value) { return String(value); }
 function backendConnected() { return true; }
 function Button(options) {
   const attrs = Object.entries(options.attrs || {}).map(([key, value]) => `${key}="${value}"`).join(" ");
-  return `<button ${attrs} ${options.disabled ? "disabled" : ""}>${options.label}</button>`;
+  const reason = options.disabled && options.reason ? `data-disabled-reason="${options.reason}"` : "";
+  return `<button ${attrs} ${options.disabled ? "disabled" : ""} ${reason}>${options.label}</button>`;
 }
 '''
-    script = harness + "\n" + renderer + r'''
-const html = renderPaperLaunchControl("controls");
+    script = harness + "\n" + confirmation_helpers + "\n" + renderer + r'''
+function intentButtonTag(html, intent) {
+  return (html.match(new RegExp(`<button[^>]*data-intent="${intent}"[^>]*>`)) || [""])[0];
+}
+const confirmedHtml = renderPaperLaunchControl("controls");
+const confirmedStart = intentButtonTag(confirmedHtml, "paper-start-review");
+const verifyButton = intentButtonTag(confirmedHtml, "paper-verify-readonly");
+const stopButton = intentButtonTag(confirmedHtml, "paper-stop");
+renderedDraft = { ...renderedDraft, confirmNoManualTrades: false };
+const unconfirmedHtml = renderPaperLaunchControl("controls");
+const unconfirmedStart = intentButtonTag(unconfirmedHtml, "paper-start-review");
 const result = {
-  verify: html.includes('data-intent="paper-verify-readonly"') && !html.match(/data-intent="paper-verify-readonly"[^>]*disabled/),
-  start: html.includes('data-intent="paper-start"') && !html.match(/data-intent="paper-start"[^>]*disabled/),
-  stop: !!html.match(/data-intent="paper-stop"[^>]*disabled/)
+  verify: verifyButton.includes('data-intent="paper-verify-readonly"') && !verifyButton.includes("disabled"),
+  startConfirmed: confirmedStart.includes('data-intent="paper-start-review"') && !confirmedStart.includes("disabled"),
+  startBeforeConfirmations: unconfirmedStart.includes("disabled") && unconfirmedStart.includes("no manual trades"),
+  stop: stopButton.includes("disabled")
 };
 console.log(JSON.stringify(result));
 '''
@@ -607,7 +642,9 @@ console.log(JSON.stringify(result));
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == '{"verify":true,"start":true,"stop":true}'
+    assert completed.stdout.strip() == (
+        '{"verify":true,"startConfirmed":true,"startBeforeConfirmations":true,"stop":true}'
+    )
 
 
 def test_run_paper_command_center_keeps_raw_codes_and_secrets_out_of_main_ui():
@@ -899,17 +936,35 @@ def test_lifecycle_refresh_patches_run_paper_without_remounting_form_controls():
 
 def test_run_paper_start_payload_uses_preserved_draft_values():
     text = _app_text()
+    start_flow = text.split('if (intent === "paper-start-review")', 1)[1].split(
+        'if (intent === "paper-reconcile-stale")', 1
+    )[0]
 
     assert "const draft = syncPaperRunDraftFromDom(formId || \"controls\", { markDirty: false })" in text
     assert "durationSeconds = paperDraftDurationSeconds(draft)" in text
     assert "watchlist: normalizePaperWatchlist(draft.watchlistRaw)" in text
     assert "validation," in text
-    assert "if (form.validation && form.validation.valid !== true)" in text
+    assert "paperStartDisabledReason(" in start_flow
     assert "duration_seconds: form.durationSeconds" in text
     assert "watchlist: form.watchlist" in text
     assert "syncPaperRunDraftFromDom(paperCard.dataset.paperFormCard || \"controls\", { markDirty: true, dirtyFields: [field] })" in text
     assert "event.target.matches(\"[data-paper-duration]\")" in text
     assert "event.target.matches(\"[data-paper-watchlist]\")" in text
+    assert '"data-intent": "paper-start-review"' in text
+    assert '"data-intent": "paper-start-confirm"' in text
+    assert "Review & Start Bounded PAPER Run" in text
+    assert "Confirm & Start Bounded PAPER Run" in text
+    assert "paperStartConfirmationState" in text
+    assert "paperStartDisabledReason" in text
+    assert "data-paper-confirmation-status" in text
+    assert "data-paper-start-action-status" in text
+    assert 'aria-live="polite"' in text
+    assert "START_PENDING" in start_flow
+    assert "START_RESULT_UNKNOWN" in start_flow
+    assert "paperStartPayloadSignature(currentPayload) !== review.signature" in start_flow
+    assert 'postIntent("/operator/intent/paper/start", review.payload)' in start_flow
+    assert "window.alert" not in start_flow
+    assert "window.confirm" not in start_flow
 
 
 def test_paper_control_state_timeout_is_precise_fail_closed_authority():

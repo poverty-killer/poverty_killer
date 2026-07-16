@@ -1,158 +1,134 @@
-# Codex Session Handoff - Operator Usability Recovery
+# Codex Session Handoff - Four-Hour PAPER Start Interaction Recovery
 
 Date: 2026-07-15 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
 Branch: `master`
-Starting commit: `07ec0aa verify pre-arm run gate`
-Active seam: operator controls, broker-verification reachability, and truthful
-interaction lifecycle.
+Starting commit: `a2b8000 restore truthful operator controls`
+Full report: `reports/completion/PAPER_START_INTERACTION_RECOVERY_REPORT.md`
 
 ## Current Verdict
 
-The scoped recovery is complete and locally green. Full evidence is in
-`reports/completion/OPERATOR_USABILITY_RECOVERY_REPORT.md`.
+The browser-side Start dead end is fixed and the repository suite is green.
 
-- Full suite: `1815 passed, 14 skipped, 384 warnings, 0 failed`.
-- Focused operator suite: `177 passed, 72 warnings, 0 failed`.
-- Python compilation and JavaScript syntax checks pass.
-- Runtime and browser wiring were proved against the durable LocalAppData state.
-- Alpaca PAPER account/positions/open-orders were validated through the governed
-  GET-only path.
-- No PAPER run, Start click, broker mutation, live mode, or real-money path was
-  used.
+- Integrated operator gate: `178 passed, 72 warnings`.
+- Full suite: `1816 passed, 14 skipped, 384 warnings, 0 failed`.
+- JavaScript syntax: PASS.
+- Desktop/mobile browser proof: PASS with the Start POST intercepted.
+- No real PAPER run was started by Codex and no broker mutation occurred.
 
-## Root Causes Closed
+## Original Attempt Truth
 
-1. The cockpit displayed a broker-proof requirement but provided no lawful UI
-   action that could satisfy it.
-2. Start did not force current broker reconciliation immediately before child
-   launch.
-3. SSE, parallel polling, unchanged rapid events, and broad rerenders could
-   churn requests and destroy active input focus.
-4. `Validate read-only` claimed more than the local credential check proved.
-5. AI gateway default, selected route, and actual answer route were conflated.
-6. Exact broker-confirmed refusal reasons could be masked as not run.
-7. The Controls renderer referenced three undefined variables, raised
-   `ReferenceError`, and left the operator on Overview.
+Shan selected a four-hour bounded PAPER run and pressed Start. Immediate live
+inspection proved:
 
-## Implemented Contract
+- backend `a2b8000`, supervisor `IDLE`;
+- `NO_ACTIVE_RUNTIME_ATTACHED`;
+- no session, child PID, exit code, or Start refusal;
+- no Start event in durable `sessions.jsonl`;
+- `14400` present in the backend allowed-duration set;
+- backend readiness `READY_FOR_BOUNDED_PAPER`, Start allowed;
+- no broker mutation.
 
-- `POST /operator/intent/paper/verify-readonly` requires explicit PAPER,
-  GET-only, no-mutation, process-scope confirmations.
-- It is unavailable while a PAPER child is active and rejects live/real-money
-  requests before broker access.
-- Proof is owned by `OperatorPaperSupervisor`, resets on backend restart, and is
-  invalidated by PAPER credential or accepted-baseline changes.
-- Start first validates the request without broker access, then performs a fresh
-  account/positions/open-orders preflight, then delegates to the existing
-  supervisor only if proof passes.
-- UI display and readiness consume proof; neither owns broker truth.
-- SSE is primary with 15-second polling only as a fallback. Server keepalives do
-  not carry duplicate status payloads.
-- Lifecycle updates use targeted DOM refresh and preserve active inputs.
-- Controls derives credential, endpoint, and runtime flags before rendering;
-  the production renderer is executed by a regression test.
-- AI status separates `configured_gateway_default`, `selected_routes`, and
-  `last_actual_route`.
+The request stopped in the browser before `POST /operator/intent/paper/start`.
+The exact pre-POST dialog branch is unknown.
 
-## Final Runtime Truth
+## Root Cause and Fix
 
-Durable state root:
+Backend green state and draft validity enabled the primary button, but four
+unchecked-by-default safety confirmations were enforced later inside the click
+handler. Missing confirmations or a dismissed native dialog returned with no
+inline or durable result, so the button appeared dead.
 
-`%LOCALAPPDATA%\PovertyKiller\state\operator`
+The repaired flow:
 
-After explicit GET-only verification:
+1. Start review is disabled until backend readiness, draft validity, and all
+   four confirmations pass.
+2. The page shows `0/4` through `4/4` and names every missing item.
+3. `Review & Start Bounded PAPER Run` creates an inline review and explicitly
+   says `Start not sent`.
+4. `Confirm & Start Bounded PAPER Run` sends the frozen reviewed payload only if
+   the draft and readiness still match.
+5. An `aria-live=polite` surface shows pending, accepted, refused, cancelled,
+   invalidated, failed, and response-unknown states.
+6. A lost response clears the reviewed payload and forbids a blind retry until
+   runtime state is refreshed and understood.
 
-- `final_launch_readiness=READY_FOR_BOUNDED_PAPER`
-- `paper_start_allowed=true`
-- `paper_stop_allowed=false` while idle
-- expected/actual suffix: `045ded` / `045ded`
-- account status: `ACTIVE`
-- portfolio status: `BROKER_CONFIRMED`
-- positions: 4 (`AVAXUSD`, `ETHUSD`, `LINKUSD`, `SOLUSD`)
-- open orders: 0
-- live blocked: true
-- real money blocked: true
-- broker/order/cancel/replace/close/liquidation mutation flags: false
+The supervisor, fresh broker preflight, account pin, runner, Stop, Risk, OMS,
+strategies, and all thresholds are unchanged.
 
-The external GET total is not globally instrumented and is unknown. Verification
-reads account, positions, and open orders; the independent pin assertion also
-reads account; browser hydration can issue later approved portfolio GETs. Do not
-convert that into an exact-call-count claim.
+## Four-Hour Positive Proof
+
+`test_four_hour_start_reaches_existing_fake_runner_after_fresh_preflight`
+proves that a `14400`-second request:
+
+- passes the existing fake GET-only broker preflight;
+- is accepted by the existing supervisor;
+- reaches the existing fake runner command unchanged;
+- emits no broker/order mutation.
+
+This is test proof, not a real PAPER child run.
 
 ## Browser Proof
 
-The bundled in-app browser failed with `missing field sandboxPolicy`, so Edge
-CDP was used and the fallback is recorded honestly.
+The in-app browser was unavailable because its tool bootstrap returned
+`missing field sandboxPolicy`; Edge/CDP was used as the recorded fallback.
 
-- real Overview-to-Controls click succeeded after the fix;
-- no post-fix console error or runtime exception;
-- input focus/value remained stable for 20 seconds;
-- zero requests during that stable 20-second window;
-- desktop 1440 and mobile 390 showed no horizontal overflow;
-- Verify and Start were enabled on current proof; Stop was visible and idle
-  disabled;
-- suffix, broker truth, four symbols, and bounded readiness were visible;
-- idle BOT was STALE, MKT was UNKNOWN, and ECG animation was frozen.
+- initial button disabled with all four missing confirmations named;
+- four-hour selection retained after all four confirmations;
+- review panel showed profile, `4 hours (14400s)`, six-symbol watchlist, and
+  PAPER-only/live-locked/no-manual-trades authority;
+- intercepted requests before final confirmation: 0;
+- one final test-only intercepted payload preserved `duration_seconds=14400`,
+  `live=false`, and `real_money=false`;
+- inline result rendered `INTERCEPTED_TEST_ONLY_NO_RUN` as a refusal;
+- desktop and 390-pixel mobile horizontal overflow: false;
+- browser exceptions and console errors: 0.
 
-Screenshots were inspected and removed; no screenshot artifact is staged.
+Post-proof live backend truth remained unattached with no session and Stop not
+allowed. Temporary screenshots are not staging artifacts.
 
-## Relabels
+## Relabel Log
 
-- Account-pin positive/refusal tests now pass through governed verification.
-- Local baseline acceptance now explicitly proves it cannot bypass external
-  preflight.
-- A historical duplicate-run refusal remains audit history, while restart now
-  requires fresh process proof.
-- Positive fake-runner fixtures were raised to accept a lawful baseline and use
-  fake GET-only proof before Start.
-- Fast status fixtures now refuse Start from credentials/local state alone.
-- UI lifecycle coverage now asserts SSE primary/fallback polling and no broad
-  remount.
+- UI duration/start tests moved from removed popup/direct-Start copy to command
+  readiness, two-step intents, exact payload signature, and result-state proof.
+- The renderer test now executes both incomplete and complete confirmation
+  states and inspects the full button tag for `disabled`.
+- `test_home_paper_launch_control_requires_all_safety_confirmations` now asserts
+  the four canonical fields and live two-step gate instead of one literal popup
+  sentence.
 
-No test, guard, threshold, or assertion was weakened.
+No assertion, guard, or threshold weakened.
 
-## Safety State
+## Safety Boundary
 
-- No PAPER run and no real child launch.
-- No broker mutation or manual trade control.
-- No live/real-money enablement.
-- No Risk, NetEdge, stale/TTL, sizing, masking, strategy, OMS, broker-governor,
-  or MarketTruthSnapshot change.
-- Existing automated position lifecycle and governed Stop are untouched.
+- Shan's original browser click was the explicit four-hour authorization/attempt,
+  but it never reached the backend.
+- Codex did not automatically resend it.
+- No real PAPER child launch during repair.
+- No broker POST/mutation, order, cancel, replace, close, liquidation, or manual
+  trade control.
+- No live or real money.
 - `SovereignExecutionGuard` remains dormant.
-- No raw secrets printed, staged, or exposed.
-
-## Dirty Tree Protection
-
-Do not stage, clean, reset, stash, or delete:
-
-- `state/override_log.jsonl`
-- `state/risk_state.backup`
-- `state/risk_state.json`
-- `state/risk_state.tmp`
-- `state/session_journal.jsonl`
-- `.pytest_tmp/`
-- `AGENTS.prev.md`
-- `POVERTY_KILLER_AUDIT_REPORT.txt`
-- old untracked `reports/codex_handoff_*`
-- `reports/operator_perf/`
-- untracked audit scripts under `scripts/`
-- secrets, logs, databases, screenshots, and runtime files
-
-The tree is intentionally not clean; the baseline tag remains deferred.
+- Existing automated position lifecycle and governed Stop remain unchanged.
 
 ## Exact Commit Scope
 
-The exact 15-file staging list is recorded in the completion report. It contains
-four production files, eight test files, the completion report, tracker, and
-this handoff. Nothing under `state/*` or the protected dirty/untracked list may
-enter the commit.
+Stage only:
 
-## Next Operator Boundary
+1. `ui/operator-control-panel/app.js`
+2. `tests/test_operator_ui_wiring.py`
+3. `tests/test_operator_home.py`
+4. `tests/test_operator_broker_preflight.py`
+5. `reports/completion/PAPER_START_INTERACTION_RECOVERY_REPORT.md`
+6. `CHECKPOINT_TRACKER.md`
+7. `reports/codex_handoff_latest.md`
 
-The repaired cockpit can obtain current read-only broker proof and display an
-enabled Start when all readiness laws pass. This seam does not authorize or
-execute the PAPER run. Start remains Shan's explicit action, and any future run
-must retain its lease, automatic position lifecycle, governed Stop, and final
-reconciliation requirements.
+Never stage protected `state/*`, `.pytest_tmp/`, `.test-*`, screenshots, secrets,
+logs, old handoffs, operator-performance reports, or untracked audit scripts.
+
+## Operator Boundary
+
+After the committed backend/UI is reopened and GET-only verification restored,
+Shan must check the four visible confirmations, select `4 hours`, press
+`Review & Start`, inspect the exact inline request, then press `Confirm & Start`.
+Codex must not perform that final action without a new explicit instruction.

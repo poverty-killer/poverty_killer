@@ -113,6 +113,14 @@
   let lifecycleRefreshInFlight = false;
   let lifecycleRefreshTimer = null;
   const paperRunDrafts = {};
+  const paperStartReviews = {};
+  const paperStartActionStates = {};
+  const PAPER_START_CONFIRMATION_FIELDS = [
+    ["confirmPaper", "PAPER-only"],
+    ["confirmLiveLocked", "live locked"],
+    ["confirmRealMoneyBlocked", "real-money blocked"],
+    ["confirmNoManualTrades", "no manual trades"]
+  ];
   const AI_CONTEXT_VERSION = "operator-ui-global-ai-context-v1";
   const AI_ANSWER_MODES = {
     DETERMINISTIC: "DETERMINISTIC",
@@ -1049,6 +1057,7 @@
 
   function resetPaperRunDraft(formId, reason) {
     const key = paperDraftKey(formId);
+    delete paperStartReviews[key];
     paperRunDrafts[key] = {
       ...defaultPaperRunDraft(key),
       lastResetReason: reason || PAPER_DRAFT_RESET_REASONS.USER_RESET
@@ -1106,6 +1115,99 @@
     };
   }
 
+  function paperStartConfirmationList(labels) {
+    const items = Array.isArray(labels) ? labels.filter(Boolean) : [];
+    if (items.length <= 1) return items.join("");
+    if (items.length === 2) return `${items[0]} and ${items[1]}`;
+    return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+  }
+
+  function paperStartConfirmationState(draft) {
+    const source = draft || {};
+    const missing = PAPER_START_CONFIRMATION_FIELDS
+      .filter(([field]) => source[field] !== true)
+      .map(([, label]) => label);
+    const total = PAPER_START_CONFIRMATION_FIELDS.length;
+    const confirmedCount = total - missing.length;
+    return {
+      ready: missing.length === 0,
+      confirmedCount,
+      total,
+      missing,
+      detail: missing.length === 0
+        ? `${confirmedCount}/${total} safety confirmations complete.`
+        : `${confirmedCount}/${total} safety confirmations complete. Check ${paperStartConfirmationList(missing)}.`
+    };
+  }
+
+  function paperStartDisabledReason(draft, validation, backendDisabledReason) {
+    if (backendDisabledReason) return backendDisabledReason;
+    if (!validation || validation.valid !== true) {
+      return (validation && validation.detail) || "Fix the bounded PAPER draft before review.";
+    }
+    const confirmations = paperStartConfirmationState(draft);
+    if (!confirmations.ready) {
+      return `Confirm ${paperStartConfirmationList(confirmations.missing)} before reviewing the bounded PAPER Start request.`;
+    }
+    return "";
+  }
+
+  function paperStartActionState(formId) {
+    const key = paperDraftKey(formId);
+    return paperStartActionStates[key] || {
+      status: "IDLE",
+      detail: "No Start request has been sent from this browser session.",
+      error: false,
+      pending: false
+    };
+  }
+
+  function setPaperStartActionState(formId, status, detail, options) {
+    const key = paperDraftKey(formId);
+    const opts = options || {};
+    paperStartActionStates[key] = {
+      status: String(status || "UNKNOWN"),
+      detail: String(detail || "Start action state unavailable."),
+      error: opts.error === true,
+      pending: opts.pending === true,
+      updatedAt: new Date().toISOString()
+    };
+    return paperStartActionStates[key];
+  }
+
+  function paperStartPayloadFromForm(form) {
+    return {
+      mode: "PAPER",
+      profile: form.profile,
+      duration_seconds: form.durationSeconds,
+      watchlist: form.watchlist,
+      approve_autonomous_paper: true,
+      real_money: false,
+      live: false
+    };
+  }
+
+  function paperStartPayloadSignature(payload) {
+    const source = payload || {};
+    return JSON.stringify({
+      mode: source.mode,
+      profile: source.profile,
+      duration_seconds: source.duration_seconds,
+      watchlist: Array.isArray(source.watchlist) ? source.watchlist : [],
+      approve_autonomous_paper: source.approve_autonomous_paper === true,
+      real_money: source.real_money === true,
+      live: source.live === true
+    });
+  }
+
+  function clearPaperStartReview(formId, status, detail, options) {
+    const key = paperDraftKey(formId);
+    delete paperStartReviews[key];
+    if (status || detail) {
+      setPaperStartActionState(key, status || "REVIEW_CLEARED", detail || "Start review cleared.", options);
+    }
+  }
+
   function syncPaperRunDraftFromDom(formId, options) {
     const opts = options || {};
     const key = paperDraftKey(formId);
@@ -1135,6 +1237,14 @@
       (opts.dirtyFields || []).forEach((field) => {
         draft.dirtyFields[field] = true;
       });
+      if (paperStartReviews[key]) {
+        clearPaperStartReview(
+          key,
+          "REVIEW_INVALIDATED",
+          "Draft or confirmations changed. Review the bounded PAPER Start request again.",
+          { error: true }
+        );
+      }
     }
     return draft;
   }
@@ -1150,10 +1260,12 @@
     document.querySelectorAll("[data-paper-form-card]").forEach((card) => {
       const formId = card.dataset.paperFormCard || "controls";
       syncPaperRunDraftFromDom(formId, { markDirty: false });
-      const disabledReason = paperLaunchDisabledReason();
+      const backendDisabledReason = paperLaunchDisabledReason();
       const draft = paperRunDraftForRender(formId);
       const validation = paperDraftValidation(draft, paperDurationBounds());
-      const effectiveDisabledReason = validation.valid ? disabledReason : validation.detail;
+      const confirmations = paperStartConfirmationState(draft);
+      const effectiveDisabledReason = paperStartDisabledReason(draft, validation, backendDisabledReason);
+      const actionState = paperStartActionState(formId);
       const sessionCard = card.querySelector("[data-runtime-session-card]");
       if (sessionCard) {
         sessionCard.outerHTML = renderSessionLifecycleCard("Active / Latest PAPER Session", "inline");
@@ -1161,16 +1273,43 @@
       const startButton = card.querySelector("[data-run-paper-start-control]");
       if (startButton) {
         startButton.disabled = Boolean(effectiveDisabledReason);
+        startButton.setAttribute("aria-disabled", effectiveDisabledReason ? "true" : "false");
+        startButton.dataset.disabledReason = effectiveDisabledReason || "";
+        startButton.title = effectiveDisabledReason || "Review the exact bounded PAPER request before the final Start action.";
       }
       const startState = card.querySelector("[data-run-paper-start-state]");
       if (startState) {
         startState.classList.toggle("error", Boolean(effectiveDisabledReason));
-        startState.textContent = effectiveDisabledReason || "Ready to request the bounded PAPER /operator/intent/paper/start endpoint after confirmations are checked.";
+        startState.textContent = effectiveDisabledReason || "Command ready for final review. No Start request has been sent yet.";
       }
       const draftNotice = card.querySelector("[data-paper-draft-status]");
       if (draftNotice) {
         draftNotice.textContent = `${paperDraftDirtyLabel(draft)} ${validation.detail}`;
         draftNotice.classList.toggle("error", validation.valid !== true);
+      }
+      const confirmationStatus = card.querySelector("[data-paper-confirmation-status]");
+      if (confirmationStatus) {
+        confirmationStatus.textContent = confirmations.detail;
+        confirmationStatus.classList.toggle("error", confirmations.ready !== true);
+      }
+      const reviewPanel = card.querySelector("[data-paper-start-review]");
+      if (reviewPanel && !paperStartReviews[paperDraftKey(formId)]) {
+        reviewPanel.remove();
+      }
+      const confirmButton = card.querySelector("[data-paper-start-confirm]");
+      if (confirmButton) {
+        const confirmDisabledReason = actionState.pending
+          ? "A Start request is already pending."
+          : effectiveDisabledReason;
+        confirmButton.disabled = Boolean(confirmDisabledReason);
+        confirmButton.setAttribute("aria-disabled", confirmDisabledReason ? "true" : "false");
+        confirmButton.dataset.disabledReason = confirmDisabledReason || "";
+        confirmButton.title = confirmDisabledReason || "Send the reviewed bounded PAPER Start request.";
+      }
+      const actionStatus = card.querySelector("[data-paper-start-action-status]");
+      if (actionStatus) {
+        actionStatus.textContent = `${actionState.status}: ${actionState.detail}`;
+        actionStatus.classList.toggle("error", actionState.error === true);
       }
       const blockerText = card.querySelector("[data-run-paper-blocker-text]");
       if (blockerText) {
@@ -2731,8 +2870,12 @@
     const bounds = paperDurationBounds();
     const { configuredMaxDuration, runnerMaxDuration, maxDuration, durationOptions } = bounds;
     const validation = paperDraftValidation(draft, bounds);
-    const disabledReason = validation.valid ? backendDisabledReason : validation.detail;
-    const startDisabled = disabledReason ? "disabled" : "";
+    const confirmations = paperStartConfirmationState(draft);
+    const disabledReason = paperStartDisabledReason(draft, validation, backendDisabledReason);
+    const startDisabled = Boolean(disabledReason);
+    const formKey = paperDraftKey(formId);
+    const startReview = paperStartReviews[formKey] || null;
+    const startActionState = paperStartActionState(formKey);
     const watchlist = draft.watchlistRaw || defaultPaperWatchlist();
     const selectedDurationRaw = String(draft.durationRaw || bounds.defaultDuration);
     const customSelected = selectedDurationRaw === "custom" || !durationOptions.some(([seconds]) => String(seconds) === selectedDurationRaw);
@@ -2781,7 +2924,7 @@
             <div class="run-paper-status-title">${escapeHtml(overall.label || overall.code || "Readiness unknown")}</div>
             <div class="run-paper-status-detail">${escapeHtml(overall.detail || "Backend launch-readiness state is unavailable.")}</div>
           </div>
-          ${badge(canRun.allowed === true ? "Start allowed" : "Start blocked", canRun.allowed === true ? "green" : "red")}
+          ${badge(canRun.allowed === true ? "Backend ready" : "Backend blocked", canRun.allowed === true ? "green" : "red")}
         </div>
         <div class="progressive-summary" data-controls-credential-summary>
           <div>
@@ -2813,7 +2956,9 @@
           ${renderRunPaperProofTile("Runtime", runtime.label || runtimeAttachment, `Supervisor ${runtime.state || sup.state || "UNKNOWN"}; safe stop ${runtime.safeStopStatus || launch.safeStopStatus || "UNKNOWN"}.`, (runtime.state || sup.state) === "RUNNING" ? "yellow" : "green")}
           ${renderRunPaperProofTile("Broker / portfolio truth", brokerTruth.label || "Broker truth not loaded in this card", brokerTruth.detail || "Portfolio Snapshot remains the broker-confirmed truth area; no positions are invented here.", brokerTruth.brokerConfirmed === true ? "green" : (brokerTruth.status === "BROKER_READ_READY_NOT_IN_THIS_VIEW" ? "yellow" : "red"))}
           ${renderRunPaperProofTile("Safety locks", "Live locked / real money blocked", safetyDetail, "green")}
-          ${renderRunPaperProofTile("Start readiness", canRun.allowed === true ? "Start allowed" : "Start blocked", blockerText, canRun.allowed === true ? "green" : "red")}
+          ${renderRunPaperProofTile("Backend Start authority", canRun.allowed === true ? "Backend ready" : "Backend blocked", blockerText, canRun.allowed === true ? "green" : "red")}
+          ${renderRunPaperProofTile("Operator confirmations", confirmations.ready ? `${confirmations.confirmedCount}/${confirmations.total} confirmed` : `${confirmations.confirmedCount}/${confirmations.total} required`, confirmations.detail, confirmations.ready ? "green" : "yellow")}
+          ${renderRunPaperProofTile("Command readiness", disabledReason ? "Review blocked" : "Ready to review", disabledReason || "Backend, draft, and confirmations are ready. Final review is still required before Start is sent.", disabledReason ? "yellow" : "green")}
           ${renderRunPaperProofTile("Max lease seconds", `${maxDuration}`, `Configured ${configuredMaxDuration}; runner ${runnerMaxDuration}; allowed durations include 72 hours and 5 days when max permits.`, maxDuration >= 432000 ? "green" : "yellow")}
         </div>
         <div class="notice ${canRun.allowed === true ? "" : "error"}" data-run-paper-blocker-text>${escapeHtml(blockerText)}</div>
@@ -2865,6 +3010,7 @@
               <label class="checkline"><input data-paper-confirm-real-money-blocked type="checkbox" ${draft.confirmRealMoneyBlocked === true ? "checked" : ""}> Real-money blocked</label>
               <label class="checkline"><input data-paper-confirm-no-manual-trades type="checkbox" ${draft.confirmNoManualTrades === true ? "checked" : ""}> No manual trades</label>
             </div>
+            <div class="notice ${confirmations.ready ? "" : "error"}" data-paper-confirmation-status>${escapeHtml(confirmations.detail)}</div>
           </div>
         </div>
         <div class="button-row">
@@ -2888,13 +3034,13 @@
             }
           })}
           ${Button({
-            label: "Start Bounded PAPER Run",
+            label: "Review & Start Bounded PAPER Run",
             variant: "primary",
             className: "primary-action",
-            disabled: Boolean(startDisabled),
+            disabled: startDisabled,
             reason: disabledReason || "",
             attrs: {
-              "data-intent": "paper-start",
+              "data-intent": "paper-start-review",
               "data-paper-form": formId,
               "data-run-paper-start-control": true
             }
@@ -2917,12 +3063,50 @@
           })}
           <span class="badge red">No manual trades / force trade unavailable</span>
         </div>
+        ${startReview ? `
+          <div class="notice" data-paper-start-review>
+            <div class="split">
+              <b>Final bounded PAPER review</b>
+              ${badge("Start not sent", "yellow")}
+            </div>
+            ${kv([
+              ["Profile", tokenText(startReview.payload.profile)],
+              ["Duration", tokenText(`${formatDuration(startReview.payload.duration_seconds)} (${startReview.payload.duration_seconds}s)`) ],
+              ["Watchlist", escapeHtml(startReview.payload.watchlist.join(", "))],
+              ["Authority", escapeHtml("PAPER-only / live locked / no manual trades")]
+            ])}
+            <div class="button-row">
+              ${Button({
+                label: "Confirm & Start Bounded PAPER Run",
+                variant: "primary",
+                className: "primary-action",
+                disabled: Boolean(disabledReason) || startActionState.pending === true,
+                reason: startActionState.pending === true ? "A Start request is already pending." : disabledReason,
+                attrs: {
+                  "data-intent": "paper-start-confirm",
+                  "data-paper-form": formId,
+                  "data-paper-start-confirm": true
+                }
+              })}
+              ${Button({
+                label: "Cancel review",
+                variant: "secondary",
+                disabled: startActionState.pending === true,
+                reason: startActionState.pending === true ? "Wait for the pending Start result." : "",
+                attrs: {
+                  "data-paper-start-review-cancel": formId
+                }
+              })}
+            </div>
+          </div>
+        ` : ""}
+        <div class="notice ${startActionState.error ? "error" : ""}" data-paper-start-action-status role="status" aria-live="polite">${escapeHtml(`${startActionState.status}: ${startActionState.detail}`)}</div>
         <div class="notice ${((data.paperControlState || {}).paperBrokerPreflight || {}).status === "PASS" ? "" : "error"}" data-paper-broker-preflight-state>${escapeHtml(
           ((data.paperControlState || {}).paperBrokerPreflight || {}).status === "PASS"
             ? `Verified ${((data.paperControlState || {}).paperBrokerPreflight || {}).positionCount || 0} positions and ${((data.paperControlState || {}).paperBrokerPreflight || {}).openOrderCount || 0} open orders. Start will verify again.`
             : `Verification required: ${((data.paperControlState || {}).paperBrokerPreflight || {}).reasonCode || "PAPER_BROKER_PREFLIGHT_REQUIRED"}.`
         )}</div>
-        <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Ready to request the bounded PAPER /operator/intent/paper/start endpoint after confirmations are checked.")}</div>
+        <div class="notice ${disabledReason ? "error" : ""}" data-run-paper-start-state>${escapeHtml(disabledReason || "Command ready for final review. No Start request has been sent yet.")}</div>
         <details class="ai-context-details" data-run-paper-advanced>
           <summary>Advanced endpoint and start proof</summary>
           <div class="notice">Endpoint proof: ${escapeHtml(endpoint.display || launch.paperEndpointDisplay || "unavailable")} (${escapeHtml(endpoint.family || launch.paperEndpointFamily || "unknown")}; ${escapeHtml(endpoint.source || launch.paperEndpointSource || "UNKNOWN")}). Raw blocker code is kept here: ${escapeHtml(endpoint.blockerCode || launch.paperEndpointBlockerCode || "none")}.</div>
@@ -9482,40 +9666,149 @@
         const proof = result.preflight || {};
         message = `${result.status || "UNKNOWN"}: ${result.reason_code || "paper_broker_preflight"}; positions=${proof.position_count || 0}; open_orders=${proof.open_order_count || 0}; account_suffix=${((proof.account_identity_assertion || {}).actual_suffix) || "unknown"}`;
       }
-      if (intent === "paper-start") {
+      if (intent === "paper-start-review") {
         const formId = sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "controls";
         const form = paperRunFormValues(formId);
-        if (!form.confirmPaper || !form.confirmLiveLocked || !form.confirmRealMoneyBlocked || !form.confirmNoManualTrades) {
-          window.alert("Confirm PAPER-only, live locked, real-money blocked, and no manual trades before requesting the bounded PAPER start.");
-          return;
-        }
-        if (form.validation && form.validation.valid !== true) {
-          window.alert(form.validation.detail || "Fix the Run PAPER draft before starting.");
+        const draft = paperRunDraft(formId);
+        const commandDisabledReason = paperStartDisabledReason(
+          draft,
+          form.validation,
+          paperLaunchDisabledReason()
+        );
+        if (commandDisabledReason) {
+          setPaperStartActionState(
+            formId,
+            "REVIEW_BLOCKED",
+            `${commandDisabledReason} No Start request was sent.`,
+            { error: true }
+          );
           refreshRunPaperControlDom();
           return;
         }
-        if (form.durationSeconds > form.maxDurationSeconds) {
-          window.alert(`Selected duration exceeds the current bounded PAPER lease max of ${formatDuration(form.maxDurationSeconds)}.`);
+        const payload = paperStartPayloadFromForm(form);
+        paperStartReviews[paperDraftKey(formId)] = {
+          payload,
+          signature: paperStartPayloadSignature(payload),
+          createdAt: new Date().toISOString()
+        };
+        setPaperStartActionState(
+          formId,
+          "REVIEW_READY",
+          `${formatDuration(form.durationSeconds)} PAPER request assembled. Review it below; Start has not been sent.`,
+          { error: false }
+        );
+        renderScreens(activeScreenId);
+        renderRail();
+        renderAiChiefOverlay();
+        return;
+      }
+      if (intent === "paper-start-confirm") {
+        const formId = sourceButton && sourceButton.dataset ? sourceButton.dataset.paperForm : "controls";
+        const key = paperDraftKey(formId);
+        const review = paperStartReviews[key];
+        const form = paperRunFormValues(formId);
+        const draft = paperRunDraft(formId);
+        const commandDisabledReason = paperStartDisabledReason(
+          draft,
+          form.validation,
+          paperLaunchDisabledReason()
+        );
+        if (!review) {
+          setPaperStartActionState(
+            formId,
+            "START_BLOCKED",
+            "No current reviewed draft exists. Review the bounded PAPER request again; no Start request was sent.",
+            { error: true }
+          );
+          refreshRunPaperControlDom();
           return;
         }
-        const confirmed = window.confirm(
-          `Request bounded PAPER start?\n\nProfile: ${form.profile}\nWatchlist: ${form.watchlist.join(", ")}\nDuration: ${formatDuration(form.durationSeconds)} (${form.durationSeconds} seconds)\n\nNo live trading or manual order will be sent by the UI.`
-        );
-        if (!confirmed) return;
-        const result = await postIntent("/operator/intent/paper/start", {
-          mode: "PAPER",
-          profile: form.profile,
-          duration_seconds: form.durationSeconds,
-          watchlist: form.watchlist,
-          approve_autonomous_paper: true,
-          real_money: false,
-          live: false
-        });
-        message = `${result.status}: ${result.reason_code}`;
-        if (result.allowed === true || result.reason_code === "PAPER_RUN_STARTED") {
-          const draft = resetPaperRunDraft(formId, PAPER_DRAFT_RESET_REASONS.RUN_STARTED);
-          draft.startedSessionId = result.session_id || (result.session && result.session.session_id) || null;
+        if (commandDisabledReason) {
+          clearPaperStartReview(
+            formId,
+            "START_BLOCKED",
+            `${commandDisabledReason} The prior review was cleared and no Start request was sent.`,
+            { error: true }
+          );
+          renderScreens(activeScreenId);
+          renderRail();
+          renderAiChiefOverlay();
+          return;
         }
+        const currentPayload = paperStartPayloadFromForm(form);
+        if (paperStartPayloadSignature(currentPayload) !== review.signature) {
+          clearPaperStartReview(
+            formId,
+            "REVIEW_INVALIDATED",
+            "The draft changed after review. Review it again; no Start request was sent.",
+            { error: true }
+          );
+          renderScreens(activeScreenId);
+          renderRail();
+          renderAiChiefOverlay();
+          return;
+        }
+
+        setPaperStartActionState(
+          formId,
+          "START_PENDING",
+          "Sending one bounded PAPER Start request. Do not click again while the result is pending.",
+          { pending: true }
+        );
+        renderScreens(activeScreenId);
+        renderRail();
+        renderAiChiefOverlay();
+
+        let result;
+        try {
+          result = await postIntent("/operator/intent/paper/start", review.payload);
+        } catch (error) {
+          delete paperStartReviews[key];
+          let refreshDetail = "Runtime refresh failed; inspect current session state before any retry.";
+          try {
+            data = await loadData();
+            const currentState = String((data.supervisor || {}).state || "UNKNOWN").toUpperCase();
+            refreshDetail = `Runtime now reports ${currentState}. Do not retry until that state is understood.`;
+          } catch (_refreshError) {
+            // Preserve the last known state; a lost response must never invite a blind retry.
+          }
+          const failure = `Start response was not confirmed: ${error.message || error.name || "request_error"}. ${refreshDetail}`;
+          setPaperStartActionState(formId, "START_RESULT_UNKNOWN", failure, { error: true });
+          data.supervisor.lastIntentResult = `START_RESULT_UNKNOWN: ${failure}`;
+          renderTopBar();
+          renderScreens(activeScreenId);
+          renderRail();
+          renderAiChiefOverlay();
+          return;
+        }
+
+        message = `${result.status || "UNKNOWN"}: ${result.reason_code || "START_RESULT_UNKNOWN"}`;
+        delete paperStartReviews[key];
+        if (result.allowed === true || result.reason_code === "PAPER_RUN_STARTED") {
+          const resetDraft = resetPaperRunDraft(formId, PAPER_DRAFT_RESET_REASONS.RUN_STARTED);
+          resetDraft.startedSessionId = result.session_id || (result.session && result.session.session_id) || null;
+          setPaperStartActionState(
+            formId,
+            "START_ACCEPTED",
+            `${message}. Session ${resetDraft.startedSessionId || "pending runtime attachment"}.`,
+            { error: false }
+          );
+        } else {
+          setPaperStartActionState(
+            formId,
+            "START_REFUSED",
+            `${message}. Review current backend readiness before trying again.`,
+            { error: true }
+          );
+        }
+
+        data = await loadData();
+        data.supervisor.lastIntentResult = message;
+        renderTopBar();
+        renderScreens(activeScreenId);
+        renderRail();
+        renderAiChiefOverlay();
+        return;
       }
       if (intent === "paper-reconcile-stale") {
         const op = runPaperState();
@@ -9797,9 +10090,20 @@
   document.addEventListener("click", (event) => {
     const paperDraftReset = event.target.closest("[data-paper-draft-reset]");
     if (paperDraftReset) {
-      resetPaperRunDraft(paperDraftReset.dataset.paperDraftReset || "controls", PAPER_DRAFT_RESET_REASONS.USER_RESET);
+      const formId = paperDraftReset.dataset.paperDraftReset || "controls";
+      resetPaperRunDraft(formId, PAPER_DRAFT_RESET_REASONS.USER_RESET);
+      setPaperStartActionState(formId, "DRAFT_RESET", "Draft and any pending Start review were cleared. No Start request was sent.");
       renderScreens(activeScreenId);
       renderRail();
+      return;
+    }
+    const paperStartReviewCancel = event.target.closest("[data-paper-start-review-cancel]");
+    if (paperStartReviewCancel && !paperStartReviewCancel.disabled) {
+      const formId = paperStartReviewCancel.dataset.paperStartReviewCancel || "controls";
+      clearPaperStartReview(formId, "REVIEW_CANCELLED", "Final Start review cancelled. No Start request was sent.");
+      renderScreens(activeScreenId);
+      renderRail();
+      renderAiChiefOverlay();
       return;
     }
     const aiOpen = event.target.closest("[data-ai-chief-open]");

@@ -216,6 +216,36 @@ evidence is in
   PAPER run, Start click, broker mutation, live/real-money path, manual trade,
   threshold change, or tracked runtime-state edit occurred.
 
+## PAPER Start Interaction Recovery
+
+Completed on 2026-07-15 after Shan selected four hours and pressed the bounded
+PAPER Start control, but observed no result. Full evidence is in
+`reports/completion/PAPER_START_INTERACTION_RECOVERY_REPORT.md`.
+
+- Root cause boundary proved: the backend remained `IDLE`, runtime was
+  unattached, latest session/PID/refusal were absent, and the durable journal
+  contained no Start event. The original click never reached the Start endpoint.
+- Four hours was not blocked: `14400` is in the existing server duration set and
+  a fresh-preflight fake-runner test proves that exact duration reaches the
+  existing runner unchanged.
+- UI defect fixed: backend-green state no longer makes the command look
+  actionable while its four operator confirmations are incomplete.
+- Start is now a visible two-step command: `Review & Start` shows exact profile,
+  duration, watchlist, and authority with `Start not sent`; `Confirm & Start`
+  sends the reviewed payload only if nothing changed.
+- Pending, accepted, refused, cancelled, invalidated, and response-unknown states
+  are visible in an `aria-live=polite` status surface. Lost responses prohibit a
+  blind retry until runtime state is understood.
+- Browser proof with Start interception: 0/4 disabled with exact missing list;
+  4/4 review showed `4 hours (14400s)`; exactly one test-only intercepted payload
+  preserved `duration_seconds=14400`; desktop/mobile overflow false; zero browser
+  exceptions or console errors. The real backend remained idle.
+- Final integrated operator gate: `178 passed, 72 warnings`.
+- Final full suite: `1816 passed, 14 skipped, 384 warnings, 0 failed`.
+- No real PAPER run was started during recovery/validation. No broker mutation,
+  live/real-money path, order, cancel, close, liquidation, threshold change, or
+  tracked runtime-state edit occurred.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from protected runtime files and pre-existing
@@ -241,5 +271,9 @@ clean/stash/reset.
   with `proceed`. Result: the unreachable verification path, stale Start proof,
   competing update transports, misleading copy, conflated AI route truth, masked
   refusal reason, and live Controls renderer exception were fixed and proved.
-- No PAPER run was authorized.
+- Shan explicitly authorized and attempted a four-hour bounded PAPER run by
+  selecting four hours and pressing Start. Repo/runtime truth proved that the UI
+  never sent the request, so no run started. Codex repaired the interaction but
+  did not infer permission to resend the failed Start automatically; final Start
+  remains Shan's explicit browser action.
 - No live mode, live read-only mode, or broker mutation was authorized.
