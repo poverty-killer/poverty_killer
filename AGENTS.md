@@ -464,3 +464,302 @@ before paper proof. No hiding truth. No broad staging. No report that hides
 unknowns or failures. Completion means the advanced system made understandable,
 testable, and operator-readable — with every part that makes it valuable intact.
 Finish our bot end to end.
+
+# 23. TRUE-CAPABILITY STAGE COVENANT (Board-ratified 2026-07-18)
+This covenant applies to every stage of
+`reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md`. It supplements and
+never replaces Sections 0-22. It is a binding stage-entry gate and may not be
+self-waived, summarized away, or treated as optional process prose.
+
+## 23.1 Non-Degradation Commitment
+At every stage, the executor commits to all of the following:
+
+1. Preserve the bot's full designed capability and sophistication. Do not dumb
+   down, flatten, genericize, truncate, bypass, cosmetically hide, or replace a
+   purpose-built module with a simpler substitute.
+2. Do not delete any source file, strategy, model, module, dormant system,
+   diagnostic, test, evidence record, state authority, capability, or safety
+   mechanism. Wire, parameterize, consolidate into the correct existing owner,
+   or classify it `PRESERVED_DORMANT` / `BLOCKED_WITH_REASON`. A proven-defective
+   implementation may be replaced inside its existing owner only when the
+   before/after contract proves preserved or stronger capability; that is a
+   repair, never permission to erase the module or its valuable behavior.
+3. Do not loosen, lower, widen around, bypass, disable, short-circuit, or relabel
+   any Risk, NetEdge, fee, spread, slippage, market-impact, stale/TTL, sizing,
+   leverage, concentration, correlation, drawdown, loss, liquidity, masking,
+   strategy, OMS, broker-governor, reconciliation, or execution limit so that a
+   trade can occur or a test can pass.
+4. Never optimize for trade count. Zero trades is a valid and required outcome
+   when no candidate survives the unchanged production gates. A successful
+   stage proves correct admission and refusal, not activity for its own sake.
+5. Do not simplify code, mathematics, quantitative models, uncertainty
+   treatment, portfolio reasoning, numerical methods, or diagnostics. Replace
+   only explicitly placeholder/illustrative math, and only with a more rigorous,
+   unit-consistent, numerically stable, uncertainty-aware implementation whose
+   assumptions and limitations are tested and reported. Complexity without
+   evidence is not an upgrade.
+6. Preserve all valuable module contributions. Not every module must fire on
+   every decision, but every module must be truthfully `WIRED_WITH_ROLE`,
+   `PRESERVED_DORMANT`, or `BLOCKED_WITH_REASON`; absence may never be fabricated
+   as a neutral contribution or approval.
+7. Keep one final authority per decision. MarketTruthSnapshot owns executable
+   market truth; Broker owns acknowledged account/order/position truth; Risk
+   owns hard admission; OMS/OrderRouter owns order lifecycle; Reconciliation
+   owns fill and position truth; AI is advisory; UI is display only.
+8. Preserve causal integrity: same-symbol evidence, event/source/decision time,
+   as-of ordering, TTL, venue provenance, and future-data rejection must remain
+   explicit. Synthetic, stale, backfilled, cross-symbol, or cross-venue evidence
+   may not masquerade as executable truth.
+9. Preserve broker and lifecycle safety: PAPER only; live and real money locked;
+   no manual trade or force-trade control; no naked SELL or short; SELL only
+   against fresh broker-confirmed available quantity with explicit automated
+   lifecycle provenance; no hidden mutation; Stop remains non-mutating.
+10. Preserve broker acknowledgement and reconciliation semantics. No order,
+    fill, fee, TCA, P&L, position, inventory lot, reservation, or contribution is
+    real merely because local code emitted it; the required canonical evidence
+    and broker/reconciliation identifiers must exist.
+11. Tests must rise to current law. Never weaken an assertion, fixture, oracle,
+    tolerance, property, timeout, mutation audit, or expected refusal to obtain
+    green. A changed contract requires written before/after justification and
+    tests for both lawful acceptance and refusal.
+12. Do not hallucinate proof. Separate inspected facts, test proof, runtime
+    proof, browser proof, broker-read proof, inference, unknowns, and work not
+    run. Mock/replay proof may never be called external broker proof, and old
+    results may never be called a current rerun.
+13. Do not hide behavior changes in defaults, environment variables, profiles,
+    fallbacks, compatibility shims, restart paths, recovery paths, feature flags,
+    or UI copy. Before/after effective configuration and authority must be
+    diffable and operator-visible.
+14. Preserve restart, recovery, and state integrity. Migrations must be durable,
+    idempotent, backward-aware, crash-safe, reconcilable, and unable to create a
+    second authority or silently discard unknown state.
+15. Preserve performance and capacity truth. A broader universe must use bounded
+    data/request budgets, rate-limit handling, backpressure, held/open-order
+    symbol priority, deterministic degradation, and explicit stale behavior; it
+    may not obtain breadth by starving execution truth.
+16. Do not add a dependency or a new subsystem, change live behavior, activate a
+    dormant mutation authority, or expand money-adjacent permission without the
+    exact Board approval required by Section 10.
+17. Preserve secret safety, dirty-worktree evidence, exact per-file staging,
+    audit logs, and the proof ladder. Never clean/reset/stash protected work or
+    stage runtime state, logs, databases, screenshots, secrets, or unrelated
+    evidence.
+18. Complete the 360-degree seam, including adjacent backend truth, operator
+    truth, failure behavior, observability, tests, and documentation. Do not stop
+    at a happy-path symptom patch or call UI polish functional completion.
+19. Preserve quantitative research integrity: no look-ahead, future leakage,
+    cross-symbol contamination, survivorship leakage, evaluation-set
+    calibration, p-hacking, or unreported multiple testing. Version data,
+    features, parameters, splits, and stochastic seeds; use out-of-sample/walk-
+    forward evidence where the claim requires it; report uncertainty and net
+    economics after fees, spread, slippage, impact, latency, and fill risk.
+20. Numeric failures fail closed and remain observable. Units, dimensions,
+    domains, finite-value handling, covariance validity, conditioning,
+    estimation error, tail behavior, liquidity/capacity, and sensitivity must be
+    addressed with methods appropriate to the model; NaN/Inf, singularity, or
+    missing calibration may not silently become zero risk or positive edge.
+21. Do not use governance as an excuse to preserve proven commissioning
+    scaffolds. Once the complete Section 23.2 burden is satisfied and the correct
+    production owner passes its gates, remove the scaffold from active authority.
+    Do not resurrect it as a renamed whitelist, hidden fallback, compatibility
+    shim, shadow veto, arbitrary new refusal, or UI-only permission check.
+
+## 23.2 Restriction-Removal Burden of Proof
+A restriction may be removed, replaced, or narrowed only after the stage report
+records all of the following and the evidence supports the conclusion:
+
+1. Its exact file/function/config owner, callers, original purpose, current
+   behavior, and affected capability.
+2. One classification: `COMMISSIONING_OR_TEST_SCAFFOLD`,
+   `PERMANENT_SAFETY_CONTROL`, `QUANT_OR_ECONOMIC_CONTROL`,
+   `GOVERNANCE_OR_ARMING_CONTROL`, or `UNKNOWN`.
+3. Repo proof that a `COMMISSIONING_OR_TEST_SCAFFOLD` restriction is preventing
+   the production design from functioning. Age, inconvenience, or low trade
+   count is not proof.
+4. Proof that removal does not weaken any permanent safety, quant/economic,
+   governance, authority, broker, reconciliation, data-truth, or secret control.
+5. The correct production authority that replaces the scaffold. Removing a
+   restriction without a complete owner is a bypass and is prohibited.
+6. Positive, negative, adversarial, replay/parity, restart/recovery, and broker-
+   mutation audit tests appropriate to its blast radius, with unchanged-control
+   fingerprints where feasible.
+7. Explicit before/after operator truth, rollback/disable behavior, limitations,
+   unknowns, and the proof-ladder rung actually reached.
+8. A before/after capability matrix proving that valuable functions, module
+   roles, data provenance, diagnostic depth, quantitative rigor, and lawful
+   acceptance/refusal paths were preserved or upgraded.
+9. After Items 1-8 pass, the scaffold must leave the active decision path. Any
+   proposal to retain it requires a named non-scaffold classification and proof;
+   novelty, low trade count, or generalized caution is insufficient.
+
+`UNKNOWN` restrictions in the stage scope or affected authority remain
+fail-closed until classified. Permanent safety, quant/economic, and
+governance/arming controls are not "training wheels" and must not be removed
+under this program. The fixed commissioning universe, forced exploration
+profile, and blanket protected-baseline behavior may be replaced only through
+the staged catalog, standard-profile, broker-lot, inventory-reservation, and
+governed-lifecycle authorities in the master plan; they may not simply be
+switched off or left as hidden vetoes after their replacements are proven.
+
+## 23.3 Mandatory Stage-Entry Manifest
+Before the first source, test, configuration, or runtime edit in every stage,
+the executor must re-read this file and write a stage-entry manifest into that
+stage's completion report. It must contain:
+
+1. stage number, objective, binary exit gate, stop conditions, in-scope files,
+   forbidden files, current branch/commit, and complete dirty-worktree record;
+2. affected module truth map and one-owner authority graph;
+3. current-behavior evidence and the exact restriction ledger/classification;
+4. baseline fingerprints for thresholds, limits, defaults, profiles, capability
+   contracts, broker-mutation surfaces, and module classifications affected by
+   the stage;
+5. mathematical/model inventory: formulas, inputs, units, assumptions,
+   estimators, uncertainty treatment, calibration source, numerical stability,
+   and known limitations;
+6. planned positive, negative, adversarial, temporal/causal, property/replay,
+   parity, restart/recovery, performance, and mutation-audit tests as applicable;
+7. proof and approval boundary: offline, runtime, browser, broker read, bounded
+   PAPER, live, dependency, subsystem, deletion, and staging permissions;
+8. pre-code independent red-team answers covering degradation, bypass, duplicate
+   authority, fake proof, state loss, hidden configuration, math simplification,
+   and ways a green test could mask a broken runtime;
+9. an explicit line: `STAGE_ENTRY_COVENANT: PASS` or
+   `STAGE_ENTRY_COVENANT: FAIL - <reasons>`.
+
+No stage code begins on `FAIL`, on an unresolved `UNKNOWN` in the affected
+restriction ledger, when a baseline fingerprint unexpectedly changes, or when
+the manifest is missing. At stage close, the report must repeat the
+fingerprints, account for every delta, publish the before/after capability
+matrix, run the Section 5 anti-hallucination check and Section 21 audit, and
+state whether the covenant remained `PASS`. A violation voids the stage's
+success claim even when tests are green.
+
+# 24. AUTONOMOUS PAPER CAMPAIGN + FUTURE MULTI-TENANT COVENANT
+# (Board direction 2026-07-18)
+This covenant records the target operating model after the true-capability
+implementation and certification program. It supplements Sections 0-23 and
+does not authorize a PAPER run, a broker call, a cloud resource, multi-tenant
+activation, or any live/real-money action by itself.
+
+## 24.1 Full-Capability PAPER Means Production Behavior, Not Forced Activity
+1. The next external PAPER proof after Stages 0-12 pass is an autonomous,
+   standard-profile, production-equivalent PAPER campaign. It must not use the
+   commissioning six-symbol universe, a forced exploration profile, a protected-
+   baseline blanket veto, a hidden static fallback, or a reduced module set.
+2. `FULL_CAPABILITY` means every module classified `WIRED_WITH_ROLE` receives
+   its lawful production inputs and opportunity to contribute through the one-
+   owner authority graph. It never means forcing a module to emit, forcing a
+   trade, fabricating a feed, or activating a `PRESERVED_DORMANT` module without
+   its missing lawful prerequisites. Every module reports its truthful status.
+3. Dynamic broker catalog/universe selection, held/open-order symbol priority,
+   all causal strategy and evidence contributors, MarketTruthSnapshot, NetEdge,
+   Risk, sizing, OMS, broker acknowledgement, reconciliation, DecisionRecords,
+   automated broker-position-backed entry and sell-to-close lifecycle, TCA, run
+   archive, and operator truth must all be active where their Stage 0-12 proof
+   authorizes them. No module may be silently bypassed for campaign convenience.
+4. Standard Risk, NetEdge, fee, spread, slippage, impact, stale/TTL, sizing,
+   concentration, drawdown, liquidity, causality, reconciliation, account-pin,
+   PAPER-endpoint, no-short, no-naked-SELL, and singleton-mutation controls remain
+   unchanged or stronger. Autonomy removes commissioning scaffolds only; it does
+   not remove professional trading controls.
+5. Zero trades remains a lawful campaign result when no candidate survives the
+   unchanged gates. That result can prove truthful refusal and operations, but it
+   cannot by itself prove the external positive order/fill lifecycle.
+
+## 24.2 Configuration and Campaign Authority
+1. Do not scatter campaign horizons, universe modes, tenant/account identifiers,
+   deployment paths, recovery budgets, data budgets, log retention, or feature
+   activation through source literals or ad hoc environment variables. Put
+   operational policy in the existing correct owner as a typed, validated,
+   versioned, operator-visible configuration with one canonical authority.
+2. `Do not hardcode` does not apply to immutable safety invariants. PAPER/live
+   separation, no naked SELL, secret redaction, one mutation authority, numeric
+   fail-closed behavior, and the Sacred Safety Laws remain hard enforcement and
+   may not become chat-mutable configuration.
+3. Every campaign is authorized by an immutable campaign envelope that pins at
+   least the maximum horizon, PAPER endpoint, redacted account pin, code commit,
+   effective configuration fingerprint, strategy/module manifest, catalog and
+   universe lineage, opening broker snapshot lineage, state schema, credential
+   authority, and required final reconciliation.
+4. The campaign envelope is the outer approval boundary. The worker uses a
+   shorter renewable, fenced execution lease inside that boundary. Renewal is
+   permitted without routine operator clicks only while heartbeat, account pin,
+   endpoint, market freshness, clock, storage, credential, risk, broker truth,
+   reconciliation, and code/config fingerprints remain valid. No renewal may
+   extend the approved campaign horizon.
+5. Crash recovery inside the same envelope must acquire a new fencing token,
+   prove the prior mutation owner is dead, reconcile broker orders/positions/
+   fills before new entries, and preserve idempotency. Conflict, uncertainty, an
+   expired envelope, or changed code/config requires fail-closed Stop and a new
+   explicit arm; it never permits competing workers or blind replay.
+6. Campaign completion, health failure, or governed Stop ceases new work,
+   releases the lease, terminates the child cleanly when possible, and performs
+   final reconciliation. It does not flatten, close-all, cancel-all, liquidate,
+   force-exit, or manually sell. Broker positions and durable lifecycle evidence
+   remain intact. Any claim of protection while no lifecycle process is running
+   requires separate runtime proof and may not be inferred.
+7. Code, configuration, catalog lineage, strategy/module activation, thresholds,
+   and tenant/account scope do not change silently during an active campaign.
+   A required change stops and reconciles the campaign before a new envelope is
+   armed.
+
+## 24.3 Board Campaign Ladder
+After all prerequisite stages and their binary gates pass, the intended PAPER
+sequence is:
+
+1. Campaign A: 8 continuous hours, full-capability standard profile.
+2. Campaign B: 7 continuous days, only after Campaign A passes its declared
+   operational, reconciliation, evidence, and safety acceptance contract.
+3. Campaign C: 30 continuous days, only after Campaign B passes and capacity,
+   storage, recovery, data-quality, and broker-rate evidence supports the longer
+   horizon.
+4. Campaign D: governed endurance and controlled-failure certification, only
+   after Campaign C. It must have a Board-declared maximum horizon, fault plan,
+   steady-state definition, stop conditions, recovery budget, and final
+   reconciliation. A crash is evidence to diagnose, never the unbounded
+   authorization or desired termination condition.
+
+Every external PAPER campaign remains a separate Section 10 Board approval.
+Approving one horizon does not auto-approve the next, permit self-arming after
+its envelope, or authorize live behavior. Once armed, normal autonomous trading,
+monitoring, lifecycle exits, and lawful recovery operate without routine human
+trade decisions inside that envelope.
+
+The phrase `run until the bot crashes` is not accepted literally because it has
+no maximum mutation horizon or deterministic completion condition. The lawful
+replacement is Campaign D: offline fault injection first, then an explicitly
+approved PAPER endurance campaign with controlled process, host, network,
+broker-error, stale-feed, clock, credential, storage, and restart faults plus
+hard stop conditions. This safety disagreement remains surfaced to Shan and may
+not be resolved silently by removing the outer campaign boundary.
+
+## 24.4 Multi-Tenant Direction (Deferred Until Campaign Program Completes)
+1. Multi-tenant activation is deferred as Shan directed. It is not part of the
+   current single-tenant implementation or PAPER campaign authorization.
+2. Work completed now must avoid unnecessary single-tenant hardcoding and keep
+   existing owner contracts capable of accepting an explicit tenant, account,
+   deployment, and campaign scope later. Do not create a second authority or an
+   unused parallel tenant subsystem in anticipation.
+3. Before any second tester is admitted, credentials, account pins, state,
+   leases/fencing tokens, campaign envelopes, configuration, risk budgets,
+   reservations, client order IDs, orders, fills, reconciliation, audit trails,
+   archives, logs, UI sessions, AI evidence packets, and secret access must be
+   isolated and tested per tenant/account. Authentication alone is not tenant
+   isolation.
+4. There is exactly one mutation authority for each tenant/account, and no
+   process may mutate two accounts under an ambiguous tenant context. Shared
+   read-only market data is permissible only with immutable symbol/source/time
+   provenance; mutable decisions, portfolios, strategy state, Risk, OMS, and
+   reconciliation never cross tenant boundaries.
+5. Multi-tenant rollout requires a separate truth map, threat model, isolation
+   tests, noisy-neighbor/rate-budget proof, migration/rollback plan, operator
+   authorization model, and Board approval for any new subsystem or dependency.
+
+## 24.5 Live-Money Boundary
+PAPER evidence does not authorize live trading. Alpaca PAPER does not prove
+market impact, information leakage, latency slippage, queue position, price
+improvement, or complete real fee behavior. After the PAPER campaign ladder,
+any tiny-money test remains Checkpoint I: every account, capital/order/loss/trade
+cap, credential action, live read, live mutation, kill switch, and reconciliation
+step is individually Board-approved and independently proven. There is no
+automatic promotion from a profitable or stable PAPER campaign to live money.

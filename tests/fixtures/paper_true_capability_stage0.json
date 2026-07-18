@@ -1,0 +1,472 @@
+{
+  "schema_version": "paper-true-capability-stage0-v1",
+  "fixture_id": "stage0-four-hour-proof-freeze-20260718",
+  "purpose": "Deterministic offline regression evidence only; never a runtime, readiness, broker, or arming authority.",
+  "provenance": {
+    "source_artifact_relative": "logs/paper_runs/bounded_paper_20260717_182808.out.log",
+    "source_sha256": "335a67411bac595b2d5928a5d9e4fee06d2bd4d64e88c14969e8caafcd098240",
+    "source_size_bytes": 106512681,
+    "source_kind": "BOARD_AUTHORIZED_BOUNDED_PAPER_STDOUT",
+    "evidence_rung": "HISTORICAL_BOUNDED_PAPER_LOG",
+    "historical": true,
+    "sanitized": true,
+    "deterministic": true,
+    "executable_input": false,
+    "current_runtime_truth": false,
+    "current_broker_truth": false,
+    "current_readiness_truth": false,
+    "selection_method": "Semantic allowlist from the completed four-hour run and its audited completion evidence.",
+    "excluded_data_classes": [
+      "raw_credentials",
+      "full_account_identifiers",
+      "broker_order_identifiers",
+      "client_order_identifiers",
+      "position_quantities",
+      "raw_log_lines",
+      "runtime_state"
+    ]
+  },
+  "historical_suite_baseline": {
+    "result": "1820 passed, 14 skipped, 0 failed",
+    "passed": 1820,
+    "skipped": 14,
+    "failed": 0,
+    "rerun_at_stage_entry": false,
+    "proof_source": "reports/codex_handoff_latest.md",
+    "current_suite_truth": false
+  },
+  "records": [
+    {
+      "record_kind": "candidate_summary",
+      "truth_class": "HISTORICAL_RUN_EVIDENCE",
+      "decision_path_candidate_count": 80,
+      "economically_admissible_count": 80,
+      "terminal_outcomes": {
+        "PAPER_BASELINE_SYMBOL_PROTECTED": 50,
+        "BEARISH_NO_LONG": 15,
+        "STALE_DATA_GUARD_ABSOLUTE_DRIFT_LIMIT_BREACH": 13,
+        "STALE_DATA_GUARD_SAFE_MODE": 2
+      },
+      "submitted_count": 0,
+      "interpretation": "Economic admission did not override later hard blockers; no candidate became an external order."
+    },
+    {
+      "record_kind": "causal_age_examples",
+      "truth_class": "HISTORICAL_CAUSAL_DEFECT",
+      "examples": [
+        {
+          "module": "Shans Curve",
+          "age_ns": -84711522000,
+          "source_reason": "NATIVE_SIGNAL_FRESH",
+          "stage0_classification": "FUTURE_DATED_CAUSAL_CONTAMINATION"
+        },
+        {
+          "module": "Regime Detector",
+          "age_ns": -95000000000,
+          "source_reason": "NATIVE_SIGNAL_FRESH",
+          "stage0_classification": "FUTURE_DATED_CAUSAL_CONTAMINATION"
+        }
+      ],
+      "normalization_applied": false,
+      "interpretation": "Negative age is not fresh; it means the evidence timestamp follows the decision timestamp."
+    },
+    {
+      "record_kind": "protected_baseline_summary",
+      "truth_class": "HISTORICAL_GUARD_EVIDENCE",
+      "policy": "ADOPT_EXISTING_POSITIONS_PROTECTED",
+      "reason_code": "PAPER_BASELINE_SYMBOL_PROTECTED",
+      "refusal_count": 50,
+      "protected_symbols": [
+        "AVAX/USD",
+        "ETH/USD",
+        "LINK/USD",
+        "SOL/USD"
+      ],
+      "guard_bypassed": false
+    },
+    {
+      "record_kind": "stale_guard_summary",
+      "truth_class": "HISTORICAL_GUARD_EVIDENCE",
+      "absolute_drift_limit_breach_count": 13,
+      "safe_mode_count": 2,
+      "route_permitted_count": 0,
+      "guard_bypassed": false
+    },
+    {
+      "record_kind": "no_trade_mutation_summary",
+      "truth_class": "HISTORICAL_MUTATION_AUDIT",
+      "iterations": 492,
+      "watched_symbol_count": 6,
+      "submitted_count": 0,
+      "order_post_attempted": 0,
+      "order_post_authorized": 0,
+      "order_post_acknowledged": 0,
+      "order_delete_count": 0,
+      "cancel_count": 0,
+      "replace_count": 0,
+      "sell_count": 0,
+      "rebalance_count": 0,
+      "broker_mutation_count": 0,
+      "current_open_order_count_at_reconciliation": 0
+    },
+    {
+      "record_kind": "shutdown_summary",
+      "truth_class": "HISTORICAL_LIFECYCLE_EVIDENCE",
+      "reason_code": "BOUNDED_DURATION_EXPIRED_NO_FLATTEN",
+      "bounded_duration_seconds": 14400,
+      "bounded_duration_elapsed": true,
+      "shutdown_complete": true,
+      "positions_preserved": true,
+      "flatten_requested": false,
+      "manual_trade_control_used": false,
+      "final_reconciliation_required": true
+    },
+    {
+      "record_kind": "final_reconciliation_summary",
+      "truth_class": "HISTORICAL_BROKER_READ_EVIDENCE",
+      "performed": true,
+      "account_status": "ACTIVE",
+      "expected_account_suffix": "045ded",
+      "actual_account_suffix": "045ded",
+      "position_count": 4,
+      "position_symbols": [
+        "AVAX/USD",
+        "ETH/USD",
+        "LINK/USD",
+        "SOL/USD"
+      ],
+      "broker_open_order_count": 0,
+      "local_open_order_count": 0,
+      "unknown_order_count": 0,
+      "conflict_count": 0,
+      "run_broker_mutation_count": 0,
+      "historical_broker_filled_order_count_observed": 55,
+      "fill_hydration_attempted_count": 92,
+      "fill_hydration_hydrated_count": 0,
+      "fill_hydration_missing_count": 92,
+      "interpretation": "Zero mutations belong to this run. Nonzero filled-order and hydration counts are older broker history observed during reconciliation, not fills created by this run."
+    }
+  ],
+  "activation_state_definitions": {
+    "IMPLEMENTED_OFFLINE": "Code or deterministic offline evidence exists and pure behavior is tested; no runtime or broker proof.",
+    "OBSERVE_ONLY": "The capability is diagnostic, classified, or non-authoritative and cannot create an executable order.",
+    "MOCKED_EXECUTION_PROVEN": "Deterministic tests reach a mocked execution boundary; no external broker mutation or fill is claimed.",
+    "BROKER_READ_PROVEN": "A time-bounded authenticated broker GET established external truth; it grants no mutation or current readiness authority.",
+    "BOUNDED_PAPER_PROVEN": "A Board-authorized bounded PAPER run produced runtime and reconciliation evidence only for capabilities actually exercised."
+  },
+  "activation_matrix": [
+    {
+      "capability": "stage0_sanitized_fixture_parser",
+      "state": "IMPLEMENTED_OFFLINE",
+      "proof_source": "tests/test_paper_true_capability_stage0.py",
+      "proof_summary": "Standard-library parsing and exact semantic regression checks.",
+      "limitation": "Test-only evidence; never imported by production code.",
+      "current_activation_authority": false,
+      "paper_start_authority": false,
+      "broker_mutation_authority": false,
+      "live_authority": false
+    },
+    {
+      "capability": "gamma_front_entry_feed",
+      "state": "OBSERVE_ONLY",
+      "proof_source": "reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md",
+      "proof_summary": "GammaFront remains WIRED_EXIT_ONLY / ENTRY_FEED_DORMANT with no lawful production entry feed.",
+      "limitation": "No executable GammaFront entry capability is claimed.",
+      "current_activation_authority": false,
+      "paper_start_authority": false,
+      "broker_mutation_authority": false,
+      "live_authority": false
+    },
+    {
+      "capability": "dispatch_compile_submit_route_internal_mocked_fill",
+      "state": "MOCKED_EXECUTION_PROVEN",
+      "proof_source": "tests/test_deterministic_end_to_end_harness.py::TestEndToEndChain::test_fresh_candidate_traverses_dispatch_compile_submit_route_fill",
+      "proof_summary": "Production dispatch/compiler and internal paper routing are exercised while the submit seam is mocked.",
+      "limitation": "The resulting OrderFill is not an external Alpaca fill.",
+      "current_activation_authority": false,
+      "paper_start_authority": false,
+      "broker_mutation_authority": false,
+      "live_authority": false
+    },
+    {
+      "capability": "pinned_account_positions_open_orders_preflight",
+      "state": "BROKER_READ_PROVEN",
+      "proof_source": "historical four-hour run preflight and final reconciliation",
+      "proof_summary": "Read-only Alpaca PAPER GETs confirmed the pinned suffix, ACTIVE account, four positions, and zero open orders during the completed run.",
+      "limitation": "Historical point-in-time truth; not a current broker read and not Start authorization.",
+      "current_activation_authority": false,
+      "paper_start_authority": false,
+      "broker_mutation_authority": false,
+      "live_authority": false
+    },
+    {
+      "capability": "four_hour_commissioning_run",
+      "state": "BOUNDED_PAPER_PROVEN",
+      "proof_source": "logs/paper_runs/bounded_paper_20260717_182808.out.log",
+      "proof_summary": "The bounded process ran 492 iterations over six symbols, submitted no orders, preserved four positions, and reconciled on shutdown.",
+      "limitation": "Proves lifecycle and refusal behavior, not external order, fill, sell-to-close, dynamic-universe, or full-capability trading behavior.",
+      "current_activation_authority": false,
+      "paper_start_authority": false,
+      "broker_mutation_authority": false,
+      "live_authority": false
+    }
+  ],
+  "invariant_manifest": [
+    {
+      "invariant_id": "PAPER_ENDPOINT_ONLY",
+      "negative_test_nodes": [
+        "tests/test_phase_d_paper_readiness_truth.py::test_d3_live_endpoint_is_blocked_even_from_canonical_env_file"
+      ],
+      "failure_contract": "Any live or non-PAPER endpoint fails closed."
+    },
+    {
+      "invariant_id": "ACCOUNT_PIN_BEFORE_ORDER_ONE",
+      "negative_test_nodes": [
+        "tests/test_dynamic_execution_broker_gateway_injection.py::test_child_broker_connect_rejects_mismatched_account_pin_before_order_one"
+      ],
+      "failure_contract": "A broker-reported suffix mismatch aborts before the first POST."
+    },
+    {
+      "invariant_id": "LIVE_MODE_DISABLED",
+      "negative_test_nodes": [
+        "tests/test_operator_paper_supervisor.py::test_supervisor_rejects_live_real_money_unknown_profile_and_watchlist"
+      ],
+      "failure_contract": "The PAPER supervisor rejects live mode."
+    },
+    {
+      "invariant_id": "REAL_MONEY_DISABLED",
+      "negative_test_nodes": [
+        "tests/test_operator_paper_supervisor.py::test_supervisor_rejects_live_real_money_unknown_profile_and_watchlist"
+      ],
+      "failure_contract": "The PAPER supervisor rejects real-money mode."
+    },
+    {
+      "invariant_id": "NO_NAKED_OR_SHORT_SELL",
+      "negative_test_nodes": [
+        "tests/test_candidate_lifecycle_scorecard_seam.py::test_sell_without_broker_position_is_broker_authority_blocker",
+        "tests/test_execution_spine_order_routing.py::test_full_spine_blocks_unsupported_sell_before_gateway_post"
+      ],
+      "failure_contract": "SELL without broker-position-backed authority is refused before broker POST."
+    },
+    {
+      "invariant_id": "NO_MANUAL_TRADE_CONTROLS",
+      "negative_test_nodes": [
+        "tests/test_operator_home.py::test_home_control_inventory_covers_required_pages_and_forbidden_controls_absent"
+      ],
+      "failure_contract": "The operator UI exposes no manual buy, sell, cancel, flatten, liquidate, or force-trade intent."
+    },
+    {
+      "invariant_id": "MARKET_TRUTH_FRESHNESS_HARD",
+      "negative_test_nodes": [
+        "tests/test_pre_trade_guardrail_constraints.py::test_stale_data_guard_blocks_stale_temporal_observation_before_routing"
+      ],
+      "failure_contract": "Stale MarketTruthSnapshot evidence blocks routing."
+    },
+    {
+      "invariant_id": "RISK_ADMISSION_HARD",
+      "negative_test_nodes": [
+        "tests/test_pre_trade_guardrail_constraints.py::test_exposure_manager_conflict_evidence_blocks_before_routing"
+      ],
+      "failure_contract": "Exposure conflicts remain hard Risk blockers."
+    },
+    {
+      "invariant_id": "NET_EDGE_HARD",
+      "negative_test_nodes": [
+        "tests/test_full_opportunity_engine_unlock.py::test_execution_engine_netedge_blocks_negative_and_unknown_edge"
+      ],
+      "failure_contract": "Negative or unknown NetEdge cannot route."
+    },
+    {
+      "invariant_id": "POSITION_SIZING_HARD",
+      "negative_test_nodes": [
+        "tests/test_shadow_front_state.py::TestSizingEngineAbsentFailClosed::test_no_sizing_engine_blocks_even_with_all_gates_passed",
+        "tests/test_shadow_front_state.py::TestSizingEngineAbsentFailClosed::test_sizing_engine_zero_quantity_blocks"
+      ],
+      "failure_contract": "Missing sizing authority or nonpositive canonical size fails closed."
+    },
+    {
+      "invariant_id": "ORDER_TTL_HARD",
+      "negative_test_nodes": [
+        "tests/test_canonical_paper_oms_lifecycle.py::test_zombie_sweeper_defers_unknown_status_until_hard_ttl",
+        "tests/test_canonical_paper_oms_lifecycle.py::test_zombie_sweeper_cancels_unknown_status_after_hard_ttl"
+      ],
+      "failure_contract": "OMS neither cancels before hard TTL nor leaves an unknown order past hard TTL."
+    },
+    {
+      "invariant_id": "OMS_AUTHORITY_HARD",
+      "negative_test_nodes": [
+        "tests/test_canonical_paper_oms_lifecycle.py::test_unauthorized_cancel_denied_once_without_spam"
+      ],
+      "failure_contract": "An unauthorized cancel is denied at the OMS boundary."
+    },
+    {
+      "invariant_id": "RECONCILIATION_HARD_NO_FAKE_FILL",
+      "negative_test_nodes": [
+        "tests/test_canonical_paper_oms_lifecycle.py::test_post_ack_reconciliation_conflict_fails_closed",
+        "tests/test_canonical_paper_oms_lifecycle.py::test_missing_broker_fill_details_reports_unavailable_without_fake_fill"
+      ],
+      "failure_contract": "Post-ack conflict fails closed and missing fill detail stays unavailable."
+    },
+    {
+      "invariant_id": "GOVERNED_STOP_ZERO_BROKER_MUTATION",
+      "negative_test_nodes": [
+        "tests/test_operator_paper_supervisor.py::test_governed_stop_halts_loop_releases_lease_without_broker_mutation_and_preserves_positions"
+      ],
+      "failure_contract": "Stop halts the child and releases the lease without order, cancel, close, or liquidation mutation."
+    },
+    {
+      "invariant_id": "SOVEREIGN_EXECUTION_GUARD_DORMANT",
+      "negative_test_nodes": [
+        "tests/test_phase_d_paper_readiness_truth.py::test_d1_stale_data_guard_fires_and_sovereign_guard_stays_lawfully_dormant"
+      ],
+      "failure_contract": "SovereignExecutionGuard remains preserved and dormant."
+    },
+    {
+      "invariant_id": "DEFAULT_THRESHOLDS_UNCHANGED",
+      "negative_test_nodes": [
+        "tests/test_paper_true_capability_stage0.py::test_threshold_and_runtime_defaults_match_frozen_baseline"
+      ],
+      "failure_contract": "Any unapproved default, exploration threshold, profile, universe, duration, or account-pin drift fails the Stage 0 pin."
+    },
+    {
+      "invariant_id": "NO_READINESS_FROM_LOWER_PROOF_RUNG",
+      "negative_test_nodes": [
+        "tests/test_paper_true_capability_stage0.py::test_activation_matrix_uses_only_frozen_states_and_grants_no_authority"
+      ],
+      "failure_contract": "Offline, observe-only, mocked, historical broker-read, and bounded-run evidence cannot authorize Start or live behavior."
+    }
+  ],
+  "baseline_fingerprints": {
+    "runtime_config": {
+      "allowed_watchlist": [
+        "BTC/USD",
+        "ETH/USD",
+        "SOL/USD",
+        "LTC/USD",
+        "AVAX/USD",
+        "LINK/USD"
+      ],
+      "allowed_profile": "PAPER_EXPLORATION_ALPHA",
+      "allowed_durations_seconds": [
+        180,
+        300,
+        900,
+        1200,
+        1800,
+        3600,
+        7200,
+        10800,
+        14400,
+        86400,
+        259200,
+        432000
+      ],
+      "minimum_duration_seconds": 60,
+      "maximum_duration_seconds": 432000,
+      "runner_maximum_duration_seconds": 432000,
+      "live_enabled": false,
+      "real_money_enabled": false,
+      "expected_account_suffix": "045ded"
+    },
+    "threshold_profile": {
+      "shans_ready_required": {
+        "default": true,
+        "exploration": false
+      },
+      "fusion_min_confidence": {
+        "default": 0.6,
+        "exploration": 0.35
+      },
+      "sector_inflow_threshold": {
+        "default": 1.5,
+        "exploration": 0.75
+      },
+      "sector_rotation_min_confidence": {
+        "default": 0.6,
+        "exploration": 0.45
+      },
+      "sector_rotation_min_baseline_candles": {
+        "default": 10,
+        "exploration": 3
+      },
+      "shadowfront_whale_threshold": {
+        "default": 0.2,
+        "exploration": 0.1
+      },
+      "shadowfront_sentiment_velocity_threshold": {
+        "default": 1.5,
+        "exploration": 0.1
+      },
+      "shadowfront_min_confidence": {
+        "default": 0.6,
+        "exploration": 0.45
+      },
+      "minimum_opportunity_score": {
+        "default": 0.45,
+        "exploration": 0.25
+      },
+      "optional_alpha_quorum": {
+        "default": 1,
+        "exploration": 0
+      }
+    },
+    "authority_graph": {
+      "version": "authority-graph-v1",
+      "owners": {
+        "market_truth": "app.core.market_snapshot.MarketTruthSnapshot",
+        "risk_gates": "app.risk.pre_trade_guardrails.evaluate_pre_trade_guardrails",
+        "sizing": "app.risk.position_sizing.PositionSizingEngine",
+        "broker_order_lifecycle": "app.execution.order_router.OrderRouter",
+        "portfolio_position_truth": "app.risk.exposure_manager.ExposureManager",
+        "ai_advisory": "app.ai_chief_operator.provider_gateway.AIProviderGateway",
+        "ui_display": "ui/operator-control-panel/app.js"
+      }
+    },
+    "module_classification": {
+      "countable_total": 397,
+      "WIRED": 297,
+      "BLOCKED": 89,
+      "PRESERVED-DEAD": 10,
+      "REJECTED-PRESERVED": 1,
+      "excluded_generated_pycache": 2
+    },
+    "alpaca_crypto_capability": {
+      "declared_actions": [
+        "buy",
+        "sell_to_close"
+      ],
+      "external_adapter_sell_supported": false,
+      "external_adapter_sell_block_reason": "only_buy_supported",
+      "paper_mutation": true,
+      "live_mutation": false,
+      "live_blocked": true,
+      "blocker_owner_stage": 8
+    },
+    "broker_mutation_surface": {
+      "final_owner": "app.execution.order_router.OrderRouter",
+      "submit_method": "POST",
+      "submit_path": "/v2/orders",
+      "cancel_method": "DELETE",
+      "cancel_path_template": "/v2/orders/{order_id}",
+      "stage0_transport_calls_authorized": false
+    },
+    "source_sha256": {
+      "app/core/decision_frame.py": "4ec83796c3de5464554da7a4ad524e48c760e90c5075cc4f8d8cf8a9f87ab94a",
+      "app/main_loop.py": "822ea28bee27e4711900e8f6d46ca1ed2ea2f3901cfaa59845b06aa3dd37190d",
+      "app/execution/alpaca_paper_adapter.py": "f8e08c8234f3104929bace10989d908c3892d5ca66ce5aca7737dca24a5a3955",
+      "app/market/capability_registry.py": "9ecf7ebb866dcd284bd2b8c5cd1d168e332751bad3d2451c2d1085ad9b79e158",
+      "app/core/authority_graph.py": "f6c7ac908a3be8252827b83cbd458072198735214d3c4c9498c00cab262f7068",
+      "app/api/operator_paper_supervisor.py": "31f0c17173449d9a27f92c88a5e704347891d2eaf95ebb98cfffc52f3b654085",
+      "app/api/operator_runtime_config.py": "3f79b4cf63e58de7d01c60b327fd9a5737f0db0cd79932105f7eec2b0cd6ac95",
+      "app/operator_credentials/store.py": "25f33b3ec1867b8431e0e6c3019531b2d2f9f604f4edef75ae99ddd421bbe46b",
+      "main.py": "403d205689940ed7e213708c4d48ffb84fa13ecd42f231593f73c7671d3267e7",
+      "app/core/market_snapshot.py": "d3b1a3f8b89b5d1a165f31ba859c7d55addf416c04722932731e195425660e1f",
+      "app/risk/pre_trade_guardrails.py": "e6bd34aaf89b2ea56e479ed169d35da0854e62328cb268070125c572293c7793",
+      "app/risk/net_edge_governor.py": "635f3c0301db73a744543cd00e31c2543fbc1565b85acf932f09f7cc81617eeb",
+      "app/risk/position_sizing.py": "02612060e6adbc653c215db702a8bcae8e61bbb5ef97d482979f3f2fa1f35921",
+      "app/execution/order_router.py": "25eb401926dac08910dc5eb61461b6019ba58f8543d2685deede4524a87e0b12",
+      "ui/operator-control-panel/app.js": "918092f7d335fa58556f92c824dd88298c590283de62a5766451bfd65222bc3f",
+      "reports/completion/PHASE_B_MODULE_TRUTH_MAP.md": "4857b57e4dbc4570622eed268def78b3c9ae03ed275149b120b432572339925f"
+    }
+  }
+}

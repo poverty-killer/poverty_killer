@@ -1,4 +1,236 @@
-# Codex Session Handoff - Operator Process Lifecycle Recovery
+# Codex Session Handoff - PAPER True Capability Stage 0 Complete
+
+Date: 2026-07-18 America/Chicago
+Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
+Branch: `master`
+Stage-entry HEAD: `d3692b6 clarify lifecycle deployment proof boundary`
+Stage report: `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_0_REPORT.md`
+
+## Current Verdict
+
+Shan explicitly approved Stage 0. It is complete and **PASS** at the local test
+rung. Stage 1 has not been opened.
+
+Stage 0 added only a deterministic sanitized fixture, six offline regression
+tests, and its governance/evidence updates. No production application, UI,
+script, runtime configuration, state, broker state, or trading authority changed.
+
+## Evidence Frozen
+
+- Historical source:
+  `logs/paper_runs/bounded_paper_20260717_182808.out.log`, SHA-256
+  `335a67411bac595b2d5928a5d9e4fee06d2bd4d64e88c14969e8caafcd098240`,
+  106,512,681 bytes. The raw log remains unstaged.
+- Sanitized fixture: 80 decision-path candidates; 50 protected-baseline
+  refusals; 15 `BEARISH_NO_LONG`; 13 absolute-drift refusals; 2 safe-mode
+  refusals; zero order submissions.
+- Signed ages `-84711522000` and `-95000000000` ns remain classified as
+  future-dated causal contamination, not freshness.
+- The run made zero broker mutations, preserved four positions, expired at the
+  14,400-second boundary without flattening, and reconciled with zero open
+  orders or conflicts.
+- Final reconciliation also observed 55 older broker-filled orders and 92
+  missing hydration attempts. Those are historical broker rows, not fills from
+  this run and not silently rewritten to zero.
+
+## Frozen Invariants and Proof Vocabulary
+
+Seventeen invariants map to 20 unique executable negative tests: PAPER endpoint
+only; account pin before order one; live/real-money disabled; no naked/short
+SELL; no manual trade controls; MarketTruthSnapshot freshness; Risk; NetEdge;
+sizing; TTL; OMS; reconciliation/no fake fills; governed Stop with zero broker
+mutation; dormant SovereignExecutionGuard; unchanged defaults; and no readiness
+from lower proof rungs.
+
+The only allowed activation states are `IMPLEMENTED_OFFLINE`, `OBSERVE_ONLY`,
+`MOCKED_EXECUTION_PROVEN`, `BROKER_READ_PROVEN`, and
+`BOUNDED_PAPER_PROVEN`. Every fixture row has Start, broker mutation, current
+activation, and live authority set false.
+
+The fixture also pins the six-symbol commissioning list, forced
+`PAPER_EXPLORATION_ALPHA` profile, allowed durations/five-day ceiling, ten
+default/exploration threshold pairs, expected suffix `045ded`, seven authority
+owners, Phase B's 397-module classification, broker POST/DELETE surface, and 16
+source hashes.
+
+## Validation
+
+- Python compile: PASS.
+- Stage 0 focused: `6 passed`.
+- Exact invariant nodes: `20 passed`, 75 warnings.
+- Run-path gate: `119 passed`, 78 warnings.
+- Full suite: `1826 passed, 14 skipped, 384 warnings, 0 failed`.
+
+Two harness mistakes are explicitly non-results: a first focused command used a
+fixed `C:\tmp` base path that pytest could not create, and a first full-suite
+wrapper had a one-second process timeout. Both were rerun correctly; neither is
+counted as proof. The 14 broker/access tests remain conditional skips, not
+passes. No broker authorization variable was enabled.
+
+## Known Blockers Preserved
+
+- The capability registry declares Alpaca crypto `sell_to_close`, while
+  `AlpacaPaperBrokerAdapter._payload_for_order()` still rejects every SELL with
+  `only_buy_supported`. This is a named Stage 8 blocker, not a pass.
+- The six-symbol universe, forced exploration profile, protected-baseline
+  blanket veto, buy-only external adapter, and five-day ceiling remain current
+  commissioning limitations.
+- GammaFront remains `WIRED_EXIT_ONLY / ENTRY_FEED_DORMANT`.
+- SovereignExecutionGuard remains preserved dormant.
+- Existing Pydantic and timezone-naive datetime deprecation warnings remain
+  visible and unresolved.
+
+## Proof and Approval Boundary
+
+The highest rung climbed is local tests. No browser, runtime, market-freshness,
+current broker, external submit/fill/sell-to-close, recovery, dynamic-universe,
+or profitability claim was made. No broker GET, PAPER run, broker mutation,
+live action, real money, threshold/control change, dependency, deletion, or
+module activation occurred.
+
+Stop at the Stage 0 boundary. Stage 1 needs its own full re-read, truth map,
+stage-entry manifest/red-team, and explicit direction from Shan. Stage 12 broker
+reads and every Stage 13 PAPER campaign remain separately Board-gated.
+
+## Exact Stage 0 Staging Scope
+
+```text
+AGENTS.md
+CHECKPOINT_TRACKER.md
+reports/codex_handoff_latest.md
+reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md
+reports/completion/PAPER_TRUE_CAPABILITY_STAGE_0_REPORT.md
+tests/fixtures/paper_true_capability_stage0.json
+tests/test_paper_true_capability_stage0.py
+```
+
+Never stage protected `state/**`, `.pytest_tmp/**`, logs, old handoffs, UI
+proposal/restriction-review packets, `reports/operator_perf/**`, screenshots,
+untracked audit scripts, credentials, secrets, databases, or runtime artifacts.
+
+---
+
+# Prior Handoff - PAPER True Capability Planning
+
+Date: 2026-07-18 America/Chicago
+Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
+Branch: `master`
+Planning baseline: `d3692b6 clarify lifecycle deployment proof boundary`
+Full report: `reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md`
+
+## Current Verdict
+
+Shan requested a complete, red-teamed plan to remove commissioning-only PAPER
+restrictions, broaden the tradable crypto universe, and let the bot lawfully
+manage existing holdings. The plan, non-degradation covenant, and autonomous-
+campaign addendum are complete; implementation has not started and approval is
+pending.
+
+Live-repo inspection showed that replacing the six-symbol list or enabling SELL
+first would expose existing causal and authority defects. The adjusted program
+therefore repairs per-symbol/time causality and consolidates broker inventory
+truth before dynamic catalog activation, fill-driven strategies, governed
+sell-to-close, upgraded portfolio economics, and natural PAPER proof.
+
+No source, test, configuration, runtime state, broker state, guard, threshold,
+or trading authority changed. No test, runtime, browser, broker read, or PAPER
+run was performed in this planning session.
+
+## Approval Boundary and Next Step
+
+- Await explicit Board approval for offline implementation Stages 0-11.
+- Before every stage, execute the Board-ratified `AGENTS.md` Section 23 manifest
+  and record `STAGE_ENTRY_COVENANT: PASS`; otherwise that stage cannot begin.
+- On approval, begin with Stage 0 and Stage 1 only; run their binary exit gates
+  and report before wider-universe or SELL work.
+- Stage 12 broker-read-only validation requires a separate approval.
+- Every Stage 13 autonomous PAPER campaign requires its own separate approval.
+- No live mode, real money, manual buy/sell/force controls, shorting, naked SELL,
+  threshold weakening, or self-arming is proposed.
+
+## Board-Ratified Non-Degradation Covenant
+
+On 2026-07-18 Shan directed that every true-capability stage hard-bind a
+non-degradation and restriction-removal covenant. It is now encoded in
+`AGENTS.md` Section 23 and referenced immediately beneath every Stage 0-13
+heading in the master plan.
+
+The covenant prohibits deletion, flattening, truncation, dumbing down,
+code/math/quant simplification, control or limit loosening, target trade counts,
+test weakening, hidden configuration expansion, fake proof, silent modules,
+duplicate authority, and unapproved money-adjacent work. It also requires
+causality, broker truth, reconciliation, robust uncertainty-aware mathematics,
+state/restart integrity, rate-limit/capacity proof, exact staging, and honest
+unknowns. A commissioning restriction can be replaced only after named repo
+proof, classification, a complete production owner, adversarial tests, and an
+accounted before/after capability matrix. An affected `UNKNOWN` remains
+fail-closed; a proven scaffold must leave the active path and cannot survive as
+a renamed or hidden veto. Quant research integrity, out-of-sample claims,
+numeric failure handling, uncertainty, and full net economics are mandatory.
+
+This ruling strengthens execution governance only. Implementation remains not
+started and still awaits Board approval.
+
+## Autonomous Campaign and Future Multi-Tenant Direction
+
+On 2026-07-18 Shan directed that commissioning mini-runs end after the true-
+capability prerequisites pass. The intended external PAPER sequence is now:
+
+1. 8 continuous hours with the full standard-profile lawful capability;
+2. 7 continuous days after the 8-hour gate passes;
+3. 30 continuous days after the 7-day gate passes;
+4. governed endurance and controlled-failure certification after the month.
+
+The current code cannot execute this sequence: runner, supervisor, runtime
+config, API/UI, and tests enforce a five-day (`432000` seconds) maximum. Do not
+delete that validation or merely increase scattered literals. The master plan
+and `AGENTS.md` Section 24 require one typed, versioned, immutable finite
+campaign envelope in the existing owners plus a shorter renewable fenced worker
+lease. Autonomous renewal/recovery is allowed only inside the approved horizon,
+with current health/fingerprint checks and broker reconciliation before new
+entries. It cannot self-arm or extend the campaign.
+
+`FULL_CAPABILITY` means every `WIRED_WITH_ROLE` module receives its lawful
+production inputs and reports source-emitted truth through the standard profile,
+dynamic broker universe, broker-backed entry/exit lifecycle, and unchanged
+MarketTruthSnapshot/NetEdge/Risk/sizing/OMS/reconciliation gates. It does not
+force every module or candidate to fire. Dormant/inapplicable modules remain
+truthful, and zero natural trades is lawful.
+
+The literal request to run without limit until a crash is a surfaced safety
+disagreement. Its lawful, stronger replacement is a Board-bounded endurance
+campaign with defined steady state, controlled process/host/network/broker/feed/
+clock/storage/restart faults, hard stop conditions, fencing, and final
+reconciliation. Each external PAPER campaign still requires separate approval.
+No PAPER run is authorized by this planning update.
+
+Multi-tenant activation is deferred until the campaign program finishes. Avoid
+unnecessary single-tenant hardcoding now, but do not invent a parallel tenant
+subsystem. Before a second tester, credentials, account pin, state, campaign,
+lease/fencing, Risk, OMS, orders/fills, reconciliation, audit, UI, logs, and AI
+evidence must be isolated per tenant/account and pass cross-tenant negative
+tests. Authentication alone is not isolation.
+
+Tiny live-money work remains Checkpoint I and individually Board-gated. Alpaca
+PAPER omits market impact, information leakage, latency slippage, queue position,
+price improvement, and some live fees, so even stable or profitable month-long
+PAPER evidence cannot automatically authorize live trading.
+
+No source, test, runtime configuration, state, broker state, cloud resource,
+PAPER run, or live path changed in this planning update. No tests/runtime/browser
+or broker calls were run.
+
+## Protected Worktree
+
+Pre-existing modified `state/*` files and untracked reports, audit scripts,
+`.pytest_tmp/`, and operator-performance artifacts remain protected and were
+not cleaned, reset, staged, or modified. The only planning files intended for
+possible staging are `AGENTS.md`, the master plan, `CHECKPOINT_TRACKER.md`, and
+this handoff.
+
+---
+
+# Prior Handoff - Operator Process Lifecycle Recovery
 
 Date: 2026-07-15 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`

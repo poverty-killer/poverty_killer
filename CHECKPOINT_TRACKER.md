@@ -1,6 +1,6 @@
 # POVERTY_KILLER Completion Checkpoint Tracker
 
-Updated: 2026-07-15
+Updated: 2026-07-18
 Branch: master
 
 ## Checkpoint Summary
@@ -281,6 +281,124 @@ Completed on 2026-07-15 after Shan showed `NO_ACTIVE_PAPER_RUN` together with
 - Safety ruling surfaced: browser closure never kills an active or uncertain
   runtime; browser chrome is not a trading-lifecycle authority.
 
+## PAPER True Capability Planning
+
+Deep-dive planning completed on 2026-07-17 after Shan requested a staged program
+to remove commissioning restrictions, broaden PAPER trading, and permit lawful
+automated management of broker-backed holdings. Full evidence, independent
+red-team, and adjusted plan are in
+`reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md`.
+
+- **PLAN ONLY / IMPLEMENTATION NOT STARTED** - no source, test, configuration,
+  runtime state, broker state, or trading authority changed.
+- Repo inspection found causal and authority prerequisites that must precede
+  wider trading: cross-symbol fusion state, future-evidence acceptance,
+  incomplete broker-book hydration, pre-fill strategy state, a declared-but-
+  rejected Alpaca SELL contract, non-scalable poll-all data access, inferred
+  module attribution, and placeholder/illustrative portfolio economics.
+- The adjusted plan has Stages 0-11 for offline implementation and adversarial
+  certification. Board approval is pending; execution begins with Stages 0 and
+  1 only and advances only through binary exit gates.
+- Stage 12 broker-read-only validation remains a separate Board approval. Stage
+  13 contains progressively bounded PAPER runs, each separately Board-approved.
+- "Open trading" is defined as a broker-discovered PAPER universe plus the
+  bot's governed, broker-position-backed automated lifecycle. It does not mean
+  live mode, real money, manual trade controls, shorting, naked SELL, or weaker
+  Risk/NetEdge/TTL/sizing/OMS/reconciliation controls.
+- No phase transition, PAPER run, broker call, threshold change, or live action
+  was authorized by creation of this plan.
+- Board addendum 2026-07-18: `AGENTS.md` Section 23 now binds every Stage 0-13
+  to a written pre-code stage-entry manifest, restriction-classification burden
+  of proof, unchanged-control fingerprints, non-degradation covenant, and
+  closing anti-hallucination audit. The covenant forbids deletion, dumbing down,
+  code/math simplification, threshold or limit loosening, trade-count targets,
+  fake proof, and silent module loss. Only restrictions proven to be
+  commissioning/test scaffolds may be replaced by the complete production
+  authority; affected `UNKNOWN` remains fail-closed. A scaffold whose full proof
+  burden passes must leave the active path rather than survive as a renamed or
+  hidden veto. Quant research integrity, out-of-sample claims, numerical failure
+  handling, uncertainty, and full net economics are also explicit covenant
+  requirements.
+- This governance addendum is not implementation approval and authorizes no
+  broker read, PAPER run, live action, mutation, dependency, subsystem, module
+  deletion, or control change.
+- Board campaign direction 2026-07-18: after Stages 0-12 pass, retire the
+  commissioning mini-run ladder. The next external PAPER test is an 8-hour
+  autonomous full-capability standard-profile campaign, followed only on binary
+  gate success by 7-day and 30-day campaigns.
+- Live repo truth: the current runner, supervisor, runtime config, API/UI, and
+  tests enforce a `432000`-second (five-day) maximum, so the week/month sequence
+  is not currently executable. The plan replaces that commissioning ceiling
+  through the existing owners with a typed finite campaign envelope and a
+  shorter renewable fenced worker lease; it does not delete validation or
+  scatter larger hard-coded duration values.
+- `AGENTS.md` Section 24 now binds full-capability campaign semantics: all
+  lawfully wired standard-profile modules receive real production inputs and
+  report truthful statuses; dormant/inapplicable modules are not forced to fire;
+  zero natural trades is lawful; no guard, threshold, Risk, NetEdge, TTL, sizing,
+  OMS, reconciliation, account-pin, PAPER/live, no-short, or no-naked-SELL
+  control weakens.
+- Safety disagreement recorded: the requested literal "run until crash" has no
+  maximum mutation horizon and is rejected as written. Its lawful replacement
+  is a separately approved endurance/controlled-failure campaign with a Board-
+  selected maximum horizon, steady-state definition, fault schedule, hard stop
+  conditions, fenced recovery, and final reconciliation.
+- Operational horizons, deployment/tenant/account identifiers, recovery/data/
+  log budgets, and capability manifests become typed, validated, versioned,
+  operator-visible configuration in the correct existing owner. Immutable
+  safety invariants remain hard enforcement and are never chat-mutable.
+- Multi-tenant activation is deferred until after the campaign program as Shan
+  directed. Current work avoids unnecessary single-tenant literals but does not
+  create a parallel tenant subsystem. A second tester requires explicit
+  credential/state/lease/order/risk/reconciliation/audit isolation and negative
+  cross-tenant proof; authentication alone is insufficient.
+- Tiny live-money testing remains Checkpoint I and is not authorized. PAPER
+  results do not model market impact, information leakage, latency slippage,
+  queue position, price improvement, or complete live fees and cannot
+  automatically promote the bot to live trading.
+- This update changed governance/planning documents only. No source, runtime
+  config, state, broker state, cloud resource, test, PAPER run, or live path was
+  changed or executed. Implementation approval for Stages 0-11 is still pending;
+  Stage 12 reads and every Stage 13 campaign remain separate approvals.
+
+## PAPER True Capability Stage 0
+
+Stage 0 was explicitly approved by Shan on 2026-07-18 and is complete at the
+local test rung. Full entry manifest, red-team, evidence, limitations, and exact
+staging recommendation are in
+`reports/completion/PAPER_TRUE_CAPABILITY_STAGE_0_REPORT.md`.
+
+- PASS - one deterministic sanitized fixture freezes the four-hour run's 80
+  candidate outcomes, two future-dated causal ages, 50 protected-baseline
+  refusals, 15 stale-guard refusals, zero current-run mutations, bounded
+  no-flatten shutdown, and final reconciliation.
+- PASS - zero current-run broker mutations remain distinct from 55 older
+  broker-filled rows and 92 missing hydration attempts observed during final
+  reconciliation; Stage 0 does not claim the account has no historical orders.
+- PASS - exactly five evidence states are defined and represented:
+  `IMPLEMENTED_OFFLINE`, `OBSERVE_ONLY`, `MOCKED_EXECUTION_PROVEN`,
+  `BROKER_READ_PROVEN`, and `BOUNDED_PAPER_PROVEN`. None grants Start, broker
+  mutation, current readiness, or live authority.
+- PASS - 17 frozen invariants map to 20 concrete negative-regression nodes. The
+  exact node gate passed `20 passed`; it covers PAPER endpoint/account pin,
+  live/real-money locks, SELL authority, no manual controls, MarketTruthSnapshot,
+  Risk, NetEdge, sizing, TTL, OMS, reconciliation, governed Stop, dormant
+  SovereignExecutionGuard, default thresholds, and proof-rung boundaries.
+- PASS - the seven-file run-path gate reproduced `119 passed`.
+- PASS - current full suite is `1826 passed, 14 skipped, 0 failed` with 384
+  deprecation warnings. The six-pass increase from the frozen historical
+  `1820 passed` baseline is exactly the new Stage 0 test module.
+- Pinned limitation - Alpaca crypto capability declares `sell_to_close`, but
+  the external PAPER adapter still rejects SELL with `only_buy_supported`.
+  Stage 0 records this as a Stage 8 blocker and does not call it working.
+- No production source/UI/script/config behavior changed. No browser/runtime
+  proof, broker read, PAPER run, broker mutation, external fill, live action,
+  real money, threshold change, module deletion, or protected state edit/stage
+  occurred.
+- Stage 1 and every later stage remain **NOT STARTED**. Stage 1 requires a new
+  stage-entry covenant and Board direction; Stage 12 broker reads and every
+  Stage 13 PAPER campaign retain their separate approval boundaries.
+
 ## Dirty Tree / Baseline Status
 
 The worktree remains dirty from protected runtime files and pre-existing
@@ -312,3 +430,7 @@ clean/stash/reset.
   did not infer permission to resend the failed Start automatically; final Start
   remains Shan's explicit browser action.
 - No live mode, live read-only mode, or broker mutation was authorized.
+- Shan explicitly approved PAPER True Capability Stage 0 on 2026-07-18. Result:
+  Stage 0 passed its offline fixture/invariant/fingerprint gate and full local
+  suite without changing production behavior. This approval does not open Stage
+  1, authorize broker reads, execute PAPER, or alter any live/money boundary.
