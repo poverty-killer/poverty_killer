@@ -1,5 +1,5 @@
 # POVERTY_KILLER — AGENTS.md
-# COMPLETION PROGRAM EDITION (v3 — Board-final merge).
+# COMPLETION PROGRAM EDITION (v3 — Board-final merge; pre-close review amendment).
 # Complete replacement of the prior AGENTS.md. Supersedes both the v1 governance
 # file and the v2 Completion Program draft. This edition keeps the v2 phase engine
 # and adds back every explicit protection from v1 that the v2 draft compressed,
@@ -131,7 +131,8 @@ risk / NetEdge / economics / TTL / sizing / masking authority? Let tests pass
 while runtime fails? Let mock/stale data pass as real? Let AI Chief hallucinate
 from missing evidence? Flatten or delete a sophisticated module? What stop
 condition halts this seam? No code until the seam survives this note.
-AFTER coding, before the report, run the ANTI-HALLUCINATION SELF-CHECK and put
+AFTER coding, execute the mandatory pre-close review loop in Section 25 before
+finalizing the report. Then run the ANTI-HALLUCINATION SELF-CHECK and put
 the answers in the report: What did I actually inspect / tests prove / runtime
 prove / browser prove / broker-read-only prove? What is inference? What is
 unknown? What did I NOT run? What could be stale or contradict this? Did I
@@ -154,10 +155,15 @@ source, output contract, UI/API exposure, proving tests, blockers, integration
 plan). (4) Red-team note (§5). No code before (3) and (4) exist.
 WORK — one seam at a time, full autonomy per §10. Preserve-first (§4). Each seam
 follows Scout → Decide Scope → Implement → Validate → Report (§8).
-CLOSE — (5) run the phase's binary exit criteria, capture evidence per the proof
-ladder (§9). (6) anti-hallucination self-check (§5). (7) write the FULL phase
-report to `reports/completion/PHASE_<X>_REPORT.md` (files, not chat; never
-truncate unknowns/failures). (8) update CHECKPOINT_TRACKER.md and the handoff,
+CLOSE — (5) freeze the candidate-close tree and execute the mandatory review,
+fix, final binary-exit-test, and retest loop (§25) on that exact tree until it
+records `PRE_CLOSE_REVIEW: PASS`; a finding that changes source, tests,
+configuration, contracts, or runtime wiring invalidates the prior review/test
+result. The loop includes the phase's binary exit criteria and captures evidence
+per the proof ladder (§9); no PASS precedes those final results. (6)
+anti-hallucination self-check (§5). (7) write the FULL phase report
+to `reports/completion/PHASE_<X>_REPORT.md` (files, not chat; never truncate
+unknowns/failures). (8) update CHECKPOINT_TRACKER.md and the handoff,
 including every Board ruling received (decisions die with sessions unless
 written). (9) commit (exact per-file staging, §11) and push on the work branch.
 (10) STOP at the boundary for Board/architect review before opening the next
@@ -235,7 +241,10 @@ advanced logic.
 * Trading/PAPER seam: no run unless explicitly authorized; prove PAPER endpoint;
   prove live endpoint blocked; prove account/open-orders/positions baseline;
   prove readiness state; bounded duration only; final reconciliation required.
-## Report — structured per §17.
+## Review — execute Section 25 on the complete candidate tree. Review is not a
+test summary: inspect the full diff, active callers, unhappy paths, tests, proof
+boundaries, staging scope, and all findings; fix and repeat when needed.
+## Report — structured per §20 only after `PRE_CLOSE_REVIEW: PASS`.
 
 # 8a. 360° FEATURE-AREA AUTHORITY
 Within an approved seam you may modify additional directly related files ONLY
@@ -429,8 +438,9 @@ bounded; final reconciliation is required.
 
 # 20. REPORTING FORMAT (every seam and phase report)
 1 VERDICT · 2 FILES CHANGED · 3 ROOT CAUSE · 4 FIXES IMPLEMENTED · 5 360°
-ADJACENT IMPROVEMENTS · 6 TESTS/CHECKS (with the proof-ladder rung each reached)
-· 7 BROWSER/RUNTIME/BROKER-READ-ONLY PROOF · 8 SELF-RED-TEAM + ANTI-HALLUCINATION
+ADJACENT IMPROVEMENTS · 6 TESTS/CHECKS + PRE-CLOSE REVIEW LOOP (cycles,
+findings, fixes, exact final-tree reruns, and proof-ladder rung reached) · 7
+BROWSER/RUNTIME/BROKER-READ-ONLY PROOF · 8 SELF-RED-TEAM + ANTI-HALLUCINATION
 SELF-CHECK ANSWERS · 9 SAFETY CONFIRMATION (no law/threshold weakened) · 10
 MODULE STATUS (wired-with-role or blocked-with-reason; no silent modules) · 11
 DISAGREEMENTS / what I would do differently · 12 LIMITATIONS + UNKNOWNS (never
@@ -451,6 +461,8 @@ Beyond the §5 anti-hallucination check, before returning any completed seam:
 9. Did I prove behavior with tests/runtime/browser evidence appropriate to the
    seam?
 10. Did I give an exact staging recommendation?
+11. Did Section 25 review the exact final candidate tree, dispose every finding,
+    invalidate stale results after fixes, and record `PRE_CLOSE_REVIEW: PASS`?
 If any answer is no, report the issue instead of pretending the seam is complete.
 
 # 22. COMMITMENT + SUPREME BOARD STANDARD (every report is graded against this)
@@ -630,9 +642,9 @@ No stage code begins on `FAIL`, on an unresolved `UNKNOWN` in the affected
 restriction ledger, when a baseline fingerprint unexpectedly changes, or when
 the manifest is missing. At stage close, the report must repeat the
 fingerprints, account for every delta, publish the before/after capability
-matrix, run the Section 5 anti-hallucination check and Section 21 audit, and
-state whether the covenant remained `PASS`. A violation voids the stage's
-success claim even when tests are green.
+matrix, complete the Section 25 review loop, run the Section 5 anti-hallucination
+check and Section 21 audit, and state whether the covenant remained `PASS`. A
+violation voids the stage's success claim even when tests are green.
 
 # 24. AUTONOMOUS PAPER CAMPAIGN + FUTURE MULTI-TENANT COVENANT
 # (Board direction 2026-07-18)
@@ -763,3 +775,155 @@ any tiny-money test remains Checkpoint I: every account, capital/order/loss/trad
 cap, credential action, live read, live mutation, kill switch, and reconciliation
 step is individually Board-approved and independently proven. There is no
 automatic promotion from a profitable or stable PAPER campaign to live money.
+
+# 25. MANDATORY PRE-CLOSE REVIEW LOOP
+# (Board direction 2026-07-18)
+This section is the single process authority for reviewing completed work before
+a seam, phase, or true-capability stage may receive a completion verdict. It
+strengthens Sections 5, 6, 8, 20, 21, and 23; it does not create a second product,
+trading, Risk, broker, or staging authority. A passing test run before this loop
+is provisional evidence, not permission to finalize a completion report.
+
+No final completion report, PASS verdict, stage-close commit, or claim that the
+work functions may be issued until the report contains exactly one current
+result line:
+
+`PRE_CLOSE_REVIEW: PASS`
+
+If the loop cannot pass, the truthful result is
+`PRE_CLOSE_REVIEW: FAIL - <reasons>` or
+`PRE_CLOSE_REVIEW: BLOCKED - <reasons>`. Missing proof never defaults to PASS.
+
+## 25.1 Freeze the Candidate-Close Tree
+After implementation and ordinary validation, but before finalizing the report:
+
+1. Record the branch, HEAD, complete `git status --short`, intended scoped file
+   list, protected dirty files, and the candidate source/test/config hashes or
+   equivalent diff fingerprint.
+2. Freeze the logical candidate. Do not call the report final while source,
+   tests, configuration, contracts, migrations, runtime wiring, or UI behavior
+   is still changing.
+3. Map every stage objective and binary exit criterion to a concrete code path,
+   test, runtime/browser/broker proof where authorized, and operator-visible
+   outcome. An unmapped requirement is a finding, not an implied pass.
+4. Identify the exact final validation set: syntax/static checks, focused tests,
+   positive and negative paths, adversarial/property/replay/parity/restart tests,
+   named run-path/e2e gates, UI/browser checks, runtime checks, full configured
+   suite, and broker-read/PAPER evidence only where separately authorized.
+
+## 25.2 Perform a Fresh Adversarial Review
+Review the complete candidate as though reviewing another senior engineer's
+production change. A self-review must be a fresh pass over repo truth, not a
+restatement of the implementation plan. Never claim independent-agent review
+unless another reviewer actually inspected the candidate.
+
+The review must inspect, as applicable:
+
+1. the full diff and every active caller/callee, authority boundary, data source,
+   schema, fallback, compatibility path, feature flag, default, environment
+   gate, restart/recovery path, concurrency/order path, and failure path affected;
+2. happy paths and unhappy paths, including missing, stale, future, malformed,
+   duplicated, out-of-order, partial, timeout, exception, restart, and conflict
+   behavior;
+3. duplicate authority, cross-symbol/tenant/account contamination, fake
+   readiness, hidden broker mutation, stale/mock truth, secret exposure, manual
+   trade control, and any weakened Risk/NetEdge/TTL/sizing/masking/strategy/OMS/
+   reconciliation guard;
+4. each valuable module in scope: production input, actual call path, truthful
+   output/contribution status, authority allowed, and proving test or named
+   blocker; no module may disappear because it was inconvenient to review;
+5. tests themselves: surviving positive twins, lawful refusal tests, assertions,
+   fixtures, tolerances, skips, xfails, mocks, mutation audits, environment gates,
+   and whether any test was deleted, weakened, relabeled, or narrowed to hide a
+   regression;
+6. operator truth and proof-ladder alignment: UI, runtime, browser, broker, P&L,
+   fill, readiness, and capability claims must not exceed the evidence actually
+   obtained; and
+7. exact scope and staging: unrelated dirty files, state, logs, databases,
+   screenshots, reports outside the approved set, secrets, and audit artifacts
+   remain protected and unstaged.
+
+Every finding must be recorded with severity, file/function or evidence path,
+root cause, impact, and disposition. There may be no unresolved in-scope safety,
+correctness, authority, data-truth, test-integrity, or operator-truth finding at
+PASS. A genuinely out-of-scope finding is logged to the tracker with its reason
+and dependency; it is never silently dropped or mislabeled fixed.
+
+## 25.3 Fix, Invalidate, and Repeat
+The review is a loop, not one inspection:
+
+1. If review finds a defect, return to implementation, fix the root cause and
+   its directly affected unhappy paths/tests, then begin a new numbered review
+   cycle from Section 25.1.
+2. Any change to production source, tests, configuration, schema, contract,
+   migration, runtime wiring, UI behavior, or safety-relevant documentation
+   invalidates the previous `PRE_CLOSE_REVIEW: PASS` and every test result whose
+   code or contract could be affected. Stale results may remain in the failure
+   history but may not support the final verdict.
+3. After a fix, rerun the affected focused/adversarial gates first, then every
+   broader gate required by Section 25.4. Do not reuse an earlier full-suite,
+   browser, runtime, or broker result as proof for a changed candidate.
+4. Report-only wording or continuity edits made after final behavior validation
+   still require diff/staging review and any report/covenant validation that can
+   detect contradictory proof. If those edits change a contract, assertion,
+   effective configuration, runtime instruction, or safety meaning, they are not
+   documentation-only and invalidate the behavioral proof.
+5. If the same blocker recurs for three review/fix cycles, or a required binary
+   gate fails twice, Section 13 tripwires apply. Stop and report rather than
+   looping forever or lowering the bar.
+
+The loop terminates only in PASS, FAIL, or BLOCKED. "Mostly passed," "looks
+good," "tests were green before the last fix," and "expected failure" are not
+completion states.
+
+## 25.4 Prove the Exact Final Candidate
+After a review cycle has zero unresolved in-scope findings:
+
+1. Run all stage binary exit tests and every validation class declared in the
+   entry manifest that applies to the final candidate.
+2. For any stage that changes production source, tests, configuration, schemas,
+   contracts, migrations, runtime wiring, or UI behavior, run the full configured
+   offline suite on the exact final tree. The final full-suite result must have
+   zero failures. Conditional external/broker tests may remain skipped only when
+   their skip mechanism is intact, their required environment is documented,
+   and they are not required for the claimed proof rung.
+3. Run named run-path/e2e gates separately when the stage affects dispatch,
+   decisions, Risk, execution, lifecycle, recovery, operator controls, or other
+   cross-module behavior. Full-suite green does not replace an explicit critical
+   path result.
+4. For UI work, repeat final desktop/mobile browser proof on the final backend
+   and frontend tree. For runtime wiring, obtain runtime proof. For external
+   truth, use broker read or PAPER only under the exact Section 10 approval.
+   Tests never impersonate a higher proof rung.
+5. Recheck threshold/default/control fingerprints, broker-mutation surfaces,
+   module classifications, assertion-intent relabel logs, skips, and secret
+   safety after the final run.
+6. Review the exact intended staged diff and run all Section 11 cached checks.
+   If the staged content differs from the reviewed candidate, the review is
+   invalid until the delta is inspected and the applicable proof is rerun.
+
+A test infrastructure error is neither PASS nor product FAIL. Record it, repair
+the harness without hiding product failures, and rerun the identical gate. A
+required test that cannot be run leaves that proof unknown and blocks any claim
+that depends on it.
+
+## 25.5 Required Review Record in the Final Report
+The final report must include a dedicated pre-close review section containing:
+
+1. the final `PRE_CLOSE_REVIEW` result line;
+2. a numbered cycle log with candidate fingerprint, reviewer scope, findings,
+   fixes, and disposition for every cycle;
+3. the requirement-to-code-to-test/proof matrix;
+4. exact final-tree commands/checks and complete pass/fail/skip/error counts;
+5. all invalidated earlier results and why they no longer support the verdict;
+6. unresolved out-of-scope findings, honest limitations, unknowns, and proof
+   rungs not climbed;
+7. confirmation that positive paths survive, refusals remain enforced, no test
+   intent weakened, no module was omitted, no threshold/control moved, and no
+   unauthorized broker mutation occurred; and
+8. the exact reviewed/staged file list plus the Section 11 cached-diff results.
+
+The reviewer must answer plainly: "What did I inspect after I believed the work
+was done, what broke under that review, what changed, and what did I rerun on the
+actual final tree?" A final report that omits this record is incomplete and may
+not claim the stage passed.

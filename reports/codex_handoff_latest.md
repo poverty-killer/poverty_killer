@@ -109,6 +109,40 @@ entry manifest, independent red-team, binary exit, and explicit Board direction.
 Stage 12 broker-read-only work and every Stage 13 PAPER campaign retain separate
 approvals. Nothing in Stage 1 authorizes arming or execution.
 
+## Governance Ruling After Stage 1
+
+Shan directed a mandatory review loop before every future stage completion
+report. `AGENTS.md` Section 25 is now the single owner of that process and is
+cross-linked into Sections 5, 6, 8, 20, 21, and 23.
+
+Before any future PASS report, the executor must freeze the candidate tree,
+review the complete diff and active/unhappy paths as a fresh adversarial pass,
+record every finding, fix root causes, and repeat review and tests whenever the
+candidate changes. Behavioral fixes invalidate earlier green evidence. The
+final exact tree must pass its declared gates, explicit critical run paths, and
+full configured suite with zero failures when production behavior changed.
+Higher proof rungs remain honest and separately authorized.
+
+Every final report must contain a numbered review-cycle record and exactly one
+current `PRE_CLOSE_REVIEW: PASS`, `FAIL`, or `BLOCKED` line. Only PASS permits a
+completion verdict. A staged diff that differs from the reviewed candidate
+invalidates the review.
+
+This ruling is prospective and governance-only. Stage 1 history is not
+rewritten; Stage 2 remains unopened. No product source, test contract, runtime,
+broker, PAPER, live, or real-money behavior is changed or authorized.
+
+Amendment review is itself governed by the new loop. Review Cycle 1 rejected
+the initial candidate because Section 6 could place final binary exit tests
+after `PRE_CLOSE_REVIEW: PASS`; Section 6 was corrected so those tests run
+inside the loop. The first structural check also had two Unicode-matching false
+negatives and is not proof. Review Cycle 2 then passed 13/13 semantic and safety
+assertions plus `git diff --check` on the corrected governance candidate; no
+product tests or higher proof rungs were run because no product behavior
+changed. The review-record edit requires a final Cycle 3 diff and staged-scope
+check. Subject to those exact-candidate checks, the terminal result is
+`PRE_CLOSE_REVIEW: PASS`.
+
 ---
 
 # Prior Handoff - PAPER True Capability Stage 0 Complete
