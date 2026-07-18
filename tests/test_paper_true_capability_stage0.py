@@ -341,6 +341,21 @@ def test_threshold_and_runtime_defaults_match_frozen_baseline(tmp_path):
 def test_authority_capability_module_and_source_fingerprints_match_frozen_baseline():
     fixture = _load_fixture()
     baseline = fixture["baseline_fingerprints"]
+    approved_delta = fixture["approved_source_deltas"]["stage1"]
+    delta_hashes = approved_delta["source_sha256"]
+
+    assert approved_delta["stage_entry_head"] == (
+        "e363f4b919d3ae52416278c810a87169ca7f1186"
+    )
+    assert approved_delta["stage_entry_covenant"] == "PASS"
+    assert set(delta_hashes) == {
+        "app/main_loop.py",
+        "main.py",
+        "app/risk/pre_trade_guardrails.py",
+    }
+    stage_report = ROOT / Path(*approved_delta["report"].split("/"))
+    assert stage_report.is_file()
+    assert "STAGE_ENTRY_COVENANT: PASS" in stage_report.read_text(encoding="utf-8")
 
     graph = authority_graph_summary()
     actual_owners = {
@@ -407,4 +422,9 @@ def test_authority_capability_module_and_source_fingerprints_match_frozen_baseli
 
     for relative_path, expected_hash in baseline["source_sha256"].items():
         path = ROOT / Path(*relative_path.split("/"))
-        assert _sha256(path) == expected_hash, relative_path
+        delta = delta_hashes.get(relative_path)
+        if delta is None:
+            assert _sha256(path) == expected_hash, relative_path
+            continue
+        assert delta["before"] == expected_hash, relative_path
+        assert _sha256(path) == delta["after"], relative_path

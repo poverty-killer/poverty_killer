@@ -41,8 +41,11 @@ FUSION LANE REPAIR — KELLY REMOVED FROM FUSION (PP6D, 2026-04-29)
 
 import math
 import logging
+from bisect import bisect_right
+from functools import wraps
+from threading import RLock
 from typing import Dict, Iterable, List, Mapping, Optional, Any, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Lawful contracts imported strictly from provided repo truth
 from app.models.fusion import FusionDecision
@@ -63,6 +66,10 @@ missing_penalty_factor: float = MISSING_PENALTY_FACTOR
 MISSING_DATA_PENALTY: float = MISSING_PENALTY_FACTOR
 MISSING_DATA_PENALTY_FACTOR: float = MISSING_PENALTY_FACTOR
 
+# Operational memory bound only. This does not alter any signal TTL, half-life,
+# risk threshold, or economic threshold.
+FUSION_HISTORY_LIMIT = 512
+
 _ATTRIBUTION_NAMES = {
     "physical": ("PhysicalValidator", "risk_guardrails"),
     "toxicity": ("Toxicity", "intelligence_node"),
@@ -72,6 +79,16 @@ _ATTRIBUTION_NAMES = {
     "insider": ("InsiderSignalEngine", "specialized_portal"),
     "regime": ("RegimeDetector", "intelligence_node"),
 }
+
+
+def _synchronized(method):
+    """Serialize mutation/selection inside the existing fusion authority."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 # =========================================================================
@@ -95,7 +112,11 @@ class QuantMath:
 
     @staticmethod
     def temporal_discount(age_ns: int, half_life_ns: int) -> float:
-        if age_ns <= 0:
+        if age_ns < 0:
+            raise ValueError(
+                f"FUSION_CAUSAL_NEGATIVE_AGE: age_ns={age_ns}"
+            )
+        if age_ns == 0:
             return 1.0
         return math.pow(0.5, age_ns / half_life_ns)
 
@@ -186,6 +207,30 @@ class HysteresisState:
         self.was_attack_mode = is_attack_mode
 
 
+@dataclass(frozen=True)
+class FusionObservation:
+    """One immutable, provenance-bearing input to a symbol fusion lane."""
+
+    payload: Any
+    symbol: str
+    source: str
+    event_ts_ns: int
+    received_ts_ns: int
+    sequence: int
+
+
+@dataclass
+class SymbolFusionLane:
+    """All mutable fusion state owned by exactly one symbol."""
+
+    histories: Dict[str, List[FusionObservation]] = field(default_factory=dict)
+    external_histories: Dict[str, List[FusionObservation]] = field(default_factory=dict)
+    state: HysteresisState = field(default_factory=HysteresisState)
+    last_fusion: Optional[FusionDecision] = None
+    telemetry: Dict[str, Any] = field(default_factory=dict)
+    last_decision_ts_ns: int = 0
+
+
 # =========================================================================
 # THE FUSION ENGINE
 # =========================================================================
@@ -200,12 +245,18 @@ class SignalFusion:
     def __init__(self, config: Any, commander: Any = None):
         self.config = config
         self.commander = commander
-        
-        # Temporal Cache: key -> (payload_object, timestamp_nanoseconds)
+
+        self._lock = RLock()
+        self._lanes: Dict[str, SymbolFusionLane] = {}
+        self._sequence = 0
+        self._active_symbol: Optional[str] = None
+        self._active_output_ts_ns: int = 0
+        self._active_causal_rejections: Dict[str, Tuple[dict, ...]] = {}
+
+        # Compatibility aliases point at the most recently fused lane. Active
+        # production callers always provide an explicit symbol.
         self._cache: Dict[str, Tuple[Any, int]] = {}
         self._external_evidence: Dict[str, Tuple[dict, ...]] = {}
-        
-        # Core State Tracking
         self._state = HysteresisState()
         self._last_fusion: Optional[FusionDecision] = None
         self._telemetry: Dict[str, Any] = {}
@@ -234,46 +285,177 @@ class SignalFusion:
     # STRICT INGESTION (REPLAY-SAFE)
     # =========================================================================
 
-    def _ingest(self, key: str, payload: Any, timestamp_ns: int) -> None:
-        """Secure ingestion portal enforcing explicit timestamp tracking."""
-        if payload is not None:
-            self._cache[key] = (payload, timestamp_ns)
+    def _default_symbol(self) -> str:
+        symbol = str(getattr(self.config, "symbol", "") or "").strip()
+        if not symbol:
+            raise ValueError("FUSION_SYMBOL_REQUIRED: no explicit or configured symbol")
+        return symbol
 
-    def update_whale(self, payload: Any, timestamp_ns: int) -> None:
-        self._ingest("whale_flow", payload, timestamp_ns)
+    @staticmethod
+    def _payload_symbol(payload: Any) -> Optional[str]:
+        if isinstance(payload, Mapping):
+            value = payload.get("symbol")
+        else:
+            value = getattr(payload, "symbol", None)
+        normalized = str(value or "").strip()
+        return normalized or None
 
-    def update_shans(self, payload: Any, timestamp_ns: int) -> None:
-        self._ingest("shans_curve", payload, timestamp_ns)
+    def _resolve_symbol(self, payload: Any = None, symbol: Optional[str] = None) -> str:
+        explicit = str(symbol or "").strip() or None
+        payload_symbol = self._payload_symbol(payload)
+        if explicit and payload_symbol and explicit != payload_symbol:
+            raise ValueError(
+                "FUSION_SYMBOL_MISMATCH: "
+                f"explicit={explicit!r} payload={payload_symbol!r}"
+            )
+        return explicit or payload_symbol or self._default_symbol()
 
-    def update_regime(self, payload: Any, timestamp_ns: int) -> None:
-        self._ingest("regime", payload, timestamp_ns)
+    def _lane(self, symbol: str) -> SymbolFusionLane:
+        lane = self._lanes.get(symbol)
+        if lane is None:
+            lane = SymbolFusionLane()
+            self._lanes[symbol] = lane
+        return lane
 
-    def update_entropy(self, payload: Any, timestamp_ns: int) -> None:
-        self._ingest("entropy", payload, timestamp_ns)
+    @staticmethod
+    def _observation_sort_key(observation: FusionObservation) -> tuple[int, int, str, int]:
+        return (
+            observation.event_ts_ns,
+            observation.received_ts_ns,
+            observation.source,
+            observation.sequence,
+        )
 
-    def update_insider(self, payload: Any, timestamp_ns: int) -> None:
-        self._ingest("insider", payload, timestamp_ns)
+    @_synchronized
+    def _ingest(
+        self,
+        key: str,
+        payload: Any,
+        timestamp_ns: int,
+        *,
+        symbol: Optional[str] = None,
+        source: Optional[str] = None,
+        received_ts_ns: Optional[int] = None,
+        external: bool = False,
+    ) -> None:
+        """Store an immutable observation without overwriting lawful history."""
+        if payload is None:
+            return
+        event_ts_ns = int(timestamp_ns)
+        receive_ts_ns = int(received_ts_ns if received_ts_ns is not None else event_ts_ns)
+        if event_ts_ns <= 0:
+            raise ValueError(f"FUSION_EVENT_TIMESTAMP_INVALID: {event_ts_ns!r}")
+        if receive_ts_ns <= 0:
+            raise ValueError(f"FUSION_RECEIVE_TIMESTAMP_INVALID: {receive_ts_ns!r}")
+        resolved_symbol = self._resolve_symbol(payload, symbol)
+        resolved_source = str(source or _ATTRIBUTION_NAMES.get(key, (key,))[0]).strip()
+        if not resolved_source:
+            raise ValueError("FUSION_SOURCE_REQUIRED")
 
-    def update_toxicity(self, payload: Any, timestamp_ns: int) -> None:
-        self._ingest("toxicity", payload, timestamp_ns)
+        self._sequence += 1
+        observation = FusionObservation(
+            payload=payload,
+            symbol=resolved_symbol,
+            source=resolved_source,
+            event_ts_ns=event_ts_ns,
+            received_ts_ns=receive_ts_ns,
+            sequence=self._sequence,
+        )
+        lane = self._lane(resolved_symbol)
+        owner = lane.external_histories if external else lane.histories
+        history = owner.setdefault(key, [])
+        keys = [self._observation_sort_key(item) for item in history]
+        insertion = bisect_right(keys, self._observation_sort_key(observation))
+        history.insert(insertion, observation)
+        if len(history) > FUSION_HISTORY_LIMIT:
+            self._trim_history(history, lane)
 
-    def update_physical(self, payload: Any, timestamp_ns: int) -> None:
-        self._ingest("physical", payload, timestamp_ns)
+    def _trim_history(
+        self,
+        history: List[FusionObservation],
+        lane: SymbolFusionLane,
+    ) -> None:
+        """Bound memory while retaining the last lawful as-of anchor."""
+        anchor = None
+        if lane.last_decision_ts_ns > 0:
+            lawful = [
+                item
+                for item in history
+                if item.event_ts_ns <= lane.last_decision_ts_ns
+                and item.received_ts_ns <= lane.last_decision_ts_ns
+            ]
+            if lawful:
+                anchor = max(lawful, key=self._observation_sort_key)
+        elif history:
+            anchor = history[0]
 
-    def update_strategy_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int) -> None:
-        self._ingest_external_evidence("strategy_attribution", records, timestamp_ns)
+        retained = history[-FUSION_HISTORY_LIMIT:]
+        if anchor is not None and anchor not in retained:
+            retained = [anchor, *retained[-(FUSION_HISTORY_LIMIT - 1):]]
+        history[:] = sorted(retained, key=self._observation_sort_key)
 
-    def update_intelligence_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int) -> None:
-        self._ingest_external_evidence("intelligence_attribution", records, timestamp_ns)
+    def update_whale(self, payload: Any, timestamp_ns: int, *, symbol: Optional[str] = None,
+                     source: Optional[str] = None, received_ts_ns: Optional[int] = None) -> None:
+        self._ingest("whale_flow", payload, timestamp_ns, symbol=symbol, source=source,
+                     received_ts_ns=received_ts_ns)
 
-    def update_world_awareness_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int) -> None:
-        self._ingest_external_evidence("world_awareness_attribution", records, timestamp_ns)
+    def update_shans(self, payload: Any, timestamp_ns: int, *, symbol: Optional[str] = None,
+                     source: Optional[str] = None, received_ts_ns: Optional[int] = None) -> None:
+        self._ingest("shans_curve", payload, timestamp_ns, symbol=symbol, source=source,
+                     received_ts_ns=received_ts_ns)
+
+    def update_regime(self, payload: Any, timestamp_ns: int, *, symbol: Optional[str] = None,
+                      source: Optional[str] = None, received_ts_ns: Optional[int] = None) -> None:
+        self._ingest("regime", payload, timestamp_ns, symbol=symbol, source=source,
+                     received_ts_ns=received_ts_ns)
+
+    def update_entropy(self, payload: Any, timestamp_ns: int, *, symbol: Optional[str] = None,
+                       source: Optional[str] = None, received_ts_ns: Optional[int] = None) -> None:
+        self._ingest("entropy", payload, timestamp_ns, symbol=symbol, source=source,
+                     received_ts_ns=received_ts_ns)
+
+    def update_insider(self, payload: Any, timestamp_ns: int, *, symbol: Optional[str] = None,
+                       source: Optional[str] = None, received_ts_ns: Optional[int] = None) -> None:
+        self._ingest("insider", payload, timestamp_ns, symbol=symbol, source=source,
+                     received_ts_ns=received_ts_ns)
+
+    def update_toxicity(self, payload: Any, timestamp_ns: int, *, symbol: Optional[str] = None,
+                        source: Optional[str] = None, received_ts_ns: Optional[int] = None) -> None:
+        self._ingest("toxicity", payload, timestamp_ns, symbol=symbol, source=source,
+                     received_ts_ns=received_ts_ns)
+
+    def update_physical(self, payload: Any, timestamp_ns: int, *, symbol: Optional[str] = None,
+                        source: Optional[str] = None, received_ts_ns: Optional[int] = None) -> None:
+        self._ingest("physical", payload, timestamp_ns, symbol=symbol, source=source,
+                     received_ts_ns=received_ts_ns)
+
+    def update_strategy_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int,
+                                 *, symbol: Optional[str] = None, source: Optional[str] = None,
+                                 received_ts_ns: Optional[int] = None) -> None:
+        self._ingest_external_evidence("strategy_attribution", records, timestamp_ns,
+                                       symbol=symbol, source=source, received_ts_ns=received_ts_ns)
+
+    def update_intelligence_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int,
+                                     *, symbol: Optional[str] = None, source: Optional[str] = None,
+                                     received_ts_ns: Optional[int] = None) -> None:
+        self._ingest_external_evidence("intelligence_attribution", records, timestamp_ns,
+                                       symbol=symbol, source=source, received_ts_ns=received_ts_ns)
+
+    def update_world_awareness_evidence(self, records: Iterable[Mapping[str, Any]], timestamp_ns: int,
+                                        *, symbol: Optional[str] = None, source: Optional[str] = None,
+                                        received_ts_ns: Optional[int] = None) -> None:
+        self._ingest_external_evidence("world_awareness_attribution", records, timestamp_ns,
+                                       symbol=symbol, source=source, received_ts_ns=received_ts_ns)
 
     def _ingest_external_evidence(
         self,
         section: str,
         records: Iterable[Mapping[str, Any]],
         timestamp_ns: int,
+        *,
+        symbol: Optional[str] = None,
+        source: Optional[str] = None,
+        received_ts_ns: Optional[int] = None,
     ) -> None:
         """
         Store advisory evidence for the next fusion cycle.
@@ -284,28 +466,175 @@ class SignalFusion:
         if timestamp_ns <= 0:
             raise ValueError(f"timestamp_ns must be positive: {timestamp_ns!r}")
         normalized = []
+        resolved_symbol: Optional[str] = None
+        receive_ts_ns = int(received_ts_ns if received_ts_ns is not None else timestamp_ns)
         for record in records:
             item = dict(record)
-            item.setdefault("timestamp_ns", int(timestamp_ns))
-            item.setdefault("input_source", item.get("input_truth", "unknown"))
+            item_symbol = self._resolve_symbol(item, symbol)
+            if resolved_symbol is not None and item_symbol != resolved_symbol:
+                raise ValueError(
+                    "FUSION_EXTERNAL_EVIDENCE_MIXED_SYMBOLS: "
+                    f"{resolved_symbol!r} != {item_symbol!r}"
+                )
+            resolved_symbol = item_symbol
+            event_ts_ns = int(item.get("event_ts_ns") or item.get("timestamp_ns") or timestamp_ns)
+            item_receive_ts_ns = int(item.get("received_ts_ns") or receive_ts_ns)
+            item["symbol"] = item_symbol
+            item["source"] = str(source or item.get("input_source") or item.get("input_truth") or section)
+            item["event_ts_ns"] = event_ts_ns
+            item["received_ts_ns"] = item_receive_ts_ns
+            item.setdefault("timestamp_ns", event_ts_ns)
+            item.setdefault("input_source", item["source"])
             normalized.append(item)
-        self._external_evidence[section] = tuple(normalized)
+        if not normalized:
+            return
+        batch_event_ts_ns = max(int(item["event_ts_ns"]) for item in normalized)
+        batch_receive_ts_ns = max(int(item["received_ts_ns"]) for item in normalized)
+        self._ingest(
+            section,
+            tuple(normalized),
+            batch_event_ts_ns,
+            symbol=resolved_symbol,
+            source=source or section,
+            received_ts_ns=batch_receive_ts_ns,
+            external=True,
+        )
 
     # =========================================================================
     # STATE EXPORT & OBSERVABILITY
     # =========================================================================
 
-    def get_last_fusion(self) -> Optional[FusionDecision]:
+    @_synchronized
+    def get_last_fusion(self, symbol: Optional[str] = None) -> Optional[FusionDecision]:
         """Provides the last computed deterministic state to the Orchestrator/Router."""
-        return self._last_fusion
+        resolved_symbol = self._resolve_symbol(symbol=symbol)
+        lane = self._lanes.get(resolved_symbol)
+        return lane.last_fusion if lane is not None else None
 
-    def get_fusion_telemetry(self) -> Dict[str, Any]:
+    @_synchronized
+    def get_fusion_telemetry(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         """Exposes internal mathematical weights and kinematic states."""
-        return self._telemetry
+        resolved_symbol = self._resolve_symbol(symbol=symbol)
+        lane = self._lanes.get(resolved_symbol)
+        return dict(lane.telemetry) if lane is not None else {}
 
-    def get_runtime_evidence(self) -> Dict[str, Tuple[dict, ...]]:
+    @_synchronized
+    def get_runtime_evidence(self, symbol: Optional[str] = None) -> Dict[str, Tuple[dict, ...]]:
         """Return advisory runtime evidence staged for fusion telemetry."""
-        return {key: tuple(dict(item) for item in value) for key, value in self._external_evidence.items()}
+        resolved_symbol = self._resolve_symbol(symbol=symbol)
+        lane = self._lanes.get(resolved_symbol)
+        if lane is None:
+            return {}
+        result: Dict[str, Tuple[dict, ...]] = {}
+        for section, history in lane.external_histories.items():
+            if not history:
+                continue
+            result[section] = tuple(dict(item) for item in history[-1].payload)
+        return result
+
+    def _select_asof(
+        self,
+        histories: Mapping[str, List[FusionObservation]],
+        decision_ts_ns: int,
+    ) -> tuple[
+        Dict[str, FusionObservation],
+        Dict[str, Tuple[dict, ...]],
+    ]:
+        selected: Dict[str, FusionObservation] = {}
+        rejections: Dict[str, Tuple[dict, ...]] = {}
+        for key, history in histories.items():
+            lawful = [
+                item
+                for item in history
+                if item.event_ts_ns <= decision_ts_ns
+                and item.received_ts_ns <= decision_ts_ns
+            ]
+            if lawful:
+                selected[key] = max(lawful, key=self._observation_sort_key)
+
+            refused = []
+            for item in history:
+                reason_code = None
+                if item.event_ts_ns > decision_ts_ns:
+                    reason_code = "FUSION_CAUSAL_FUTURE_EVENT"
+                elif item.received_ts_ns > decision_ts_ns:
+                    reason_code = "FUSION_CAUSAL_NOT_YET_AVAILABLE"
+                if reason_code is None:
+                    continue
+                refused.append(
+                    {
+                        "reason_code": reason_code,
+                        "symbol": item.symbol,
+                        "channel": key,
+                        "source": item.source,
+                        "event_ts_ns": item.event_ts_ns,
+                        "received_ts_ns": item.received_ts_ns,
+                        "decision_ts_ns": decision_ts_ns,
+                        "event_age_ns": decision_ts_ns - item.event_ts_ns,
+                        "availability_age_ns": decision_ts_ns - item.received_ts_ns,
+                    }
+                )
+            if refused:
+                rejections[key] = tuple(refused[-FUSION_HISTORY_LIMIT:])
+        return selected, rejections
+
+    def _activate_lane(
+        self,
+        *,
+        symbol: str,
+        decision_ts_ns: int,
+        output_ts_ns: int,
+    ) -> SymbolFusionLane:
+        lane = self._lane(symbol)
+        selected, input_rejections = self._select_asof(lane.histories, decision_ts_ns)
+        external, external_rejections = self._select_asof(
+            lane.external_histories,
+            decision_ts_ns,
+        )
+        all_rejections = {**input_rejections, **external_rejections}
+
+        self._active_symbol = symbol
+        self._active_output_ts_ns = output_ts_ns
+        self._active_causal_rejections = all_rejections
+        self._cache = {
+            key: (observation.payload, observation.event_ts_ns)
+            for key, observation in selected.items()
+        }
+        self._external_evidence = {
+            key: tuple(dict(item) for item in observation.payload)
+            for key, observation in external.items()
+        }
+        self._state = lane.state
+        self._telemetry = lane.telemetry
+        self._last_fusion = lane.last_fusion
+        lane.last_decision_ts_ns = decision_ts_ns
+
+        self._telemetry.clear()
+        self._telemetry["symbol"] = symbol
+        self._telemetry["decision_ts_ns"] = decision_ts_ns
+        self._telemetry["output_ts_ns"] = output_ts_ns
+        self._telemetry["causal_integrity_rejections"] = all_rejections
+        self._telemetry["fusion_input_provenance"] = {
+            key: {
+                "symbol": observation.symbol,
+                "source": observation.source,
+                "event_ts_ns": observation.event_ts_ns,
+                "received_ts_ns": observation.received_ts_ns,
+                "decision_ts_ns": decision_ts_ns,
+                "event_age_ns": decision_ts_ns - observation.event_ts_ns,
+                "availability_age_ns": decision_ts_ns - observation.received_ts_ns,
+                "causal_status": "FUSION_CAUSAL_ASOF_SELECTED",
+            }
+            for key, observation in {**selected, **external}.items()
+        }
+        return lane
+
+    def _store_decision(self, decision: FusionDecision) -> None:
+        if self._active_symbol is None:
+            raise RuntimeError("FUSION_ACTIVE_SYMBOL_MISSING")
+        lane = self._lane(self._active_symbol)
+        lane.last_fusion = decision
+        self._last_fusion = decision
 
     def _attach_external_evidence_to_telemetry(self) -> None:
         edge_attribution = self._telemetry.setdefault("edge_attribution", {})
@@ -375,7 +704,14 @@ class SignalFusion:
     # THE APEX ALGORITHM: CORE FUSION DOCTRINE
     # =========================================================================
 
-    def fuse(self, current_ts_ns: int) -> FusionDecision:
+    @_synchronized
+    def fuse(
+        self,
+        current_ts_ns: int,
+        *,
+        symbol: Optional[str] = None,
+        output_ts_ns: Optional[int] = None,
+    ) -> FusionDecision:
         """
         The mathematical heart of the system.
         Executes staleness vetting, precise property extraction, temporal discounting,
@@ -386,7 +722,25 @@ class SignalFusion:
             current_ts_ns: The authoritative orchestration tick timestamp.
                            NO WALL-CLOCK FALLBACKS ARE PERMITTED.
         """
-        self._telemetry.clear()
+        current_ts_ns = int(current_ts_ns)
+        if current_ts_ns <= 0:
+            raise ValueError(f"FUSION_DECISION_TIMESTAMP_INVALID: {current_ts_ns!r}")
+        resolved_symbol = self._resolve_symbol(symbol=symbol)
+        resolved_output_ts_ns = int(output_ts_ns if output_ts_ns is not None else current_ts_ns)
+        if resolved_output_ts_ns <= 0:
+            raise ValueError(f"FUSION_OUTPUT_TIMESTAMP_INVALID: {resolved_output_ts_ns!r}")
+        lane = self._lane(resolved_symbol)
+        if lane.last_decision_ts_ns > 0 and current_ts_ns < lane.last_decision_ts_ns:
+            raise ValueError(
+                "FUSION_DECISION_TIMESTAMP_REGRESSION: "
+                f"symbol={resolved_symbol!r} previous={lane.last_decision_ts_ns} "
+                f"current={current_ts_ns}"
+            )
+        self._activate_lane(
+            symbol=resolved_symbol,
+            decision_ts_ns=current_ts_ns,
+            output_ts_ns=resolved_output_ts_ns,
+        )
         self._telemetry["execution_ts"] = current_ts_ns
         self._telemetry["missing_inputs"] = []
         self._telemetry["edge_attribution"] = {}
@@ -406,15 +760,40 @@ class SignalFusion:
         for sig in critical_signals:
             ttl = self._ttl_ns[sig]
             if sig not in self._cache:
+                causal_rejections = self._active_causal_rejections.get(sig, ())
+                causal_reason = (
+                    str(causal_rejections[-1]["reason_code"])
+                    if causal_rejections
+                    else None
+                )
+                reason_code = (
+                    f"{causal_reason}:{sig}"
+                    if causal_reason
+                    else f"MISSING_CRITICAL_SIGNAL:{sig}"
+                )
                 self._record_fusion_attribution(
                     sig,
-                    status="MISSING_FEED_TRUTH",
+                    status="FAILED_CLOSED" if causal_reason else "MISSING_FEED_TRUTH",
                     input_source="fusion_cache",
-                    output_summary="Critical signal missing; fusion fails closed.",
+                    output_summary=(
+                        "Critical signal was causally unavailable; fusion fails closed."
+                        if causal_reason
+                        else "Critical signal missing; fusion fails closed."
+                    ),
                     effect="VETO",
-                    reason=f"MISSING_CRITICAL_SIGNAL:{sig}",
+                    reason=reason_code,
                     timestamp_ns=current_ts_ns,
                 )
+                if causal_reason:
+                    logger.info(
+                        "[FUSION_DIAG] Causally unavailable CRITICAL signal: %s reason=%s -> veto",
+                        sig,
+                        causal_reason,
+                    )
+                    return self._issue_hard_veto(
+                        current_ts_ns,
+                        f"{causal_reason} [{sig}]",
+                    )
                 logger.info("[FUSION_DIAG] Missing CRITICAL signal: %s -> veto", sig)
                 return self._issue_hard_veto(current_ts_ns, f"Missing critical signal [{sig}]")
             _, ts = self._cache[sig]
@@ -448,16 +827,34 @@ class SignalFusion:
             st = self._cache.get(sig)
             if st is None:
                 missing_or_stale_noncrit[sig] = True
+                causal_rejections = self._active_causal_rejections.get(sig, ())
+                causal_reason = (
+                    str(causal_rejections[-1]["reason_code"])
+                    if causal_rejections
+                    else None
+                )
                 self._record_fusion_attribution(
                     sig,
                     status="MISSING_FEED_TRUTH",
                     input_source="fusion_cache",
-                    output_summary="Native feed missing; neutral default plus explicit missing-truth penalty.",
+                    output_summary=(
+                        "Native feed causally unavailable; neutral default plus explicit missing-truth penalty."
+                        if causal_reason
+                        else "Native feed missing; neutral default plus explicit missing-truth penalty."
+                    ),
                     effect="ADVISORY",
-                    reason=f"MISSING_NONCRITICAL_SIGNAL:{sig}",
+                    reason=(
+                        f"{causal_reason}:{sig}"
+                        if causal_reason
+                        else f"MISSING_NONCRITICAL_SIGNAL:{sig}"
+                    ),
                     timestamp_ns=current_ts_ns,
                 )
-                logger.info("[FUSION_DIAG] Missing non-critical signal: %s -> neutral default with penalty", sig)
+                logger.info(
+                    "[FUSION_DIAG] Missing non-critical signal: %s causal_reason=%s -> neutral default with penalty",
+                    sig,
+                    causal_reason,
+                )
                 continue
             _, ts = st
             age_ns = current_ts_ns - ts
@@ -772,7 +1169,7 @@ class SignalFusion:
             "base_confidence=%.4f\npre_kelly=%.4f\n"
             "final_confidence=%.4f\nattack_mode=%s\npreferred_sleeve=%s\n"
             "kelly_removed_from_fusion=True",
-            getattr(self.config, 'symbol', 'UNKNOWN'),
+            self._active_symbol or 'UNKNOWN',
             regime_str,
             whale_dir,
             shans_bias_str,
@@ -799,7 +1196,7 @@ class SignalFusion:
             base_reason += f" | [{' | '.join(reason_flags)}]"
 
         decision = FusionDecision(
-            exchange_ts_ns=current_ts_ns,
+            exchange_ts_ns=self._active_output_ts_ns,
             attack_mode=attack_mode,
             confidence=final_confidence,
             
@@ -833,7 +1230,7 @@ class SignalFusion:
             regime_str,
             base_reason,
         )
-        self._last_fusion = decision
+        self._store_decision(decision)
         return decision
 
     # =========================================================================
@@ -881,7 +1278,7 @@ class SignalFusion:
         self._state.register_decision(False)
 
         decision = FusionDecision(
-            exchange_ts_ns=current_ts_ns,
+            exchange_ts_ns=self._active_output_ts_ns or current_ts_ns,
             attack_mode=False,
             confidence=0.0,
             
@@ -903,5 +1300,5 @@ class SignalFusion:
             physical_verification_score=phys_score
         )
         
-        self._last_fusion = decision
+        self._store_decision(decision)
         return decision

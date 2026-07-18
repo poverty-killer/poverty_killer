@@ -289,16 +289,19 @@ automated management of broker-backed holdings. Full evidence, independent
 red-team, and adjusted plan are in
 `reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md`.
 
-- **PLAN ONLY / IMPLEMENTATION NOT STARTED** - no source, test, configuration,
-  runtime state, broker state, or trading authority changed.
+- **HISTORICAL PLANNING BASELINE** - the planning artifact itself changed no
+  source, runtime state, broker state, or trading authority. Stages 0 and 1 have
+  since completed under their own Board approvals and stage-entry covenants;
+  Stage 2 is not open.
 - Repo inspection found causal and authority prerequisites that must precede
   wider trading: cross-symbol fusion state, future-evidence acceptance,
   incomplete broker-book hydration, pre-fill strategy state, a declared-but-
   rejected Alpaca SELL contract, non-scalable poll-all data access, inferred
   module attribution, and placeholder/illustrative portfolio economics.
 - The adjusted plan has Stages 0-11 for offline implementation and adversarial
-  certification. Board approval is pending; execution begins with Stages 0 and
-  1 only and advances only through binary exit gates.
+  certification. Shan separately approved Stage 0 and then Stage 1; each
+  advanced only through its binary exit gate. Later stages still require their
+  own boundary direction.
 - Stage 12 broker-read-only validation remains a separate Board approval. Stage
   13 contains progressively bounded PAPER runs, each separately Board-approved.
 - "Open trading" is defined as a broker-discovered PAPER universe plus the
@@ -356,10 +359,10 @@ red-team, and adjusted plan are in
   results do not model market impact, information leakage, latency slippage,
   queue position, price improvement, or complete live fees and cannot
   automatically promote the bot to live trading.
-- This update changed governance/planning documents only. No source, runtime
-  config, state, broker state, cloud resource, test, PAPER run, or live path was
-  changed or executed. Implementation approval for Stages 0-11 is still pending;
-  Stage 12 reads and every Stage 13 campaign remain separate approvals.
+- The planning update changed governance/planning documents only. Later Stage
+  0/1 work is recorded separately below. Stage 2 and later implementation are
+  not opened; Stage 12 reads and every Stage 13 campaign remain separate
+  approvals.
 
 ## PAPER True Capability Stage 0
 
@@ -395,9 +398,58 @@ staging recommendation are in
   proof, broker read, PAPER run, broker mutation, external fill, live action,
   real money, threshold change, module deletion, or protected state edit/stage
   occurred.
-- Stage 1 and every later stage remain **NOT STARTED**. Stage 1 requires a new
-  stage-entry covenant and Board direction; Stage 12 broker reads and every
-  Stage 13 PAPER campaign retain their separate approval boundaries.
+- Historical close boundary: Stage 1 was not opened by Stage 0. Shan later
+  directed `proceed`, and Stage 1 completed under its own covenant and report
+  below. Stage 2 is not started; Stage 12 broker reads and every Stage 13 PAPER
+  campaign retain their separate approval boundaries.
+
+## PAPER True Capability Stage 1
+
+Shan directed `proceed` on 2026-07-18 after Stage 0. Stage 1 is complete and
+**PASS at the local offline test rung**. Full entry manifest, independent
+red-team, close evidence, limitations, research, and exact staging scope are in
+`reports/completion/PAPER_TRUE_CAPABILITY_STAGE_1_REPORT.md`.
+
+- PASS - `SignalFusion` now maintains bounded causal histories, hysteresis,
+  telemetry, and last-result state per symbol. Selection requires both event and
+  receipt clocks no later than the decision clock; future event/availability,
+  negative age, and decision-clock regression have named fail-closed reasons.
+- PASS - existing EntropyDecoder, PhysicalValidator, StaleDataGuard, fusion,
+  WhaleFlow, Shans, regime, toxicity, and topology state is routed by candidate
+  symbol. The active trade callback writes the per-symbol path exactly once and
+  no longer gives legacy global compatibility objects decision authority. The
+  close audit also removed the missing-runtime process-global regime fallback;
+  missing same-symbol regime evidence is explicitly `UNKNOWN`.
+- PASS - one persistent StaleDataGuard per SymbolRuntime consumes transport
+  receipt minus exchange time and contributes its canonical assessment to the
+  existing Risk owner. MarketTruthSnapshot remains the sole executable
+  market-freshness owner; every existing temporal and trading threshold remains
+  unchanged.
+- PASS - WebSocket and REST transports preserve actual receipt clocks. Kraken
+  derives order-book event time from provider level timestamps and rejects
+  missing source time instead of substituting local wall time.
+- PASS - no assertion-intent flip occurred. Stale fixtures rose to the stricter
+  contract with real runtime temporal assessments, explicit symbols, and lawful
+  decision clocks; no reachability test was converted into a refusal test.
+- PASS - Stage 1/fusion/compatibility gate `64 passed`; affected suite
+  `116 passed`; explicit run-path gate `122 passed`; compatibility gate
+  `130 passed`; Stage 0 fingerprint/invariant gate `6 passed`; final configured
+  suite `1858 passed, 14 skipped, 0 failed` with 384 warnings; final post-report
+  Stage 0 + Stage 1 covenant/acceptance rerun `38 passed`.
+- PASS - the Stage 0 fixture retains its original source hashes and appends a
+  separately named `approved_source_deltas.stage1` ledger tied to entry HEAD,
+  report, and `STAGE_ENTRY_COVENANT: PASS`.
+- Proof limit - local offline tests only. No browser/live-feed runtime, broker
+  read, PAPER run, broker mutation, external order/fill/sell-to-close, PnL,
+  profitability, live action, real money, or arming proof occurred.
+- Preserved limitations - analytical state restarts cold/fail-closed; identical-
+  clock duplicates use stable ingestion sequence; 14 conditional broker/access
+  tests remain skipped; external feed clock quality/capacity is unproven; Stage
+  2+ universe, baseline, SELL adapter, economics, campaign, and tenant work is
+  unchanged.
+- Stage 2 remains **NOT STARTED**. It needs its own full governance re-read,
+  stage-entry manifest/red-team, binary exit, and Board direction. Stage 12 and
+  every Stage 13 campaign remain separately gated.
 
 ## Dirty Tree / Baseline Status
 
@@ -434,3 +486,9 @@ clean/stash/reset.
   Stage 0 passed its offline fixture/invariant/fingerprint gate and full local
   suite without changing production behavior. This approval does not open Stage
   1, authorize broker reads, execute PAPER, or alter any live/money boundary.
+- Shan then directed `proceed`, opening PAPER True Capability Stage 1 only.
+  Result: Stage 1 repaired same-symbol causal decision state and persistent
+  transport-risk evidence, retained all thresholds/authorities, and passed the
+  final configured offline suite (`1858 passed, 14 skipped, 0 failed`). No
+  broker read, PAPER run, broker mutation, live action, or Stage 2 work was
+  authorized or performed.

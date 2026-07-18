@@ -1,4 +1,117 @@
-# Codex Session Handoff - PAPER True Capability Stage 0 Complete
+# Codex Session Handoff - PAPER True Capability Stage 1 Complete
+
+Date: 2026-07-18 America/Chicago
+Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
+Branch: `master`
+Stage-entry HEAD: `e363f4b919d3ae52416278c810a87169ca7f1186`
+Close commit: this handoff is carried by the Stage 1 close commit; verify with
+`git log -1 --oneline`
+Stage report: `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_1_REPORT.md`
+
+## Current Verdict
+
+Shan directed `proceed`, opening Stage 1 only. Stage 1 is complete and **PASS at
+the local offline test rung**. Stage 2 has not been opened.
+
+The active decision path now uses per-symbol mutable analytical state and a
+deterministic causal contract: a selected observation must belong to the same
+symbol and have both event and receipt/availability timestamps no later than
+the decision timestamp. Future or regressing clocks fail closed with named
+reasons. Existing model math, MarketTruthSnapshot, Risk, NetEdge, sizing, OMS,
+reconciliation, account, endpoint, and lifecycle controls remain intact.
+
+## Implementation Truth
+
+- `SignalFusion` remains the sole fusion owner and now indexes histories,
+  hysteresis, telemetry, and last decisions by symbol. Histories are bounded to
+  512 records per symbol/channel without changing any signal TTL or threshold.
+- `SymbolRuntime` owns one existing EntropyDecoder, PhysicalValidator, and
+  persistent StaleDataGuard instance per symbol. It stores evidence; it does not
+  gain final trade authority.
+- The guard assesses receipt minus exchange time, retains per-symbol kinematics,
+  and supplies the canonical assessment to the existing pre-trade Risk owner.
+  Missing active-path assessment fails closed. MarketTruthSnapshot still owns
+  executable candle/book freshness.
+- WebSocket and REST paths preserve actual receipt time. Kraken source event
+  time comes from its level timestamps; missing source time rejects rather than
+  being replaced with local wall time.
+- MainLoop uses candidate-symbol candle volume, regime, topology, entropy,
+  physical, toxicity, whale, insider, and fusion state. The primary symbol is no
+  longer borrowed for another candidate. A close-audit branch that could use the
+  process-global regime detector when a runtime detector was missing was also
+  removed; missing same-symbol regime evidence now emits `UNKNOWN`.
+- The trade callback routes once through the full per-symbol path. Legacy global
+  objects remain preserved for compatibility but have no active multi-symbol
+  decision authority.
+
+## Validation
+
+- Scoped Python compile: PASS.
+- Stage 1 plus native fusion/Seam 7E compatibility: `64 passed`.
+- Affected integration/guardrail suite: `116 passed`.
+- Explicit run-path gate: `122 passed`.
+- Compatibility gate: `130 passed`.
+- Stage 0 invariant/fingerprint gate: `6 passed`.
+- Final Stage 0 + Stage 1 covenant/acceptance rerun: `38 passed`.
+- Final configured full suite: `1858 passed, 14 skipped, 384 warnings,
+  0 failed` in `281.60s`.
+
+The failure history is preserved in the report, including a discarded
+post-report setup error caused by pytest selecting an inaccessible Windows temp
+directory; the identical workspace-local-basetemp rerun passed. No
+assertion-intent flip occurred. Fixtures were raised to the stricter contract with runtime-owned
+temporal assessments, explicit symbol identity, and lawful decision clocks.
+The 14 conditional broker/access skips remain skips, not passes.
+
+## Proof and Safety Boundary
+
+The highest rung reached is local offline tests. No UI/browser, live-feed
+runtime, broker read, PAPER run, broker mutation, external submit/fill/sell-to-
+close, PnL, profitability, live action, real money, or arming result is claimed.
+No broker authorization variable was enabled.
+
+No guard, threshold, strategy math, Risk, NetEdge, MarketTruthSnapshot, TTL,
+sizing, masking, OMS, reconciliation, account pin, PAPER/live lock, no-short, or
+no-naked-SELL control weakened. No module was deleted, flattened, forced to fire,
+or replaced with a generic subsystem. SovereignExecutionGuard remains dormant.
+
+## Known Limitations Preserved
+
+- Analytical guard/fusion state restarts cold and fail-closed; warm persistence
+  was not invented without a gap/reconciliation authority.
+- Identical event/receipt/source duplicates use stable ingestion order as their
+  final tie-break.
+- External evidence batches conservatively use their maximum event/receipt
+  clocks; one future record can hold back the batch.
+- External feed timestamp quality, runtime throughput/memory, multi-day
+  recovery, and broker behavior are unproven.
+- Fusion is internally serialized, but concurrent same-symbol WebSocket/REST
+  ordering across every upstream analytical engine was not stress-tested.
+- Fourteen broker/access tests remain conditionally skipped; existing Pydantic
+  and timezone-naive datetime warnings remain.
+- The dynamic universe, protected baseline, forced exploration profile,
+  external SELL adapter limitation, five-day ceiling, portfolio economics,
+  campaign recovery, and multi-tenant isolation remain Stage 2+ work.
+
+## Dirty Tree and Staging Boundary
+
+Known test/runtime state files and pre-existing untracked evidence remain
+protected. Never clean, reset, stash, prune, edit, or stage them. The Stage 1
+report contains the exact 29-file staging list. It excludes `state/**`,
+`.pytest_tmp/**`, old handoffs, proposal/restriction-review packets,
+`reports/operator_perf/**`, logs, screenshots, secrets, databases, and untracked
+audit scripts.
+
+## Next Boundary
+
+Stop at Stage 1. Stage 2 needs a new governance re-read, live-repo truth map,
+entry manifest, independent red-team, binary exit, and explicit Board direction.
+Stage 12 broker-read-only work and every Stage 13 PAPER campaign retain separate
+approvals. Nothing in Stage 1 authorizes arming or execution.
+
+---
+
+# Prior Handoff - PAPER True Capability Stage 0 Complete
 
 Date: 2026-07-18 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
@@ -9,7 +122,8 @@ Stage report: `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_0_REPORT.md`
 ## Current Verdict
 
 Shan explicitly approved Stage 0. It is complete and **PASS** at the local test
-rung. Stage 1 has not been opened.
+rung. At that historical Stage 0 boundary, Stage 1 had not been opened; the
+current Stage 1 close truth is recorded above.
 
 Stage 0 added only a deterministic sanitized fixture, six offline regression
 tests, and its governance/evidence updates. No production application, UI,

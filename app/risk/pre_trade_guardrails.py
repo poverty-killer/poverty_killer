@@ -12,8 +12,8 @@ from app.market.venue_capabilities import (
     QuoteSessionClassification,
     VenueCapability,
 )
-from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
-from app.utils.enums import is_blocking_risk_action
+from app.risk.stale_data_guard import TemporalRiskAssessment
+from app.utils.enums import RiskAction, is_blocking_risk_action
 
 
 ALLOW = "ALLOW"
@@ -87,7 +87,10 @@ class PreTradeGuardrailRequest:
     economics_context: Mapping[str, Any] | None = None
     strategy_context: Mapping[str, Any] | None = None
     exposure_authority_evidence: Mapping[str, Any] | None = None
-    stale_data_observation: TemporalInput | Mapping[str, Any] | None = None
+    stale_data_assessment: TemporalRiskAssessment | Mapping[str, Any] | None = None
+    # Compatibility input only. Raw observations are no longer evaluated here;
+    # the persistent SymbolRuntime guard must emit the assessment.
+    stale_data_observation: TemporalRiskAssessment | Mapping[str, Any] | None = None
     source: str = "pre_trade_guardrails"
     action: str | None = None
 
@@ -420,28 +423,68 @@ def _append_stale_data_guard_evidence(
     evidence: list[GuardrailEvidence],
     request: PreTradeGuardrailRequest,
 ) -> str | None:
-    observation = _coerce_temporal_input(request.stale_data_observation)
-    if observation is None:
+    assessment = _coerce_temporal_assessment(
+        request.stale_data_assessment
+        if request.stale_data_assessment is not None
+        else request.stale_data_observation
+    )
+    if assessment is None:
         evidence.append(
             GuardrailEvidence(
                 module="StaleDataGuard",
                 status=CONTRIBUTED_MISSING_TRUTH,
                 reason_code="STALE_DATA_GUARD_OBSERVATION_MISSING",
                 summary=(
-                    "No temporal observation was supplied to StaleDataGuard; the guard did not "
-                    "invent market freshness truth."
+                    "No persistent temporal assessment was supplied by SymbolRuntime; "
+                    "pre-trade Risk did not recreate a guard or invent transport truth."
                 ),
-                details={"required_by_active_path": request.source == "main_loop_dispatch"},
+                details={
+                    "required_by_active_path": request.source == "main_loop_dispatch",
+                    "legacy_raw_observation_present": isinstance(
+                        request.stale_data_observation,
+                        Mapping,
+                    ),
+                },
             )
         )
         if request.source == "main_loop_dispatch":
             return "STALE_DATA_GUARD_OBSERVATION_MISSING"
         return None
 
-    assessment = StaleDataGuard(symbol=request.symbol).assess(observation)
-    action = assessment.risk_action
+    if assessment.get("symbol") != request.symbol:
+        evidence.append(
+            GuardrailEvidence(
+                module="StaleDataGuard",
+                status=CONTRIBUTED_BLOCK,
+                reason_code="STALE_DATA_GUARD_SYMBOL_MISMATCH",
+                summary="The persistent temporal assessment belongs to another symbol.",
+                details={
+                    "request_symbol": request.symbol,
+                    "assessment_symbol": assessment.get("symbol"),
+                    "mutation_authority": False,
+                },
+            )
+        )
+        return "STALE_DATA_GUARD_SYMBOL_MISMATCH"
+
+    try:
+        action = RiskAction(str(assessment.get("risk_action")))
+    except ValueError:
+        evidence.append(
+            GuardrailEvidence(
+                module="StaleDataGuard",
+                status=CONTRIBUTED_BLOCK,
+                reason_code="STALE_DATA_GUARD_ASSESSMENT_INVALID",
+                summary="The persistent temporal assessment has an invalid risk action.",
+                details={"mutation_authority": False},
+            )
+        )
+        return "STALE_DATA_GUARD_ASSESSMENT_INVALID"
+
     blocking = is_blocking_risk_action(action)
     reason_code = _stale_guard_reason_code(assessment, blocking=blocking)
+    kinematics = assessment.get("kinematics")
+    kinematics = dict(kinematics) if isinstance(kinematics, Mapping) else {}
     evidence.append(
         GuardrailEvidence(
             module="StaleDataGuard",
@@ -453,17 +496,18 @@ def _append_stale_data_guard_evidence(
                 else "StaleDataGuard assessed temporal market-data integrity and allowed routing."
             ),
             details={
-                "risk_action": getattr(action, "value", str(action)),
-                "risk_level": getattr(assessment.risk_level, "value", str(assessment.risk_level)),
-                "severity": getattr(assessment.severity, "value", str(assessment.severity)),
-                "authority_tier": getattr(assessment.authority_tier, "value", str(assessment.authority_tier)),
-                "priority": getattr(assessment.priority, "value", str(assessment.priority)),
-                "rationale": assessment.rationale,
-                "warnings": assessment.warnings,
-                "drift_ns": assessment.kinematics.drift_ns,
-                "current_ts_ns": observation.current_ts_ns,
-                "exchange_ts_ns": observation.exchange_ts_ns,
-                "local_received_ts_ns": observation.local_received_ts_ns,
+                "risk_action": action.value,
+                "risk_level": assessment.get("risk_level"),
+                "severity": assessment.get("severity"),
+                "authority_tier": assessment.get("authority_tier"),
+                "priority": assessment.get("priority"),
+                "rationale": tuple(assessment.get("rationale") or ()),
+                "warnings": tuple(assessment.get("warnings") or ()),
+                "drift_ns": kinematics.get("drift_ns"),
+                "sample_count": kinematics.get("sample_count"),
+                "current_ts_ns": assessment.get("timestamp_ns"),
+                "exchange_ts_ns": assessment.get("exchange_ts_ns"),
+                "local_received_ts_ns": assessment.get("local_received_ts_ns"),
                 "max_drift_ms": 500,
                 "mutation_authority": False,
             },
@@ -472,37 +516,42 @@ def _append_stale_data_guard_evidence(
     return reason_code if blocking else None
 
 
-def _coerce_temporal_input(value: TemporalInput | Mapping[str, Any] | None) -> TemporalInput | None:
-    if isinstance(value, TemporalInput):
-        return value
+def _coerce_temporal_assessment(
+    value: TemporalRiskAssessment | Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if isinstance(value, TemporalRiskAssessment):
+        return value.to_dict()
     if not isinstance(value, Mapping):
         return None
-    current_ts_ns = _to_int(value.get("current_ts_ns") or value.get("snapshot_created_ns"))
-    exchange_ts_ns = _to_int(
-        value.get("exchange_ts_ns")
-        or value.get("candle_close_ts_ns")
-        or value.get("candle_id")
-        or value.get("latest_candle_ts_ns")
-    )
-    if current_ts_ns is None or exchange_ts_ns is None:
+    required = {
+        "symbol",
+        "timestamp_ns",
+        "exchange_ts_ns",
+        "local_received_ts_ns",
+        "risk_action",
+        "risk_level",
+        "severity",
+        "authority_tier",
+        "priority",
+        "kinematics",
+    }
+    if not required.issubset(value):
         return None
-    local_received_ts_ns = _to_int(value.get("local_received_ts_ns") or value.get("receive_ts_ns"))
-    return TemporalInput(
-        current_ts_ns=current_ts_ns,
-        exchange_ts_ns=exchange_ts_ns,
-        local_received_ts_ns=local_received_ts_ns,
-    )
+    return dict(value)
 
 
-def _stale_guard_reason_code(assessment: Any, *, blocking: bool) -> str:
+def _stale_guard_reason_code(assessment: Mapping[str, Any], *, blocking: bool) -> str:
     if not blocking:
         return "STALE_DATA_GUARD_ALLOW"
-    first_rationale = next((str(item) for item in assessment.rationale if str(item)), "")
+    first_rationale = next(
+        (str(item) for item in assessment.get("rationale", ()) if str(item)),
+        "",
+    )
     if "absolute_drift_limit_breach" in first_rationale:
         return "STALE_DATA_GUARD_ABSOLUTE_DRIFT_LIMIT_BREACH"
     if first_rationale.startswith("invariant_violation:"):
         return "STALE_DATA_GUARD_INVARIANT_VIOLATION"
-    action = getattr(assessment.risk_action, "value", str(assessment.risk_action))
+    action = str(assessment.get("risk_action") or "UNKNOWN")
     return f"STALE_DATA_GUARD_{_sanitize_reason(action)}"
 
 

@@ -38,6 +38,7 @@ from app.models.enums import SignalType, SleeveType, StrategyID, TruthStatus
 from app.models.market_data import Candle
 from app.models.signals import StrategySignal
 from app.risk.exposure_manager import ExposureManager
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 
 
 LOGGER_NAME = "app.main_loop"
@@ -76,13 +77,7 @@ def _signal(side: str = "buy", confidence: float = 0.70) -> StrategySignal:
         price=2500.0,
         exchange_ts_ns=T0_NS,
         reason="decision_frame_test",
-        metadata={
-            "stale_data_observation": {
-                "current_ts_ns": T0_NS + 61 * NS_PER_SECOND,
-                "exchange_ts_ns": T0_NS + 61 * NS_PER_SECOND,
-                "local_received_ts_ns": T0_NS + 61 * NS_PER_SECOND,
-            }
-        },
+        metadata={},
     )
 
 
@@ -129,6 +124,7 @@ def _candle() -> Candle:
 
 
 def _runtime(sector_signal=None, sector_vote=None):
+    guard_ts_ns = int(getattr(sector_signal, "exchange_ts_ns", None) or T0_NS)
     return types.SimpleNamespace(
         last_price=2500.0,
         shadow_front_strategy=MagicMock(),
@@ -142,6 +138,9 @@ def _runtime(sector_signal=None, sector_vote=None):
         last_liquidity_void_consumed_decision_uuid=None,
         toxicity_engine=MagicMock(),
         sentiment_velocity_engine=MagicMock(),
+        last_stale_data_assessment=StaleDataGuard("ETH/USD").assess(
+            TemporalInput(guard_ts_ns, guard_ts_ns, guard_ts_ns)
+        ),
         last_tpe_signal=None,
     )
 

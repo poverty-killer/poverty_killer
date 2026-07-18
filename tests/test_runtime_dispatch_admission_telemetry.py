@@ -21,6 +21,7 @@ from app.models import Candle
 from app.models.enums import SleeveType
 from app.models.enums import RegimeType
 from app.risk.position_sizing import PositionSizingEngine
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 from app.risk.trade_efficiency_governor import TradeEfficiencyGovernor
 
 
@@ -42,13 +43,7 @@ def _signal(
         price=None,
         exchange_ts_ns=exchange_ts_ns,
         reason="dispatch_admission_diag_test",
-        metadata={
-            "stale_data_observation": {
-                "current_ts_ns": exchange_ts_ns,
-                "exchange_ts_ns": exchange_ts_ns,
-                "local_received_ts_ns": exchange_ts_ns,
-            }
-        },
+        metadata={},
     )
 
 
@@ -107,7 +102,10 @@ def _runtime(
     *,
     sector_signal: types.SimpleNamespace | None = None,
     sector_vote: types.SimpleNamespace | None = None,
+    symbol: str = "ETH/USD",
 ) -> types.SimpleNamespace:
+    guard_symbol = str(getattr(sector_signal, "symbol", None) or symbol)
+    guard_ts_ns = int(getattr(sector_signal, "exchange_ts_ns", None) or T0_NS)
     return types.SimpleNamespace(
         last_price=2500.0,
         current_volatility=0.20,
@@ -122,6 +120,10 @@ def _runtime(
         last_liquidity_void_consumed_decision_uuid=None,
         toxicity_engine=MagicMock(),
         sentiment_velocity_engine=MagicMock(),
+        entropy_decoder=MagicMock(),
+        last_stale_data_assessment=StaleDataGuard(guard_symbol).assess(
+            TemporalInput(guard_ts_ns, guard_ts_ns, guard_ts_ns)
+        ),
         last_tpe_signal=None,
     )
 
@@ -1040,7 +1042,7 @@ def test_flat_bearish_crypto_sell_becomes_no_long_telemetry_without_broker_inten
     )
     signal = _signal(symbol="SOL/USD")
     signal.side = "sell"
-    runtime = _runtime()
+    runtime = _runtime(symbol="SOL/USD")
 
     verdict = main_loop_module._build_pre_trade_guardrail_verdict(
         config=config,
@@ -1072,7 +1074,7 @@ def test_sell_to_close_requires_broker_position_backed_inventory():
     signal = _signal(symbol="SOL/USD")
     signal.side = "sell"
     signal.metadata["existing_positions"] = ({"symbol": "SOLUSD", "quantity": "1.0"},)
-    runtime = _runtime()
+    runtime = _runtime(symbol="SOL/USD")
 
     verdict = main_loop_module._build_pre_trade_guardrail_verdict(
         config=config,
@@ -1102,7 +1104,7 @@ def test_alpaca_crypto_sell_short_is_unsupported_by_capability():
     signal.side = "sell"
     signal.metadata["short_intent"] = True
     signal.metadata["short_authority"] = True
-    runtime = _runtime()
+    runtime = _runtime(symbol="SOL/USD")
 
     verdict = main_loop_module._build_pre_trade_guardrail_verdict(
         config=config,
@@ -1127,7 +1129,7 @@ def test_buy_path_still_selects_capability_when_lawful():
         preferred_trading_portal="alpaca_paper",
     )
     signal = _signal(symbol="SOL/USD")
-    runtime = _runtime()
+    runtime = _runtime(symbol="SOL/USD")
 
     verdict = main_loop_module._build_pre_trade_guardrail_verdict(
         config=config,

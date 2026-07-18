@@ -23,6 +23,7 @@ from app.operator_activation.paper_baseline import (
 from app.risk.drawdown_guard import DrawdownGuard, DrawdownReasonCode
 from app.risk.exposure_manager import EXPOSURE_AUTHORITY_STATUS, ExposureManager
 from app.risk.trade_efficiency_governor import KellyOverlayStatus, TradeEfficiencyGovernor
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 from app.state.state_store import StateStore
 from app.strategies.moving_floor import TopologicalMovingFloor
 from app.utils.enums import RiskAction
@@ -396,11 +397,9 @@ def test_g4_live_runtime_correlation_slash_runs_before_netedge(monkeypatch):
     metadata = _canonical_metadata("ETH/USD", market_truth, snapshot)
     metadata["correlation_pairs"] = {("ETH/USD", "BTC/USD"): Decimal("0.90")}
     metadata["correlation_truth_status"] = "FRESH"
-    metadata["stale_data_observation"] = {
-        "current_ts_ns": current_ns,
-        "exchange_ts_ns": current_ns,
-        "local_received_ts_ns": current_ns,
-    }
+    stale_data_assessment = StaleDataGuard("ETH/USD").assess(
+        TemporalInput(current_ns, current_ns, current_ns)
+    )
     signal = _strategy_signal(
         symbol="ETH/USD",
         candle_id=snapshot["candle_id"],
@@ -419,7 +418,10 @@ def test_g4_live_runtime_correlation_slash_runs_before_netedge(monkeypatch):
         config=_portfolio_risk_config(),
         symbol="ETH/USD",
         signal=signal,
-        runtime=SimpleNamespace(last_price=100.0),
+        runtime=SimpleNamespace(
+            last_price=100.0,
+            last_stale_data_assessment=stale_data_assessment,
+        ),
         is_attack=False,
         exposure_manager=manager,
     )
@@ -445,11 +447,9 @@ def test_p3d_live_runtime_per_symbol_cap_clamps_before_netedge_and_broker_route(
     monkeypatch.setattr(engine_module, "now_ns", lambda: current_ns)
     market_truth, _, snapshot = _snapshot_payload(symbol="ETH/USD", current_ns=current_ns)
     metadata = _canonical_metadata("ETH/USD", market_truth, snapshot)
-    metadata["stale_data_observation"] = {
-        "current_ts_ns": current_ns,
-        "exchange_ts_ns": current_ns,
-        "local_received_ts_ns": current_ns,
-    }
+    stale_data_assessment = StaleDataGuard("ETH/USD").assess(
+        TemporalInput(current_ns, current_ns, current_ns)
+    )
     signal = _strategy_signal(
         symbol="ETH/USD",
         candle_id=snapshot["candle_id"],
@@ -467,7 +467,10 @@ def test_p3d_live_runtime_per_symbol_cap_clamps_before_netedge_and_broker_route(
         config=_portfolio_risk_config(max_utilization=0.95, max_asset_concentration=0.15),
         symbol="ETH/USD",
         signal=signal,
-        runtime=SimpleNamespace(last_price=200.0),
+        runtime=SimpleNamespace(
+            last_price=200.0,
+            last_stale_data_assessment=stale_data_assessment,
+        ),
         is_attack=False,
         exposure_manager=manager,
     )

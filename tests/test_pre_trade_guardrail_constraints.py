@@ -37,6 +37,7 @@ from app.risk.pre_trade_guardrails import (
     PreTradeGuardrailRequest,
     evaluate_pre_trade_guardrails,
 )
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 from app.utils.time_utils import now_ns
 
 
@@ -104,7 +105,7 @@ def _verdict(
     open_orders=(),
     reservations=(),
     exposure_authority_evidence=None,
-    stale_data_observation=None,
+    transport_observation=None,
 ):
     capability, portal_result = _cap(symbol, asset_class=asset_class, tif=tif)
     quote_options = {"market_open": None if asset_class == "crypto" else True}
@@ -131,14 +132,22 @@ def _verdict(
             open_orders=open_orders,
             reservations=reservations,
             exposure_authority_evidence=exposure_authority_evidence,
-            stale_data_observation=stale_data_observation
-            or {
-                "current_ts_ns": T0_NS,
-                "exchange_ts_ns": T0_NS,
-                "local_received_ts_ns": T0_NS,
-            },
+            stale_data_assessment=_temporal_assessment(
+                symbol,
+                transport_observation
+                or {
+                    "current_ts_ns": T0_NS,
+                    "exchange_ts_ns": T0_NS,
+                    "local_received_ts_ns": T0_NS,
+                },
+            ),
         )
     )
+
+
+def _temporal_assessment(symbol: str, observation: dict):
+    """Build real persistent-guard evidence; pre-trade never evaluates raw clocks."""
+    return StaleDataGuard(symbol).assess(TemporalInput(**observation))
 
 
 def _exposure_authority_evidence(reason_code: str, *, block: bool = True) -> dict:
@@ -320,7 +329,7 @@ def test_quote_session_and_market_data_blocking_reasons_are_preserved():
 
 def test_stale_data_guard_blocks_stale_temporal_observation_before_routing():
     verdict = _verdict(
-        stale_data_observation={
+        transport_observation={
             "current_ts_ns": T0_NS + 1_000_000_000,
             "exchange_ts_ns": T0_NS,
             "local_received_ts_ns": T0_NS + 900_000_000,

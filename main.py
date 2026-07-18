@@ -22,13 +22,13 @@ WEBSOCKET HEALTH WIRING — PERMANENT FIX
 BUNDLE MULTI-SYMBOL RUNTIME — PER-SYMBOL OWNERSHIP EXPANSION
 - Passes active_symbols set to create_main_loop
 - Per-symbol engines now created inside MainLoop's SymbolRuntime containers
-- _on_trade() now extracts symbol from trade_info and passes to MainLoop.on_trade()
+- _on_trade() extracts symbol and routes once through MainLoop's symbol runtime
 - Removes primary-symbol hardcoding from trade/insider path
 
 BUNDLE STRATEGY-GATING REPAIR — WHALE OVERLAY WIRING (2026-04-27)
-- Adds call to MainLoop.on_trade_with_whale() with full trade details
-- Preserves existing on_trade() call for backward compatibility
-- Passes side and volume to enable per-symbol whale detection
+- Routes each trade exactly once through MainLoop.on_trade_with_whale()
+- MainLoop owns per-symbol price, whale, sentiment, and Fusion updates
+- Passes source receipt time so causal availability is explicit
 """
 
 import argparse
@@ -404,10 +404,8 @@ class SovereignHeartbeat:
     BUNDLE F1: Added telemetry_store initialization and injection.
     
     BUNDLE MULTI-SYMBOL RUNTIME: Per-symbol engines now created inside MainLoop.
-    Trades now extract symbol from trade_info and route to MainLoop.on_trade().
-    
-    BUNDLE STRATEGY-GATING REPAIR: Also routes to MainLoop.on_trade_with_whale()
-    with full trade details for per-symbol whale detection.
+    Trades extract symbol and route once to MainLoop.on_trade_with_whale(),
+    which owns the per-symbol price, flow, sentiment, and Fusion update.
     """
 
     def __init__(
@@ -508,6 +506,8 @@ class SovereignHeartbeat:
         )
 
         self.signal_fusion = SignalFusion(config)
+        # Preserved compatibility objects. Active market callbacks use the
+        # corresponding engines owned by each SymbolRuntime.
         self.whale_engine = WhaleFlowEngine()
         self.entropy_decoder = EntropyDecoder()
         self.safety_gate = SafetyGate(config)
@@ -644,8 +644,8 @@ class SovereignHeartbeat:
         # BUNDLE MULTI-SYMBOL RUNTIME: Per-symbol engines are now created
         # inside MainLoop's SymbolRuntime containers. Legacy single-symbol
         # instances are no longer created here.
-        self.regime_detector = RegimeDetector()  # Global, used per-symbol
-        self.physical_validator = PhysicalValidator()  # Global, used per-symbol
+        self.regime_detector = RegimeDetector()  # Compatibility dependency
+        self.physical_validator = PhysicalValidator()  # Compatibility dependency
         self.insider_engine = InsiderSignalEngine()  # Global, used per-symbol
 
         # BUNDLE F1: Pass telemetry_store to MainLoop via create_main_loop
@@ -1067,40 +1067,32 @@ class SovereignHeartbeat:
         Transport/callback ownership lives here.
         Semantic market-data processing remains in MainLoop.
         
-        BUNDLE MULTI-SYMBOL RUNTIME: Extracts symbol from trade_info
-        and passes to MainLoop.on_trade() with the real symbol.
-        No longer assumes primary symbol only.
-        
-        BUNDLE STRATEGY-GATING REPAIR: Also passes full trade details
-        to MainLoop.on_trade_with_whale() for per-symbol whale detection.
+        Extracts the real symbol and routes one authoritative update through
+        MainLoop's per-symbol runtime. The legacy process-global whale engine
+        remains preserved but is not a second active writer.
         """
         try:
             volume = float(trade_info.get("volume", 0.0))
             price = float(trade_info.get("price", 0.0))
             side = int(trade_info.get("side", 0))
             ts_ns = int(trade_info.get("exchange_ts_ns", 0))
+            receive_ts_ns = int(trade_info.get("receive_ts_ns") or time.time_ns())
             symbol = trade_info.get("symbol", self._primary_symbol)
 
             if ts_ns <= 0 or volume <= 0:
                 return
 
-            buy_vol = volume if side == 1 else 0.0
-            sell_vol = volume if side == -1 else 0.0
-
-            alert = self.whale_engine.update(
-                buy_volume=buy_vol,
-                sell_volume=sell_vol,
-                trade_sizes=[volume],
-                exchange_ts_ns=ts_ns,
+            alert = self.main_loop.on_trade_with_whale(
+                symbol,
+                price,
+                side,
+                volume,
+                ts_ns,
+                receive_ts_ns=receive_ts_ns,
             )
-
-            self.signal_fusion.update_whale(alert, ts_ns)
-            
-            # Pass symbol to MainLoop.on_trade() (basic price update)
-            self.main_loop.on_trade(symbol, price, ts_ns)
-            
-            # Pass full trade details to MainLoop.on_trade_with_whale() (whale detection)
-            self.main_loop.on_trade_with_whale(symbol, price, side, volume, ts_ns)
+            if alert is None:
+                self._mark_loop_event()
+                return
 
             # Insider observation uses the real symbol from trade_info
             if side == 1:
@@ -1115,9 +1107,9 @@ class SovereignHeartbeat:
             if runtime and runtime.toxicity_engine:
                 tox_suppression = runtime.toxicity_engine.get_suppression_factor()
             else:
-                # Fallback to primary symbol's toxicity engine
-                primary_runtime = self.main_loop.get_runtime(self._primary_symbol)
-                tox_suppression = primary_runtime.toxicity_engine.get_suppression_factor() if primary_runtime and primary_runtime.toxicity_engine else 1.0
+                # Missing same-symbol evidence degrades neutrally; another
+                # symbol's toxicity state is never borrowed.
+                tox_suppression = 1.0
 
             tox_inv = Decimal(str(round(1.0 - tox_suppression, 6)))
             intensity = Decimal(str(round(min(1.0, max(0.0, alert.confidence)), 6)))

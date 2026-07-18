@@ -261,7 +261,10 @@ def test_alpha_modules_emit_native_or_explicit_missing_truth():
 
 
 def test_intelligence_and_world_awareness_enter_fusion_as_advisory_context():
-    fusion = SignalFusion(SimpleNamespace(strategies=SimpleNamespace(sector_rotation_ranging_eligible=False)))
+    fusion = SignalFusion(SimpleNamespace(
+        symbol="ETH/USD",
+        strategies=SimpleNamespace(sector_rotation_ranging_eligible=False),
+    ))
     strategy_records = _router().collect_strategy_runtime_evidence(_fusion_decision())["strategy_attribution"]
     fusion.update_strategy_evidence(strategy_records, T0_NS)
     fusion.update_intelligence_evidence([_intelligence_record("WhaleZoneEngine")], T0_NS)
@@ -273,7 +276,10 @@ def test_intelligence_and_world_awareness_enter_fusion_as_advisory_context():
 
 
 def test_signal_fusion_preserves_missing_and_degraded_contributors_in_telemetry():
-    fusion = SignalFusion(SimpleNamespace(strategies=SimpleNamespace(sector_rotation_ranging_eligible=False)))
+    fusion = SignalFusion(SimpleNamespace(
+        symbol="ETH/USD",
+        strategies=SimpleNamespace(sector_rotation_ranging_eligible=False),
+    ))
     fusion.update_physical({"health_score": 0.90}, T0_NS)
     fusion.update_toxicity(SimpleNamespace(toxicity_score=0.10, regime=SimpleNamespace(value=0)), T0_NS)
     fusion.update_strategy_evidence(
@@ -321,7 +327,10 @@ def test_opportunity_ranking_abstains_with_explicit_reason_and_no_execution_auth
 
 
 def test_decision_record_metadata_carries_runtime_flow_attribution_sections():
-    fusion = SignalFusion(SimpleNamespace(strategies=SimpleNamespace(sector_rotation_ranging_eligible=False)))
+    fusion = SignalFusion(SimpleNamespace(
+        symbol="ETH/USD",
+        strategies=SimpleNamespace(sector_rotation_ranging_eligible=False),
+    ))
     strategy_records = _router().collect_strategy_runtime_evidence(_fusion_decision())["strategy_attribution"]
     intelligence = [_intelligence_record()]
     world = [_world_awareness_record()]
@@ -359,7 +368,10 @@ def test_decision_record_metadata_carries_runtime_flow_attribution_sections():
 def test_no_target_module_exposes_broker_mutation_or_live_endpoint_authority():
     modules = (
         _router(),
-        SignalFusion(SimpleNamespace(strategies=SimpleNamespace(sector_rotation_ranging_eligible=False))),
+        SignalFusion(SimpleNamespace(
+            symbol="ETH/USD",
+            strategies=SimpleNamespace(sector_rotation_ranging_eligible=False),
+        )),
     )
     forbidden_attrs = {
         "submit_order",
@@ -774,21 +786,46 @@ def test_seam7e_completion_correction_calls_every_native_module_and_carries_outp
     assert ranking_summary["status"] == "RANKED"
     assert ranking_summary["execution_authority"] == "none"
 
-    fusion = SignalFusion(SimpleNamespace(strategies=SimpleNamespace(sector_rotation_ranging_eligible=False)))
-    fusion.update_strategy_evidence(strategy_records_by_name.values(), T0_NS)
-    fusion.update_intelligence_evidence(intelligence_records_by_name.values(), T0_NS)
-    fusion.update_world_awareness_evidence(world_records_by_name.values(), T0_NS)
-    fusion.update_physical({"health_score": 0.90}, T0_NS)
-    fusion.update_toxicity(SimpleNamespace(toxicity_score=0.10, regime=SimpleNamespace(value=0)), T0_NS)
-    fusion.fuse(T0_NS)
+    fusion = SignalFusion(SimpleNamespace(
+        symbol="AAPL",
+        strategies=SimpleNamespace(sector_rotation_ranging_eligible=False),
+    ))
+    native_records = (
+        *strategy_records_by_name.values(),
+        *intelligence_records_by_name.values(),
+        *world_records_by_name.values(),
+    )
+    decision_ts_ns = max(
+        int(record.get("event_ts_ns") or record.get("timestamp_ns") or T0_NS)
+        for record in native_records
+    )
+    fusion.update_strategy_evidence(
+        strategy_records_by_name.values(),
+        T0_NS,
+        received_ts_ns=decision_ts_ns,
+    )
+    fusion.update_intelligence_evidence(
+        intelligence_records_by_name.values(),
+        T0_NS,
+        received_ts_ns=decision_ts_ns,
+    )
+    fusion.update_world_awareness_evidence(
+        world_records_by_name.values(),
+        T0_NS,
+        received_ts_ns=decision_ts_ns,
+    )
+    fusion.update_physical({"health_score": 0.90}, decision_ts_ns)
+    fusion.update_toxicity(
+        SimpleNamespace(toxicity_score=0.10, regime=SimpleNamespace(value=0)),
+        decision_ts_ns,
+    )
+    fusion.fuse(decision_ts_ns)
     telemetry = fusion.get_fusion_telemetry()
 
     all_records_by_name = {
         record["module_name"]: record
         for record in (
-            *strategy_records_by_name.values(),
-            *intelligence_records_by_name.values(),
-            *world_records_by_name.values(),
+            *native_records,
         )
     }
     assert set(all_records_by_name) >= {

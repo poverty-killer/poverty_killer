@@ -121,13 +121,7 @@ def _sector_signal(t0_ns: int) -> StrategySignal:
         price=None,
         exchange_ts_ns=t0_ns,
         reason="integrated_paper_readiness",
-        metadata={
-            "stale_data_observation": {
-                "current_ts_ns": t0_ns,
-                "exchange_ts_ns": t0_ns,
-                "local_received_ts_ns": t0_ns,
-            }
-        },
+        metadata={},
     )
 
 
@@ -139,6 +133,11 @@ def _runtime_with_entry_vote(t0_ns: int):
     runtime.sentiment_velocity_engine = MagicMock()
     runtime.update_candle(_candle(t0_ns))
     runtime.update_order_book(_book(t0_ns))
+    runtime.observe_transport(
+        exchange_ts_ns=t0_ns,
+        receive_ts_ns=t0_ns,
+        assessment_ts_ns=t0_ns,
+    )
 
     signal = _sector_signal(t0_ns)
     vote = adapt_sector_rotation_to_vote(

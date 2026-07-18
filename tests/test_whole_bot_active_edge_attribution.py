@@ -135,7 +135,10 @@ def _risk_guard():
 
 
 def test_signal_fusion_carries_missing_feed_truth_instead_of_silent_drop():
-    fusion = SignalFusion(SimpleNamespace(strategies=SimpleNamespace(sector_rotation_ranging_eligible=False)))
+    fusion = SignalFusion(SimpleNamespace(
+        symbol="ETH/USD",
+        strategies=SimpleNamespace(sector_rotation_ranging_eligible=False),
+    ))
     fusion.update_physical({"health_score": 0.90}, T0_NS)
     fusion.update_toxicity(
         SimpleNamespace(toxicity_score=0.10, regime=SimpleNamespace(value=0)),

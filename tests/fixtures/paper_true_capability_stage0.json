@@ -147,6 +147,27 @@
       "interpretation": "Zero mutations belong to this run. Nonzero filled-order and hydration counts are older broker history observed during reconciliation, not fills created by this run."
     }
   ],
+  "approved_source_deltas": {
+    "stage1": {
+      "report": "reports/completion/PAPER_TRUE_CAPABILITY_STAGE_1_REPORT.md",
+      "stage_entry_head": "e363f4b919d3ae52416278c810a87169ca7f1186",
+      "stage_entry_covenant": "PASS",
+      "source_sha256": {
+        "app/main_loop.py": {
+          "before": "822ea28bee27e4711900e8f6d46ca1ed2ea2f3901cfaa59845b06aa3dd37190d",
+          "after": "cb37f160d59b7c60926f9272ec4be1cd17fa447d9677f397a4a1fa669f34667e"
+        },
+        "main.py": {
+          "before": "403d205689940ed7e213708c4d48ffb84fa13ecd42f231593f73c7671d3267e7",
+          "after": "b55a5c447dac339d5f950e9fa0234df98111bde4d89f94bbdeba9c8cc3c211da"
+        },
+        "app/risk/pre_trade_guardrails.py": {
+          "before": "e6bd34aaf89b2ea56e479ed169d35da0854e62328cb268070125c572293c7793",
+          "after": "c8d2a2a8ca3717847cf19f7ecc8c81d6e7a67fe1c7e3dfe36e6a4f370bbc9a23"
+        }
+      }
+    }
+  },
   "activation_state_definitions": {
     "IMPLEMENTED_OFFLINE": "Code or deterministic offline evidence exists and pure behavior is tested; no runtime or broker proof.",
     "OBSERVE_ONLY": "The capability is diagnostic, classified, or non-authoritative and cannot create an executable order.",

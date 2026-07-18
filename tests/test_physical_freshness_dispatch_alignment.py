@@ -169,16 +169,23 @@ def _fusion_decision(ts_ns: int):
 def test_admitted_market_event_physical_timestamp_is_fresh_for_same_clock_fusion():
     config = Config()
     fusion = SignalFusion(config=config)
+    runtime = types.SimpleNamespace(physical_validator=PhysicalValidator())
     loop = types.SimpleNamespace(
         exchange="kraken",
-        physical_validator=PhysicalValidator(),
         signal_fusion=fusion,
+        _ensure_runtime=lambda symbol: runtime,
     )
 
-    MainLoop._update_physical_freshness.__get__(loop, MainLoop)("ETH/USD", T0_NS)
-    fusion.update_toxicity(_toxicity(T0_NS), T0_NS)
+    MainLoop._update_physical_freshness.__get__(loop, MainLoop)("ETH/USD", T0_NS, T0_NS)
+    fusion.update_toxicity(
+        _toxicity(T0_NS),
+        T0_NS,
+        symbol="ETH/USD",
+        source="test_toxicity",
+        received_ts_ns=T0_NS,
+    )
 
-    decision = fusion.fuse(T0_NS)
+    decision = fusion.fuse(T0_NS, symbol="ETH/USD")
 
     assert "Stale critical signal [physical]" not in decision.reason
     assert decision.preferred_sleeve is not None
@@ -187,10 +194,22 @@ def test_admitted_market_event_physical_timestamp_is_fresh_for_same_clock_fusion
 def test_true_stale_physical_still_hard_vetoes_fusion():
     config = Config()
     fusion = SignalFusion(config=config)
-    fusion.update_physical({"health_score": 0.80}, T0_NS - 31_000_000_000)
-    fusion.update_toxicity(_toxicity(T0_NS), T0_NS)
+    fusion.update_physical(
+        {"health_score": 0.80, "symbol": "ETH/USD"},
+        T0_NS - 31_000_000_000,
+        symbol="ETH/USD",
+        source="test_physical",
+        received_ts_ns=T0_NS - 31_000_000_000,
+    )
+    fusion.update_toxicity(
+        _toxicity(T0_NS),
+        T0_NS,
+        symbol="ETH/USD",
+        source="test_toxicity",
+        received_ts_ns=T0_NS,
+    )
 
-    decision = fusion.fuse(T0_NS)
+    decision = fusion.fuse(T0_NS, symbol="ETH/USD")
 
     assert decision.preferred_sleeve is None
     assert "VETO: Stale critical signal [physical]" in decision.reason

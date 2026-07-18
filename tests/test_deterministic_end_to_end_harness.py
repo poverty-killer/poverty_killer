@@ -59,6 +59,7 @@ from app.models.enums import (
     SleeveType,
 )
 from app.execution.order_router import OrderRouter
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 
 
 # =============================================================================
@@ -90,13 +91,7 @@ def _make_strategy_signal(
         price=price,
         exchange_ts_ns=exchange_ts_ns,
         reason="harness_signal",
-        metadata={
-            "stale_data_observation": {
-                "current_ts_ns": exchange_ts_ns,
-                "exchange_ts_ns": exchange_ts_ns,
-                "local_received_ts_ns": exchange_ts_ns,
-            }
-        },
+        metadata={},
         regime=None,
     )
 
@@ -128,6 +123,8 @@ def _make_runtime(
     flv_strategy=None,
 ):
     """SymbolRuntime stand-in matching the existing upstream test helper."""
+    guard_symbol = str(getattr(sector_signal, "symbol", None) or "ETH/USD")
+    guard_ts_ns = int(getattr(sector_signal, "exchange_ts_ns", None) or 1)
     return types.SimpleNamespace(
         last_price=last_price,
         last_sector_rotation_observed_signal=sector_signal,
@@ -141,6 +138,9 @@ def _make_runtime(
         liquidity_void_strategy=flv_strategy,
         toxicity_engine=MagicMock(),
         sentiment_velocity_engine=MagicMock(),
+        last_stale_data_assessment=StaleDataGuard(guard_symbol).assess(
+            TemporalInput(guard_ts_ns, guard_ts_ns, guard_ts_ns)
+        ),
         last_tpe_signal=None,
     )
 

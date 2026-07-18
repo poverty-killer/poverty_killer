@@ -185,6 +185,8 @@ class TemporalInvariantStatus:
     future_dated: bool
     regressed: bool
     excessive_forward_gap: bool
+    local_clock_regressed: bool
+    receipt_after_assessment: bool
     reason: Optional[str] = None
     veto_reason: Optional[RiskVetoReason] = None
 
@@ -196,6 +198,8 @@ class TemporalRiskAssessment:
     """
     symbol: str
     timestamp_ns: int
+    exchange_ts_ns: int
+    local_received_ts_ns: int
 
     risk_level: RiskLevel
     severity: InvariantViolationSeverity
@@ -212,6 +216,52 @@ class TemporalRiskAssessment:
 
     rationale: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Stable replay/guardrail evidence without enum or dataclass leakage."""
+        return {
+            "symbol": self.symbol,
+            "timestamp_ns": self.timestamp_ns,
+            "exchange_ts_ns": self.exchange_ts_ns,
+            "local_received_ts_ns": self.local_received_ts_ns,
+            "risk_level": self.risk_level.value,
+            "severity": self.severity.value,
+            "risk_action": self.risk_action.value,
+            "authority_tier": self.authority_tier.value,
+            "priority": self.priority.value,
+            "hazard_velocity": self.hazard_velocity.value,
+            "invariant_status": {
+                "valid": self.invariant_status.valid,
+                "future_dated": self.invariant_status.future_dated,
+                "regressed": self.invariant_status.regressed,
+                "excessive_forward_gap": self.invariant_status.excessive_forward_gap,
+                "local_clock_regressed": self.invariant_status.local_clock_regressed,
+                "receipt_after_assessment": self.invariant_status.receipt_after_assessment,
+                "reason": self.invariant_status.reason,
+                "veto_reason": (
+                    self.invariant_status.veto_reason.value
+                    if self.invariant_status.veto_reason is not None
+                    else None
+                ),
+            },
+            "kinematics": {
+                "drift_ns": self.kinematics.drift_ns,
+                "velocity_ns_s": self.kinematics.velocity_ns_s,
+                "acceleration_ns_s2": self.kinematics.acceleration_ns_s2,
+                "jitter_sigma_ns": self.kinematics.jitter_sigma_ns,
+                "z_score": self.kinematics.z_score,
+                "entropy": self.kinematics.entropy,
+                "skewness": self.kinematics.skewness,
+                "sample_count": self.kinematics.sample_count,
+                "interval_ns": self.kinematics.interval_ns,
+                "micro_stalls_detected": self.kinematics.micro_stalls_detected,
+                "uptime_ns": self.kinematics.uptime_ns,
+            },
+            "warm": self.warm,
+            "suppress_reason": self.suppress_reason,
+            "rationale": self.rationale,
+            "warnings": self.warnings,
+        }
 
 
 # ============================================================================
@@ -252,6 +302,7 @@ class StaleDataGuard:
         self._last_velocity = 0.0
         self._last_arrival_ts_ns = 0
         self._last_exchange_ts_ns = 0
+        self._last_assessment_ts_ns = 0
 
         # Compatibility attribute
         self.sigma_limit = self.config.sigma_limit
@@ -267,35 +318,47 @@ class StaleDataGuard:
         rationale = []
         warnings = []
 
+        arrival_ts_ns = int(
+            observation.local_received_ts_ns
+            if observation.local_received_ts_ns is not None
+            else observation.current_ts_ns
+        )
+
         invariant_status = self._validate_invariant_status(
             incoming_exchange_ts_ns=observation.exchange_ts_ns,
             current_ts_ns=observation.current_ts_ns,
+            local_received_ts_ns=arrival_ts_ns,
         )
 
         interval_ns = (
-            observation.current_ts_ns - self._last_arrival_ts_ns
+            arrival_ts_ns - self._last_arrival_ts_ns
             if self._last_arrival_ts_ns > 0 else 0
         )
 
-        drift_ns = observation.current_ts_ns - observation.exchange_ts_ns
+        drift_ns = arrival_ts_ns - observation.exchange_ts_ns
 
-        dt_s = (
-            max((observation.current_ts_ns - self._last_arrival_ts_ns) / NS_PER_SEC, 1e-9)
-            if self._last_arrival_ts_ns > 0 else 0.001
-        )
-
-        velocity_ns_s = (drift_ns - self._last_drift) / dt_s
-        acceleration_ns_s2 = (velocity_ns_s - self._last_velocity) / dt_s
+        if self._last_arrival_ts_ns > 0:
+            dt_s = max(
+                (arrival_ts_ns - self._last_arrival_ts_ns) / NS_PER_SEC,
+                1e-9,
+            )
+            velocity_ns_s = (drift_ns - self._last_drift) / dt_s
+            acceleration_ns_s2 = (velocity_ns_s - self._last_velocity) / dt_s
+        else:
+            # A first observation has no temporal derivative. Inventing a
+            # denominator here creates a false velocity and a false SAFE_MODE.
+            velocity_ns_s = 0.0
+            acceleration_ns_s2 = 0.0
 
         self._push_sample(
             drift_ns=drift_ns,
             interval_ns=interval_ns,
-            arrival_ts_ns=observation.current_ts_ns,
+            arrival_ts_ns=arrival_ts_ns,
             exchange_ts_ns=observation.exchange_ts_ns,
         )
 
         active = self._active_view()
-        stats = self._compute_statistics(active)
+        stats = self._compute_statistics(active, current_drift_ns=drift_ns)
 
         if not invariant_status.valid:
             rationale.append(f"invariant_violation:{invariant_status.reason}")
@@ -359,6 +422,8 @@ class StaleDataGuard:
         assessment = TemporalRiskAssessment(
             symbol=self.symbol,
             timestamp_ns=observation.current_ts_ns,
+            exchange_ts_ns=observation.exchange_ts_ns,
+            local_received_ts_ns=arrival_ts_ns,
             risk_level=risk_level,
             severity=severity,
             risk_action=risk_action,
@@ -375,8 +440,9 @@ class StaleDataGuard:
 
         self._last_drift = drift_ns
         self._last_velocity = velocity_ns_s
-        self._last_arrival_ts_ns = observation.current_ts_ns
+        self._last_arrival_ts_ns = arrival_ts_ns
         self._last_exchange_ts_ns = observation.exchange_ts_ns
+        self._last_assessment_ts_ns = observation.current_ts_ns
 
         return assessment
 
@@ -407,9 +473,11 @@ class StaleDataGuard:
         """
         Legacy compatibility boolean check.
         """
+        current_ts_ns = time.time_ns()
         status = self._validate_invariant_status(
             incoming_exchange_ts_ns=incoming_exchange_ts_ns,
-            current_ts_ns=time.time_ns(),
+            current_ts_ns=current_ts_ns,
+            local_received_ts_ns=current_ts_ns,
         )
         if not status.valid:
             if status.future_dated:
@@ -469,6 +537,7 @@ class StaleDataGuard:
             "state": {
                 "last_arrival_ts_ns": int(self._last_arrival_ts_ns),
                 "last_exchange_ts_ns": int(self._last_exchange_ts_ns),
+                "last_assessment_ts_ns": int(self._last_assessment_ts_ns),
                 "buffer_ptr": int(self._ptr),
                 "buffer_full": bool(self._is_full),
             },
@@ -494,7 +563,12 @@ class StaleDataGuard:
     def _active_view(self) -> np.ndarray:
         return self._buffer if self._is_full else self._buffer[:self._ptr]
 
-    def _compute_statistics(self, active: np.ndarray) -> Dict[str, float]:
+    def _compute_statistics(
+        self,
+        active: np.ndarray,
+        *,
+        current_drift_ns: Optional[int] = None,
+    ) -> Dict[str, float]:
         if len(active) == 0:
             return {
                 "std_drift": 0.0,
@@ -514,7 +588,12 @@ class StaleDataGuard:
         std_drift = float(np.std(drifts)) if len(active) >= self.config.min_samples else 0.0
 
         if std_drift > 0:
-            z_score = float((self._last_drift - mean_drift) / std_drift)
+            observed_drift = (
+                self._last_drift
+                if current_drift_ns is None
+                else int(current_drift_ns)
+            )
+            z_score = float((observed_drift - mean_drift) / std_drift)
         else:
             z_score = 0.0
 
@@ -637,6 +716,7 @@ class StaleDataGuard:
         *,
         incoming_exchange_ts_ns: int,
         current_ts_ns: int,
+        local_received_ts_ns: int,
     ) -> TemporalInvariantStatus:
         """
         Hard invariant:
@@ -647,12 +727,41 @@ class StaleDataGuard:
         tolerance_ns = self.config.future_skew_tolerance_ms * NS_PER_MS
         max_forward_gap_ns = self.config.max_forward_gap_ms * NS_PER_MS
 
-        future_dated = incoming_exchange_ts_ns > (current_ts_ns + tolerance_ns)
+        future_dated = incoming_exchange_ts_ns > (local_received_ts_ns + tolerance_ns)
         regressed = self._last_exchange_ts_ns > 0 and incoming_exchange_ts_ns < self._last_exchange_ts_ns
         excessive_forward_gap = (
             self._last_exchange_ts_ns > 0 and
             (incoming_exchange_ts_ns - self._last_exchange_ts_ns) > max_forward_gap_ns
         )
+        local_clock_regressed = (
+            (self._last_arrival_ts_ns > 0 and local_received_ts_ns < self._last_arrival_ts_ns)
+            or (self._last_assessment_ts_ns > 0 and current_ts_ns < self._last_assessment_ts_ns)
+        )
+        receipt_after_assessment = local_received_ts_ns > current_ts_ns
+
+        if receipt_after_assessment:
+            return TemporalInvariantStatus(
+                valid=False,
+                future_dated=False,
+                regressed=False,
+                excessive_forward_gap=False,
+                local_clock_regressed=False,
+                receipt_after_assessment=True,
+                reason="local_receive_after_assessment_timestamp",
+                veto_reason=RiskVetoReason.CLOCK_SKEW,
+            )
+
+        if local_clock_regressed:
+            return TemporalInvariantStatus(
+                valid=False,
+                future_dated=False,
+                regressed=False,
+                excessive_forward_gap=False,
+                local_clock_regressed=True,
+                receipt_after_assessment=False,
+                reason="local_clock_timestamp_regression",
+                veto_reason=RiskVetoReason.CLOCK_SKEW,
+            )
 
         if future_dated:
             return TemporalInvariantStatus(
@@ -660,6 +769,8 @@ class StaleDataGuard:
                 future_dated=True,
                 regressed=False,
                 excessive_forward_gap=False,
+                local_clock_regressed=False,
+                receipt_after_assessment=False,
                 reason="future_dated_exchange_timestamp",
                 veto_reason=RiskVetoReason.CLOCK_SKEW,
             )
@@ -670,6 +781,8 @@ class StaleDataGuard:
                 future_dated=False,
                 regressed=True,
                 excessive_forward_gap=False,
+                local_clock_regressed=False,
+                receipt_after_assessment=False,
                 reason="exchange_timestamp_regression",
                 veto_reason=RiskVetoReason.STALE_MARKET_DATA,
             )
@@ -680,6 +793,8 @@ class StaleDataGuard:
                 future_dated=False,
                 regressed=False,
                 excessive_forward_gap=True,
+                local_clock_regressed=False,
+                receipt_after_assessment=False,
                 reason="excessive_exchange_forward_gap",
                 veto_reason=RiskVetoReason.STALE_MARKET_DATA,
             )
@@ -689,6 +804,8 @@ class StaleDataGuard:
             future_dated=False,
             regressed=False,
             excessive_forward_gap=False,
+            local_clock_regressed=False,
+            receipt_after_assessment=False,
             reason=None,
             veto_reason=None,
         )

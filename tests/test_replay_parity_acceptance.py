@@ -127,13 +127,7 @@ def _build_strategy_signal(
         price=None,
         exchange_ts_ns=t0_ns,
         reason="replay_parity_acceptance",
-        metadata={
-            "stale_data_observation": {
-                "current_ts_ns": t0_ns,
-                "exchange_ts_ns": t0_ns,
-                "local_received_ts_ns": t0_ns,
-            }
-        },
+        metadata={},
         regime=None,
     )
 
@@ -146,12 +140,17 @@ def _build_vote_via_real_adapter(signal: StrategySignal, t0_ns: int):
     )
 
 
-def _build_runtime(symbol: str = "ETH/USD") -> SymbolRuntime:
+def _build_runtime(symbol: str, t0_ns: int) -> SymbolRuntime:
     runtime = SymbolRuntime(symbol=symbol)
     runtime.shadow_front_strategy = MagicMock()
     runtime.sector_rotation_strategy = MagicMock()
     runtime.toxicity_engine = MagicMock()
     runtime.sentiment_velocity_engine = MagicMock()
+    runtime.observe_transport(
+        exchange_ts_ns=t0_ns,
+        receive_ts_ns=t0_ns,
+        assessment_ts_ns=t0_ns,
+    )
     return runtime
 
 
@@ -319,7 +318,7 @@ def _run_happy_path(t0_ns: int) -> Dict[str, Any]:
         signal = _build_strategy_signal(t0_ns, side="buy", quantity=0.5)
         vote = _build_vote_via_real_adapter(signal, t0_ns)
 
-        runtime = _build_runtime("ETH/USD")
+        runtime = _build_runtime("ETH/USD", t0_ns)
         runtime.update_candle(candle)
         runtime.update_order_book(book)
         runtime.record_observed_signal("sector_rotation", signal)
@@ -412,7 +411,7 @@ def _run_negative_stale(t0_ns: int, *, delta_ns: int = 60_000_000_000) -> Dict[s
         stale_signal = _build_strategy_signal(t0_ns - delta_ns, side="buy")
         stale_vote = _build_vote_via_real_adapter(stale_signal, t0_ns - delta_ns)
 
-        runtime = _build_runtime("ETH/USD")
+        runtime = _build_runtime("ETH/USD", t0_ns)
         runtime.update_candle(_build_candle(t0_ns, close=2500.0))
         runtime.update_order_book(_build_book(t0_ns, mid=2500.0))
         runtime.record_observed_signal("sector_rotation", stale_signal)
@@ -455,7 +454,7 @@ def _run_negative_missing(t0_ns: int) -> Dict[str, Any]:
     pair recorded. Consume gate must return (None, None); no fill possible.
     """
     with ReplayTimeContext(t0_ns):
-        runtime = _build_runtime("ETH/USD")
+        runtime = _build_runtime("ETH/USD", t0_ns)
         runtime.update_candle(_build_candle(t0_ns))
         runtime.update_order_book(_build_book(t0_ns))
         # No record_observed_*.
@@ -865,7 +864,7 @@ class TestReplayParityNegativeControls:
                 signal = _build_strategy_signal(t0_ns, side="buy")
                 vote = _build_vote_via_real_adapter(signal, t0_ns)
 
-                runtime = _build_runtime("ETH/USD")
+                runtime = _build_runtime("ETH/USD", t0_ns)
                 runtime.update_candle(_build_candle(t0_ns))
                 runtime.update_order_book(_build_book(t0_ns))
                 runtime.record_observed_signal("sector_rotation", signal)

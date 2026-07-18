@@ -100,6 +100,10 @@ class OrderBookSnapshot(BaseModel):
     bids: List[Tuple[float, float]] = Field(description="[(price, size), ...]")
     asks: List[Tuple[float, float]] = Field(description="[(price, size), ...]")
     exchange_latency_ns: Optional[int] = None
+    receive_ts_ns: Optional[int] = Field(
+        default=None,
+        description="Local transport receipt time; never a substitute for exchange time",
+    )
 
     @property
     def exchange_ts_sec(self) -> float:

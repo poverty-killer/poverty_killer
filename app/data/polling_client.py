@@ -5,14 +5,15 @@ Acts as fallback when WebSocket connection fails.
 
 TIMESTAMP TRUTH:
 - exchange_ts_ns extracted from exchange response where available
-- Fallback to now_ns() is permitted for REST polling (non-authoritative fallback)
-- receive_ts_ns captured at response receipt for monitoring
+- Kraken depth without a source-level timestamp fails closed
+- receive_ts_ns remains distinct transport receipt evidence
 """
 
 import asyncio
 import calendar
 import logging
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Callable, Any, Mapping
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -287,7 +288,11 @@ class PollingClient:
                 if response.status == 200:
                     data = await response.json()
                     response_received_ns = now_ns()
-                    order_book = self._parse_order_book(data, symbol)
+                    order_book = self._parse_order_book(
+                        data,
+                        symbol,
+                        receive_ts_ns=response_received_ns,
+                    )
 
                     if order_book and self.on_order_book:
                         await self._safe_callback(self.on_order_book, order_book)
@@ -668,7 +673,13 @@ class PollingClient:
 
         return candles
 
-    def _parse_order_book(self, data: Dict, symbol: str) -> Optional[OrderBookSnapshot]:
+    def _parse_order_book(
+        self,
+        data: Dict,
+        symbol: str,
+        *,
+        receive_ts_ns: Optional[int] = None,
+    ) -> Optional[OrderBookSnapshot]:
         """
         Parse order book from exchange response.
 
@@ -705,6 +716,7 @@ class PollingClient:
                     exchange_ts_ns=exchange_ts_ns,
                     bids=bids[:50],
                     asks=asks[:50],
+                    receive_ts_ns=receive_ts_ns,
                 )
 
             result = data.get("result", {})
@@ -713,6 +725,7 @@ class PollingClient:
                     bids_raw = book_data.get("bids", [])
                     asks_raw = book_data.get("asks", [])
 
+                    source_level_ts_ns: list[int] = []
                     bids = []
                     for entry in bids_raw:
                         try:
@@ -721,6 +734,10 @@ class PollingClient:
                                 price = float(entry[0])
                                 size = float(entry[1])
                                 bids.append((price, size))
+                                if len(entry) >= 3:
+                                    source_level_ts_ns.append(
+                                        int(Decimal(str(entry[2])) * Decimal(1_000_000_000))
+                                    )
                             else:
                                 logger.warning(f"Malformed bid entry in order book for {symbol}: {entry}")
                         except (ValueError, TypeError) as e:
@@ -733,22 +750,33 @@ class PollingClient:
                                 price = float(entry[0])
                                 size = float(entry[1])
                                 asks.append((price, size))
+                                if len(entry) >= 3:
+                                    source_level_ts_ns.append(
+                                        int(Decimal(str(entry[2])) * Decimal(1_000_000_000))
+                                    )
                             else:
                                 logger.warning(f"Malformed ask entry in order book for {symbol}: {entry}")
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Failed to convert ask entry for {symbol}: {entry} - {e}")
 
-                    # REST responses often lack timestamp; use receipt time as fallback
-                    # This is a REST polling fallback, not authoritative WebSocket path
-                    exchange_ts_ns = now_ns()
+                    if not source_level_ts_ns:
+                        logger.warning(
+                            "Kraken order book missing source-level timestamp for %s; rejecting",
+                            symbol,
+                        )
+                        return None
+                    exchange_ts_ns = max(source_level_ts_ns)
 
                     return OrderBookSnapshot(
                         symbol=symbol,
                         exchange_ts_ns=exchange_ts_ns,
                         bids=bids[:50],
-                        asks=asks[:50]
+                        asks=asks[:50],
+                        receive_ts_ns=receive_ts_ns,
                     )
 
+        except (InvalidOperation, ValueError, TypeError) as e:
+            logger.error(f"Failed to parse order book timestamps for {symbol}: {e}")
         except Exception as e:
             logger.error(f"Failed to parse order book for {symbol}: {e}")
 

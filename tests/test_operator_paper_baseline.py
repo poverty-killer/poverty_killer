@@ -31,6 +31,7 @@ from app.operator_activation.paper_baseline import (
 )
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from app.main_loop import _build_pre_trade_guardrail_verdict
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 
 
 @pytest.fixture(autouse=True)
@@ -504,14 +505,18 @@ def test_runtime_context_does_not_baseline_block_unprotected_symbol() -> None:
             quantity=Decimal("1"),
             metadata={
                 "quote_fresh": True,
-                "stale_data_observation": {
-                    "current_ts_ns": 1_777_948_800_000_000_000,
-                    "exchange_ts_ns": 1_777_948_800_000_000_000,
-                    "local_received_ts_ns": 1_777_948_800_000_000_000,
-                },
             },
         ),
-        runtime=SimpleNamespace(last_price=Decimal("100")),
+        runtime=SimpleNamespace(
+            last_price=Decimal("100"),
+            last_stale_data_assessment=StaleDataGuard("LTC/USD").assess(
+                TemporalInput(
+                    1_777_948_800_000_000_000,
+                    1_777_948_800_000_000_000,
+                    1_777_948_800_000_000_000,
+                )
+            ),
+        ),
         is_attack=False,
     )
 

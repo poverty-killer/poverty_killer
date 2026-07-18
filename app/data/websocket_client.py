@@ -11,7 +11,7 @@ TIMESTAMP TRUTH (STRICT AUTHORITATIVE PATH):
 - exchange_ts_ns MUST come from exchange-provided nested Kraken v2 timestamps
 - Messages WITHOUT lawful exchange timestamp are REJECTED (dropped, logged)
 - No wall-clock substitution for authoritative timestamps
-- receive_ts_ns captured for telemetry only (not passed to canonical models)
+- receive_ts_ns is explicit causal-availability and transport-health evidence
 """
 
 import asyncio
@@ -38,7 +38,7 @@ class KrakenWebSocketClient:
     TIMESTAMP AUTHORITY:
     - exchange_ts_ns extracted from nested Kraken v2 RFC3339 timestamps
     - Messages missing lawful exchange timestamp are REJECTED (not fabricated)
-    - receive_ts_ns captured for monitoring only
+    - receive_ts_ns is retained separately from exchange event identity
     """
     
     def __init__(
@@ -389,7 +389,7 @@ class KrakenWebSocketClient:
 
         Args:
             raw_message: Raw WebSocket message
-            receive_ts_ns: Nanosecond timestamp when message was received (telemetry only)
+            receive_ts_ns: Local receipt timestamp for transport and causal evidence
         """
         try:
             data = json.loads(raw_message)
@@ -732,6 +732,7 @@ class KrakenWebSocketClient:
                     exchange_ts_ns=effective_ts_ns,
                     bids=sorted_bids,
                     asks=sorted_asks,
+                    receive_ts_ns=receive_ts_ns,
                 )
 
                 self._messages_processed += 1
@@ -882,7 +883,9 @@ class KrakenWebSocketClient:
                         low=float(candle_data.get("low", 0)),
                         close=float(candle_data.get("close", 0)),
                         volume=float(candle_data.get("volume", 0)),
-                        timeframe="1m"
+                        timeframe="1m",
+                        candle_batch_received_ns=receive_ts_ns,
+                        provider_id="kraken_ws",
                     )
                 except Exception:
                     logger.warning("Candle payload has non-numeric OHLCV fields — rejecting")

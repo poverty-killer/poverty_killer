@@ -128,6 +128,11 @@ def _build_runtime(t0_ns: int):
     runtime.sentiment_velocity_engine = MagicMock()
     runtime.update_candle(_build_candle(t0_ns))
     runtime.update_order_book(_build_book(t0_ns))
+    runtime.observe_transport(
+        exchange_ts_ns=t0_ns,
+        receive_ts_ns=t0_ns,
+        assessment_ts_ns=t0_ns,
+    )
     signal = _build_strategy_signal(t0_ns)
     vote = _build_vote(signal, t0_ns)
     runtime.record_observed_signal("sector_rotation", signal)

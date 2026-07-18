@@ -48,6 +48,7 @@ import pytest
 from app.commander import Commander
 from app.main_loop import MainLoop
 from app.models.enums import SleeveType
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 
 
 # =============================================================================
@@ -66,14 +67,6 @@ def _make_signal(
 ):
     """Stand-in for app.models.signals.StrategySignal (duck-typed)."""
     signal_metadata = {} if metadata is None else dict(metadata)
-    signal_metadata.setdefault(
-        "stale_data_observation",
-        {
-            "current_ts_ns": exchange_ts_ns,
-            "exchange_ts_ns": exchange_ts_ns,
-            "local_received_ts_ns": exchange_ts_ns,
-        },
-    )
     return types.SimpleNamespace(
         strategy="sector_rotation",
         symbol=symbol,
@@ -116,6 +109,8 @@ def _make_runtime(
     flv_strategy=None,
 ):
     """Stand-in for app.symbol_runtime.SymbolRuntime (duck-typed for dispatch)."""
+    guard_symbol = str(getattr(sector_signal, "symbol", None) or "ETH/USD")
+    guard_ts_ns = int(getattr(sector_signal, "exchange_ts_ns", None) or 1)
     return types.SimpleNamespace(
         last_price=last_price,
         last_sector_rotation_observed_signal=sector_signal,
@@ -129,6 +124,9 @@ def _make_runtime(
         liquidity_void_strategy=flv_strategy,
         toxicity_engine=MagicMock(),
         sentiment_velocity_engine=MagicMock(),
+        last_stale_data_assessment=StaleDataGuard(guard_symbol).assess(
+            TemporalInput(guard_ts_ns, guard_ts_ns, guard_ts_ns)
+        ),
         last_tpe_signal=None,
     )
 

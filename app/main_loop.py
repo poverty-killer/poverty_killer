@@ -34,6 +34,7 @@ from app.brain.regime_detector import RegimeDetector
 from app.brain.physical_validator import PhysicalValidator
 from app.brain.toxicity_engine import ToxicityEngine, ToxicityAlert
 from app.brain.entropy_decoder import EntropyDecoder
+from app.brain.whale_flow_engine import WhaleFlowAlert
 from app.brain.insider_signal_engine import InsiderSignalEngine, InsiderSignalSnapshot
 from app.execution.engine import ExecutionEngine
 from app.strategies.strategy_router import StrategyRouter
@@ -862,40 +863,9 @@ def _int_or_none(value: Any) -> Optional[int]:
         return None
 
 
-def _pre_trade_stale_data_observation(signal: Any, metadata: Dict[str, Any]) -> Optional[Dict[str, int]]:
-    explicit = metadata.get("stale_data_observation")
-    if isinstance(explicit, dict):
-        return dict(explicit)
-
-    execution_market_truth = metadata.get("execution_market_truth")
-    snapshot = metadata.get("market_truth_snapshot") or metadata.get("candidate_market_snapshot")
-    if not isinstance(snapshot, dict) and isinstance(execution_market_truth, dict):
-        snapshot = execution_market_truth.get("market_truth_snapshot")
-    snapshot = dict(snapshot) if isinstance(snapshot, dict) else {}
-
-    current_ts_ns = _int_or_none(
-        snapshot.get("snapshot_created_ns")
-        or metadata.get("current_ts_ns")
-        or metadata.get("receive_ts_ns")
-        or metadata.get("candle_batch_received_ns")
-    )
-    exchange_ts_ns = _int_or_none(
-        snapshot.get("candle_close_ts_ns")
-        or snapshot.get("candle_id")
-        or metadata.get("exchange_ts_ns")
-        or getattr(signal, "exchange_ts_ns", None)
-    )
-    if current_ts_ns is None or exchange_ts_ns is None:
-        return None
-
-    observation: Dict[str, int] = {
-        "current_ts_ns": current_ts_ns,
-        "exchange_ts_ns": exchange_ts_ns,
-    }
-    local_received_ts_ns = _int_or_none(snapshot.get("receive_ts_ns") or metadata.get("receive_ts_ns"))
-    if local_received_ts_ns is not None:
-        observation["local_received_ts_ns"] = local_received_ts_ns
-    return observation
+def _pre_trade_stale_data_assessment(runtime: Any, _metadata: Dict[str, Any]) -> Any:
+    """Return only SymbolRuntime-owned transport evidence."""
+    return getattr(runtime, "last_stale_data_assessment", None)
 
 
 def _normalize_symbol_for_position_match(symbol: Any) -> str:
@@ -1297,7 +1267,7 @@ def _build_pre_trade_guardrail_verdict(
             economics_context=metadata.get("economics_context"),
             strategy_context=metadata.get("strategy_context"),
             exposure_authority_evidence=metadata.get("portfolio_risk_gate_evidence"),
-            stale_data_observation=_pre_trade_stale_data_observation(signal, metadata),
+            stale_data_assessment=_pre_trade_stale_data_assessment(runtime, metadata),
             source="main_loop_dispatch",
         )
     )
@@ -1657,7 +1627,7 @@ class MainLoop:
             runtime.set_shans_dependencies(
                 risk_guard=self.risk_guard,
                 data_validator=self.data_validator,
-                entropy_decoder=self.entropy_decoder
+                entropy_decoder=runtime.entropy_decoder,
             )
             self._runtimes[sym] = runtime
             logger.info(f"Initialized SymbolRuntime for {sym} with per-symbol ShansCurve")
@@ -1771,7 +1741,7 @@ class MainLoop:
             runtime.set_shans_dependencies(
                 risk_guard=self.risk_guard,
                 data_validator=self.data_validator,
-                entropy_decoder=self.entropy_decoder
+                entropy_decoder=runtime.entropy_decoder,
             )
             self._runtimes[symbol] = runtime
             logger.info(f"Defensively created SymbolRuntime for {symbol} with per-symbol ShansCurve")
@@ -2064,7 +2034,12 @@ class MainLoop:
             self._current_volatility = runtime.current_volatility
             self._primary_runtime = runtime
 
-    def _update_physical_freshness(self, symbol: str, exchange_ts_ns: int) -> None:
+    def _update_physical_freshness(
+        self,
+        symbol: str,
+        exchange_ts_ns: int,
+        receive_ts_ns: int,
+    ) -> None:
         """
         Refresh Fusion's critical physical signal from an admitted market-data event.
 
@@ -2072,9 +2047,13 @@ class MainLoop:
         timestamp supplied here must therefore match the market event that is
         about to drive Fusion, not an unrelated wall-clock fallback.
         """
-        receive_ns = time.time_ns()
-        latency_ms = max(0.0, (receive_ns - exchange_ts_ns) / 1_000_000)
-        self.physical_validator.record_latency(
+        runtime = self._ensure_runtime(symbol)
+        validator = getattr(runtime, "physical_validator", None) if runtime is not None else None
+        if validator is None:
+            logger.error("[PHYSICAL] Per-symbol validator missing for %s", symbol)
+            return
+        latency_ms = max(0.0, (receive_ts_ns - exchange_ts_ns) / 1_000_000)
+        validator.record_latency(
             symbol=symbol,
             exchange=self.exchange,
             latency_ms=latency_ms,
@@ -2082,18 +2061,32 @@ class MainLoop:
             price_impact_bps=0.0,
             timestamp_ns=exchange_ts_ns,
         )
-        phys_dict = self.physical_validator.to_fusion_dict(self.exchange)
-        self.signal_fusion.update_physical(phys_dict, exchange_ts_ns)
+        phys_dict = validator.to_fusion_dict(self.exchange)
+        phys_dict.update(
+            {
+                "symbol": symbol,
+                "source": "runtime_order_book_transport",
+                "event_ts_ns": exchange_ts_ns,
+                "received_ts_ns": receive_ts_ns,
+            }
+        )
+        self.signal_fusion.update_physical(
+            phys_dict,
+            exchange_ts_ns,
+            symbol=symbol,
+            source="runtime_order_book_transport",
+            received_ts_ns=receive_ts_ns,
+        )
 
     def _get_dispatch_regime(self, runtime: SymbolRuntime) -> RegimeType:
-        """Return the symbol-owned regime when available, else legacy global."""
+        """Return symbol-owned regime truth; missing evidence stays UNKNOWN."""
         detector = getattr(runtime, "regime_detector", None)
         get_current_regime = getattr(detector, "get_current_regime", None)
         if callable(get_current_regime):
             regime = get_current_regime()
             if isinstance(regime, RegimeType):
                 return regime
-        return self._current_regime
+        return RegimeType.UNKNOWN
 
     def _classify_shadow_front_decline(
         self,
@@ -3191,7 +3184,7 @@ class MainLoop:
         if runtime is None:
             return
 
-        receive_ns = time.time_ns()
+        receive_ns = int(getattr(order_book, "receive_ts_ns", None) or time.time_ns())
         exchange_ts_ns = order_book.exchange_ts_ns
 
         # ================================================================
@@ -3222,6 +3215,11 @@ class MainLoop:
                    symbol, processed_total, mid, spread)
 
         # Update runtime state
+        runtime.observe_transport(
+            exchange_ts_ns=exchange_ts_ns,
+            receive_ts_ns=receive_ns,
+            assessment_ts_ns=receive_ns,
+        )
         runtime.update_order_book(order_book)
 
         # STAGE 2-F3: Update OrderRouter live market mid cache only on the
@@ -3254,8 +3252,9 @@ class MainLoop:
         if mid > 0.0:
             cum_bid_vol, cum_ask_vol = order_book.depth_at_levels(10)
             
-            # Use primary runtime's last candle for volume reference (honest degradation)
-            last_candle_ref = self._primary_runtime.last_candle if self._primary_runtime else None
+            # Volume evidence is same-symbol only. Missing symbol-local candle
+            # remains an honest zero-volume degradation.
+            last_candle_ref = runtime.last_candle
             
             # ================================================================
             # PER-SYMBOL SHANS: Use runtime's own ShansCurve instance
@@ -3283,7 +3282,13 @@ class MainLoop:
                     logger.info("[SHANS_DIAG] SHANS_RESULT: symbol=%s result_type=SIGNAL score=%.4f bias=%d conf=%.4f",
                                symbol, shans_result.shans_superfluid_score,
                                shans_result.shans_bias, shans_result.shans_confidence)
-                    self.signal_fusion.update_shans(shans_result, exchange_ts_ns)
+                    self.signal_fusion.update_shans(
+                        shans_result,
+                        int(getattr(shans_result, "timestamp_ns", exchange_ts_ns)),
+                        symbol=symbol,
+                        source="runtime_shans_curve",
+                        received_ts_ns=receive_ns,
+                    )
                     logger.info("[SHANS_DIAG] FUSION_UPDATE_CALLED: symbol=%s", symbol)
                 else:
                     logger.info("[SHANS_DIAG] SHANS_RESULT: symbol=%s result_type=None", symbol)
@@ -3291,7 +3296,7 @@ class MainLoop:
             bid_price = mid - spread / 2.0
             ask_price = mid + spread / 2.0
             last_volume = last_candle_ref.volume if last_candle_ref is not None else 0.0
-            # PER-SYMBOL REGIME: Use symbol's own detector with fallback to global.
+            # PER-SYMBOL REGIME: another symbol's detector is never a fallback.
             if runtime.regime_detector is not None:
                 regime_tuple = runtime.regime_detector.update(
                     price=mid,
@@ -3304,19 +3309,17 @@ class MainLoop:
                 )
             else:
                 logger.warning(
-                    "[REGIME] No per-symbol detector for %s, using global fallback",
+                    "[REGIME] No per-symbol detector for %s; emitting UNKNOWN",
                     symbol,
                 )
-                regime_tuple = self.regime_detector.update(
-                    price=mid,
-                    volume=last_volume,
-                    bid_price=bid_price,
-                    ask_price=ask_price,
-                    bid_depth=cum_bid_vol,
-                    ask_depth=cum_ask_vol,
-                    exchange_ts_ns=exchange_ts_ns,
-                )
-            self.signal_fusion.update_regime(regime_tuple, exchange_ts_ns)
+                regime_tuple = (RegimeType.UNKNOWN, 0.0)
+            self.signal_fusion.update_regime(
+                regime_tuple,
+                exchange_ts_ns,
+                symbol=symbol,
+                source="runtime_regime_detector",
+                received_ts_ns=receive_ns,
+            )
             if symbol == self.symbol:
                 self._current_regime = regime_tuple[0]
             
@@ -3324,7 +3327,7 @@ class MainLoop:
             runtime.update_regime_multiplier(regime_tuple[0])
 
         # Physical validator uses per-symbol admitted market-data events.
-        self._update_physical_freshness(symbol, exchange_ts_ns)
+        self._update_physical_freshness(symbol, exchange_ts_ns, receive_ns)
 
         # Update sentiment engine with current proxy value
         runtime.update_sentiment_engine(exchange_ts_ns)
@@ -3413,6 +3416,14 @@ class MainLoop:
         # ================================================================
 
         exchange_ts_ns = candle.exchange_ts_ns
+        receive_ts_ns = int(
+            getattr(candle, "candle_batch_received_ns", None)
+            or time.time_ns()
+        )
+        candle_signal_ts_ns = int(
+            getattr(candle, "candle_close_ts_ns", None)
+            or exchange_ts_ns
+        )
 
         # Update runtime state
         runtime.update_candle(candle)
@@ -3422,12 +3433,9 @@ class MainLoop:
         # WHALE FLOW — STRICT CHANNEL PURITY
         # ================================================================
         # Do NOT feed Candle into SignalFusion whale_flow.
-        # Whale fusion channel accepts only WhaleFlowAlert-like payloads
-        # produced by the per-symbol WhaleFlowEngine from trade flow.
-        whale_alert = runtime.last_whale_alert
-
-        if whale_alert is not None:
-            self.signal_fusion.update_whale(whale_alert, exchange_ts_ns)
+        # Whale fusion channel is written once by the originating trade path.
+        # Candle dispatch reads the symbol-indexed as-of history without
+        # refreshing or backdating the alert.
 
         # Update per-symbol toxicity engine
         runtime.toxicity_engine.update_candle(
@@ -3435,22 +3443,45 @@ class MainLoop:
             high=candle.high,
             low=candle.low,
             close=candle.close,
-            timestamp_ns=exchange_ts_ns,
+            timestamp_ns=candle_signal_ts_ns,
         )
-        tox_alert = runtime.toxicity_engine.update_toxicity(exchange_ts_ns)
-        self.signal_fusion.update_toxicity(tox_alert, exchange_ts_ns)
+        tox_alert = runtime.toxicity_engine.update_toxicity(candle_signal_ts_ns)
+        self.signal_fusion.update_toxicity(
+            tox_alert,
+            int(getattr(tox_alert, "timestamp_ns", exchange_ts_ns)),
+            symbol=symbol,
+            source="runtime_toxicity_engine",
+            received_ts_ns=receive_ts_ns,
+        )
         
         # Update sentiment proxy with toxicity multiplier
         runtime.update_toxicity_multiplier_from_alert()
 
-        # Entropy decoder (global, per-symbol call)
+        # Entropy decoder state is symbol-owned.
         raw_entropy = min(1.0, (candle.high - candle.low) / max(candle.close, 1e-9) * 20.0)
-        entropy_score = self.entropy_decoder.update(symbol, exchange_ts_ns, raw_entropy)
-        self.signal_fusion.update_entropy(entropy_score, exchange_ts_ns)
+        entropy_decoder = runtime.entropy_decoder
+        if entropy_decoder is not None:
+            entropy_score = entropy_decoder.update(symbol, candle_signal_ts_ns, raw_entropy)
+            self.signal_fusion.update_entropy(
+                entropy_score,
+                candle_signal_ts_ns,
+                symbol=symbol,
+                source="runtime_entropy_decoder",
+                received_ts_ns=receive_ts_ns,
+            )
 
         # Insider signal (global, per-symbol snapshot)
-        insider_snapshot = self.insider_engine.get_or_default_snapshot(symbol, exchange_ts_ns)
-        self.signal_fusion.update_insider(insider_snapshot, exchange_ts_ns)
+        insider_snapshot = self.insider_engine.get_or_default_snapshot(
+            symbol,
+            candle_signal_ts_ns,
+        )
+        self.signal_fusion.update_insider(
+            insider_snapshot,
+            int(getattr(insider_snapshot, "timestamp_ns", exchange_ts_ns)),
+            symbol=symbol,
+            source="runtime_insider_signal_engine",
+            received_ts_ns=receive_ts_ns,
+        )
 
         # Commander equity update (global)
         self.commander.update_equity(self._last_equity, exchange_ts_ns)
@@ -3584,15 +3615,23 @@ class MainLoop:
                 )
             else:
                 # Refresh critical physical evidence on the admitted candle clock
-                # before Fusion evaluates physical freshness against this same
-                # dispatch timestamp. This preserves hard stale-physical vetoes
-                # while preventing active admitted candles from comparing against
-                # an older order-book event timestamp.
-                self._update_physical_freshness(symbol, exchange_ts_ns)
+                # Fusion decides at local candle-batch receipt time. The
+                # per-symbol physical lane remains sourced by admitted order-book
+                # transport, so an old or missing book still hard-vetoes here.
+                decision_ts_ns = int(
+                    candle_execution_truth.get("receive_ts_ns")
+                    or receive_ts_ns
+                )
 
-                # Fuse signals (global — LIMIT: single cache, called per-symbol)
-                fusion = self.signal_fusion.fuse(exchange_ts_ns)
-                self._last_fusion = fusion
+                # Fuse only this symbol's causal lane.
+                fusion = self.signal_fusion.fuse(
+                    decision_ts_ns,
+                    symbol=symbol,
+                    output_ts_ns=exchange_ts_ns,
+                )
+                runtime.last_fusion = fusion
+                if symbol == self.symbol:
+                    self._last_fusion = fusion
 
                 # Dispatch per-symbol (DIAGNOSTIC: trace dispatch entry)
                 if fusion is None:
@@ -3618,7 +3657,7 @@ class MainLoop:
         self._metrics.last_candle_exchange_ts_ns = exchange_ts_ns
 
         # Risk assessment (uses primary symbol's TPE signal for now)
-        tpe_signal = self._primary_runtime.last_tpe_signal
+        tpe_signal = runtime.last_tpe_signal
         tpe_coherence = tpe_signal.coherence_score if tpe_signal is not None else 0.5
         risk_state = self.risk_guard.assess_state(self._last_equity, tpe_coherence)
         self._last_risk_state = risk_state
@@ -3671,8 +3710,16 @@ class MainLoop:
         
         self._metrics.last_trade_exchange_ts_ns = timestamp_ns
 
-    def on_trade_with_whale(self, symbol: str, price: float, side: int, 
-                            volume: float, timestamp_ns: int) -> None:
+    def on_trade_with_whale(
+        self,
+        symbol: str,
+        price: float,
+        side: int,
+        volume: float,
+        timestamp_ns: int,
+        *,
+        receive_ts_ns: Optional[int] = None,
+    ) -> Optional[WhaleFlowAlert]:
         """
         Trade update with whale data for per-symbol engine and sentiment proxy.
         
@@ -3680,14 +3727,16 @@ class MainLoop:
         Feeds trade data to per-symbol WhaleFlowEngine and sentiment proxy.
         """
         if not self._running:
-            return
+            return None
         if symbol not in self.active_symbols:
             logger.warning(f"Received whale trade for inactive symbol {symbol}, dropping")
-            return
+            return None
         
         runtime = self._ensure_runtime(symbol)
         if runtime is None:
-            return
+            return None
+
+        received_ns = int(receive_ts_ns or time.time_ns())
         
         # Update runtime with trade price
         runtime.update_trade(price=price, timestamp_ns=timestamp_ns)
@@ -3708,6 +3757,13 @@ class MainLoop:
         
         if alert:
             logger.debug(f"Per-symbol whale update for {symbol}: dir={alert.direction.name}, conf={alert.confidence:.3f}")
+            self.signal_fusion.update_whale(
+                alert,
+                int(getattr(alert, "exchange_ts_ns", timestamp_ns)),
+                symbol=symbol,
+                source="runtime_whale_flow_engine",
+                received_ts_ns=received_ns,
+            )
         
         # Update sentiment proxy with trade volumes
         runtime.update_trade_with_volumes(buy_vol, sell_vol, timestamp_ns)
@@ -3722,6 +3778,7 @@ class MainLoop:
             self._last_price = price
         
         self._metrics.last_trade_exchange_ts_ns = timestamp_ns
+        return alert
 
     def on_equity_update(self, current_equity: float, exchange_ts_ns: int) -> None:
         """Update equity (global, not per-symbol)."""
@@ -4315,7 +4372,7 @@ class MainLoop:
         signal_fusion = getattr(self, "signal_fusion", None)
         get_fusion_telemetry = getattr(signal_fusion, "get_fusion_telemetry", None)
         if callable(get_fusion_telemetry):
-            telemetry_candidate = get_fusion_telemetry()
+            telemetry_candidate = get_fusion_telemetry(symbol=symbol)
             if isinstance(telemetry_candidate, dict):
                 fusion_telemetry = telemetry_candidate
         get_shadow_counts = getattr(execution_engine, "get_shadow_broker_mutation_counts", None)
@@ -5670,7 +5727,8 @@ class MainLoop:
                 "broker_position_cache_source": self._broker_position_cache_source,
                 "actuation": "diagnostic_trace",
                 "actuation_limits": {
-                    "signal_fusion_global": True,
+                    "signal_fusion_global": False,
+                    "signal_fusion_symbol_indexed": True,
                     "decision_compiler_global": True,
                     "execution_engine_global": True,
                     "order_router_global": True,
@@ -5685,9 +5743,13 @@ class MainLoop:
                 }
             }
 
-    def get_last_fusion(self) -> Optional[FusionDecision]:
+    def get_last_fusion(self, symbol: Optional[str] = None) -> Optional[FusionDecision]:
         with self._lock:
-            return self._last_fusion
+            selected_symbol = symbol or self.symbol
+            runtime = self._runtimes.get(selected_symbol)
+            if runtime is not None:
+                return runtime.last_fusion
+            return self._last_fusion if selected_symbol == self.symbol else None
     
     def get_runtime(self, symbol: str) -> Optional[SymbolRuntime]:
         """Get runtime container for a specific symbol."""

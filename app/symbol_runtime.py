@@ -11,6 +11,7 @@ Each SymbolRuntime owns symbol-specific:
 - Market data state (order book, candle, price, volatility)
 - TPE signal
 - Per-symbol engine instances (TopologicalEngine, ToxicityEngine, WhaleFlowEngine)
+- Per-symbol entropy, physical-validation, and temporal-integrity state
 - Per-symbol strategy instance (ShadowFrontStrategy)
 - Per-symbol sentiment (MarketSentimentProxy + SentimentVelocityEngine)
 - Per-symbol ShansCurve (asymptotic liquidity exhaustion detector)
@@ -41,13 +42,17 @@ from collections import deque
 from app.models import OrderBookSnapshot, Candle
 from app.brain.topological_engine import TopologicalEngine, TopologicalSignal
 from app.brain.toxicity_engine import ToxicityEngine
+from app.brain.entropy_decoder import EntropyDecoder
+from app.brain.physical_validator import PhysicalValidator
 from app.brain.shans_curve import ShansCurve
 from app.brain.regime_detector import RegimeDetector
 from app.brain.whale_flow_engine import WhaleFlowEngine, WhaleFlowAlert, WhaleDirection
 from app.brain.market_sentiment_proxy import MarketSentimentProxy
 from app.brain.sentiment_velocity import SentimentVelocityEngine
 from app.models.market_data import WhaleFlowScore
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput, TemporalRiskAssessment
 from app.strategies.moving_floor import TopologicalMovingFloor
+from app.utils.enums import EventSource
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -95,7 +100,7 @@ class SymbolRuntime:
     Owns all symbol-specific runtime state.
     One instance per active symbol in MainLoop.
     
-    Does NOT own global components (SignalFusion, StrategyRouter, 
+    Does NOT own global components (SignalFusion authority, StrategyRouter,
     DecisionCompiler, ExecutionEngine, OrderRouter).
     """
     symbol: str
@@ -115,6 +120,16 @@ class SymbolRuntime:
     whale_flow_engine: Optional[WhaleFlowEngine] = None
     shans_curve: Optional[ShansCurve] = None
     regime_detector: Optional[RegimeDetector] = None
+    entropy_decoder: Optional[EntropyDecoder] = None
+    physical_validator: Optional[PhysicalValidator] = None
+
+    # Persistent per-symbol transport integrity. MarketTruthSnapshot remains
+    # executable candle/book freshness authority; this is Risk evidence only.
+    stale_data_guard: Optional[StaleDataGuard] = None
+    last_stale_data_assessment: Optional[TemporalRiskAssessment] = None
+
+    # State/evidence storage only. SignalFusion remains the sole calculator.
+    last_fusion: Optional[Any] = None
     
     # Per-symbol sentiment components
     sentiment_proxy: Optional[MarketSentimentProxy] = None
@@ -168,6 +183,8 @@ class SymbolRuntime:
     
     def __post_init__(self):
         self.initialized = False
+        if self.stale_data_guard is None:
+            self.stale_data_guard = StaleDataGuard(symbol=self.symbol)
         if not hasattr(self, '_sentiment_buffer') or self._sentiment_buffer is None:
             self._sentiment_buffer = deque(maxlen=self._sentiment_buffer_max_size)
         if not hasattr(self, '_last_sent_timestamp_ns'):
@@ -270,6 +287,8 @@ class SymbolRuntime:
         self.toxicity_engine = ToxicityEngine(symbol=self.symbol)
         self.whale_flow_engine = WhaleFlowEngine(config=config)
         self.regime_detector = RegimeDetector(config=config, symbol=self.symbol)
+        self.entropy_decoder = EntropyDecoder()
+        self.physical_validator = PhysicalValidator()
         self.sentiment_proxy = MarketSentimentProxy(symbol=self.symbol)
         self.sentiment_velocity_engine = SentimentVelocityEngine()
         self.shadow_front_strategy = ShadowFrontStrategy(config=config, symbol=self.symbol)
@@ -296,18 +315,44 @@ class SymbolRuntime:
         
         self.initialized = True
     
-    def set_shans_dependencies(self, risk_guard, data_validator, entropy_decoder) -> None:
+    def set_shans_dependencies(self, risk_guard, data_validator, entropy_decoder=None) -> None:
         """
         Inject ShansCurve dependencies after MainLoop initialization.
         
-        ShansCurve requires risk_guard, data_validator, entropy_decoder which are
-        global/shared across symbols. This method injects them after per-symbol
-        ShansCurve instances are created.
+        ShansCurve requires risk_guard, data_validator, and entropy_decoder.
+        Shared policy dependencies are injected after construction while the
+        entropy decoder remains owned by this symbol runtime.
         """
         if self.shans_curve:
             self.shans_curve.risk_guard = risk_guard
             self.shans_curve.data_validator = data_validator
-            self.shans_curve.entropy_decoder = entropy_decoder
+            self.shans_curve.entropy_decoder = self.entropy_decoder or entropy_decoder
+
+    def observe_transport(
+        self,
+        *,
+        exchange_ts_ns: int,
+        receive_ts_ns: int,
+        assessment_ts_ns: Optional[int] = None,
+        source: EventSource = EventSource.MARKET_DATA,
+    ) -> TemporalRiskAssessment:
+        """Update persistent transport drift/kinematics from explicit clocks."""
+        if self.stale_data_guard is None:
+            raise RuntimeError(f"STALE_DATA_GUARD_UNINITIALIZED:{self.symbol}")
+        assessment = self.stale_data_guard.assess(
+            TemporalInput(
+                current_ts_ns=int(
+                    assessment_ts_ns
+                    if assessment_ts_ns is not None
+                    else receive_ts_ns
+                ),
+                exchange_ts_ns=int(exchange_ts_ns),
+                local_received_ts_ns=int(receive_ts_ns),
+                source=source,
+            )
+        )
+        self.last_stale_data_assessment = assessment
+        return assessment
     
     def get_shans_buffer_len(self) -> int:
         """Get current ShansCurve buffer length for diagnostics."""
@@ -560,6 +605,15 @@ class SymbolRuntime:
             "toxicity_engine_ready": self.toxicity_engine is not None,
             "whale_flow_engine_ready": self.whale_flow_engine is not None,
             "shans_curve_ready": self.shans_curve is not None,
+            "entropy_decoder_ready": self.entropy_decoder is not None,
+            "physical_validator_ready": self.physical_validator is not None,
+            "stale_data_guard_ready": self.stale_data_guard is not None,
+            "stale_data_guard_samples": (
+                self.last_stale_data_assessment.kinematics.sample_count
+                if self.last_stale_data_assessment is not None
+                else 0
+            ),
+            "has_last_fusion": self.last_fusion is not None,
             "shans_buffer_len": self.get_shans_buffer_len(),
             "sentiment_proxy_ready": self.sentiment_proxy is not None,
             "sentiment_velocity_ready": self.sentiment_velocity_engine is not None,

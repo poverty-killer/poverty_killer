@@ -19,6 +19,7 @@ from app.risk.pre_trade_guardrails import (
     PreTradeGuardrailRequest,
     evaluate_pre_trade_guardrails,
 )
+from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +115,13 @@ def test_d0_lower_layer_broker_methods_are_preserved_not_authorities() -> None:
 
 
 def test_d1_stale_data_guard_fires_and_sovereign_guard_stays_lawfully_dormant() -> None:
+    assessment = StaleDataGuard("BTC/USD").assess(
+        TemporalInput(
+            current_ts_ns=1_777_948_801_000_000_000,
+            exchange_ts_ns=1_777_948_800_000_000_000,
+            local_received_ts_ns=1_777_948_800_900_000_000,
+        )
+    )
     verdict = evaluate_pre_trade_guardrails(
         PreTradeGuardrailRequest(
             symbol="BTC/USD",
@@ -124,11 +132,7 @@ def test_d1_stale_data_guard_fires_and_sovereign_guard_stays_lawfully_dormant() 
             limit_price=Decimal("100.00"),
             current_price=Decimal("100.00"),
             internal_max_notional=Decimal("1.00"),
-            stale_data_observation={
-                "current_ts_ns": 1_777_948_801_000_000_000,
-                "exchange_ts_ns": 1_777_948_800_000_000_000,
-                "local_received_ts_ns": 1_777_948_800_900_000_000,
-            },
+            stale_data_assessment=assessment,
             source="phase_d_guard_liveness_probe",
         )
     )
@@ -144,7 +148,7 @@ def test_d1_stale_data_guard_fires_and_sovereign_guard_stays_lawfully_dormant() 
 
     main_loop_source = (REPO_ROOT / "app" / "main_loop.py").read_text(encoding="utf-8")
     assert "evaluate_pre_trade_guardrails(" in main_loop_source
-    assert "_pre_trade_stale_data_observation(signal, metadata)" in main_loop_source
+    assert "_pre_trade_stale_data_assessment(runtime, metadata)" in main_loop_source
     assert "StaleDataGuard(" not in main_loop_source
     assert "SovereignExecutionGuard(" not in main_loop_source
 
