@@ -144,9 +144,27 @@ def _crypto_preflight(*, account_id: str = "paper-account-045ded") -> dict[str, 
     return _preflight(
         account_id=account_id,
         positions=[
-            {"symbol": "BTCUSD", "asset_class": "crypto", "qty": "0.5", "side": "long"},
-            {"symbol": "ETHUSD", "asset_class": "crypto", "qty": "2", "side": "long"},
-            {"symbol": "SOLUSD", "asset_class": "crypto", "qty": "10", "side": "long"},
+            {
+                "symbol": "BTCUSD",
+                "asset_class": "crypto",
+                "qty": "0.5",
+                "side": "long",
+                "avg_entry_price": "50000",
+            },
+            {
+                "symbol": "ETHUSD",
+                "asset_class": "crypto",
+                "qty": "2",
+                "side": "long",
+                "avg_entry_price": "3000",
+            },
+            {
+                "symbol": "SOLUSD",
+                "asset_class": "crypto",
+                "qty": "10",
+                "side": "long",
+                "avg_entry_price": "140",
+            },
         ]
     )
 
@@ -408,6 +426,7 @@ def test_runtime_baseline_context_loads_from_env_and_normalizes_symbols(tmp_path
     assert loaded.policy == BASELINE_POLICY_PROTECTED
     assert loaded.same_symbol_baseline_guard_active is True
     assert loaded.protected_symbols_normalized == ("BTCUSD", "ETHUSD", "SOLUSD")
+    assert loaded.protected_positions["BTCUSD"]["avg_entry_price"] == "50000"
     assert env[PAPER_BASELINE_ENV_REQUIRED] == "1"
     assert env[PAPER_BASELINE_ENV_PATH] == str(path)
     assert env[PAPER_BASELINE_ENV_SNAPSHOT_ID] == accepted["baseline_snapshot_id"]

@@ -311,11 +311,42 @@ def _build_runtime_decision_frame(
     )
 
 
-def _portfolio_risk_gate_enabled(config: Any) -> bool:
+def _portfolio_risk_gate_enabled(
+    config: Any,
+    *,
+    exposure_manager: Any = None,
+    symbol: str = "",
+) -> bool:
+    if str(getattr(config, "broker_mode", "")).lower() != "paper":
+        return False
+    if getattr(config, "portfolio_risk_gate_paper_enabled", False):
+        return True
+    if exposure_manager is None or not hasattr(
+        exposure_manager,
+        "broker_inventory_authority_evidence",
+    ):
+        return False
+    inventory_evidence = exposure_manager.broker_inventory_authority_evidence(symbol)
     return bool(
-        getattr(config, "portfolio_risk_gate_paper_enabled", False)
-        and str(getattr(config, "broker_mode", "")).lower() == "paper"
+        isinstance(inventory_evidence, dict)
+        and inventory_evidence.get("broker_inventory_required") is True
     )
+
+
+_CANDIDATE_INVENTORY_AUTHORITY_FIELDS = (
+    "broker_inventory_evidence",
+    "existing_positions",
+    "open_orders",
+    "reservations",
+    "run_acquired_qty",
+    "paper_baseline_lot_tracking_available",
+    "broker_position_backed",
+)
+
+
+def _strip_candidate_inventory_authority(metadata: Dict[str, Any]) -> None:
+    for field in _CANDIDATE_INVENTORY_AUTHORITY_FIELDS:
+        metadata.pop(field, None)
 
 
 def _portfolio_risk_gate_block_evidence(
@@ -356,7 +387,11 @@ def _apply_portfolio_risk_gate_to_signal(
     if not isinstance(getattr(signal, "metadata", None), dict):
         signal.metadata = metadata
 
-    enabled = _portfolio_risk_gate_enabled(config)
+    enabled = _portfolio_risk_gate_enabled(
+        config,
+        exposure_manager=exposure_manager,
+        symbol=symbol,
+    )
     metadata["portfolio_risk_gate_required"] = enabled
     metadata["portfolio_risk_gate_policy_version"] = str(
         getattr(config, "portfolio_risk_gate_policy_version", "P3B_B1_V1")
@@ -408,6 +443,30 @@ def _apply_portfolio_risk_gate_to_signal(
     if not isinstance(correlation_pairs, dict):
         correlation_pairs = {}
 
+    inventory_evidence = (
+        exposure_manager.broker_inventory_authority_evidence(symbol)
+        if hasattr(exposure_manager, "broker_inventory_authority_evidence")
+        else {}
+    )
+    if isinstance(inventory_evidence, dict):
+        snapshot_id = inventory_evidence.get("snapshot_id")
+        if snapshot_id:
+            metadata["broker_inventory_snapshot_id"] = snapshot_id
+    broker_inventory_required = bool(
+        isinstance(inventory_evidence, dict)
+        and inventory_evidence.get("broker_inventory_required") is True
+    )
+    if broker_inventory_required:
+        _strip_candidate_inventory_authority(metadata)
+    available_qty = _vote_decimal(inventory_evidence.get("available_qty")) if isinstance(inventory_evidence, dict) else None
+    canonical_broker_position_backed = bool(
+        broker_inventory_required
+        and inventory_evidence.get("broker_inventory_reconciled") is True
+        and inventory_evidence.get("known_attribution") is True
+        and available_qty is not None
+        and available_qty >= qty
+    )
+
     evidence = exposure_manager.evaluate_pre_trade_portfolio_gate(
         policy_version=metadata["portfolio_risk_gate_policy_version"],
         sleeve=metadata.get("sleeve") or getattr(signal, "strategy", None),
@@ -416,7 +475,11 @@ def _apply_portfolio_risk_gate_to_signal(
         qty=qty,
         price=price,
         action=metadata.get("execution_action") or metadata.get("action") or getattr(signal, "side", None),
-        broker_position_backed=metadata.get("broker_position_backed") is True,
+        broker_position_backed=(
+            canonical_broker_position_backed
+            if broker_inventory_required
+            else metadata.get("broker_position_backed") is True
+        ),
         max_utilization=getattr(config, "portfolio_risk_max_utilization", None),
         max_asset_concentration=getattr(config, "portfolio_risk_max_asset_concentration", None),
         cash_reserve_pct=getattr(config, "portfolio_risk_cash_reserve_pct", None),
@@ -424,9 +487,9 @@ def _apply_portfolio_risk_gate_to_signal(
         correlation_slash_factor=getattr(config, "portfolio_risk_correlation_slash_factor", None),
         correlation_pairs=correlation_pairs,
         correlation_truth_status=metadata.get("correlation_truth_status"),
-        existing_positions=_metadata_sequence(metadata.get("existing_positions")),
-        open_orders=_metadata_sequence(metadata.get("open_orders")),
-        reservations=_metadata_sequence(metadata.get("reservations")),
+        existing_positions=() if broker_inventory_required else _metadata_sequence(metadata.get("existing_positions")),
+        open_orders=() if broker_inventory_required else _metadata_sequence(metadata.get("open_orders")),
+        reservations=() if broker_inventory_required else _metadata_sequence(metadata.get("reservations")),
     )
     metadata["portfolio_risk_gate_evidence"] = evidence
     if evidence.get("authorized") is True and evidence.get("adjusted") is True:
@@ -907,9 +970,21 @@ def _classify_sell_intent(
     side: str,
     metadata: Dict[str, Any],
     existing_positions: Tuple[Dict[str, Any], ...],
+    inventory_evidence: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     if str(side or "").lower() != "sell":
         return None
+    if isinstance(inventory_evidence, dict) and inventory_evidence.get("broker_inventory_required") is True:
+        broker_qty = _to_decimal_or_none(inventory_evidence.get("broker_qty")) or Decimal("0")
+        available_qty = _to_decimal_or_none(inventory_evidence.get("available_qty")) or Decimal("0")
+        if (
+            inventory_evidence.get("broker_inventory_reconciled") is True
+            and inventory_evidence.get("known_attribution") is True
+            and broker_qty > Decimal("0")
+            and available_qty > Decimal("0")
+        ):
+            return "SELL_EXIT_EXISTING_BROKER_POSITION"
+        return "SELL_AUTHORITY_MISSING"
     if _matching_positive_position(symbol, existing_positions):
         return "SELL_EXIT_EXISTING_BROKER_POSITION"
     local_position = metadata.get("local_sim_position") or metadata.get("sim_position")
@@ -1112,7 +1187,11 @@ def _build_pre_trade_guardrail_verdict(
         signal.metadata = metadata
 
     should_apply_portfolio_gate = (
-        _portfolio_risk_gate_enabled(config)
+        _portfolio_risk_gate_enabled(
+            config,
+            exposure_manager=exposure_manager,
+            symbol=symbol,
+        )
         and not isinstance(metadata.get("portfolio_risk_gate_evidence"), dict)
         and (exposure_manager is not None or metadata.get("portfolio_risk_gate_required") is True)
     )
@@ -1136,13 +1215,27 @@ def _build_pre_trade_guardrail_verdict(
     internal_max_notional = _to_decimal_or_none(metadata.get("internal_max_notional")) or requested_notional
     existing_positions = _metadata_sequence(metadata.get("existing_positions"))
     side = str(getattr(signal, "side", "buy")).lower()
+    inventory_evidence = (
+        exposure_manager.broker_inventory_authority_evidence(symbol)
+        if exposure_manager is not None and hasattr(exposure_manager, "broker_inventory_authority_evidence")
+        else {}
+    )
+    broker_inventory_required = bool(
+        isinstance(inventory_evidence, dict)
+        and inventory_evidence.get("broker_inventory_required") is True
+    )
+    if broker_inventory_required:
+        _strip_candidate_inventory_authority(metadata)
+    if isinstance(inventory_evidence, dict) and inventory_evidence.get("snapshot_id"):
+        metadata["broker_inventory_snapshot_id"] = inventory_evidence.get("snapshot_id")
     protective_context = metadata.get("protective_context")
     protective_context = dict(protective_context) if isinstance(protective_context, dict) else {}
     sell_intent_classification = _classify_sell_intent(
         symbol=symbol,
         side=side,
         metadata=metadata,
-        existing_positions=existing_positions,
+        existing_positions=() if broker_inventory_required else existing_positions,
+        inventory_evidence=inventory_evidence,
     )
     execution_action = _execution_action_for_signal(side, sell_intent_classification)
     if sell_intent_classification:
@@ -1158,8 +1251,16 @@ def _build_pre_trade_guardrail_verdict(
             side=side,
             requested_qty=quantity,
             accepted_baseline=accepted_baseline,
-            run_acquired_qty=metadata.get("run_acquired_qty"),
-            lot_tracking_available=metadata.get("paper_baseline_lot_tracking_available") is True,
+            run_acquired_qty=(
+                inventory_evidence.get("bot_owned_qty", inventory_evidence.get("bot_acquired_qty"))
+                if broker_inventory_required
+                else metadata.get("run_acquired_qty")
+            ),
+            lot_tracking_available=(
+                inventory_evidence.get("lot_tracking_available") is True
+                if broker_inventory_required
+                else metadata.get("paper_baseline_lot_tracking_available") is True
+            ),
         )
         if baseline_decision.get("allowed") is not True:
             metadata["broker_intent"] = False
@@ -1258,9 +1359,9 @@ def _build_pre_trade_guardrail_verdict(
             capability=capability,
             portal_selection_result=portal_result,
             quote_classification=quote_classification,
-            existing_positions=existing_positions,
-            open_orders=_metadata_sequence(metadata.get("open_orders")),
-            reservations=_metadata_sequence(metadata.get("reservations")),
+            existing_positions=() if broker_inventory_required else existing_positions,
+            open_orders=() if broker_inventory_required else _metadata_sequence(metadata.get("open_orders")),
+            reservations=() if broker_inventory_required else _metadata_sequence(metadata.get("reservations")),
             add_on_allowed=bool(metadata.get("add_on_allowed", False)),
             approval_present=bool(metadata.get("approval_present", False)),
             protective_context=protective_context or None,

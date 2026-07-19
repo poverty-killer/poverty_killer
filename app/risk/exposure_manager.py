@@ -268,6 +268,8 @@ class PositionState:
     realized_pnl: Decimal = ZERO
     unrealized_pnl: Decimal = ZERO
     fees_paid: Decimal = ZERO
+    realized_pnl_basis: str = "GROSS_EX_FEES"
+    fee_truth_status: str = "UNKNOWN"
     last_update_ns: int = 0
     source: EventSource = EventSource.RISK
 
@@ -524,6 +526,7 @@ class ExposureManager:
         max_utilization: Decimal = Decimal("0.80"),
         max_asset_concentration: Decimal = Decimal("0.25"),
         sleeve_limits: Optional[Dict[SleeveType, Decimal]] = None,
+        require_broker_inventory_reconciliation: bool = False,
     ):
         self.policy = ExposurePolicyConfig(
             initial_equity=_d(initial_equity, field_name="initial_equity"),
@@ -536,6 +539,16 @@ class ExposureManager:
         self._version = 0
         self._mutation_seq = 0
         self._reconciliation_attribution_loss = False
+        self._broker_inventory_required = bool(require_broker_inventory_reconciliation)
+        self._broker_inventory_reconciled = False
+        self._broker_inventory_snapshot_id: Optional[str] = None
+        self._broker_inventory_account_suffix: Optional[str] = None
+        self._broker_cash_available: Optional[Decimal] = None
+        self._broker_inventory_position_evidence: Dict[str, Dict[str, Any]] = {}
+        self._broker_inventory_reason_codes: tuple[str, ...] = ()
+        self._broker_inventory_pnl_basis = "NOT_APPLICABLE"
+        self._broker_inventory_fee_truth_status = "NOT_ESTABLISHED"
+        self._broker_inventory_fee_truth_complete = False
 
         self._total_equity: Decimal = self.policy.initial_equity
 
@@ -618,10 +631,18 @@ class ExposureManager:
             qty = _ensure_positive(_d(qty, field_name="qty"), "qty")
             price = _ensure_positive(_d(price, field_name="price"), "price")
 
-            current_pos = self._inventory[sleeve].get(symbol)
+            current_pos = self._position_for_normalized_locked(sleeve, symbol)
             current_qty = current_pos.qty if current_pos is not None else ZERO
 
             pending_signed_qty = self._pending_signed_qty_for(sleeve=sleeve, symbol=symbol)
+            if reduce_only and side == OrderSide.SELL:
+                # Unfilled BUY reservations are not owned inventory and cannot
+                # back a sell-to-close reservation.
+                pending_signed_qty = self._pending_signed_qty_for(
+                    sleeve=sleeve,
+                    symbol=symbol,
+                    side=OrderSide.SELL,
+                )
             current_effective_qty = current_qty + pending_signed_qty
 
             proposed_signed_qty = _signed_qty_for_side(side, qty)
@@ -823,6 +844,54 @@ class ExposureManager:
             qty_dec = _ensure_positive(_d(qty, field_name="qty"), "qty")
             price_dec = _ensure_positive(_d(price, field_name="price"), "price")
             action_text = str(action or side_value.value or "").strip().lower()
+
+            if self._broker_inventory_required and not self._broker_inventory_reconciled:
+                return self._portfolio_gate_evidence(
+                    status="CONTRIBUTED_BLOCK",
+                    reason_code="BROKER_INVENTORY_RECONCILIATION_REQUIRED",
+                    summary="Complete fresh broker inventory is required before external PAPER admission.",
+                    policy_version=policy,
+                    symbol=symbol,
+                    original_qty=qty_dec,
+                    adjusted_qty=ZERO,
+                    price=price_dec,
+                    details={
+                        "inventory_snapshot_id": self._broker_inventory_snapshot_id,
+                        "inventory_reason_codes": self._broker_inventory_reason_codes,
+                        "broker_inventory_required": True,
+                    },
+                )
+
+            if self._broker_inventory_required and side_value == OrderSide.BUY:
+                if self._broker_cash_available is None:
+                    return self._portfolio_gate_evidence(
+                        status="CONTRIBUTED_BLOCK",
+                        reason_code="BROKER_CASH_TRUTH_REQUIRED",
+                        summary="Fresh broker cash truth is required before an external PAPER BUY.",
+                        policy_version=policy,
+                        symbol=symbol,
+                        original_qty=qty_dec,
+                        adjusted_qty=ZERO,
+                        price=price_dec,
+                        details={"inventory_snapshot_id": self._broker_inventory_snapshot_id},
+                    )
+                pending_buy_notional = self._pending_buy_notional_locked()
+                if pending_buy_notional + qty_dec * price_dec > self._broker_cash_available:
+                    return self._portfolio_gate_evidence(
+                        status="CONTRIBUTED_BLOCK",
+                        reason_code="BROKER_CASH_RESERVATION_BREACH",
+                        summary="Outstanding BUY reservations plus this candidate exceed broker cash.",
+                        policy_version=policy,
+                        symbol=symbol,
+                        original_qty=qty_dec,
+                        adjusted_qty=ZERO,
+                        price=price_dec,
+                        details={
+                            "inventory_snapshot_id": self._broker_inventory_snapshot_id,
+                            "broker_cash_available": str(self._broker_cash_available),
+                            "pending_buy_notional": str(pending_buy_notional),
+                        },
+                    )
 
             max_util = (
                 _d(max_utilization, field_name="max_utilization")
@@ -1298,7 +1367,13 @@ class ExposureManager:
             if lookup is None:
                 continue
             corr, pair_status = lookup
-            if pair_status in {"STALE", "MISSING", "UNKNOWN", "UNAVAILABLE"}:
+            if pair_status in {
+                "STALE",
+                "MISSING",
+                "UNKNOWN",
+                "UNAVAILABLE",
+                "CONFLICT",
+            }:
                 return {
                     "blocked": True,
                     "slash_applied": False,
@@ -1359,34 +1434,54 @@ class ExposureManager:
     ) -> Optional[Tuple[Decimal, str]]:
         if not correlation_pairs:
             return None
-        candidates = (
-            (symbol, existing),
-            (existing, symbol),
-            tuple(sorted((symbol, existing))),
-            f"{symbol}|{existing}",
-            f"{existing}|{symbol}",
-            f"{symbol}:{existing}",
-            f"{existing}:{symbol}",
-        )
-        value = None
-        for key in candidates:
-            if key in correlation_pairs:
-                value = correlation_pairs[key]
-                break
-        if value is None:
+        target = frozenset((self._normalize_symbol(symbol), self._normalize_symbol(existing)))
+        matching_values: list[Any] = []
+        for key, candidate_value in correlation_pairs.items():
+            pair: Optional[Tuple[Any, Any]] = None
+            if isinstance(key, tuple) and len(key) == 2:
+                pair = key
+            elif isinstance(key, str):
+                for separator in ("|", ":"):
+                    parts = key.split(separator)
+                    if len(parts) == 2:
+                        pair = (parts[0], parts[1])
+                        break
+            if pair is None:
+                continue
+            normalized_pair = frozenset(
+                (self._normalize_symbol(pair[0]), self._normalize_symbol(pair[1]))
+            )
+            if normalized_pair == target:
+                matching_values.append(candidate_value)
+        if not matching_values:
             return None
-        status = "FRESH"
-        if isinstance(value, dict):
-            status = str(value.get("status") or value.get("truth_status") or "FRESH").strip().upper()
-            value = value.get("correlation")
-        try:
-            return _d(value, field_name="correlation"), status
-        except ValueError:
-            return None
+
+        parsed: list[Tuple[Decimal, str]] = []
+        for value in matching_values:
+            status = "FRESH"
+            if isinstance(value, dict):
+                status = str(
+                    value.get("status") or value.get("truth_status") or "FRESH"
+                ).strip().upper()
+                value = value.get("correlation")
+            try:
+                parsed.append((_d(value, field_name="correlation"), status))
+            except ValueError:
+                return None
+        if any(item != parsed[0] for item in parsed[1:]):
+            return ZERO, "CONFLICT"
+        return parsed[0]
 
     @staticmethod
     def _normalize_symbol(symbol: Any) -> str:
-        return str(symbol or "").strip().upper().replace("-", "/")
+        return (
+            str(symbol or "")
+            .strip()
+            .upper()
+            .replace("/", "")
+            .replace("-", "")
+            .replace("_", "")
+        )
 
     # ------------------------------------------------------------------
     # Reservation management
@@ -1430,6 +1525,13 @@ class ExposureManager:
             )
             if not result.authorized:
                 raise ValueError(f"reservation rejected: {result.reason}")
+
+            if self._broker_inventory_required and side == OrderSide.BUY:
+                if self._broker_cash_available is None:
+                    raise ValueError("broker cash truth required for BUY reservation")
+                pending_buy_notional = self._pending_buy_notional_locked()
+                if pending_buy_notional + qty * price > self._broker_cash_available:
+                    raise ValueError("BUY reservations exceed broker cash")
 
             qty = _quantize_down(_d(qty, field_name="qty"), self.policy.quantity_step)
             if qty < self.policy.min_reservation_qty:
@@ -1644,6 +1746,8 @@ class ExposureManager:
                 side=side_enum,
                 qty=qty_dec,
                 price=price,
+                trade_intent=TradeIntent.REDUCE if side_enum == OrderSide.SELL else TradeIntent.OPEN,
+                reduce_only=side_enum == OrderSide.SELL,
                 client_order_id=client_order_id,
                 dedupe_key=reservation_dedupe_key,
             )
@@ -2098,6 +2202,13 @@ class ExposureManager:
 
     def get_risk_snapshot(self, current_prices: Dict[str, Decimal]) -> Dict[str, Any]:
         snapshot = self.get_risk_snapshot_typed(current_prices=current_prices)
+        with self._lock:
+            broker_inventory_pnl_truth = {
+                "realized_pnl_basis": self._broker_inventory_pnl_basis,
+                "fee_truth_status": self._broker_inventory_fee_truth_status,
+                "fee_truth_complete": self._broker_inventory_fee_truth_complete,
+                "net_realized_pnl_claimed": False,
+            }
         return {
             "timestamp_ns": snapshot.timestamp_ns,
             "global": {
@@ -2131,6 +2242,7 @@ class ExposureManager:
             "version": snapshot.version,
             "quality": snapshot.quality.value,
             "reconciliation_attribution_loss": snapshot.reconciliation_attribution_loss,
+            "broker_inventory_pnl_truth": broker_inventory_pnl_truth,
         }
 
     def get_risk_snapshot_typed(self, current_prices: Dict[str, Decimal]) -> ExposureRiskSnapshot:
@@ -2191,6 +2303,8 @@ class ExposureManager:
                         "realized_pnl": p.realized_pnl,
                         "unrealized_pnl": p.unrealized_pnl,
                         "fees_paid": p.fees_paid,
+                        "realized_pnl_basis": p.realized_pnl_basis,
+                        "fee_truth_status": p.fee_truth_status,
                         "position_side": p.position_side.value,
                         "last_update_ns": p.last_update_ns,
                     }
@@ -2358,6 +2472,452 @@ class ExposureManager:
     # Recovery / reconciliation
     # ------------------------------------------------------------------
 
+    def ingest_reconciled_broker_inventory(self, reconciliation: Dict[str, Any]) -> Dict[str, Any]:
+        """Atomically replace the in-memory position book from durable broker truth.
+
+        The method never calls StateStore or a broker. The coordinator commits
+        the immutable snapshot first, then supplies the read-back record here.
+        Active reservations remain in their existing owner and are not removed.
+        """
+        result: Dict[str, Any] = {
+            "applied": False,
+            "reason_code": None,
+            "snapshot_id": reconciliation.get("snapshot_id") if isinstance(reconciliation, dict) else None,
+            "broker_command_performed": False,
+            "broker_mutation_occurred": False,
+        }
+        if not isinstance(reconciliation, dict) or str(reconciliation.get("status") or "").upper() != "RECONCILED":
+            result["reason_code"] = "BROKER_INVENTORY_NOT_RECONCILED"
+            return result
+
+        snapshot_id = str(reconciliation.get("snapshot_id") or "").strip()
+        account_suffix = str(reconciliation.get("account_suffix") or "").strip()
+        reconciliation_metadata = (
+            reconciliation.get("metadata")
+            if isinstance(reconciliation.get("metadata"), dict)
+            else {}
+        )
+        realized_pnl_basis = str(
+            reconciliation_metadata.get("realized_pnl_basis") or ""
+        ).strip().upper()
+        fee_truth_status = str(
+            reconciliation_metadata.get("fee_truth_status") or ""
+        ).strip().upper()
+        fee_truth_complete = reconciliation_metadata.get("fee_truth_complete") is True
+        if (
+            realized_pnl_basis != "GROSS_EX_FEES"
+            or not fee_truth_status
+            or reconciliation_metadata.get("net_realized_pnl_claimed") is not False
+        ):
+            result["reason_code"] = "BROKER_INVENTORY_PNL_TRUTH_CONTRACT_INVALID"
+            return result
+        broker_cash_available: Optional[Decimal] = None
+        cash_value = reconciliation_metadata.get("cash_available")
+        if cash_value not in (None, ""):
+            try:
+                broker_cash_available = _d(cash_value, field_name="cash_available")
+            except ValueError:
+                result["reason_code"] = "BROKER_CASH_TRUTH_INVALID"
+                return result
+            if not broker_cash_available.is_finite() or broker_cash_available < ZERO:
+                result["reason_code"] = "BROKER_CASH_TRUTH_INVALID"
+                return result
+        positions = reconciliation.get("positions") if isinstance(reconciliation.get("positions"), list) else None
+        lots = reconciliation.get("lots") if isinstance(reconciliation.get("lots"), list) else None
+        if not snapshot_id or not account_suffix or positions is None or lots is None:
+            result["reason_code"] = "BROKER_INVENTORY_PROJECTION_INCOMPLETE"
+            return result
+
+        pending_projection: Dict[str, Tuple[str, OrderSide, Decimal, Decimal, SleeveType, str]] = {}
+        for lot in lots:
+            if not isinstance(lot, dict):
+                continue
+            provenance = str(lot.get("provenance") or "").upper()
+            if provenance not in {"PENDING_BUY", "PENDING_SELL"}:
+                continue
+            metadata = lot.get("metadata") if isinstance(lot.get("metadata"), dict) else {}
+            reservation_id = str(metadata.get("reservation_id") or "").strip()
+            client_order_id = str(metadata.get("client_order_id") or "").strip()
+            symbol = self._normalize_symbol(lot.get("symbol"))
+            try:
+                qty = _ensure_positive(_d(lot.get("remaining_qty"), field_name="remaining_qty"), "remaining_qty")
+                price = _ensure_positive(_d(lot.get("avg_entry_price"), field_name="avg_entry_price"), "avg_entry_price")
+                sleeve = (
+                    _enum_from_ledger(SleeveType, lot.get("sleeve"), field_name="sleeve")
+                    if str(lot.get("sleeve") or "").strip()
+                    else SleeveType.POVERTY_KILLER_AGGREGATE
+                )
+            except ValueError:
+                result["reason_code"] = "BROKER_PENDING_RESERVATION_PROJECTION_INVALID"
+                return result
+            if not reservation_id or not client_order_id or not symbol or reservation_id in pending_projection:
+                result["reason_code"] = "BROKER_PENDING_RESERVATION_PROJECTION_INVALID"
+                return result
+            side = OrderSide.BUY if provenance == "PENDING_BUY" else OrderSide.SELL
+            pending_projection[reservation_id] = (
+                symbol,
+                side,
+                qty,
+                price,
+                sleeve,
+                client_order_id,
+            )
+
+        position_by_symbol: Dict[str, Dict[str, Any]] = {}
+        for row in positions:
+            if not isinstance(row, dict):
+                result["reason_code"] = "BROKER_INVENTORY_POSITION_ROW_INVALID"
+                return result
+            symbol = self._normalize_symbol(row.get("symbol"))
+            if not symbol or symbol in position_by_symbol:
+                result["reason_code"] = "BROKER_INVENTORY_POSITION_SYMBOL_CONFLICT"
+                return result
+            try:
+                broker_qty = _d(row.get("broker_qty"), field_name="broker_qty")
+            except ValueError:
+                result["reason_code"] = f"BROKER_INVENTORY_QUANTITY_INVALID:{symbol}"
+                return result
+            if not broker_qty.is_finite() or broker_qty < ZERO:
+                result["reason_code"] = f"BROKER_INVENTORY_QUANTITY_INVALID:{symbol}"
+                return result
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            try:
+                unknown_qty = _d(metadata.get("unknown_attribution_qty", "0"), field_name="unknown_attribution_qty")
+            except ValueError:
+                result["reason_code"] = f"BROKER_INVENTORY_UNKNOWN_ATTRIBUTION_INVALID:{symbol}"
+                return result
+            if not unknown_qty.is_finite() or unknown_qty != ZERO or metadata.get("attribution_status") != "KNOWN":
+                result["reason_code"] = f"BROKER_INVENTORY_UNKNOWN_ATTRIBUTION:{symbol}"
+                return result
+            position_by_symbol[symbol] = {**row, "symbol": symbol, "broker_qty_decimal": broker_qty}
+
+        inventory_lots = [
+            row
+            for row in lots
+            if isinstance(row, dict) and str(row.get("provenance") or "").upper() in {"ADOPTED_BASELINE", "BOT_ACQUIRED"}
+        ]
+        if any(str(row.get("provenance") or "").upper() == "UNKNOWN_ATTRIBUTION" for row in lots if isinstance(row, dict)):
+            result["reason_code"] = "BROKER_INVENTORY_UNKNOWN_ATTRIBUTION"
+            return result
+
+        candidate_inventory: Dict[SleeveType, Dict[str, PositionState]] = {sleeve: {} for sleeve in SleeveType}
+        grouped: Dict[Tuple[SleeveType, str], List[Tuple[Decimal, Decimal]]] = {}
+        totals: Dict[str, Decimal] = {symbol: ZERO for symbol in position_by_symbol}
+        for lot in inventory_lots:
+            symbol = self._normalize_symbol(lot.get("symbol"))
+            provenance = str(lot.get("provenance") or "").upper()
+            if symbol not in position_by_symbol:
+                result["reason_code"] = f"BROKER_INVENTORY_LOT_SYMBOL_UNKNOWN:{symbol or 'missing'}"
+                return result
+            try:
+                remaining_qty = _d(lot.get("remaining_qty"), field_name="remaining_qty")
+            except ValueError:
+                result["reason_code"] = f"BROKER_INVENTORY_LOT_QUANTITY_INVALID:{symbol}"
+                return result
+            if not remaining_qty.is_finite() or remaining_qty < ZERO:
+                result["reason_code"] = f"BROKER_INVENTORY_LOT_QUANTITY_INVALID:{symbol}"
+                return result
+            if remaining_qty == ZERO:
+                continue
+            if provenance == "ADOPTED_BASELINE":
+                sleeve = SleeveType.POVERTY_KILLER_AGGREGATE
+            else:
+                try:
+                    sleeve = _enum_from_ledger(SleeveType, lot.get("sleeve"), field_name="sleeve")
+                except ValueError:
+                    result["reason_code"] = f"BOT_ACQUIRED_SLEEVE_UNKNOWN:{symbol}"
+                    return result
+            price_value = lot.get("avg_entry_price") or position_by_symbol[symbol].get("avg_entry_price")
+            try:
+                price = _d(price_value, field_name="avg_entry_price")
+            except ValueError:
+                result["reason_code"] = f"BROKER_INVENTORY_LOT_PRICE_INVALID:{symbol}"
+                return result
+            if not price.is_finite() or price <= ZERO:
+                result["reason_code"] = f"BROKER_INVENTORY_LOT_PRICE_INVALID:{symbol}"
+                return result
+            grouped.setdefault((sleeve, symbol), []).append((remaining_qty, price))
+            totals[symbol] = totals.get(symbol, ZERO) + remaining_qty
+
+        for symbol, position in position_by_symbol.items():
+            if totals.get(symbol, ZERO) != position["broker_qty_decimal"]:
+                result["reason_code"] = f"BROKER_INVENTORY_TOTAL_MISMATCH:{symbol}"
+                return result
+
+        realized_by_group: Dict[Tuple[SleeveType, str], Decimal] = {}
+        for lot in lots:
+            if not isinstance(lot, dict) or str(lot.get("provenance") or "").upper() != "SOLD":
+                continue
+            symbol = self._normalize_symbol(lot.get("symbol"))
+            metadata = lot.get("metadata") if isinstance(lot.get("metadata"), dict) else {}
+            allocations = metadata.get("allocations")
+            if not isinstance(allocations, list) or not allocations:
+                result["reason_code"] = f"SOLD_ALLOCATION_LINEAGE_MISSING:{symbol or 'missing'}"
+                return result
+            try:
+                sold_qty = _d(lot.get("sold_qty"), field_name="sold_qty")
+                row_realized = _d(
+                    metadata.get("realized_pnl_ex_fees"),
+                    field_name="realized_pnl_ex_fees",
+                )
+            except ValueError:
+                result["reason_code"] = f"SOLD_REALIZED_PNL_INVALID:{symbol or 'missing'}"
+                return result
+            allocation_qty = ZERO
+            allocation_realized = ZERO
+            for allocation in allocations:
+                if not isinstance(allocation, dict) or not str(allocation.get("lot_id") or "").strip():
+                    result["reason_code"] = f"SOLD_ALLOCATION_LINEAGE_INVALID:{symbol or 'missing'}"
+                    return result
+                try:
+                    sleeve = _enum_from_ledger(
+                        SleeveType,
+                        allocation.get("sleeve"),
+                        field_name="sleeve",
+                    )
+                    quantity = _ensure_positive(
+                        _d(allocation.get("quantity"), field_name="allocation_quantity"),
+                        "allocation_quantity",
+                    )
+                    realized = _d(
+                        allocation.get("realized_pnl_ex_fees"),
+                        field_name="allocation_realized_pnl_ex_fees",
+                    )
+                except ValueError:
+                    result["reason_code"] = f"SOLD_ALLOCATION_LINEAGE_INVALID:{symbol or 'missing'}"
+                    return result
+                if not realized.is_finite():
+                    result["reason_code"] = f"SOLD_ALLOCATION_LINEAGE_INVALID:{symbol or 'missing'}"
+                    return result
+                allocation_qty += quantity
+                allocation_realized += realized
+                realized_by_group[(sleeve, symbol)] = (
+                    realized_by_group.get((sleeve, symbol), ZERO) + realized
+                )
+            if (
+                not sold_qty.is_finite()
+                or sold_qty < ZERO
+                or not row_realized.is_finite()
+                or allocation_qty != sold_qty
+                or allocation_realized != row_realized
+            ):
+                result["reason_code"] = f"SOLD_REALIZED_PNL_INVALID:{symbol or 'missing'}"
+                return result
+
+        now_ns = _now_ns()
+        for (sleeve, symbol), components in grouped.items():
+            qty = sum((component[0] for component in components), start=ZERO)
+            weighted_cost = sum((component[0] * component[1] for component in components), start=ZERO)
+            wap = weighted_cost / qty
+            broker_row = position_by_symbol[symbol]
+            mark_value = broker_row.get("mark_price") or broker_row.get("avg_entry_price") or wap
+            try:
+                mark = _d(mark_value, field_name="mark_price")
+            except ValueError:
+                result["reason_code"] = f"BROKER_INVENTORY_MARK_INVALID:{symbol}"
+                return result
+            if not mark.is_finite() or mark <= ZERO:
+                result["reason_code"] = f"BROKER_INVENTORY_MARK_INVALID:{symbol}"
+                return result
+            unrealized = (mark - wap) * qty
+            candidate_inventory[sleeve][symbol] = PositionState(
+                symbol=symbol,
+                sleeve=sleeve,
+                qty=qty,
+                wap=wap,
+                mark_price=mark,
+                mark_ts_ns=int(reconciliation.get("observed_at_ns") or now_ns),
+                realized_pnl=realized_by_group.get((sleeve, symbol), ZERO),
+                unrealized_pnl=unrealized,
+                fees_paid=ZERO,
+                realized_pnl_basis=realized_pnl_basis,
+                fee_truth_status=fee_truth_status,
+                last_update_ns=int(reconciliation.get("observed_at_ns") or now_ns),
+                source=EventSource.HYDRATION,
+            )
+
+        # Preserve realized history even if a bot-acquired lot closed fully.
+        for (sleeve, symbol), realized in realized_by_group.items():
+            if symbol in candidate_inventory[sleeve]:
+                continue
+            broker_row = position_by_symbol.get(symbol, {})
+            mark_value = broker_row.get("mark_price") or broker_row.get("avg_entry_price") or "0"
+            mark = _d(mark_value, field_name="mark_price")
+            candidate_inventory[sleeve][symbol] = PositionState(
+                symbol=symbol,
+                sleeve=sleeve,
+                qty=ZERO,
+                wap=ZERO,
+                mark_price=mark if mark.is_finite() and mark > ZERO else ZERO,
+                mark_ts_ns=int(reconciliation.get("observed_at_ns") or now_ns),
+                realized_pnl=realized,
+                unrealized_pnl=ZERO,
+                fees_paid=ZERO,
+                realized_pnl_basis=realized_pnl_basis,
+                fee_truth_status=fee_truth_status,
+                last_update_ns=int(reconciliation.get("observed_at_ns") or now_ns),
+                source=EventSource.HYDRATION,
+            )
+
+        with self._lock:
+            active_reservations = {
+                reservation.reservation_id: (
+                    self._normalize_symbol(reservation.symbol),
+                    reservation.side,
+                    reservation.open_qty,
+                    reservation.price,
+                    reservation.sleeve,
+                    str(reservation.client_order_id or ""),
+                )
+                for reservation in self._reservations.values()
+                if reservation.open_qty > ZERO
+            }
+            if active_reservations != pending_projection:
+                result["reason_code"] = "BROKER_PENDING_RESERVATION_RUNTIME_MISMATCH"
+                return result
+            previous_inventory = self._inventory
+            previous_snapshot_id = self._broker_inventory_snapshot_id
+            previous_account_suffix = self._broker_inventory_account_suffix
+            previous_broker_cash = self._broker_cash_available
+            previous_evidence = self._broker_inventory_position_evidence
+            previous_reconciled = self._broker_inventory_reconciled
+            previous_reason_codes = self._broker_inventory_reason_codes
+            previous_attribution_loss = self._reconciliation_attribution_loss
+            previous_pnl_basis = self._broker_inventory_pnl_basis
+            previous_fee_truth_status = self._broker_inventory_fee_truth_status
+            previous_fee_truth_complete = self._broker_inventory_fee_truth_complete
+            self._inventory = candidate_inventory
+            self._broker_inventory_snapshot_id = snapshot_id
+            self._broker_inventory_account_suffix = account_suffix
+            self._broker_cash_available = broker_cash_available
+            self._broker_inventory_position_evidence = {
+                symbol: {
+                    **dict(row.get("metadata") or {}),
+                    "broker_qty": str(row["broker_qty_decimal"]),
+                    "snapshot_id": snapshot_id,
+                }
+                for symbol, row in position_by_symbol.items()
+            }
+            self._broker_inventory_reconciled = True
+            self._broker_inventory_reason_codes = ()
+            self._reconciliation_attribution_loss = False
+            self._broker_inventory_pnl_basis = realized_pnl_basis
+            self._broker_inventory_fee_truth_status = fee_truth_status
+            self._broker_inventory_fee_truth_complete = fee_truth_complete
+            self._bump_version()
+            self.recompute_aggregates()
+            invariant = self.validate_invariants()
+            if not invariant.valid:
+                self._inventory = previous_inventory
+                self._broker_inventory_snapshot_id = previous_snapshot_id
+                self._broker_inventory_account_suffix = previous_account_suffix
+                self._broker_cash_available = previous_broker_cash
+                self._broker_inventory_position_evidence = previous_evidence
+                self._broker_inventory_reconciled = previous_reconciled
+                self._broker_inventory_reason_codes = previous_reason_codes
+                self._reconciliation_attribution_loss = previous_attribution_loss
+                self._broker_inventory_pnl_basis = previous_pnl_basis
+                self._broker_inventory_fee_truth_status = previous_fee_truth_status
+                self._broker_inventory_fee_truth_complete = previous_fee_truth_complete
+                self._bump_version()
+                self.recompute_aggregates()
+                result["reason_code"] = "BROKER_INVENTORY_INGEST_INVARIANT_FAILED"
+                result["violations"] = invariant.violations
+                return result
+            self._append_mutation(
+                mutation_type=MutationType.RECONCILED,
+                symbol=None,
+                sleeve=None,
+                payload={
+                    "snapshot_id": snapshot_id,
+                    "account_suffix": account_suffix,
+                    "position_count": len(position_by_symbol),
+                    "complete_book": True,
+                    "unknown_attribution": False,
+                },
+            )
+
+        result.update(
+            {
+                "applied": True,
+                "reason_code": "BROKER_INVENTORY_RECONCILED",
+                "position_count": len(position_by_symbol),
+                "symbols": tuple(sorted(position_by_symbol)),
+                "invariant_valid": True,
+            }
+        )
+        return result
+
+    def mark_broker_inventory_unreconciled(self, *reason_codes: str) -> None:
+        """Fail closed without discarding the last diagnostic snapshot."""
+        with self._lock:
+            self._broker_inventory_reconciled = False
+            self._broker_inventory_reason_codes = tuple(str(item) for item in reason_codes if str(item))
+
+    def broker_inventory_authority_evidence(self, symbol: str) -> Dict[str, Any]:
+        """Return immutable admission evidence; absence in a complete book means zero."""
+        normalized = self._normalize_symbol(symbol)
+        with self._lock:
+            base = {
+                "source": "ExposureManager",
+                "authority_class": "PORTFOLIO_RISK",
+                "snapshot_id": self._broker_inventory_snapshot_id,
+                "account_suffix": self._broker_inventory_account_suffix,
+                "broker_cash_available": None if self._broker_cash_available is None else str(self._broker_cash_available),
+                "broker_inventory_required": self._broker_inventory_required,
+                "broker_inventory_reconciled": self._broker_inventory_reconciled,
+                "reason_codes": self._broker_inventory_reason_codes,
+                "realized_pnl_basis": self._broker_inventory_pnl_basis,
+                "fee_truth_status": self._broker_inventory_fee_truth_status,
+                "fee_truth_complete": self._broker_inventory_fee_truth_complete,
+                "net_realized_pnl_claimed": False,
+                "symbol": normalized,
+                "broker_mutation_occurred": False,
+            }
+            if not self._broker_inventory_reconciled:
+                return {
+                    **base,
+                    "known_attribution": False,
+                    "lot_tracking_available": False,
+                    "authorized": not self._broker_inventory_required,
+                    "reason_code": "BROKER_INVENTORY_RECONCILIATION_REQUIRED",
+                }
+            evidence = dict(self._broker_inventory_position_evidence.get(normalized) or {})
+            if not evidence:
+                evidence = {
+                    "broker_qty": "0",
+                    "baseline_qty": "0",
+                    "bot_acquired_qty": "0",
+                    "sold_qty": "0",
+                    "unknown_attribution_qty": "0",
+                    "pending_buy_qty": "0",
+                    "pending_sell_qty": "0",
+                    "available_qty": "0",
+                    "attribution_status": "KNOWN",
+                    "snapshot_id": self._broker_inventory_snapshot_id,
+                }
+            try:
+                unknown_attribution = _d(
+                    evidence.get("unknown_attribution_qty", "0"),
+                    field_name="unknown_attribution_qty",
+                )
+            except ValueError:
+                unknown_attribution = None
+            known = (
+                str(evidence.get("attribution_status") or "") == "KNOWN"
+                and unknown_attribution is not None
+                and unknown_attribution.is_finite()
+                and unknown_attribution == ZERO
+            )
+            return {
+                **base,
+                **evidence,
+                "known_attribution": known,
+                "lot_tracking_available": known,
+                "authorized": known,
+                "reason_code": "BROKER_INVENTORY_ATTRIBUTION_KNOWN" if known else "BROKER_INVENTORY_UNKNOWN_ATTRIBUTION",
+            }
+
     def force_inventory_sync(
         self,
         symbol: str,
@@ -2470,7 +3030,7 @@ class ExposureManager:
 
     def position_for(self, sleeve: SleeveType, symbol: str) -> Optional[PositionState]:
         with self._lock:
-            return self._inventory[sleeve].get(symbol)
+            return self._position_for_normalized_locked(sleeve, symbol)
 
     def reservations_for(self, sleeve: Optional[SleeveType] = None, symbol: Optional[str] = None) -> List[PendingReservation]:
         with self._lock:
@@ -2478,7 +3038,7 @@ class ExposureManager:
             for reservation in self._reservations.values():
                 if sleeve is not None and reservation.sleeve != sleeve:
                     continue
-                if symbol is not None and reservation.symbol != symbol:
+                if symbol is not None and self._normalize_symbol(reservation.symbol) != self._normalize_symbol(symbol):
                     continue
                 if reservation.open_qty > ZERO:
                     out.append(reservation)
@@ -3113,19 +3673,21 @@ class ExposureManager:
 
     def _asset_total_mark_notional(self, symbol: str) -> Decimal:
         total = ZERO
+        normalized = self._normalize_symbol(symbol)
         for sleeve_positions in self._inventory.values():
-            pos = sleeve_positions.get(symbol)
-            if pos is not None:
-                total += pos.notional_mark
+            for position_symbol, pos in sleeve_positions.items():
+                if self._normalize_symbol(position_symbol) == normalized:
+                    total += pos.notional_mark
         return total
 
     def _asset_reserved_notional(self, symbol: str) -> Decimal:
         total = ZERO
+        normalized = self._normalize_symbol(symbol)
         for reservation in self._reservations.values():
-            if reservation.symbol != symbol or reservation.open_qty <= ZERO:
+            if self._normalize_symbol(reservation.symbol) != normalized or reservation.open_qty <= ZERO:
                 continue
 
-            current = self._inventory[reservation.sleeve].get(symbol)
+            current = self._position_for_normalized_locked(reservation.sleeve, symbol)
             current_qty = current.qty if current is not None else ZERO
             pending_ex_self = self._pending_signed_qty_for(
                 sleeve=reservation.sleeve,
@@ -3150,14 +3712,40 @@ class ExposureManager:
         sleeve: SleeveType,
         symbol: str,
         exclude_reservation_id: Optional[str] = None,
+        side: Optional[OrderSide] = None,
     ) -> Decimal:
         total = ZERO
+        normalized = self._normalize_symbol(symbol)
         for rid, reservation in self._reservations.items():
             if exclude_reservation_id is not None and rid == exclude_reservation_id:
                 continue
-            if reservation.sleeve == sleeve and reservation.symbol == symbol and reservation.open_qty > ZERO:
-                total += reservation.signed_open_qty * reservation.confidence_weight
+            if (
+                reservation.sleeve == sleeve
+                and self._normalize_symbol(reservation.symbol) == normalized
+                and reservation.open_qty > ZERO
+                and (side is None or reservation.side == side)
+            ):
+                # Quantity feasibility is exact. Confidence weighting belongs
+                # to risk notional, never to no-short / reduce-only ownership.
+                total += reservation.signed_open_qty
         return total
+
+    def _pending_buy_notional_locked(self) -> Decimal:
+        return sum(
+            (
+                reservation.open_qty * reservation.price
+                for reservation in self._reservations.values()
+                if reservation.side == OrderSide.BUY and reservation.open_qty > ZERO
+            ),
+            start=ZERO,
+        )
+
+    def _position_for_normalized_locked(self, sleeve: SleeveType, symbol: str) -> Optional[PositionState]:
+        normalized = self._normalize_symbol(symbol)
+        for position_symbol, position in self._inventory[sleeve].items():
+            if self._normalize_symbol(position_symbol) == normalized:
+                return position
+        return None
 
     def _remove_reservation(
         self,

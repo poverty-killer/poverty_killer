@@ -451,6 +451,70 @@ red-team, close evidence, limitations, research, and exact staging scope are in
   stage-entry manifest/red-team, binary exit, and Board direction. Stage 12 and
   every Stage 13 campaign remain separately gated.
 
+## PAPER True Capability Stage 2
+
+Shan directed `proceed` on 2026-07-18 after Stage 1 and required the mandatory
+pre-close production-review loop. Stage 2 is complete at the **local offline
+test rung**. Its exact 16-file cached diff passed membership, whitespace,
+summary, forbidden-control, and credential-value review. Stage 3 is not opened.
+
+- PASS - StateStore now persists immutable broker inventory events, complete
+  snapshots, per-symbol projections, and lot projections as integrity-checked
+  exact Decimal text. Legacy float tables remain preserved and non-authoritative.
+- PASS - ReservationLifecycleCoordinator deterministically reconciles the
+  pinned PAPER account, complete positions, open orders, durable mappings,
+  reservations, fills, corrections, and busts into `ADOPTED_BASELINE`,
+  `BOT_ACQUIRED`, `PENDING_BUY`, `PENDING_SELL`, `SOLD`, or fail-closed
+  `UNKNOWN_ATTRIBUTION` lineage.
+- PASS - ExposureManager remains portfolio/Risk owner, atomically ingests the
+  durable full book, checks exact lot totals and reservation parity, and exposes
+  broker inventory evidence directly to MainLoop. Candidate metadata can carry
+  a snapshot ID but cannot supply inventory quantity or lot authority.
+- PASS - external PAPER startup requires complete GET-only reconciliation before
+  admission. A false legacy risk-gate flag cannot bypass the requirement; a
+  failed later refresh revokes prior authorization.
+- PASS - same-symbol BUY is no longer refused solely because the symbol existed
+  in the opening baseline. All existing Risk, concentration, utilization,
+  correlation, sizing, stale/TTL, NetEdge, economics, and strategy gates remain.
+- PASS - opening baseline quantity and exact cost basis stay immutable; current
+  drift can be explained only by pinned-account, baseline-linked,
+  integrity-verified managed lineage. The supervisor reads the canonical runtime
+  StateStore in strict read-only mode.
+- PASS - duplicate, partial, late, corrected, busted, rejected, expired,
+  canceled, and replaced evidence is deterministic/idempotent across restart.
+  Incomplete activity rows cannot borrow cumulative order truth or create a fake
+  fill.
+- PASS - no existing positive assertion was flipped to refusal. The surviving
+  G4 correlation-slash positive caught a separator-normalization regression in
+  the first final run (`118 passed, 1 failed`); normalized pair lookup and a new
+  conflict refusal fixed it without changing the threshold or slash factor.
+- Final exact-tree gates: syntax PASS; affected `134 passed`; compatibility
+  `212 passed`; seven-file run path `119 passed`; Stage 0/1/2 covenants
+  `115 passed`; configured offline suite `1936 passed, 14 skipped, 0 failed`
+  with 420 warnings.
+- The 14 external/access tests remain skips, not passes. Seven retain the Board
+  read-authorization gate, three stop on missing mutation approval, and four
+  legacy optional read-only tests skipped on `URLError`; no broker response or
+  current truth was obtained.
+- Highest proof rung: local offline tests. No browser/runtime process, broker
+  truth, PAPER run, successful broker request, external order/fill, SELL,
+  profitability, live action, real money, or arming proof occurred.
+- Preserved blockers: Stage 3 broker catalog/increments/universe; Stage 8
+  external sell-to-close and complete activity lifecycle/pagination; Stage 9
+  managed-existing sell policy; incomplete fee/net-PnL truth; campaign/runtime,
+  cloud, and multi-tenant proof.
+- No threshold, guard, authority, module, strategy math, or safety law weakened.
+  Alpaca PAPER adapter remains BUY-only; SovereignExecutionGuard remains
+  dormant; protected state/evidence remains unstaged.
+- PASS - mandatory pre-close review completed on the final candidate: exact 16
+  cached paths, `git diff --cached --check` exit 0, 8,064 insertions and 134
+  deletions, no intended unstaged delta, and protected runtime state excluded.
+
+Current boundary: stop at Stage 2 after the exact close commit/push. Stage 3
+requires its own governance re-read, entry manifest, truth map, red team, and
+Board direction. Stage 12 broker reads and every Stage 13 PAPER campaign remain
+separately gated.
+
 ## Governance - Mandatory Pre-Close Review Loop
 
 Shan directed on 2026-07-18 that every future stage must complete a review loop

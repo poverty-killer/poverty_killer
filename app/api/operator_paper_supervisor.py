@@ -46,6 +46,7 @@ from app.operator_credentials.store import (
     alpaca_paper_account_pin_env,
     normalize_alpaca_account_suffix,
 )
+from app.state.state_store import StateStore
 
 
 SUPERVISOR_VERSION = "operator-paper-supervisor-v1"
@@ -436,6 +437,7 @@ class PaperSupervisorConfig:
     runtime_profile: str = "LOCAL_PAPER"
     operator_state_dir: str | None = None
     session_store_path: str | None = None
+    state_store_path: str | None = None
     max_session_history: int = 250
     script_path: str = "scripts/run_bounded_paper.ps1"
     powershell_executable: str = "powershell.exe"
@@ -460,6 +462,7 @@ class PaperSupervisorConfig:
             runtime_profile=runtime_config.runtime_profile,
             operator_state_dir=str(runtime_config.operator_state_dir),
             session_store_path=str(runtime_config.operator_session_store_path),
+            state_store_path=str(runtime_config.data_dir / "state.db"),
             max_session_history=runtime_config.max_session_history,
         )
 
@@ -1055,15 +1058,33 @@ class OperatorPaperSupervisor:
         identity = self._paper_account_identity_assertion(force=True)
         baseline_store = PaperBaselineStore(self._baseline_store_path())
         accepted_baseline = baseline_store.current()
-        baseline_state = build_baseline_adoption_state(
-            current_snapshot=portfolio,
-            accepted_baseline=accepted_baseline if accepted_baseline.get("accepted") is True else None,
-        )
         summary = portfolio.get("summary") if isinstance(portfolio.get("summary"), Mapping) else {}
         positions = portfolio.get("positions") if isinstance(portfolio.get("positions"), list) else []
         open_orders = portfolio.get("open_orders") if isinstance(portfolio.get("open_orders"), list) else []
         portfolio_account_suffix = normalize_alpaca_account_suffix(summary.get("account_id"))
         identity_account_suffix = normalize_alpaca_account_suffix(identity.get("actual_suffix"))
+        baseline_state = build_baseline_adoption_state(
+            current_snapshot=portfolio,
+            accepted_baseline=accepted_baseline if accepted_baseline.get("accepted") is True else None,
+        )
+        managed_state_read = {
+            "status": "NOT_REQUIRED",
+            "reason_code": "OPENING_BASELINE_STILL_CURRENT",
+            "durable_integrity_verified": False,
+            "broker_mutation_occurred": False,
+        }
+        if accepted_baseline.get("accepted") is True and baseline_state.get("start_ready") is not True:
+            managed_reconciliation, managed_state_read = self._latest_managed_inventory_reconciliation(
+                account_suffix=identity_account_suffix or portfolio_account_suffix,
+            )
+            if managed_reconciliation is not None and managed_state_read["durable_integrity_verified"] is True:
+                baseline_state = build_baseline_adoption_state(
+                    current_snapshot=portfolio,
+                    accepted_baseline=accepted_baseline,
+                    managed_reconciliation=managed_reconciliation,
+                    managed_reconciliation_durable_verified=True,
+                )
+        baseline_state["managed_reconciliation_state_read"] = managed_state_read
         baseline_account_suffix = accepted_baseline_account_suffix(
             accepted_baseline if accepted_baseline.get("accepted") is True else None
         )
@@ -1403,6 +1424,60 @@ class OperatorPaperSupervisor:
         if self.config.operator_state_dir:
             return Path(self.config.operator_state_dir) / "paper_baseline.json"
         return self.config.repo_root / "state" / "operator" / "paper_baseline.json"
+
+    def _state_store_path(self) -> Path:
+        configured = str(self.config.state_store_path or "").strip()
+        if configured:
+            return Path(configured)
+        return self.config.repo_root / "data" / "state.db"
+
+    def _latest_managed_inventory_reconciliation(
+        self,
+        *,
+        account_suffix: str | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Read integrity-checked lineage without mutating the runtime store."""
+        evidence: dict[str, Any] = {
+            "status": "UNAVAILABLE",
+            "reason_code": "MANAGED_RECONCILIATION_NOT_AVAILABLE",
+            "durable_integrity_verified": False,
+            "broker_mutation_occurred": False,
+        }
+        if not account_suffix:
+            evidence["reason_code"] = "MANAGED_RECONCILIATION_ACCOUNT_SUFFIX_REQUIRED"
+            return None, evidence
+        path = self._state_store_path()
+        if not path.is_file():
+            evidence["reason_code"] = "MANAGED_RECONCILIATION_STATE_STORE_MISSING"
+            return None, evidence
+
+        store: StateStore | None = None
+        try:
+            store = StateStore(str(path), read_only=True)
+            reconciliation = store.get_latest_broker_inventory_reconciliation(
+                account_suffix=account_suffix,
+                strict=True,
+            )
+        except (OSError, RuntimeError):
+            evidence["status"] = "BLOCKED"
+            evidence["reason_code"] = "MANAGED_RECONCILIATION_STATE_READ_FAILED"
+            return None, evidence
+        finally:
+            if store is not None:
+                store.close()
+
+        if reconciliation is None:
+            return None, evidence
+        evidence.update(
+            {
+                "status": "VERIFIED",
+                "reason_code": "MANAGED_RECONCILIATION_DURABLE_INTEGRITY_VERIFIED",
+                "durable_integrity_verified": True,
+                "snapshot_id": reconciliation.get("snapshot_id"),
+                "observed_at_ns": reconciliation.get("observed_at_ns"),
+            }
+        )
+        return reconciliation, evidence
 
     def _paper_baseline_runtime_context(self) -> PaperBaselineRuntimeContext:
         path = self._baseline_store_path()

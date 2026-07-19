@@ -1,4 +1,162 @@
-# Codex Session Handoff - PAPER True Capability Stage 1 Complete
+# Codex Session Handoff - PAPER True Capability Stage 2 Close
+
+Date: 2026-07-18 America/Chicago
+Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
+Branch: `master`
+Stage-entry HEAD: `f462356d140eaf0acccfd5be05faeb01536ae989`
+Stage report: `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_2_REPORT.md`
+
+## Current Stage 2 Verdict
+
+Shan directed `proceed`, opening Stage 2 only, and required the mandatory
+pre-close review loop. Stage 2 is locally green: complete broker inventory,
+lots, fills, reservations, managed baseline lineage, Risk consumption, startup
+reconciliation, and supervisor read-only state wiring are implemented through
+the existing authority owners. The mandatory pre-close review passed on the
+exact 16-file cached candidate; Stage 3 is not open.
+
+The highest proof rung is local offline tests. No launcher/browser/runtime
+process, current broker truth, PAPER run, successful broker response, external
+order/fill, SELL, PnL/profitability, live action, real money, or arming result is
+claimed.
+
+## Stage 2 Implementation Truth
+
+- StateStore owns immutable exact-Decimal inventory events, complete broker-book
+  snapshots, per-symbol projections, lot projections, strict hashes, and a
+  read-only consumer mode. Existing tables are preserved.
+- ReservationLifecycleCoordinator remains the projection coordinator. It joins
+  pinned account, positions, open orders, accepted opening baseline, mappings,
+  reservations, fills, corrections, and busts without broker or Risk authority.
+- ExposureManager remains full portfolio/Risk owner. It atomically ingests the
+  strict durable book, validates lots and pending reservations, accounts for
+  broker cash, and blocks missing/stale/unknown/conflicting truth.
+- OrderRouter/OMS remains order-lifecycle and broker-boundary owner. Startup and
+  post-ack GET reconciliation hydrate all returned partial-fill activities,
+  preserve exact identities, and revoke admission after any incomplete refresh.
+- MainLoop strips candidate inventory quantities/permissions. External broker
+  inventory requirement forces the existing Risk gate on even if the legacy
+  PAPER flag is false.
+- Opening baseline remains immutable. Managed current quantity and exact cost
+  basis require integrity-verified baseline-linked lineage and fresh re-ingest
+  before candidate admission.
+- Slash/hyphen/no-separator symbols match across broker inventory and correlation
+  evidence. Conflicting correlation aliases fail closed. No correlation math or
+  threshold changed.
+
+## Final Validation
+
+- Scoped Python compile: PASS.
+- Affected Stage 2/bootstrap/baseline/supervisor set: `134 passed`.
+- Existing broker/OMS/reservation compatibility set: `212 passed`.
+- Seven named run-path files: `119 passed`.
+- Stage 0/1/2 covenant and fingerprint set: `115 passed`.
+- Final configured offline suite: `1936 passed, 14 skipped, 420 warnings,
+  0 failed` in 181.22 seconds.
+- Exact skip audit: 14 named tests skipped. Seven require the Board read env,
+  three lack exact mutation approval, and four legacy optional reads ended in
+  `URLError`. No broker response or truth was obtained.
+- Schema restart/idempotency node: exit 0; 4.4788556 seconds process wall time.
+- Final cache review: exact 16 paths; `git diff --cached --check` exit 0; 8,064
+  insertions and 134 deletions; no intended unstaged delta; protected runtime
+  state remains excluded.
+
+The first formal final run is intentionally preserved as failure history:
+`test_g4_live_runtime_correlation_slash_runs_before_netedge` produced one
+failure (`118 passed, 1 failed`) because broker symbol normalization hid
+slash-form correlation evidence. The positive test was not relabeled or
+weakened. Normalized pair lookup fixed the root cause, a contradictory-alias
+refusal was added, all earlier results were invalidated, and every final gate
+above was rerun on the new fingerprint.
+
+## Safety and Proof Boundary
+
+No Risk, NetEdge, sizing, stale/TTL, masking, strategy, correlation,
+utilization, concentration, cash-reserve, OMS, account-pin, endpoint, baseline,
+or no-short control weakened. No manual trade control, new mutation owner,
+module deletion, generic replacement, or external dependency was added.
+
+Alpaca PAPER remains BUY-only until Stage 8. SovereignExecutionGuard remains
+dormant. Realized PnL lineage is labeled `GROSS_EX_FEES`; fee-complete/net PnL
+and profitability are unknown. No fake fill, broker truth, readiness, or higher
+proof rung is claimed.
+
+## Known Limitations
+
+- No current broker truth or process/browser wiring proof was obtained.
+- Broker fill activities use one page of at most 100; missing evidence blocks,
+  but complete pagination/stream lifecycle belongs to Stage 8.
+- Broker instrument increments/catalog/dynamic universe remain Stage 3.
+- External SELL and managed existing-position exits remain Stages 8/9.
+- Runtime throughput, long-duration recovery, disk/network faults, cloud, and
+  multi-tenant isolation remain unproven.
+- Fourteen broker/access skips and existing Pydantic/datetime warnings remain.
+- Four legacy optional read tests should adopt the Board env gate in a properly
+  scoped future test-governance seam; they are not called fixed here.
+- The worktree retains protected runtime state and pre-existing untracked
+  evidence. No baseline tag/branch may be forced.
+
+## Protected Worktree
+
+Never clean, reset, stash, prune, edit, or stage:
+
+```text
+state/override_log.jsonl
+state/risk_state.backup
+state/risk_state.json
+state/risk_state.tmp
+state/session_journal.jsonl
+.pytest_tmp/
+AGENTS.prev.md
+POVERTY_KILLER_AUDIT_REPORT.txt
+old reports/codex_handoff_*.md files
+reports/completion/PAPER_AUTONOMY_RESTRICTIONS_REVIEW.md
+reports/completion/UI_NOVEL_OPERATOR_COCKPIT_BOARD_PACKET.md
+reports/completion/UI_WORLD_CLASS_REDESIGN_PACKET.md
+reports/operator_perf/
+scripts/_paper_audit_common.py
+scripts/audit_oms_shutdown.py
+scripts/audit_paper_run.py
+scripts/audit_safety_markers.py
+```
+
+## Exact Stage 2 Staging
+
+These 16 files were staged individually and passed every Section 11 cached
+check:
+
+```text
+app/api/operator_paper_supervisor.py
+app/execution/order_router.py
+app/main_loop.py
+app/operator_activation/paper_baseline.py
+app/risk/exposure_manager.py
+app/risk/reservation_lifecycle_coordinator.py
+app/state/state_store.py
+main.py
+tests/fixtures/paper_true_capability_stage0.json
+tests/test_operator_paper_baseline.py
+tests/test_paper_true_capability_stage0.py
+tests/test_paper_true_capability_stage2.py
+tests/test_runtime_reservation_bootstrap.py
+reports/completion/PAPER_TRUE_CAPABILITY_STAGE_2_REPORT.md
+CHECKPOINT_TRACKER.md
+reports/codex_handoff_latest.md
+```
+
+## Next Boundary
+
+Stop after the Stage 2 commit/push. Stage 3 needs a fresh governance re-read,
+entry manifest, truth map, red team, and Board direction. Broker reads and every
+PAPER campaign retain separate approval gates.
+
+---
+
+The remaining content below is historical continuity from earlier stages and
+packets. Its statements that Stage 2 was unopened were true when written and
+are superseded by the current section above.
+
+# Historical Continuity - PAPER True Capability Stage 1 Complete
 
 Date: 2026-07-18 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`

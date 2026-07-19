@@ -341,7 +341,9 @@ def test_threshold_and_runtime_defaults_match_frozen_baseline(tmp_path):
 def test_authority_capability_module_and_source_fingerprints_match_frozen_baseline():
     fixture = _load_fixture()
     baseline = fixture["baseline_fingerprints"]
-    approved_delta = fixture["approved_source_deltas"]["stage1"]
+    approved_deltas = fixture["approved_source_deltas"]
+    assert set(approved_deltas) == {"stage1", "stage2"}
+    approved_delta = approved_deltas["stage1"]
     delta_hashes = approved_delta["source_sha256"]
 
     assert approved_delta["stage_entry_head"] == (
@@ -356,6 +358,32 @@ def test_authority_capability_module_and_source_fingerprints_match_frozen_baseli
     stage_report = ROOT / Path(*approved_delta["report"].split("/"))
     assert stage_report.is_file()
     assert "STAGE_ENTRY_COVENANT: PASS" in stage_report.read_text(encoding="utf-8")
+
+    stage2_delta = approved_deltas["stage2"]
+    stage2_hashes = stage2_delta["source_sha256"]
+    assert stage2_delta["stage_entry_head"] == (
+        "f462356d140eaf0acccfd5be05faeb01536ae989"
+    )
+    assert stage2_delta["stage_entry_covenant"] == "PASS"
+    assert set(stage2_hashes) == {
+        "app/api/operator_paper_supervisor.py",
+        "app/execution/order_router.py",
+        "app/main_loop.py",
+        "app/operator_activation/paper_baseline.py",
+        "app/risk/exposure_manager.py",
+        "app/risk/reservation_lifecycle_coordinator.py",
+        "app/state/state_store.py",
+        "main.py",
+    }
+    stage2_report = ROOT / Path(*stage2_delta["report"].split("/"))
+    assert stage2_report.is_file()
+    assert "STAGE_ENTRY_COVENANT: PASS" in stage2_report.read_text(encoding="utf-8")
+    for relative_path, hashes in stage2_hashes.items():
+        assert set(hashes) == {"before", "after"}
+        assert len(hashes["before"]) == len(hashes["after"]) == 64
+        assert _sha256(ROOT / Path(*relative_path.split("/"))) == hashes["after"]
+    for relative_path in set(delta_hashes) & set(stage2_hashes):
+        assert stage2_hashes[relative_path]["before"] == delta_hashes[relative_path]["after"]
 
     graph = authority_graph_summary()
     actual_owners = {
@@ -422,9 +450,11 @@ def test_authority_capability_module_and_source_fingerprints_match_frozen_baseli
 
     for relative_path, expected_hash in baseline["source_sha256"].items():
         path = ROOT / Path(*relative_path.split("/"))
-        delta = delta_hashes.get(relative_path)
-        if delta is None:
-            assert _sha256(path) == expected_hash, relative_path
-            continue
-        assert delta["before"] == expected_hash, relative_path
-        assert _sha256(path) == delta["after"], relative_path
+        expected_current = expected_hash
+        for stage_hashes in (delta_hashes, stage2_hashes):
+            delta = stage_hashes.get(relative_path)
+            if delta is None:
+                continue
+            assert delta["before"] == expected_current, relative_path
+            expected_current = delta["after"]
+        assert _sha256(path) == expected_current, relative_path

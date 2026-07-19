@@ -7,6 +7,7 @@ HARDENED: Added PRAGMA integrity_check on startup and backup() method for 24-hou
 
 import sqlite3
 import json
+import hashlib
 import threading
 import logging
 import shutil
@@ -29,7 +30,7 @@ class StateStore:
     All state transitions are persisted before memory updates.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, *, read_only: bool = False):
         """
         Initialize state store with SQLite database.
 
@@ -37,13 +38,20 @@ class StateStore:
             db_path: Path to SQLite database file
         """
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._read_only = bool(read_only)
+        if self._read_only:
+            if not self.db_path.is_file():
+                raise FileNotFoundError(self.db_path)
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Thread-local connections for thread safety
         self._local = threading.local()
 
-        # Initialize database schema
-        self._init_database()
+        # Read-only consumers inspect the existing authority without running
+        # schema creation or transaction recovery against the runtime database.
+        if not self._read_only:
+            self._init_database()
 
         # Run integrity check on startup
         integrity_ok = self.integrity_check()
@@ -51,8 +59,9 @@ class StateStore:
             logger.critical("Database integrity check FAILED on startup!")
             raise RuntimeError("Database corruption detected. Cannot start engine.")
 
-        # Recover any uncommitted transactions
-        self._recover_uncommitted()
+        # Recover any uncommitted transactions only in the writable owner.
+        if not self._read_only:
+            self._recover_uncommitted()
 
         logger.info(f"StateStore initialized: {self.db_path}")
 
@@ -63,14 +72,24 @@ class StateStore:
         Yields connection, ensures proper cleanup.
         """
         if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(
-                str(self.db_path),
-                timeout=DB_TIMEOUT_SECONDS,
-                isolation_level=None  # Autocommit mode, we manage transactions
-            )
-            self._local.conn.execute(f"PRAGMA journal_mode={DB_JOURNAL_MODE}")
-            self._local.conn.execute(f"PRAGMA synchronous={DB_SYNC_MODE}")
-            self._local.conn.execute(f"PRAGMA wal_autocheckpoint={DB_WAL_AUTOCHECKPOINT}")
+            if self._read_only:
+                database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+                self._local.conn = sqlite3.connect(
+                    database_uri,
+                    timeout=DB_TIMEOUT_SECONDS,
+                    isolation_level=None,
+                    uri=True,
+                )
+                self._local.conn.execute("PRAGMA query_only=ON")
+            else:
+                self._local.conn = sqlite3.connect(
+                    str(self.db_path),
+                    timeout=DB_TIMEOUT_SECONDS,
+                    isolation_level=None  # Autocommit mode, we manage transactions
+                )
+                self._local.conn.execute(f"PRAGMA journal_mode={DB_JOURNAL_MODE}")
+                self._local.conn.execute(f"PRAGMA synchronous={DB_SYNC_MODE}")
+                self._local.conn.execute(f"PRAGMA wal_autocheckpoint={DB_WAL_AUTOCHECKPOINT}")
             self._local.conn.row_factory = sqlite3.Row
 
         try:
@@ -277,6 +296,88 @@ class StateStore:
                 )
             """)
 
+            # Immutable broker inventory facts and reconciliation projections.
+            # Executable quantities are TEXT-backed Decimals. The legacy REAL
+            # positions/fills tables remain compatibility surfaces only.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_inventory_events (
+                    event_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    replaces_event_id TEXT,
+                    broker_order_id TEXT,
+                    client_order_id TEXT,
+                    fill_id TEXT,
+                    baseline_snapshot_id TEXT,
+                    symbol TEXT,
+                    side TEXT,
+                    action TEXT,
+                    quantity TEXT,
+                    price TEXT,
+                    fee TEXT,
+                    fee_currency TEXT,
+                    quantity_semantics TEXT NOT NULL,
+                    sleeve TEXT,
+                    event_ts_ns INTEGER,
+                    observed_at_ns INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    metadata TEXT
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_inventory_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    broker TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    endpoint_family TEXT NOT NULL,
+                    account_suffix TEXT NOT NULL,
+                    baseline_snapshot_id TEXT,
+                    parent_snapshot_id TEXT,
+                    observed_at_ns INTEGER NOT NULL,
+                    position_count INTEGER NOT NULL,
+                    open_order_count INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    book_hash TEXT NOT NULL,
+                    reason_codes TEXT NOT NULL,
+                    metadata TEXT,
+                    created_at_ns INTEGER NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_inventory_snapshot_positions (
+                    snapshot_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    broker_qty TEXT NOT NULL,
+                    avg_entry_price TEXT,
+                    mark_price TEXT,
+                    quantity_step TEXT,
+                    metadata TEXT,
+                    PRIMARY KEY (snapshot_id, symbol)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_inventory_lot_projections (
+                    snapshot_id TEXT NOT NULL,
+                    lot_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    sleeve TEXT,
+                    provenance TEXT NOT NULL,
+                    original_qty TEXT NOT NULL,
+                    remaining_qty TEXT NOT NULL,
+                    sold_qty TEXT NOT NULL,
+                    avg_entry_price TEXT,
+                    source_event_id TEXT,
+                    baseline_snapshot_id TEXT,
+                    acquired_at_ns INTEGER,
+                    metadata TEXT,
+                    PRIMARY KEY (snapshot_id, lot_id)
+                )
+            """)
+
             # Portfolio snapshots table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -375,6 +476,12 @@ class StateStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_broker_fill_ledger_client ON broker_fill_ledger(client_order_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_broker_fill_ledger_broker_order ON broker_fill_ledger(broker_order_id)")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_broker_fill_ledger_activity ON broker_fill_ledger(broker_activity_id) WHERE broker_activity_id IS NOT NULL")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_events_baseline ON broker_inventory_events(baseline_snapshot_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_events_client ON broker_inventory_events(client_order_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_events_symbol ON broker_inventory_events(symbol)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_snapshots_account ON broker_inventory_snapshots(account_suffix, observed_at_ns)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_positions_symbol ON broker_inventory_snapshot_positions(symbol)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_lots_symbol ON broker_inventory_lot_projections(symbol)")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_ledger_active_dedupe ON reservation_ledger(reservation_dedupe_key) WHERE is_active = 1")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_client ON reservation_ledger(client_order_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_active ON reservation_ledger(is_active)")
@@ -849,6 +956,7 @@ class StateStore:
         broker: Optional[str] = None,
         *,
         include_terminal: bool = True,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """List persisted order ID mappings for read-only reconcile scans."""
         try:
@@ -879,6 +987,8 @@ class StateStore:
                 return results
         except Exception as e:
             logger.error("Failed to list order ID mappings: %s", e)
+            if strict:
+                raise RuntimeError("order_id_mapping_read_failed") from e
             return []
 
     def count_table_rows(self, table: str) -> int:
@@ -891,6 +1001,10 @@ class StateStore:
             "reservation_ledger",
             "reservation_fill_progress",
             "reservation_release_tombstones",
+            "broker_inventory_events",
+            "broker_inventory_snapshots",
+            "broker_inventory_snapshot_positions",
+            "broker_inventory_lot_projections",
         }
         if table not in allowed:
             raise ValueError(f"unsupported_state_table:{table}")
@@ -991,6 +1105,145 @@ class StateStore:
         except (TypeError, json.JSONDecodeError):
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _text_or_none(value: Any, *, lower: bool = False) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return text.lower() if lower else text
+
+    @staticmethod
+    def _int_or_none(value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _stable_hash(value: Any) -> str:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _broker_inventory_book_hash(
+        cls,
+        snapshot: Dict[str, Any],
+        positions: List[Dict[str, Any]],
+        lots: List[Dict[str, Any]],
+    ) -> str:
+        """Hash the semantic projection, independent of SQLite JSON encoding."""
+        snapshot_payload = {
+            key: snapshot.get(key)
+            for key in (
+                "snapshot_id",
+                "broker",
+                "environment",
+                "endpoint_family",
+                "account_suffix",
+                "baseline_snapshot_id",
+                "parent_snapshot_id",
+                "observed_at_ns",
+                "status",
+            )
+        }
+        snapshot_payload["position_count"] = int(
+            snapshot.get("position_count")
+            if snapshot.get("position_count") is not None
+            else len(positions)
+        )
+        snapshot_payload["open_order_count"] = int(snapshot.get("open_order_count") or 0)
+        raw_reasons = snapshot.get("reason_codes") or ()
+        if isinstance(raw_reasons, str):
+            try:
+                raw_reasons = json.loads(raw_reasons)
+            except json.JSONDecodeError:
+                raw_reasons = (raw_reasons,)
+        snapshot_payload["reason_codes"] = tuple(str(item) for item in raw_reasons)
+        snapshot_payload["metadata"] = cls._json_dict_or_empty(snapshot.get("metadata"))
+
+        position_payload = []
+        for row in positions:
+            position_payload.append(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "snapshot_id",
+                        "symbol",
+                        "broker_qty",
+                        "avg_entry_price",
+                        "mark_price",
+                        "quantity_step",
+                    )
+                }
+                | {"metadata": cls._json_dict_or_empty(row.get("metadata"))}
+            )
+        position_payload.sort(key=lambda row: row["symbol"])
+
+        lot_payload = []
+        for row in lots:
+            lot_payload.append(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "snapshot_id",
+                        "lot_id",
+                        "symbol",
+                        "sleeve",
+                        "provenance",
+                        "original_qty",
+                        "remaining_qty",
+                        "sold_qty",
+                        "avg_entry_price",
+                        "source_event_id",
+                        "baseline_snapshot_id",
+                        "acquired_at_ns",
+                    )
+                }
+                | {"metadata": cls._json_dict_or_empty(row.get("metadata"))}
+            )
+        lot_payload.sort(key=lambda row: (row["symbol"], row["acquired_at_ns"] or 0, row["lot_id"]))
+        return cls._stable_hash(
+            {
+                "snapshot": snapshot_payload,
+                "positions": position_payload,
+                "lots": lot_payload,
+            }
+        )
+
+    @staticmethod
+    def _inventory_decimal_text(
+        value: Any,
+        *,
+        field_name: str,
+        required: bool,
+        positive: bool = False,
+        non_negative: bool = False,
+    ) -> Any:
+        if value is None or str(value).strip() == "":
+            return False if required else None
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            logger.error("Invalid Decimal inventory field %s", field_name)
+            return False
+        if not decimal_value.is_finite():
+            logger.error("Non-finite Decimal inventory field %s", field_name)
+            return False
+        if positive and decimal_value <= Decimal("0"):
+            return False
+        if non_negative and decimal_value < Decimal("0"):
+            return False
+        return str(decimal_value)
 
     def upsert_reservation_ledger(self, reservation: Dict[str, Any]) -> bool:
         """
@@ -1143,6 +1396,7 @@ class StateStore:
         *,
         active_only: bool = False,
         include_terminal: bool = True,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """List persisted reservation ledger facts for future recovery."""
         try:
@@ -1164,6 +1418,8 @@ class StateStore:
                 return [self._reservation_row(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error("Failed to list reservation ledger: %s", e)
+            if strict:
+                raise RuntimeError("reservation_ledger_read_failed") from e
             return []
 
     def record_reservation_fill_progress(self, progress: Dict[str, Any]) -> bool:
@@ -1250,7 +1506,12 @@ class StateStore:
             logger.error("Failed to record reservation fill progress %s: %s", fill_key, e)
             return False
 
-    def list_reservation_fill_progress(self, reservation_id: str) -> List[Dict[str, Any]]:
+    def list_reservation_fill_progress(
+        self,
+        reservation_id: str,
+        *,
+        strict: bool = False,
+    ) -> List[Dict[str, Any]]:
         """List persisted fill progress facts for one reservation."""
         try:
             with self._get_connection() as conn:
@@ -1266,6 +1527,8 @@ class StateStore:
                 return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error("Failed to list reservation fill progress %s: %s", reservation_id, e)
+            if strict:
+                raise RuntimeError("reservation_fill_progress_read_failed") from e
             return []
 
     def record_reservation_release_tombstone(self, tombstone: Dict[str, Any]) -> bool:
@@ -1357,6 +1620,7 @@ class StateStore:
         *,
         reservation_id: Optional[str] = None,
         release_idempotency_key: Optional[str] = None,
+        strict: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Read a release-once tombstone by reservation ID or release key."""
         if not reservation_id and not release_idempotency_key:
@@ -1378,6 +1642,8 @@ class StateStore:
                 return None if row is None else self._release_tombstone_row(row)
         except Exception as e:
             logger.error("Failed to get reservation release tombstone: %s", e)
+            if strict:
+                raise RuntimeError("reservation_release_tombstone_read_failed") from e
             return None
 
     def insert_fill(self, fill: Dict[str, Any]) -> bool:
@@ -1540,6 +1806,455 @@ class StateStore:
         except Exception as e:
             logger.error("Failed to upsert broker fill ledger %s: %s", fill.get("fill_id"), e)
             return "failed"
+
+    def record_broker_inventory_event(self, event: Dict[str, Any]) -> str:
+        """Persist one immutable inventory-affecting lifecycle fact.
+
+        Returns one of: inserted, updated, duplicate, conflict, failed.
+        Re-observation may enrich a previously missing fee, but changing any
+        quantity/identity field under the same event ID is a conflict.
+        """
+        event_id = str(event.get("event_id") or "").strip()
+        event_type = str(event.get("event_type") or "").strip().upper()
+        source = str(event.get("source") or "").strip()
+        semantics = str(event.get("quantity_semantics") or "NONE").strip().upper()
+        allowed_types = {
+            "FILL",
+            "TRADE_CORRECT",
+            "TRADE_BUST",
+            "REJECTED",
+            "EXPIRED",
+            "CANCELED",
+            "CANCELLED",
+            "REPLACED",
+        }
+        if not event_id or event_type not in allowed_types or not source:
+            return "failed"
+        if semantics not in {"DELTA", "CUMULATIVE_ORDER", "NONE"}:
+            return "failed"
+
+        quantity = self._inventory_decimal_text(
+            event.get("quantity"),
+            field_name="quantity",
+            required=event_type in {"FILL", "TRADE_CORRECT"},
+            positive=event_type in {"FILL", "TRADE_CORRECT"},
+        )
+        price = self._inventory_decimal_text(
+            event.get("price"),
+            field_name="price",
+            required=event_type in {"FILL", "TRADE_CORRECT"},
+            positive=event_type in {"FILL", "TRADE_CORRECT"},
+        )
+        fee = self._inventory_decimal_text(
+            event.get("fee"),
+            field_name="fee",
+            required=False,
+            non_negative=True,
+        )
+        if quantity is False or price is False or fee is False:
+            return "failed"
+        if event_type in {"FILL", "TRADE_CORRECT"}:
+            if semantics == "NONE":
+                return "failed"
+            required_identity = ("broker_order_id", "client_order_id", "fill_id")
+            if any(not str(event.get(field) or "").strip() for field in required_identity):
+                return "failed"
+            if not str(event.get("symbol") or "").strip() or str(event.get("side") or "").strip().lower() not in {"buy", "sell"}:
+                return "failed"
+        if event_type in {"TRADE_CORRECT", "TRADE_BUST"} and not str(event.get("replaces_event_id") or "").strip():
+            return "failed"
+
+        raw_event_ts_ns = event.get("event_ts_ns")
+        event_ts_ns = self._int_or_none(raw_event_ts_ns)
+        if raw_event_ts_ns not in (None, "") and (event_ts_ns is None or event_ts_ns <= 0):
+            return "failed"
+        raw_observed_at_ns = event.get("observed_at_ns")
+        observed_at_ns = self._int_or_none(raw_observed_at_ns)
+        if raw_observed_at_ns in (None, ""):
+            observed_at_ns = now_ns()
+        elif observed_at_ns is None or observed_at_ns <= 0:
+            return "failed"
+
+        stable = {
+            "event_id": event_id,
+            "event_type": event_type,
+            "replaces_event_id": self._text_or_none(event.get("replaces_event_id")),
+            "broker_order_id": self._text_or_none(event.get("broker_order_id")),
+            "client_order_id": self._text_or_none(event.get("client_order_id")),
+            "fill_id": self._text_or_none(event.get("fill_id")),
+            "baseline_snapshot_id": self._text_or_none(event.get("baseline_snapshot_id")),
+            "symbol": self._text_or_none(event.get("symbol")),
+            "side": self._text_or_none(event.get("side"), lower=True),
+            "action": self._text_or_none(event.get("action"), lower=True),
+            "quantity": quantity if isinstance(quantity, str) else None,
+            "price": price if isinstance(price, str) else None,
+            "quantity_semantics": semantics,
+            "sleeve": self._text_or_none(event.get("sleeve")),
+            "event_ts_ns": event_ts_ns,
+            "source": source,
+        }
+        payload_hash = self._stable_hash(stable)
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        record = {
+            **stable,
+            "fee": fee if isinstance(fee, str) else None,
+            "fee_currency": self._text_or_none(event.get("fee_currency")),
+            "observed_at_ns": observed_at_ns,
+            "payload_hash": payload_hash,
+            "status": str(event.get("status") or "OBSERVED").strip().upper(),
+            "metadata": json.dumps(metadata, sort_keys=True, separators=(",", ":"), default=str),
+        }
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute("SELECT * FROM broker_inventory_events WHERE event_id = ?", (event_id,))
+                existing = cursor.fetchone()
+                if existing is not None:
+                    existing_row = dict(existing)
+                    if str(existing_row.get("payload_hash") or "") != payload_hash:
+                        conn.rollback()
+                        return "conflict"
+                    existing_fee = self._decimal_or_none(existing_row.get("fee"))
+                    incoming_fee = self._decimal_or_none(record.get("fee"))
+                    existing_currency = str(existing_row.get("fee_currency") or "")
+                    incoming_currency = str(record.get("fee_currency") or "")
+                    if existing_fee is None and incoming_fee is not None and incoming_currency:
+                        cursor.execute(
+                            """
+                            UPDATE broker_inventory_events
+                            SET fee = ?, fee_currency = ?, observed_at_ns = ?, metadata = ?
+                            WHERE event_id = ?
+                            """,
+                            (str(incoming_fee), incoming_currency, observed_at_ns, record["metadata"], event_id),
+                        )
+                        conn.commit()
+                        return "updated"
+                    if incoming_fee is not None and (existing_fee != incoming_fee or existing_currency != incoming_currency):
+                        conn.rollback()
+                        return "conflict"
+                    conn.rollback()
+                    return "duplicate"
+
+                columns = tuple(record)
+                cursor.execute(
+                    f"INSERT INTO broker_inventory_events ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    [record[column] for column in columns],
+                )
+                conn.commit()
+                return "inserted"
+        except Exception as exc:
+            logger.error("Failed to record broker inventory event %s: %s", event_id, exc)
+            return "failed"
+
+    def list_broker_inventory_events(
+        self,
+        *,
+        baseline_snapshot_id: Optional[str] = None,
+        strict: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return immutable inventory events in deterministic causal order."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if baseline_snapshot_id is None:
+                    cursor.execute(
+                        """
+                        SELECT * FROM broker_inventory_events
+                        ORDER BY COALESCE(event_ts_ns, observed_at_ns), observed_at_ns, event_id
+                        """
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT * FROM broker_inventory_events
+                        WHERE baseline_snapshot_id = ?
+                        ORDER BY COALESCE(event_ts_ns, observed_at_ns), observed_at_ns, event_id
+                        """,
+                        (str(baseline_snapshot_id),),
+                    )
+                rows: List[Dict[str, Any]] = []
+                integrity_error = False
+                for row in cursor.fetchall():
+                    record = dict(row)
+                    stable = {
+                        "event_id": self._text_or_none(record.get("event_id")),
+                        "event_type": self._text_or_none(record.get("event_type")),
+                        "replaces_event_id": self._text_or_none(record.get("replaces_event_id")),
+                        "broker_order_id": self._text_or_none(record.get("broker_order_id")),
+                        "client_order_id": self._text_or_none(record.get("client_order_id")),
+                        "fill_id": self._text_or_none(record.get("fill_id")),
+                        "baseline_snapshot_id": self._text_or_none(record.get("baseline_snapshot_id")),
+                        "symbol": self._text_or_none(record.get("symbol")),
+                        "side": self._text_or_none(record.get("side"), lower=True),
+                        "action": self._text_or_none(record.get("action"), lower=True),
+                        "quantity": self._text_or_none(record.get("quantity")),
+                        "price": self._text_or_none(record.get("price")),
+                        "quantity_semantics": self._text_or_none(record.get("quantity_semantics")),
+                        "sleeve": self._text_or_none(record.get("sleeve")),
+                        "event_ts_ns": self._int_or_none(record.get("event_ts_ns")),
+                        "source": self._text_or_none(record.get("source")),
+                    }
+                    if self._stable_hash(stable) != str(record.get("payload_hash") or ""):
+                        integrity_error = True
+                        logger.error(
+                            "Broker inventory event integrity check failed for %s",
+                            record.get("event_id"),
+                        )
+                        break
+                    record["metadata"] = self._json_dict_or_empty(record.get("metadata"))
+                    rows.append(record)
+                if integrity_error:
+                    if strict:
+                        raise RuntimeError("broker_inventory_event_integrity_failed")
+                    return []
+                return rows
+        except Exception as exc:
+            logger.error("Failed to list broker inventory events: %s", exc)
+            if strict:
+                raise RuntimeError("broker_inventory_event_read_failed") from exc
+            return []
+
+    def persist_broker_inventory_reconciliation(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        positions: List[Dict[str, Any]],
+        lots: List[Dict[str, Any]],
+    ) -> str:
+        """Atomically persist one immutable broker book and lot projection.
+
+        Returns one of: inserted, duplicate, conflict, failed.
+        """
+        snapshot_id = str(snapshot.get("snapshot_id") or "").strip()
+        required_text = ("broker", "environment", "endpoint_family", "account_suffix", "status")
+        if not snapshot_id or any(not str(snapshot.get(field) or "").strip() for field in required_text):
+            return "failed"
+        observed_at_ns = self._int_or_none(snapshot.get("observed_at_ns"))
+        if observed_at_ns is None or observed_at_ns <= 0:
+            return "failed"
+
+        normalized_positions: List[Dict[str, Any]] = []
+        seen_symbols: set[str] = set()
+        for row in positions:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol or symbol in seen_symbols:
+                return "failed"
+            seen_symbols.add(symbol)
+            broker_qty = self._inventory_decimal_text(row.get("broker_qty"), field_name="broker_qty", required=True, non_negative=True)
+            avg_entry_price = self._inventory_decimal_text(row.get("avg_entry_price"), field_name="avg_entry_price", required=False, positive=True)
+            mark_price = self._inventory_decimal_text(row.get("mark_price"), field_name="mark_price", required=False, positive=True)
+            quantity_step = self._inventory_decimal_text(row.get("quantity_step"), field_name="quantity_step", required=False, positive=True)
+            if any(value is False for value in (broker_qty, avg_entry_price, mark_price, quantity_step)):
+                return "failed"
+            normalized_positions.append({
+                "snapshot_id": snapshot_id,
+                "symbol": symbol,
+                "broker_qty": broker_qty,
+                "avg_entry_price": avg_entry_price if isinstance(avg_entry_price, str) else None,
+                "mark_price": mark_price if isinstance(mark_price, str) else None,
+                "quantity_step": quantity_step if isinstance(quantity_step, str) else None,
+                "metadata": json.dumps(row.get("metadata") or {}, sort_keys=True, separators=(",", ":"), default=str),
+            })
+
+        normalized_lots: List[Dict[str, Any]] = []
+        seen_lots: set[str] = set()
+        allowed_provenance = {
+            "ADOPTED_BASELINE",
+            "BOT_ACQUIRED",
+            "PENDING_BUY",
+            "PENDING_SELL",
+            "SOLD",
+            "UNKNOWN_ATTRIBUTION",
+        }
+        for row in lots:
+            lot_id = str(row.get("lot_id") or "").strip()
+            symbol = str(row.get("symbol") or "").strip().upper()
+            provenance = str(row.get("provenance") or "").strip().upper()
+            if not lot_id or not symbol or lot_id in seen_lots or provenance not in allowed_provenance:
+                return "failed"
+            seen_lots.add(lot_id)
+            original_qty = self._inventory_decimal_text(row.get("original_qty"), field_name="original_qty", required=True, non_negative=True)
+            remaining_qty = self._inventory_decimal_text(row.get("remaining_qty"), field_name="remaining_qty", required=True, non_negative=True)
+            sold_qty = self._inventory_decimal_text(row.get("sold_qty"), field_name="sold_qty", required=True, non_negative=True)
+            avg_entry_price = self._inventory_decimal_text(row.get("avg_entry_price"), field_name="avg_entry_price", required=False, positive=True)
+            if any(value is False for value in (original_qty, remaining_qty, sold_qty, avg_entry_price)):
+                return "failed"
+            original_decimal = Decimal(str(original_qty))
+            remaining_decimal = Decimal(str(remaining_qty))
+            sold_decimal = Decimal(str(sold_qty))
+            if provenance in {"ADOPTED_BASELINE", "BOT_ACQUIRED"}:
+                if remaining_decimal + sold_decimal != original_decimal:
+                    return "failed"
+            elif provenance in {"PENDING_BUY", "PENDING_SELL", "UNKNOWN_ATTRIBUTION"}:
+                if remaining_decimal != original_decimal or sold_decimal != Decimal("0"):
+                    return "failed"
+            elif provenance == "SOLD":
+                if remaining_decimal != Decimal("0") or sold_decimal != original_decimal:
+                    return "failed"
+            normalized_lots.append({
+                "snapshot_id": snapshot_id,
+                "lot_id": lot_id,
+                "symbol": symbol,
+                "sleeve": self._text_or_none(row.get("sleeve")),
+                "provenance": provenance,
+                "original_qty": original_qty,
+                "remaining_qty": remaining_qty,
+                "sold_qty": sold_qty,
+                "avg_entry_price": avg_entry_price if isinstance(avg_entry_price, str) else None,
+                "source_event_id": self._text_or_none(row.get("source_event_id")),
+                "baseline_snapshot_id": self._text_or_none(row.get("baseline_snapshot_id")),
+                "acquired_at_ns": self._int_or_none(row.get("acquired_at_ns")),
+                "metadata": json.dumps(row.get("metadata") or {}, sort_keys=True, separators=(",", ":"), default=str),
+            })
+
+        normalized_positions.sort(key=lambda row: row["symbol"])
+        normalized_lots.sort(key=lambda row: (row["symbol"], row["acquired_at_ns"] or 0, row["lot_id"]))
+        book_hash = self._broker_inventory_book_hash(
+            snapshot,
+            normalized_positions,
+            normalized_lots,
+        )
+        reason_codes = tuple(str(item) for item in (snapshot.get("reason_codes") or ()))
+        header = {
+            "snapshot_id": snapshot_id,
+            "broker": str(snapshot["broker"]),
+            "environment": str(snapshot["environment"]),
+            "endpoint_family": str(snapshot["endpoint_family"]),
+            "account_suffix": str(snapshot["account_suffix"]),
+            "baseline_snapshot_id": self._text_or_none(snapshot.get("baseline_snapshot_id")),
+            "parent_snapshot_id": self._text_or_none(snapshot.get("parent_snapshot_id")),
+            "observed_at_ns": observed_at_ns,
+            "position_count": len(normalized_positions),
+            "open_order_count": int(snapshot.get("open_order_count") or 0),
+            "status": str(snapshot["status"]),
+            "book_hash": book_hash,
+            "reason_codes": json.dumps(reason_codes),
+            "metadata": json.dumps(snapshot.get("metadata") or {}, sort_keys=True, separators=(",", ":"), default=str),
+            "created_at_ns": self._int_or_none(snapshot.get("created_at_ns")) or now_ns(),
+        }
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute("SELECT book_hash FROM broker_inventory_snapshots WHERE snapshot_id = ?", (snapshot_id,))
+                existing = cursor.fetchone()
+                if existing is not None:
+                    conn.rollback()
+                    return "duplicate" if str(existing[0]) == book_hash else "conflict"
+
+                header_columns = tuple(header)
+                cursor.execute(
+                    f"INSERT INTO broker_inventory_snapshots ({', '.join(header_columns)}) VALUES ({', '.join('?' for _ in header_columns)})",
+                    [header[column] for column in header_columns],
+                )
+                for row in normalized_positions:
+                    columns = tuple(row)
+                    cursor.execute(
+                        f"INSERT INTO broker_inventory_snapshot_positions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                        [row[column] for column in columns],
+                    )
+                for row in normalized_lots:
+                    columns = tuple(row)
+                    cursor.execute(
+                        f"INSERT INTO broker_inventory_lot_projections ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                        [row[column] for column in columns],
+                    )
+                conn.commit()
+                return "inserted"
+        except Exception as exc:
+            logger.error("Failed to persist broker inventory reconciliation %s: %s", snapshot_id, exc)
+            return "failed"
+
+    def get_broker_inventory_reconciliation(
+        self,
+        snapshot_id: str,
+        *,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Read one immutable broker inventory snapshot with its projection."""
+        safe_id = str(snapshot_id or "").strip()
+        if not safe_id:
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM broker_inventory_snapshots WHERE snapshot_id = ?", (safe_id,))
+                header = cursor.fetchone()
+                if header is None:
+                    return None
+                result = dict(header)
+                result["reason_codes"] = tuple(json.loads(result.get("reason_codes") or "[]"))
+                result["metadata"] = self._json_dict_or_empty(result.get("metadata"))
+                cursor.execute(
+                    "SELECT * FROM broker_inventory_snapshot_positions WHERE snapshot_id = ? ORDER BY symbol",
+                    (safe_id,),
+                )
+                positions = []
+                for row in cursor.fetchall():
+                    item = dict(row)
+                    item["metadata"] = self._json_dict_or_empty(item.get("metadata"))
+                    positions.append(item)
+                cursor.execute(
+                    "SELECT * FROM broker_inventory_lot_projections WHERE snapshot_id = ? ORDER BY symbol, acquired_at_ns, lot_id",
+                    (safe_id,),
+                )
+                lots = []
+                for row in cursor.fetchall():
+                    item = dict(row)
+                    item["metadata"] = self._json_dict_or_empty(item.get("metadata"))
+                    lots.append(item)
+                result["positions"] = positions
+                result["lots"] = lots
+                if int(result.get("position_count") or 0) != len(positions):
+                    raise RuntimeError("broker_inventory_position_count_integrity_failed")
+                expected_hash = str(result.get("book_hash") or "")
+                actual_hash = self._broker_inventory_book_hash(result, positions, lots)
+                if not expected_hash or actual_hash != expected_hash:
+                    raise RuntimeError("broker_inventory_book_hash_integrity_failed")
+                return result
+        except Exception as exc:
+            logger.error("Failed to get broker inventory reconciliation %s: %s", safe_id, exc)
+            if strict:
+                raise RuntimeError("broker_inventory_reconciliation_read_failed") from exc
+            return None
+
+    def get_latest_broker_inventory_reconciliation(
+        self,
+        *,
+        account_suffix: Optional[str] = None,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the newest persisted projection, never treating it as fresh by itself."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if account_suffix is None:
+                    cursor.execute(
+                        "SELECT snapshot_id FROM broker_inventory_snapshots ORDER BY observed_at_ns DESC, created_at_ns DESC LIMIT 1"
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT snapshot_id FROM broker_inventory_snapshots
+                        WHERE account_suffix = ?
+                        ORDER BY observed_at_ns DESC, created_at_ns DESC LIMIT 1
+                        """,
+                        (str(account_suffix),),
+                    )
+                row = cursor.fetchone()
+                return (
+                    None
+                    if row is None
+                    else self.get_broker_inventory_reconciliation(str(row[0]), strict=strict)
+                )
+        except Exception as exc:
+            logger.error("Failed to get latest broker inventory reconciliation: %s", exc)
+            if strict:
+                raise RuntimeError("latest_broker_inventory_reconciliation_read_failed") from exc
+            return None
 
     def count_fills_for_order(self, order_id: str) -> int:
         """Count local fill ledger rows for one client order ID."""

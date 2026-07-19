@@ -492,6 +492,19 @@ class SovereignHeartbeat:
             broker_gateway_adapter=self._broker_gateway_adapter,
             broker_read_profile=config.broker_read_permission_profile,
             execution_config=config.execution,
+            broker_inventory_reconciliation_required=self._broker_inventory_reconciliation_required,
+        )
+        self.broker_inventory_startup_reconciliation = self.order_router.reconcile_startup_broker_inventory()
+        self.reservation_lifecycle_bootstrap_status.update(
+            {
+                "broker_inventory_reconciliation_required": self._broker_inventory_reconciliation_required,
+                "broker_inventory_reconciliation": dict(self.broker_inventory_startup_reconciliation),
+                "broker_inventory_authorized": self.broker_inventory_startup_reconciliation.get("authorized") is True,
+                "runtime_lifecycle_wired": bool(
+                    self.reservation_lifecycle_enabled
+                    and self.reservation_lifecycle_coordinator is not None
+                ),
+            }
         )
 
         self.masking_layer = MaskingLayer(
@@ -759,8 +772,8 @@ class SovereignHeartbeat:
         """
         Root-owned reservation runtime bootstrap.
 
-        This creates and hydrates objects only. It does not wire lifecycle call
-        sites, does not issue broker commands, and keeps activation disabled.
+        This hydrates the existing durable reservation owner before OrderRouter
+        wires direct lifecycle calls. It never issues a broker command.
         """
         reservation_lifecycle_paper_requested = bool(
             getattr(config, "reservation_lifecycle_paper_enabled", False)
@@ -770,10 +783,20 @@ class SovereignHeartbeat:
         self.reservation_lifecycle_enabled = bool(
             reservation_lifecycle_paper_requested and reservation_lifecycle_is_paper
         )
+        configured_execution_broker = (
+            get_configured_execution_broker(config)
+            if reservation_lifecycle_is_paper
+            else INTERNAL_PAPER_EXECUTION_BROKER
+        )
+        self._broker_inventory_reconciliation_required = bool(
+            reservation_lifecycle_is_paper
+            and configured_execution_broker != INTERNAL_PAPER_EXECUTION_BROKER
+        )
         self.exposure_manager = ExposureManager(
             initial_equity=Decimal(str(config.initial_capital)),
             max_utilization=Decimal(str(getattr(config, "portfolio_risk_max_utilization", "0.50"))),
             max_asset_concentration=Decimal(str(getattr(config, "portfolio_risk_max_asset_concentration", "0.15"))),
+            require_broker_inventory_reconciliation=self._broker_inventory_reconciliation_required,
         )
 
         active_rows = []
@@ -793,6 +816,7 @@ class SovereignHeartbeat:
             active_rows = self.state_store.list_reservation_ledger(
                 active_only=True,
                 include_terminal=False,
+                strict=True,
             )
             for row in active_rows:
                 reservation_id = row.get("reservation_id")
@@ -800,11 +824,15 @@ class SovereignHeartbeat:
                     continue
                 tombstone = self.state_store.get_reservation_release_tombstone(
                     reservation_id=reservation_id,
+                    strict=True,
                 )
                 if tombstone is not None:
                     release_tombstones.append(tombstone)
                 fill_progress.extend(
-                    self.state_store.list_reservation_fill_progress(reservation_id)
+                    self.state_store.list_reservation_fill_progress(
+                        reservation_id,
+                        strict=True,
+                    )
                 )
 
             hydrate_result = self.exposure_manager.hydrate_reservations_from_ledger(
@@ -823,6 +851,7 @@ class SovereignHeartbeat:
         self.reservation_lifecycle_coordinator = ReservationLifecycleCoordinator(
             exposure_manager=self.exposure_manager,
             state_store=self.state_store,
+            baseline_context=getattr(config, "paper_baseline_runtime_context", None),
         )
         self.reservation_lifecycle_bootstrap_status = {
             "exposure_manager_created": self.exposure_manager is not None,
@@ -844,6 +873,7 @@ class SovereignHeartbeat:
             "failed_reason": failed_reason,
             "hydrate_result": hydrate_result,
             "runtime_lifecycle_wired": False,
+            "broker_inventory_reconciliation_required": self._broker_inventory_reconciliation_required,
             "telemetry_authority_used": False,
             "broker_command_performed": False,
         }

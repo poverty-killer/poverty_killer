@@ -163,6 +163,45 @@ def test_portfolio_risk_gate_paper_enables_effective_reservation_lifecycle(tmp_p
     assert root.reservation_lifecycle_bootstrap_status["portfolio_risk_gate_policy_version"] == "P3B_B1_V1"
 
 
+def test_external_paper_bootstrap_requires_complete_broker_inventory_before_admission(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        runtime_main.EXECUTION_BROKER_ENV_VAR,
+        runtime_main.ALPACA_PAPER_EXECUTION_BROKER,
+    )
+    root = _root_with_store(_store(tmp_path))
+
+    root._bootstrap_reservation_lifecycle_disabled(
+        _config(portfolio_risk_gate_paper_enabled=True)
+    )
+
+    assert root.reservation_lifecycle_enabled is True
+    assert root._broker_inventory_reconciliation_required is True
+    assert root.exposure_manager.broker_inventory_authority_evidence("BTCUSD") == {
+        "source": "ExposureManager",
+        "authority_class": "PORTFOLIO_RISK",
+        "snapshot_id": None,
+        "account_suffix": None,
+        "broker_cash_available": None,
+        "broker_inventory_required": True,
+        "broker_inventory_reconciled": False,
+        "reason_codes": (),
+        "realized_pnl_basis": "NOT_APPLICABLE",
+        "fee_truth_status": "NOT_ESTABLISHED",
+        "fee_truth_complete": False,
+        "net_realized_pnl_claimed": False,
+        "symbol": "BTCUSD",
+        "broker_mutation_occurred": False,
+        "known_attribution": False,
+        "lot_tracking_available": False,
+        "authorized": False,
+        "reason_code": "BROKER_INVENTORY_RECONCILIATION_REQUIRED",
+    }
+    assert root.reservation_lifecycle_bootstrap_status["broker_command_performed"] is False
+
+
 def test_live_requested_keeps_effective_reservation_lifecycle_disabled(tmp_path):
     store = _store(tmp_path)
     root = _root_with_store(store)
@@ -311,9 +350,12 @@ def test_bootstrap_passes_disabled_coordinator_only_to_order_router():
     assert "self._bootstrap_reservation_lifecycle_disabled(config)" in heartbeat_init
     assert "reservation_lifecycle_coordinator=self.reservation_lifecycle_coordinator" in heartbeat_init
     assert "reservation_lifecycle_enabled=self.reservation_lifecycle_enabled" in heartbeat_init
+    assert "broker_inventory_reconciliation_required=self._broker_inventory_reconciliation_required" in heartbeat_init
+    assert "self.order_router.reconcile_startup_broker_inventory()" in heartbeat_init
     assert "exposure_manager=self.exposure_manager" in heartbeat_init
     assert "reservation_lifecycle_coordinator" in order_router_init.parameters
     assert "reservation_lifecycle_enabled" in order_router_init.parameters
+    assert "broker_inventory_reconciliation_required" in order_router_init.parameters
     assert "reservation_lifecycle_coordinator" not in execution_engine_init.parameters
     assert "reservation_lifecycle_coordinator" not in main_loop_init.parameters
     assert "exposure_manager" in main_loop_init.parameters

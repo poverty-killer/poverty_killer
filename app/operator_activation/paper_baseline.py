@@ -215,6 +215,7 @@ class PaperBaselineRuntimeContext:
     baseline_loaded: bool
     baseline_snapshot_id: str | None = None
     snapshot_hash: str | None = None
+    account_suffix: str | None = None
     policy: str | None = None
     protected_symbols_normalized: tuple[str, ...] = ()
     protected_positions: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -244,6 +245,7 @@ class PaperBaselineRuntimeContext:
             "baseline_loaded": self.baseline_loaded,
             "baseline_snapshot_id": self.baseline_snapshot_id,
             "snapshot_hash": self.snapshot_hash,
+            "account_suffix": self.account_suffix,
             "policy": self.policy,
             "protected_symbols_normalized": list(self.protected_symbols_normalized),
             "protected_symbols_count": self.protected_symbols_count,
@@ -322,6 +324,17 @@ def build_paper_baseline_runtime_context(
         return _runtime_context_error("PAPER_BASELINE_SNAPSHOT_ID_MISMATCH", required=required, source_path=source_path)
     if expected_snapshot_hash and snapshot_hash != expected_snapshot_hash:
         return _runtime_context_error("PAPER_BASELINE_SNAPSHOT_HASH_MISMATCH", required=required, source_path=source_path)
+    accepted_account = accepted_snapshot.get("account")
+    accepted_account = accepted_account if isinstance(accepted_account, Mapping) else {}
+    account_suffix = normalize_alpaca_account_suffix(
+        accepted_account.get("account_id") or accepted_account.get("id")
+    )
+    if not account_suffix:
+        return _runtime_context_error(
+            "PAPER_BASELINE_ACCOUNT_ID_MISSING",
+            required=required,
+            source_path=source_path,
+        )
 
     positions = _as_list(accepted_snapshot.get("positions"))
     protected_positions: dict[str, dict[str, Any]] = {}
@@ -335,6 +348,11 @@ def build_paper_baseline_runtime_context(
             "qty": _clean_decimal_text(position.get("qty") or position.get("quantity")),
             "side": position.get("side"),
             "asset_class": position.get("asset_class"),
+            "avg_entry_price": _clean_decimal_text(
+                position.get("avg_entry_price") or position.get("average_entry_price")
+            ),
+            "cost_basis": _clean_decimal_text(position.get("cost_basis")),
+            "position_id": position.get("position_id"),
             "baseline_position": True,
         }
     protected_symbols = tuple(sorted(protected_positions))
@@ -345,6 +363,7 @@ def build_paper_baseline_runtime_context(
                 baseline_loaded=True,
                 baseline_snapshot_id=baseline_snapshot_id,
                 snapshot_hash=snapshot_hash,
+                account_suffix=account_suffix,
                 policy=policy,
                 protected_symbols_normalized=(),
                 protected_positions={},
@@ -361,6 +380,7 @@ def build_paper_baseline_runtime_context(
         baseline_loaded=True,
         baseline_snapshot_id=baseline_snapshot_id,
         snapshot_hash=snapshot_hash,
+        account_suffix=account_suffix,
         policy=policy,
         protected_symbols_normalized=protected_symbols,
         protected_positions=protected_positions,
@@ -529,10 +549,139 @@ def _positions_drift(current_positions: list[dict[str, Any]], accepted_snapshot:
     return _position_signature(current_positions) != accepted_signature
 
 
+def _managed_reconciliation_matches_current(
+    *,
+    current_positions: list[dict[str, Any]],
+    accepted_snapshot: Mapping[str, Any],
+    managed_reconciliation: Mapping[str, Any] | None,
+    durable_integrity_verified: bool = False,
+) -> tuple[bool, str]:
+    """Validate current broker quantity against immutable managed lineage."""
+    if not isinstance(managed_reconciliation, Mapping):
+        return False, "MANAGED_RECONCILIATION_MISSING"
+    if str(managed_reconciliation.get("status") or "").upper() != "RECONCILED":
+        return False, "MANAGED_RECONCILIATION_NOT_RECONCILED"
+    exposure_ingest = managed_reconciliation.get("exposure_ingest")
+    runtime_application_proven = bool(
+        managed_reconciliation.get("authorized") is True
+        and isinstance(exposure_ingest, Mapping)
+        and exposure_ingest.get("applied") is True
+    )
+    if not runtime_application_proven and not durable_integrity_verified:
+        return False, "MANAGED_RECONCILIATION_RUNTIME_APPLICATION_REQUIRED"
+    snapshot_id = str(managed_reconciliation.get("snapshot_id") or "").strip()
+    baseline_snapshot_id = str(managed_reconciliation.get("baseline_snapshot_id") or "").strip()
+    opening_id = str(((accepted_snapshot.get("proof") or {}).get("baseline_snapshot_id")) or "").strip()
+    if not snapshot_id or not opening_id or baseline_snapshot_id != opening_id:
+        return False, "MANAGED_RECONCILIATION_BASELINE_LINEAGE_MISMATCH"
+    metadata = managed_reconciliation.get("metadata")
+    if not isinstance(metadata, Mapping) or metadata.get("opening_baseline_preserved") is not True:
+        return False, "MANAGED_RECONCILIATION_OPENING_BASELINE_NOT_PRESERVED"
+    accepted_suffix = normalize_alpaca_account_suffix(
+        ((accepted_snapshot.get("account") or {}).get("account_id"))
+        or ((accepted_snapshot.get("account") or {}).get("id"))
+    )
+    managed_suffix = normalize_alpaca_account_suffix(managed_reconciliation.get("account_suffix"))
+    if not accepted_suffix or not managed_suffix or accepted_suffix != managed_suffix:
+        return False, "MANAGED_RECONCILIATION_ACCOUNT_MISMATCH"
+
+    rows = managed_reconciliation.get("positions")
+    if not isinstance(rows, list):
+        return False, "MANAGED_RECONCILIATION_POSITIONS_MISSING"
+    managed_quantities: dict[str, Decimal] = {}
+    managed_avg_entry_prices: dict[str, Decimal] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return False, "MANAGED_RECONCILIATION_POSITION_INVALID"
+        symbol = normalize_baseline_symbol(row.get("symbol"))
+        try:
+            raw_qty = str(row.get("broker_qty") or "").strip()
+            if not raw_qty:
+                raise InvalidOperation
+            qty = Decimal(raw_qty)
+        except (InvalidOperation, ValueError):
+            return False, f"MANAGED_RECONCILIATION_QUANTITY_INVALID:{symbol or 'UNKNOWN'}"
+        row_metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        if not qty.is_finite():
+            return False, f"MANAGED_RECONCILIATION_QUANTITY_INVALID:{symbol or 'UNKNOWN'}"
+        if not symbol or symbol in managed_quantities or qty < Decimal("0"):
+            return False, "MANAGED_RECONCILIATION_POSITION_INVALID"
+        try:
+            raw_avg_entry_price = str(row.get("avg_entry_price") or "").strip()
+            if qty > Decimal("0") and not raw_avg_entry_price:
+                raise InvalidOperation
+            avg_entry_price = Decimal(raw_avg_entry_price or "0")
+        except (InvalidOperation, ValueError):
+            return False, f"MANAGED_RECONCILIATION_AVG_ENTRY_PRICE_INVALID:{symbol}"
+        if not avg_entry_price.is_finite() or (
+            qty > Decimal("0") and avg_entry_price <= Decimal("0")
+        ):
+            return False, f"MANAGED_RECONCILIATION_AVG_ENTRY_PRICE_INVALID:{symbol}"
+        if str(row_metadata.get("attribution_status") or "") != "KNOWN":
+            return False, f"MANAGED_RECONCILIATION_ATTRIBUTION_UNKNOWN:{symbol}"
+        try:
+            raw_unknown_qty = str(
+                row_metadata.get("unknown_attribution_qty", "0")
+            ).strip()
+            if not raw_unknown_qty:
+                raise InvalidOperation
+            unknown_attribution_qty = Decimal(raw_unknown_qty)
+        except (InvalidOperation, ValueError):
+            return False, f"MANAGED_RECONCILIATION_ATTRIBUTION_INVALID:{symbol}"
+        if not unknown_attribution_qty.is_finite():
+            return False, f"MANAGED_RECONCILIATION_ATTRIBUTION_INVALID:{symbol}"
+        if unknown_attribution_qty != Decimal("0"):
+            return False, f"MANAGED_RECONCILIATION_ATTRIBUTION_UNKNOWN:{symbol}"
+        managed_quantities[symbol] = qty
+        managed_avg_entry_prices[symbol] = avg_entry_price
+
+    current_quantities: dict[str, Decimal] = {}
+    current_avg_entry_prices: dict[str, Decimal] = {}
+    for row in current_positions:
+        if not isinstance(row, Mapping):
+            return False, "CURRENT_BROKER_POSITION_INVALID"
+        symbol = normalize_baseline_symbol(row.get("symbol"))
+        if not symbol or symbol in current_quantities:
+            return False, "CURRENT_BROKER_POSITION_INVALID"
+        try:
+            raw_current_qty = str(row.get("qty") or row.get("quantity") or "").strip()
+            if not raw_current_qty:
+                raise InvalidOperation
+            current_qty = Decimal(raw_current_qty)
+        except (InvalidOperation, ValueError):
+            return False, f"CURRENT_BROKER_POSITION_QUANTITY_INVALID:{symbol}"
+        if not current_qty.is_finite() or current_qty < Decimal("0"):
+            return False, f"CURRENT_BROKER_POSITION_QUANTITY_INVALID:{symbol}"
+        try:
+            raw_current_avg_entry_price = str(
+                row.get("avg_entry_price") or row.get("average_entry_price") or ""
+            ).strip()
+            if current_qty > Decimal("0") and not raw_current_avg_entry_price:
+                raise InvalidOperation
+            current_avg_entry_price = Decimal(raw_current_avg_entry_price or "0")
+        except (InvalidOperation, ValueError):
+            return False, f"CURRENT_BROKER_POSITION_AVG_ENTRY_PRICE_INVALID:{symbol}"
+        if not current_avg_entry_price.is_finite() or (
+            current_qty > Decimal("0") and current_avg_entry_price <= Decimal("0")
+        ):
+            return False, f"CURRENT_BROKER_POSITION_AVG_ENTRY_PRICE_INVALID:{symbol}"
+        current_quantities[symbol] = current_qty
+        current_avg_entry_prices[symbol] = current_avg_entry_price
+    if current_quantities != managed_quantities:
+        return False, "MANAGED_RECONCILIATION_CURRENT_POSITION_MISMATCH"
+    if current_avg_entry_prices != managed_avg_entry_prices:
+        return False, "MANAGED_RECONCILIATION_CURRENT_COST_BASIS_MISMATCH"
+    if runtime_application_proven:
+        return True, "MANAGED_RECONCILIATION_CURRENT"
+    return True, "MANAGED_RECONCILIATION_DURABLE_VERIFIED_REINGEST_REQUIRED"
+
+
 def build_baseline_adoption_state(
     *,
     current_snapshot: Mapping[str, Any] | None = None,
     accepted_baseline: Mapping[str, Any] | None = None,
+    managed_reconciliation: Mapping[str, Any] | None = None,
+    managed_reconciliation_durable_verified: bool = False,
 ) -> dict[str, Any]:
     accepted_snapshot = _accepted_snapshot(accepted_baseline)
     current = dict(current_snapshot or {})
@@ -610,6 +759,44 @@ def build_baseline_adoption_state(
         return base
     if accepted_snapshot is not None:
         if current and _positions_drift(current_positions, accepted_snapshot):
+            managed_current, managed_reason = _managed_reconciliation_matches_current(
+                current_positions=current_positions,
+                accepted_snapshot=accepted_snapshot,
+                managed_reconciliation=managed_reconciliation,
+                durable_integrity_verified=managed_reconciliation_durable_verified,
+            )
+            if managed_current:
+                base.update(
+                    {
+                        "status": PREFLIGHT_READY_WITH_ACCEPTED_EXISTING_POSITIONS,
+                        "decision": "PREFLIGHT_READY_WITH_MANAGED_RECONCILIATION",
+                        "start_ready": True,
+                        "baseline_snapshot_id": ((accepted_snapshot.get("proof") or {}).get("baseline_snapshot_id")),
+                        "snapshot_hash": ((accepted_snapshot.get("proof") or {}).get("snapshot_hash")),
+                        "accepted_at": ((accepted_snapshot.get("proof") or {}).get("accepted_at")),
+                        "managed_reconciliation_snapshot_id": managed_reconciliation.get("snapshot_id"),
+                        "managed_reconciliation_status": managed_reason,
+                        "managed_reconciliation_durable_verified": bool(
+                            managed_reconciliation_durable_verified
+                        ),
+                        "runtime_reingest_required": not (
+                            isinstance(managed_reconciliation.get("exposure_ingest"), Mapping)
+                            and managed_reconciliation.get("authorized") is True
+                            and managed_reconciliation["exposure_ingest"].get("applied") is True
+                        ),
+                        "opening_baseline_preserved": True,
+                        "reason": (
+                            "Current broker positions differ from opening inventory only through a complete, "
+                            "integrity-verified reconciliation lineage. The new runtime must re-ingest fresh broker truth "
+                            "before candidate admission."
+                        ),
+                        "next_safe_action": (
+                            "Start only through the governed supervisor; the child must reconcile and re-ingest the "
+                            "complete broker book before any new entry."
+                        ),
+                    }
+                )
+                return base
             base.update(
                 {
                     "status": PAPER_BASELINE_DRIFT_REQUIRES_REFRESH,
@@ -619,6 +806,7 @@ def build_baseline_adoption_state(
                     "accepted_at": ((accepted_snapshot.get("proof") or {}).get("accepted_at")),
                     "reason": "Current positions differ from the accepted baseline; refresh read-only preflight and accept a new baseline.",
                     "next_safe_action": "Request explicit read-only PAPER preflight refresh before any PAPER run discussion.",
+                    "managed_reconciliation_status": managed_reason,
                 }
             )
             return base
