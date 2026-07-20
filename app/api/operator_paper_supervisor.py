@@ -24,6 +24,7 @@ from typing import Any, Callable, Mapping, Protocol
 from app.api.operator_runtime_config import OperatorRuntimeConfig, RUNNER_MAX_PAPER_DURATION_SECONDS
 from app.api.operator_session_store import OperatorSessionStore
 from app.execution.broker_read_policy import broker_read_profile_from_env
+from app.market.capability_registry import validate_alpaca_crypto_capability_evidence
 from app.operator_activation.account_identity import (
     ACCOUNT_PIN_NOT_PROVEN,
     account_identity_assertion_passed,
@@ -66,6 +67,9 @@ PAPER_BROKER_READ_AUTH_ENV = "PK_BOARD_AUTHORIZED_PAPER_BROKER_READ"
 PAPER_BROKER_READ_AUTH_VALUE = "YES_D4_BOARD_AUTHORIZED"
 PAPER_BROKER_PREFLIGHT_REQUIRED = "PAPER_BROKER_PREFLIGHT_REQUIRED"
 PAPER_BROKER_PREFLIGHT_FAILED = "PAPER_BROKER_PREFLIGHT_FAILED"
+BROKER_CRYPTO_CATALOG_ID_ENV = "POVERTY_KILLER_CATALOG_SNAPSHOT_ID"
+BROKER_CRYPTO_UNIVERSE_ID_ENV = "POVERTY_KILLER_UNIVERSE_SNAPSHOT_ID"
+BROKER_CRYPTO_STATE_STORE_ENV = "POVERTY_KILLER_CAPABILITY_STATE_STORE_PATH"
 PAPER_BROKER_PREFLIGHT_CONFIRMATIONS = {
     "confirm_paper_read_only": "MISSING_PAPER_READ_ONLY_CONFIRMATION",
     "confirm_account_positions_orders_get_only": "MISSING_GET_ONLY_SCOPE_CONFIRMATION",
@@ -438,6 +442,8 @@ class PaperSupervisorConfig:
     operator_state_dir: str | None = None
     session_store_path: str | None = None
     state_store_path: str | None = None
+    catalog_snapshot_id: str = ""
+    universe_snapshot_id: str = ""
     max_session_history: int = 250
     script_path: str = "scripts/run_bounded_paper.ps1"
     powershell_executable: str = "powershell.exe"
@@ -462,7 +468,9 @@ class PaperSupervisorConfig:
             runtime_profile=runtime_config.runtime_profile,
             operator_state_dir=str(runtime_config.operator_state_dir),
             session_store_path=str(runtime_config.operator_session_store_path),
-            state_store_path=str(runtime_config.data_dir / "state.db"),
+            state_store_path=str(runtime_config.capability_state_store_path),
+            catalog_snapshot_id=runtime_config.catalog_snapshot_id,
+            universe_snapshot_id=runtime_config.universe_snapshot_id,
             max_session_history=runtime_config.max_session_history,
         )
 
@@ -531,7 +539,13 @@ class OperatorPaperSupervisor:
                 "Pinned account identity will be checked by the governed GET-only PAPER broker verification.",
             )
         )
-        paper_start_refusal = self._paper_start_prerequisite_refusal(account_identity=account_identity)
+        _, crypto_capability_status = self._managed_crypto_capability_evidence(
+            account_suffix=account_identity.get("actual_suffix"),
+        )
+        paper_start_refusal = self._paper_start_prerequisite_refusal(
+            account_identity=account_identity,
+            crypto_capability_status=crypto_capability_status,
+        )
         broker_read_profile = self._broker_read_profile().to_dict()
         return {
             "supervisor_version": SUPERVISOR_VERSION,
@@ -576,6 +590,7 @@ class OperatorPaperSupervisor:
             "paper_broker_read_authorization": self.paper_broker_read_authorization_status(),
             "paper_broker_preflight": self.paper_broker_preflight_status(),
             "paper_baseline_runtime_context": self._paper_baseline_runtime_context().to_dict(),
+            "broker_crypto_capability_evidence": crypto_capability_status,
             "startup_lifecycle_reconciliation": dict(self._startup_lifecycle_event),
             "process_lifecycle": {
                 "active_statuses": sorted(ACTIVE_SESSION_STATUSES),
@@ -589,6 +604,8 @@ class OperatorPaperSupervisor:
             },
             "allowed_profile": self.config.allowed_profile,
             "allowed_watchlist": list(self.config.allowed_watchlist),
+            "priority_watchlist": list(self.config.allowed_watchlist),
+            "watchlist_authority": "PRIORITY_ONLY_NOT_EXECUTION_ELIGIBILITY",
             "allowed_durations": sorted(self.config.allowed_durations),
             "min_paper_duration_seconds": self.config.min_paper_duration_seconds,
             "max_paper_duration_seconds": self.config.max_paper_duration_seconds,
@@ -632,7 +649,50 @@ class OperatorPaperSupervisor:
                 runtime_mutation_occurred=False,
             )
 
-        watchlist = self._normalize_watchlist(request.get("watchlist")) or self.config.allowed_watchlist
+        identity_assertion = self._paper_account_identity_assertion(force=False)
+        _, capability_status = self._managed_crypto_capability_evidence(
+            account_suffix=identity_assertion.get("actual_suffix"),
+        )
+        post_validation_refusal = self._paper_start_prerequisite_refusal(
+            account_identity=identity_assertion,
+            crypto_capability_status=capability_status,
+        )
+        if post_validation_refusal:
+            session = self._build_refused_session(request, post_validation_refusal)
+            event = self._record_event("paper_start", False, post_validation_refusal, session.session_id, False)
+            session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(session)
+            return self._intent_response(
+                intent="paper_start",
+                allowed=False,
+                reason_code=post_validation_refusal,
+                audit_event=event,
+                session=session,
+                runtime_mutation_occurred=False,
+            )
+        full_runtime_universe = tuple(str(item) for item in capability_status.get("runtime_symbols") or ())
+        requested_priority = self._normalize_watchlist(request.get("watchlist"))
+        watchlist = tuple(
+            dict.fromkeys(
+                (
+                    *(symbol for symbol in requested_priority if symbol in full_runtime_universe),
+                    *full_runtime_universe,
+                )
+            )
+        )
+        if not watchlist:
+            session = self._build_refused_session(request, "BROKER_CRYPTO_RUNTIME_UNIVERSE_EMPTY")
+            event = self._record_event("paper_start", False, session.refusal_reason or "BROKER_CRYPTO_RUNTIME_UNIVERSE_EMPTY", session.session_id, False)
+            session.audit_event_ids.append(event.audit_event_id)
+            self._persist_session(session)
+            return self._intent_response(
+                intent="paper_start",
+                allowed=False,
+                reason_code=session.refusal_reason or "BROKER_CRYPTO_RUNTIME_UNIVERSE_EMPTY",
+                audit_event=event,
+                session=session,
+                runtime_mutation_occurred=False,
+            )
         duration = int(request.get("duration_seconds") or 300)
         session_id = self._new_session_id()
         spec = self._build_start_spec(session_id=session_id, duration_seconds=duration, watchlist=watchlist)
@@ -1219,16 +1279,21 @@ class OperatorPaperSupervisor:
         if duration_int > self.config.max_paper_duration_seconds:
             return "DURATION_ABOVE_MAXIMUM_SECONDS"
 
-        watchlist = self._normalize_watchlist(request.get("watchlist")) or self.config.allowed_watchlist
-        if not watchlist:
-            return "MISSING_WATCHLIST"
-        allowed = set(self.config.allowed_watchlist)
-        if any(symbol not in allowed for symbol in watchlist):
-            return "UNSUPPORTED_WATCHLIST_SYMBOL"
         preflight_passed = self._paper_broker_preflight.get("status") == "PASS"
-        prerequisite_refusal = self._paper_start_prerequisite_refusal(force_account_pin=not preflight_passed)
+        identity_assertion = self._paper_account_identity_assertion(force=not preflight_passed)
+        _, capability_status = self._managed_crypto_capability_evidence(
+            account_suffix=identity_assertion.get("actual_suffix"),
+        )
+        prerequisite_refusal = self._paper_start_prerequisite_refusal(
+            account_identity=identity_assertion,
+            crypto_capability_status=capability_status,
+        )
         if prerequisite_refusal:
             return prerequisite_refusal
+        requested_priority = self._normalize_watchlist(request.get("watchlist"))
+        eligible_symbols = set(capability_status.get("entry_symbols") or ())
+        if requested_priority and any(symbol not in eligible_symbols for symbol in requested_priority):
+            return "PRIORITY_SYMBOL_NOT_ENTRY_ELIGIBLE"
         return None
 
     def _paper_key_refusal(self) -> str | None:
@@ -1299,6 +1364,7 @@ class OperatorPaperSupervisor:
         *,
         account_identity: Mapping[str, Any] | None = None,
         force_account_pin: bool = False,
+        crypto_capability_status: Mapping[str, Any] | None = None,
     ) -> str | None:
         key_refusal = self._paper_key_refusal()
         if key_refusal:
@@ -1315,6 +1381,15 @@ class OperatorPaperSupervisor:
         )
         if not account_identity_assertion_passed(identity_assertion):
             return str(identity_assertion.get("reason_code") or ACCOUNT_PIN_NOT_PROVEN)
+        capability_status = (
+            dict(crypto_capability_status)
+            if isinstance(crypto_capability_status, Mapping)
+            else self._managed_crypto_capability_evidence(
+                account_suffix=identity_assertion.get("actual_suffix"),
+            )[1]
+        )
+        if capability_status.get("status") != "VERIFIED":
+            return str(capability_status.get("reason_code") or "BROKER_CRYPTO_CAPABILITY_EVIDENCE_UNAVAILABLE")
         baseline_context = self._paper_baseline_runtime_context()
         if baseline_context.baseline_required and not baseline_context.baseline_loaded:
             return baseline_context.baseline_context_error or PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED
@@ -1479,6 +1554,72 @@ class OperatorPaperSupervisor:
         )
         return reconciliation, evidence
 
+    def _managed_crypto_capability_evidence(
+        self,
+        *,
+        account_suffix: str | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Read pinned catalog/universe evidence without creating eligibility authority."""
+        status: dict[str, Any] = {
+            "status": "UNAVAILABLE",
+            "reason_code": "BROKER_CRYPTO_CAPABILITY_EVIDENCE_UNAVAILABLE",
+            "catalog_snapshot_id": self.config.catalog_snapshot_id or None,
+            "universe_snapshot_id": self.config.universe_snapshot_id or None,
+            "durable_integrity_verified": False,
+            "broker_call_occurred": False,
+            "broker_mutation_occurred": False,
+            "secrets_values_exposed": False,
+        }
+        if not self.config.catalog_snapshot_id or not self.config.universe_snapshot_id:
+            status["reason_code"] = "BROKER_CRYPTO_UNIVERSE_PIN_REQUIRED"
+            return None, status
+        normalized_suffix = normalize_alpaca_account_suffix(account_suffix)
+        if not normalized_suffix:
+            status["reason_code"] = "BROKER_CRYPTO_ACCOUNT_SUFFIX_REQUIRED"
+            return None, status
+        path = self._state_store_path()
+        status["state_store_path"] = str(path)
+        if not path.is_file():
+            status["reason_code"] = "BROKER_CRYPTO_CAPABILITY_STATE_STORE_MISSING"
+            return None, status
+
+        store: StateStore | None = None
+        try:
+            store = StateStore(str(path), read_only=True)
+            evidence = store.get_broker_crypto_capability_evidence(
+                catalog_snapshot_id=self.config.catalog_snapshot_id,
+                universe_snapshot_id=self.config.universe_snapshot_id,
+                strict=True,
+            )
+        except (OSError, RuntimeError, ValueError):
+            status["status"] = "BLOCKED"
+            status["reason_code"] = "BROKER_CRYPTO_CAPABILITY_STATE_READ_FAILED"
+            return None, status
+        finally:
+            if store is not None:
+                store.close()
+        if not isinstance(evidence, dict):
+            status["reason_code"] = "BROKER_CRYPTO_CAPABILITY_EVIDENCE_MISSING"
+            return None, status
+
+        catalog = evidence.get("catalog") if isinstance(evidence.get("catalog"), dict) else {}
+        universe = evidence.get("universe") if isinstance(evidence.get("universe"), dict) else {}
+        try:
+            _registry, validation = validate_alpaca_crypto_capability_evidence(
+                catalog,
+                universe,
+                expected_account_suffix=normalized_suffix,
+                as_of_ns=time.time_ns(),
+            )
+        except (TypeError, ValueError, ArithmeticError):
+            status["status"] = "BLOCKED"
+            status["reason_code"] = "BROKER_CRYPTO_CAPABILITY_EVIDENCE_INVALID"
+            status["durable_integrity_verified"] = True
+            return evidence, status
+        status.update(validation)
+        status["durable_integrity_verified"] = True
+        return evidence, status
+
     def _paper_baseline_runtime_context(self) -> PaperBaselineRuntimeContext:
         path = self._baseline_store_path()
         required = str(self.config.process_env.get(PAPER_BASELINE_ENV_REQUIRED) or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -1508,6 +1649,9 @@ class OperatorPaperSupervisor:
         log_dir.mkdir(parents=True, exist_ok=True)
         process_env = dict(self.config.process_env)
         process_env.update(alpaca_paper_account_pin_env())
+        process_env[BROKER_CRYPTO_CATALOG_ID_ENV] = self.config.catalog_snapshot_id
+        process_env[BROKER_CRYPTO_UNIVERSE_ID_ENV] = self.config.universe_snapshot_id
+        process_env[BROKER_CRYPTO_STATE_STORE_ENV] = str(self._state_store_path())
         endpoint_authority = alpaca_endpoint_authority(process_env)
         if endpoint_authority["paper_endpoint_only"] is True:
             process_env["APCA_API_BASE_URL"] = str(endpoint_authority["alpaca_endpoint_display"])

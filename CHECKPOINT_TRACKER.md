@@ -1,6 +1,6 @@
 # POVERTY_KILLER Completion Checkpoint Tracker
 
-Updated: 2026-07-18
+Updated: 2026-07-19
 Branch: master
 
 ## Checkpoint Summary
@@ -290,18 +290,18 @@ red-team, and adjusted plan are in
 `reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md`.
 
 - **HISTORICAL PLANNING BASELINE** - the planning artifact itself changed no
-  source, runtime state, broker state, or trading authority. Stages 0 and 1 have
-  since completed under their own Board approvals and stage-entry covenants;
-  Stage 2 is not open.
+  source, runtime state, broker state, or trading authority. Stages 0 through 3
+  have since completed under their own Board approvals, stage-entry covenants,
+  and close reports; Stage 4 is not open.
 - Repo inspection found causal and authority prerequisites that must precede
   wider trading: cross-symbol fusion state, future-evidence acceptance,
   incomplete broker-book hydration, pre-fill strategy state, a declared-but-
   rejected Alpaca SELL contract, non-scalable poll-all data access, inferred
   module attribution, and placeholder/illustrative portfolio economics.
 - The adjusted plan has Stages 0-11 for offline implementation and adversarial
-  certification. Shan separately approved Stage 0 and then Stage 1; each
-  advanced only through its binary exit gate. Later stages still require their
-  own boundary direction.
+  certification. Shan separately directed Stages 0, 1, 2, and 3; each advanced
+  only through its binary exit gate. Later stages still require their own
+  boundary direction.
 - Stage 12 broker-read-only validation remains a separate Board approval. Stage
   13 contains progressively bounded PAPER runs, each separately Board-approved.
 - "Open trading" is defined as a broker-discovered PAPER universe plus the
@@ -360,9 +360,8 @@ red-team, and adjusted plan are in
   queue position, price improvement, or complete live fees and cannot
   automatically promote the bot to live trading.
 - The planning update changed governance/planning documents only. Later Stage
-  0/1 work is recorded separately below. Stage 2 and later implementation are
-  not opened; Stage 12 reads and every Stage 13 campaign remain separate
-  approvals.
+  0-3 work is recorded separately below. Stage 4 is not opened; Stage 12 reads
+  and every Stage 13 campaign remain separate approvals.
 
 ## PAPER True Capability Stage 0
 
@@ -399,9 +398,9 @@ staging recommendation are in
   real money, threshold change, module deletion, or protected state edit/stage
   occurred.
 - Historical close boundary: Stage 1 was not opened by Stage 0. Shan later
-  directed `proceed`, and Stage 1 completed under its own covenant and report
-  below. Stage 2 is not started; Stage 12 broker reads and every Stage 13 PAPER
-  campaign retain their separate approval boundaries.
+  directed Stages 1-3 separately, and each completed under its own covenant and
+  report below. Stage 4 is not started; Stage 12 broker reads and every Stage 13
+  PAPER campaign retain their separate approval boundaries.
 
 ## PAPER True Capability Stage 1
 
@@ -447,16 +446,18 @@ red-team, close evidence, limitations, research, and exact staging scope are in
   tests remain skipped; external feed clock quality/capacity is unproven; Stage
   2+ universe, baseline, SELL adapter, economics, campaign, and tenant work is
   unchanged.
-- Stage 2 remains **NOT STARTED**. It needs its own full governance re-read,
-  stage-entry manifest/red-team, binary exit, and Board direction. Stage 12 and
-  every Stage 13 campaign remain separately gated.
+- Historical Stage 1 close boundary: Stage 2 was not opened by Stage 1. Shan
+  later directed Stages 2 and 3 separately; both completed under their own
+  covenants and reports. Stage 4 remains unopened, and Stage 12 plus every Stage
+  13 campaign remain separately gated.
 
 ## PAPER True Capability Stage 2
 
 Shan directed `proceed` on 2026-07-18 after Stage 1 and required the mandatory
 pre-close production-review loop. Stage 2 is complete at the **local offline
 test rung**. Its exact 16-file cached diff passed membership, whitespace,
-summary, forbidden-control, and credential-value review. Stage 3 is not opened.
+summary, forbidden-control, and credential-value review. Stage 3 later opened
+and closed under the separate record below.
 
 - PASS - StateStore now persists immutable broker inventory events, complete
   snapshots, per-symbol projections, and lot projections as integrity-checked
@@ -510,10 +511,71 @@ summary, forbidden-control, and credential-value review. Stage 3 is not opened.
   cached paths, `git diff --cached --check` exit 0, 8,064 insertions and 134
   deletions, no intended unstaged delta, and protected runtime state excluded.
 
-Current boundary: stop at Stage 2 after the exact close commit/push. Stage 3
-requires its own governance re-read, entry manifest, truth map, red team, and
-Board direction. Stage 12 broker reads and every Stage 13 PAPER campaign remain
-separately gated.
+Historical boundary: Stage 3 was not opened by Stage 2. Shan later directed it
+separately, and its close truth is recorded below.
+
+## PAPER True Capability Stage 3
+
+Shan directed `proceed stage 3` on 2026-07-19. Stage 3 is complete and **PASS
+at the local offline test rung only**. Full entry manifest, restriction ledger,
+research, review cycles, test evidence, limitations, and exact staging scope are
+in `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_3_REPORT.md`.
+
+- PASS - a distinct catalog-only policy admits only Alpaca PAPER GET
+  `/v2/assets?status=active&asset_class=crypto`; every mutation method is denied
+  before transport. No production caller or real GET was added in Stage 3.
+- PASS - strict broker-canonical normalization rejects malformed types,
+  conflicting aliases/duplicates, missing facts, floats, nonfinite values, and
+  nonpositive size/price constraints. Exact Decimal text is preserved.
+- PASS - one deterministic capability owner intersects broker asset facts,
+  pinned-account permissions, quote funding, adapter support, and explicit
+  market-data coverage. Every asset receives inclusion/exclusion reasons.
+- PASS - immutable catalog/universe snapshots are endpoint/account/time/hash/
+  count bound and atomically persisted. Missing, future, stale, corrupt,
+  cross-account, or malformed evidence fails closed after restart.
+- PASS - entry eligibility is independent from monitor-required membership, so
+  held/open-order symbols remain governed while new entry can be refused.
+- PASS - static Alpaca crypto rows remain preserved as reference/display
+  evidence but have zero execution authority, including direct registry
+  validation. The operator list is priority-only and cannot grant eligibility.
+- PASS - the full broker-derived universe is transported through supervisor,
+  pre-spawn, child boot, MainLoop, and intelligence-spine paths without a static
+  rescue. All existing Risk, NetEdge, sizing, MarketTruthSnapshot, OMS,
+  reconciliation, account-pin, no-short, and no-naked-SELL owners remain.
+- Final exact-candidate gates: focused `173 passed`; seven-file run path `119
+  passed`; Stage 0-3 covenants `150 passed`; configured offline suite `1980
+  passed, 14 skipped, 0 failed` with 420 warnings; exact skip audit `54 passed,
+  14 skipped`.
+- The 14 skips remain external/mutation gates, not passes: seven explicit Board
+  broker-read gates, three absent mutation approvals, and four legacy optional
+  read probes ending in `URLError`. No Stage 3 test skipped.
+- Mandatory review cycles found and fixed static direct-validation authority,
+  priority-order transport, future/monitor-only proof gaps, permissive string
+  coercion, malformed persisted identity/reasons, malformed priorities, and
+  malformed suffix/held/open-order evidence. Earlier test results were
+  invalidated; cycle 3 found no unresolved in-scope behavior issue. Cycle 4
+  corrected a close-report cached-audit evidence omission and revalidated the
+  unchanged behavior fingerprint plus the final documents.
+- Frozen 35-file behavior manifest composite:
+  `ee6a81105af15256fac596b691f87831902a45f14d7c8b96bc815e6071084929`.
+- Final cache audit: 38 expected and staged paths, zero missing/extra, zero
+  intended unstaged deltas, `git diff --cached --check` exit 0, and 5,441
+  insertions / 109 deletions. Protected runtime/evidence files remain excluded.
+- Highest proof rung: local offline tests. No browser, runtime launch, real
+  broker catalog read, PAPER run, broker mutation, external order/fill/SELL,
+  profitability, live action, real money, or arming proof occurred.
+- Preserved blockers: production catalog acquisition/acceptance; continuous
+  refresh and scalable feed batching/rate budgets/ranking in Stage 4; Alpaca
+  SELL in Stage 8; managed-existing exits in Stage 9; later campaign, cloud,
+  and multi-tenant proof.
+- No threshold, guard, authority, module, strategy math, or safety law weakened.
+  No file/module was deleted, no dependency/subsystem was added,
+  SovereignExecutionGuard remains dormant, and protected state remains unstaged.
+
+Current boundary: **STOP after the Stage 3 close commit/push. Stage 4 is NOT
+OPEN.** It requires a fresh governance re-read, entry manifest, truth map,
+red-team, binary exit, and Board direction. Stage 12 broker reads and every
+Stage 13 PAPER campaign remain separately gated.
 
 ## Governance - Mandatory Pre-Close Review Loop
 
@@ -617,3 +679,15 @@ clean/stash/reset.
   fix-review-retest repetition, exact-final-tree proof, and
   `PRE_CLOSE_REVIEW: PASS` before a completion claim. The ruling changes
   governance only and opens no stage or money-adjacent authority.
+- Shan directed `proceed` for PAPER True Capability Stage 2. Result: complete
+  broker inventory/lineage truth was consolidated through StateStore,
+  ReservationLifecycleCoordinator, ExposureManager, OMS, MainLoop, and the
+  supervisor; the final offline suite passed `1936 passed, 14 skipped, 0
+  failed`. No external broker proof, PAPER run, SELL, live action, or Stage 3
+  authority was inferred.
+- Shan directed `proceed stage 3` on 2026-07-19. Result: the six-symbol
+  commissioning authority was replaced offline with a strict broker-canonical
+  catalog/capability universe, static rows lost execution authority, and the
+  final reviewed suite passed `1980 passed, 14 skipped, 0 failed`. No broker
+  read, PAPER run, mutation, live action, Stage 4 work, or campaign was
+  authorized or performed.

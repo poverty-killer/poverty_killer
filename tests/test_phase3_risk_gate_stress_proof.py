@@ -15,6 +15,11 @@ from app.execution.broker_gateway import BrokerAdapterIdentity, BrokerGatewayRes
 from app.execution.engine import ExecutionEngine
 from app.execution.order_router import OrderRouter
 from app.main_loop import MainLoop, _build_pre_trade_guardrail_verdict
+from app.market.capability_registry import (
+    build_alpaca_crypto_capability_registry,
+    build_alpaca_crypto_universe,
+    normalize_alpaca_crypto_catalog,
+)
 from app.models.signals import StrategySignal
 from app.operator_activation.paper_baseline import (
     BASELINE_POLICY_PROTECTED,
@@ -33,6 +38,47 @@ T0_NS = 1_779_600_000_000_000_000
 NS_PER_SECOND = 1_000_000_000
 
 LIVE_RUNTIME = "LIVE_RUNTIME"
+
+
+def _broker_catalog_registry(symbol: str):
+    catalog = normalize_alpaca_crypto_catalog(
+        [
+            {
+                "id": f"asset-{symbol.replace('/', '').lower()}",
+                "class": "crypto",
+                "exchange": "CRYPTO",
+                "symbol": symbol,
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "marginable": False,
+                "shortable": False,
+                "min_order_size": "0.000000001",
+                "min_trade_increment": "0.000000001",
+                "price_increment": "0.000000001",
+            }
+        ],
+        observed_at_ns=T0_NS,
+        valid_until_ns=T0_NS + 300 * NS_PER_SECOND,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=T0_NS + NS_PER_SECOND,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=(symbol,),
+    )
+    return build_alpaca_crypto_capability_registry(catalog, universe)
 
 
 @dataclass(frozen=True)
@@ -371,6 +417,7 @@ def test_g3_live_runtime_heat_cap_blocks_before_broker_route(monkeypatch):
         runtime=SimpleNamespace(last_price=600.0),
         is_attack=False,
         exposure_manager=manager,
+        capability_registry=_broker_catalog_registry(signal.symbol),
     )
     signal.metadata["pre_trade_guardrail_verdict"] = verdict
     engine = _engine(router)
@@ -424,6 +471,7 @@ def test_g4_live_runtime_correlation_slash_runs_before_netedge(monkeypatch):
         ),
         is_attack=False,
         exposure_manager=manager,
+        capability_registry=_broker_catalog_registry(signal.symbol),
     )
     signal.metadata["pre_trade_guardrail_verdict"] = verdict
     engine = _engine(router)
@@ -473,6 +521,7 @@ def test_p3d_live_runtime_per_symbol_cap_clamps_before_netedge_and_broker_route(
         ),
         is_attack=False,
         exposure_manager=manager,
+        capability_registry=_broker_catalog_registry(signal.symbol),
     )
     signal.metadata["pre_trade_guardrail_verdict"] = verdict
     engine = _engine(router)
@@ -529,6 +578,7 @@ def test_g5_live_runtime_per_symbol_cap_blocks_when_already_at_cap(monkeypatch):
         runtime=SimpleNamespace(last_price=200.0),
         is_attack=False,
         exposure_manager=manager,
+        capability_registry=_broker_catalog_registry(signal.symbol),
     )
     signal.metadata["pre_trade_guardrail_verdict"] = verdict
     engine = _engine(router)
@@ -804,6 +854,7 @@ def test_g10_live_runtime_moving_floor_exit_is_broker_position_backed_sell_to_cl
         signal=signal,
         runtime=SimpleNamespace(last_price=107.0),
         is_attack=False,
+        capability_registry=_broker_catalog_registry(signal.symbol),
     )
 
     assert runtime.last_moving_floor_evidence["reason_code"] == gate.reason_code

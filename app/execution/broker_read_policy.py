@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 PAPER_SMOKE_STRICT_READS = "PAPER_SMOKE_STRICT_READS"
 PAPER_TCA_EXTENDED_READS = "PAPER_TCA_EXTENDED_READS"
+PAPER_ASSET_CATALOG_READS = "PAPER_ASSET_CATALOG_READS"
 
 BROKER_READ_PROFILE_ENV = "PK_BROKER_READ_PROFILE"
 BROKER_READ_ALLOWLIST_ENV = "PK_BROKER_READ_ALLOWLIST"
@@ -16,6 +17,7 @@ ACCOUNT_ACTIVITY_READS_ALLOWED_ENV = "PK_ACCOUNT_ACTIVITY_READS_ALLOWED"
 
 BROKER_READ_NOT_AUTHORIZED = "BROKER_READ_NOT_AUTHORIZED"
 BROKER_READ_UNKNOWN_FAMILY = "BROKER_READ_UNKNOWN_FAMILY"
+BROKER_MUTATION_NOT_AUTHORIZED = "BROKER_MUTATION_NOT_AUTHORIZED"
 
 READ_ACCOUNT = "account"
 READ_ORDERS = "orders"
@@ -27,6 +29,7 @@ READ_FEE_ACTIVITIES = "fee_activities"
 READ_TRADE_EVENTS = "trade_events"
 READ_CLOCK = "clock"
 READ_ASSETS = "assets"
+READ_ASSET_CATALOG = "asset_catalog"
 
 TCA_ACCOUNT_ACTIVITY_TYPES = frozenset({"FILL", "CFEE", "FEE"})
 
@@ -42,6 +45,7 @@ KNOWN_READ_FAMILIES = frozenset(
         READ_TRADE_EVENTS,
         READ_CLOCK,
         READ_ASSETS,
+        READ_ASSET_CATALOG,
     }
 )
 
@@ -81,6 +85,7 @@ class BrokerReadPermissionProfile:
     allowed_families: frozenset[str]
     denied_families: frozenset[str]
     allowed_account_activity_types: frozenset[str] = frozenset()
+    mutation_allowed: bool = True
 
     @property
     def account_activity_reads_allowed(self) -> bool:
@@ -136,11 +141,20 @@ class BrokerReadPermissionProfile:
             "account_activity_read_authorized": self.account_activity_reads_allowed,
             "fee_hydration_allowed": self.fee_hydration_allowed,
             "deny_unknown_read_family": True,
+            "mutation_allowed": self.mutation_allowed,
         }
 
 
 def broker_read_profile_for_name(name: Any) -> BrokerReadPermissionProfile:
     normalized = str(name or PAPER_SMOKE_STRICT_READS).strip().upper()
+    if normalized == PAPER_ASSET_CATALOG_READS:
+        return BrokerReadPermissionProfile(
+            name=PAPER_ASSET_CATALOG_READS,
+            allowed_families=frozenset({READ_ASSET_CATALOG}),
+            denied_families=KNOWN_READ_FAMILIES - {READ_ASSET_CATALOG},
+            allowed_account_activity_types=frozenset(),
+            mutation_allowed=False,
+        )
     if normalized == PAPER_TCA_EXTENDED_READS:
         return BrokerReadPermissionProfile(
             name=PAPER_TCA_EXTENDED_READS,
@@ -192,6 +206,8 @@ def broker_read_family_for_get_path(path: str) -> str:
         return READ_ACCOUNT_ACTIVITIES
     if clean_path == "/v2/clock":
         return READ_CLOCK
+    if clean_path == "/v2/assets":
+        return READ_ASSET_CATALOG
     if clean_path.startswith("/v2/assets/"):
         return READ_ASSETS
     return clean_path.strip("/").replace("/", "_") or BROKER_READ_UNKNOWN_FAMILY

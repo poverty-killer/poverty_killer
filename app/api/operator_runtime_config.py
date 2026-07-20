@@ -125,6 +125,9 @@ class OperatorRuntimeConfig:
     hosted_mode: bool = False
     paper_runner_mode: str = "LOCAL_POWERSHELL"
     allowed_watchlist: tuple[str, ...] = DEFAULT_ALLOWED_WATCHLIST
+    catalog_snapshot_id: str = ""
+    universe_snapshot_id: str = ""
+    capability_state_store_path: Path = field(default_factory=lambda: repo_root_from_here() / "data" / "state.db")
     allowed_profile: str = "PAPER_EXPLORATION_ALPHA"
     allowed_durations: tuple[int, ...] = DEFAULT_ALLOWED_DURATIONS
     min_paper_duration_seconds: int = DEFAULT_MIN_PAPER_DURATION_SECONDS
@@ -200,6 +203,22 @@ class OperatorRuntimeConfig:
             hosted_mode=_truthy(env_map.get("PK_HOSTED_MODE")),
             paper_runner_mode=str(env_map.get("PK_PAPER_RUNNER_MODE") or "LOCAL_POWERSHELL").strip().upper(),
             allowed_watchlist=_split_csv(env_map.get("PK_ALLOWED_WATCHLIST"), DEFAULT_ALLOWED_WATCHLIST),
+            catalog_snapshot_id=str(
+                env_map.get("POVERTY_KILLER_CATALOG_SNAPSHOT_ID")
+                or env_map.get("PK_CATALOG_SNAPSHOT_ID")
+                or ""
+            ).strip(),
+            universe_snapshot_id=str(
+                env_map.get("POVERTY_KILLER_UNIVERSE_SNAPSHOT_ID")
+                or env_map.get("PK_UNIVERSE_SNAPSHOT_ID")
+                or ""
+            ).strip(),
+            capability_state_store_path=_path_from_env(
+                root,
+                env_map.get("POVERTY_KILLER_CAPABILITY_STATE_STORE_PATH")
+                or env_map.get("PK_CAPABILITY_STATE_STORE_PATH"),
+                str(data_dir / "state.db"),
+            ),
             allowed_profile=str(env_map.get("PK_ALLOWED_PROFILE") or "PAPER_EXPLORATION_ALPHA").strip().upper(),
             allowed_durations=allowed_durations,
             min_paper_duration_seconds=_positive_int(
@@ -235,6 +254,11 @@ class OperatorRuntimeConfig:
             "max_session_history": self.max_session_history,
             "max_event_cache": self.max_event_cache,
             "allowed_watchlist": list(self.allowed_watchlist),
+            "priority_watchlist": list(self.allowed_watchlist),
+            "watchlist_authority": "PRIORITY_ONLY_NOT_EXECUTION_ELIGIBILITY",
+            "catalog_snapshot_id": self.catalog_snapshot_id or None,
+            "universe_snapshot_id": self.universe_snapshot_id or None,
+            "capability_state_store_path": str(self.capability_state_store_path),
             "allowed_profile": self.allowed_profile,
             "allowed_durations": list(self.allowed_durations),
             "min_paper_duration_seconds": self.min_paper_duration_seconds,

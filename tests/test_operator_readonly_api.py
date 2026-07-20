@@ -14,6 +14,7 @@ from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
 from app.operator_activation.paper_baseline import BASELINE_POLICY_PROTECTED
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
+from tests.paper_capability_test_support import install_mock_broker_crypto_capability_evidence
 from tests.test_operator_paper_supervisor import FakeRunner
 
 
@@ -152,6 +153,7 @@ def _verified_provider(
     operator_ui_disconnect_grace_seconds: float = 8.0,
 ) -> tuple[OperatorSnapshotProvider, dict]:
     _write_canonical_paper_env()
+    install_mock_broker_crypto_capability_evidence(supervisor)
     snapshot = _verified_broker_snapshot()
     provider = OperatorSnapshotProvider(
         supervisor=supervisor,

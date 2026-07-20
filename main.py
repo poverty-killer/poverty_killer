@@ -87,11 +87,16 @@ from app.market import (
     VenueCapabilityRegistry,
     build_default_capability_registry,
 )
+from app.market.capability_registry import (
+    normalize_alpaca_crypto_symbol,
+    validate_alpaca_crypto_capability_evidence,
+)
 from app.main_loop import create_main_loop
 from app.models import Candle, EventEnvelope
 from app.models.enums import EventType, ExchangeType
 from app.monitoring.logger import setup_logger
 from app.operator_activation.paper_baseline import load_paper_baseline_runtime_context_from_env
+from app.operator_credentials.store import expected_alpaca_paper_account_suffix
 from app.risk.exposure_manager import ExposureManager
 from app.risk.guard import HybridRiskGuard
 from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
@@ -124,6 +129,7 @@ _VENUE_PRIMARY_SYMBOL_FALLBACK: dict = {
 EXECUTION_BROKER_ENV_VAR = "POVERTY_KILLER_EXECUTION_BROKER"
 INTERNAL_PAPER_EXECUTION_BROKER = "internal_paper"
 ALPACA_PAPER_EXECUTION_BROKER = "alpaca_paper"
+BROKER_CRYPTO_UNIVERSE_SOURCE = "DURABLE_BROKER_CRYPTO_UNIVERSE"
 SUPPORTED_EXECUTION_BROKERS = frozenset(
     {
         INTERNAL_PAPER_EXECUTION_BROKER,
@@ -153,6 +159,14 @@ class RuntimeUniverseResolution:
     symbols: tuple[str, ...]
     source: str
     reason: str
+    execution_authorized: bool = False
+    entry_symbols: tuple[str, ...] = ()
+    monitor_symbols: tuple[str, ...] = ()
+    catalog_snapshot_id: str | None = None
+    universe_snapshot_id: str | None = None
+    observed_at_ns: int | None = None
+    valid_until_ns: int | None = None
+    capability_registry: VenueCapabilityRegistry | None = None
 
 
 def get_configured_execution_broker(config: Config) -> str:
@@ -270,7 +284,135 @@ def _active_market_values(config: Config) -> set[str] | None:
     return {str(market).strip().lower() for market in active_markets if str(market).strip()}
 
 
-def resolve_runtime_universe(config: Config) -> RuntimeUniverseResolution:
+def resolve_runtime_universe(
+    config: Config,
+    *,
+    state_store: StateStore | None = None,
+    require_broker_catalog: bool = False,
+    as_of_ns: int | None = None,
+) -> RuntimeUniverseResolution:
+    if require_broker_catalog:
+        catalog_id = str(getattr(config, "runtime_catalog_snapshot_id", "") or "").strip()
+        universe_id = str(getattr(config, "runtime_universe_snapshot_id", "") or "").strip()
+        source = BROKER_CRYPTO_UNIVERSE_SOURCE
+        if not catalog_id or not universe_id:
+            return RuntimeUniverseResolution((), source, "BROKER_CRYPTO_UNIVERSE_PIN_REQUIRED")
+
+        owned_store = False
+        store = state_store
+        try:
+            if store is None:
+                path = Path(str(getattr(config, "runtime_capability_state_store_path", "data/state.db")))
+                if not path.is_absolute():
+                    path = Path.cwd() / path
+                if not path.is_file():
+                    return RuntimeUniverseResolution((), source, "BROKER_CRYPTO_CAPABILITY_STATE_STORE_MISSING")
+                store = StateStore(str(path), read_only=True)
+                owned_store = True
+            evidence = store.get_broker_crypto_capability_evidence(
+                catalog_snapshot_id=catalog_id,
+                universe_snapshot_id=universe_id,
+                strict=True,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return RuntimeUniverseResolution((), source, "BROKER_CRYPTO_CAPABILITY_EVIDENCE_INVALID")
+        finally:
+            if owned_store and store is not None:
+                store.close()
+        if not isinstance(evidence, dict):
+            return RuntimeUniverseResolution((), source, "BROKER_CRYPTO_CAPABILITY_EVIDENCE_MISSING")
+
+        catalog = evidence.get("catalog") if isinstance(evidence.get("catalog"), dict) else {}
+        universe = evidence.get("universe") if isinstance(evidence.get("universe"), dict) else {}
+        current_ns = int(as_of_ns if as_of_ns is not None else now_ns())
+        expected_suffix = str(expected_alpaca_paper_account_suffix() or "").strip().lower()
+        try:
+            registry, validation = validate_alpaca_crypto_capability_evidence(
+                catalog,
+                universe,
+                expected_account_suffix=expected_suffix,
+                as_of_ns=current_ns,
+            )
+        except (TypeError, ValueError, ArithmeticError):
+            return RuntimeUniverseResolution(
+                (),
+                source,
+                "BROKER_CRYPTO_CAPABILITY_EVIDENCE_INVALID",
+                catalog_snapshot_id=catalog_id,
+                universe_snapshot_id=universe_id,
+            )
+        reasons = list(validation.get("reason_codes") or ()) if validation.get("status") != "VERIFIED" else []
+        if "crypto" not in (_active_market_values(config) or set()):
+            reasons.append("CRYPTO_MARKET_NOT_ACTIVE")
+        observed_at = int(validation.get("observed_at_ns") or 0)
+        valid_until = int(validation.get("valid_until_ns") or 0)
+        if reasons:
+            return RuntimeUniverseResolution(
+                (),
+                source,
+                ",".join(dict.fromkeys(reasons)),
+                catalog_snapshot_id=catalog_id,
+                universe_snapshot_id=universe_id,
+                observed_at_ns=observed_at,
+                valid_until_ns=valid_until,
+            )
+
+        persisted_entries = tuple(str(item) for item in validation.get("entry_symbols") or ())
+        persisted_monitors = tuple(str(item) for item in validation.get("monitor_symbols") or ())
+        persisted_runtime = tuple(str(item) for item in validation.get("runtime_symbols") or ())
+        priority_hints_list: list[str] = []
+        malformed_priority: list[str] = []
+        for item in getattr(config, "runtime_watchlist", ()):
+            raw_priority = str(item or "").strip()
+            if not raw_priority:
+                continue
+            normalized = normalize_alpaca_crypto_symbol(raw_priority)
+            if not normalized:
+                malformed_priority.append(raw_priority.upper())
+                continue
+            priority_hints_list.append(normalized)
+        if malformed_priority:
+            return RuntimeUniverseResolution(
+                (),
+                source,
+                "PRIORITY_SYMBOL_INVALID:" + ",".join(dict.fromkeys(malformed_priority)),
+                catalog_snapshot_id=catalog_id,
+                universe_snapshot_id=universe_id,
+                observed_at_ns=observed_at,
+                valid_until_ns=valid_until,
+            )
+        priority_hints = tuple(dict.fromkeys(priority_hints_list))
+        runtime_set = set(persisted_runtime)
+        unknown_priority = tuple(symbol for symbol in priority_hints if symbol not in runtime_set)
+        if unknown_priority:
+            return RuntimeUniverseResolution(
+                (),
+                source,
+                "PRIORITY_SYMBOL_NOT_IN_BROKER_RUNTIME_UNIVERSE:" + ",".join(unknown_priority),
+                catalog_snapshot_id=catalog_id,
+                universe_snapshot_id=universe_id,
+                observed_at_ns=observed_at,
+                valid_until_ns=valid_until,
+            )
+        runtime_symbols = tuple(dict.fromkeys((*priority_hints, *persisted_runtime)))
+        entry_set = set(persisted_entries)
+        monitor_set = set(persisted_monitors)
+        entry_symbols = tuple(symbol for symbol in runtime_symbols if symbol in entry_set)
+        monitor_symbols = tuple(symbol for symbol in runtime_symbols if symbol in monitor_set)
+        return RuntimeUniverseResolution(
+            runtime_symbols,
+            source,
+            "UNIVERSE_READY_FROM_BROKER_CATALOG",
+            execution_authorized=True,
+            entry_symbols=entry_symbols,
+            monitor_symbols=monitor_symbols,
+            catalog_snapshot_id=catalog_id,
+            universe_snapshot_id=universe_id,
+            observed_at_ns=observed_at,
+            valid_until_ns=valid_until,
+            capability_registry=registry,
+        )
+
     watchlist = tuple(str(symbol).strip().upper() for symbol in getattr(config, "runtime_watchlist", ()) if str(symbol).strip())
     if watchlist:
         source = "CONFIG_EXPLICIT_ALLOWED:runtime_watchlist"
@@ -287,7 +429,7 @@ def resolve_runtime_universe(config: Config) -> RuntimeUniverseResolution:
         return RuntimeUniverseResolution((), source, "UNKNOWN_SYMBOLS:" + ",".join(unknown))
     active_markets = _active_market_values(config)
     if active_markets is None:
-        return RuntimeUniverseResolution(tuple(dict.fromkeys(symbols)), source, "UNIVERSE_READY")
+        return RuntimeUniverseResolution(tuple(dict.fromkeys(symbols)), source, "STATIC_UNIVERSE_REFERENCE_ONLY")
     allowed_symbols = tuple(
         symbol
         for symbol in symbols
@@ -304,7 +446,7 @@ def resolve_runtime_universe(config: Config) -> RuntimeUniverseResolution:
         )
         suffix = ":" + ",".join(blocked_assets) if blocked_assets else ""
         return RuntimeUniverseResolution((), source, "NO_ACTIVE_MARKET_SYMBOLS" + suffix)
-    return RuntimeUniverseResolution(tuple(dict.fromkeys(allowed_symbols)), source, "UNIVERSE_READY")
+    return RuntimeUniverseResolution(tuple(dict.fromkeys(allowed_symbols)), source, "STATIC_UNIVERSE_REFERENCE_ONLY")
 
 
 def get_active_capability_candidates(
@@ -363,6 +505,29 @@ def provider_lane_for_asset_class(asset_class: str) -> str:
     if normalized == "options":
         return FeedProviderLane.OPTIONS_MARKET_DATA.value
     return FeedProviderLane.REFERENCE_MARKET_DATA.value
+
+
+def resolve_runtime_feed_symbols(
+    runtime_symbols: tuple[str, ...],
+    *,
+    universe_resolution: RuntimeUniverseResolution,
+    provider_asset_classes: set[str],
+) -> tuple[str, ...]:
+    """Resolve feed enrollment without consulting static metadata for broker-derived crypto."""
+    if universe_resolution.source == BROKER_CRYPTO_UNIVERSE_SOURCE:
+        if "crypto" not in provider_asset_classes:
+            return ()
+        return tuple(sorted(dict.fromkeys(runtime_symbols)))
+    return tuple(
+        sorted(
+            symbol
+            for symbol in runtime_symbols
+            if (
+                (asset_class := InstrumentRegistry.get_asset_class(symbol))
+                and asset_class.value in provider_asset_classes
+            )
+        )
+    )
 
 
 def resolve_runtime_portal(
@@ -425,8 +590,11 @@ class SovereignHeartbeat:
         # BUNDLE F1: Initialize telemetry store
         self.telemetry_store = TelemetryEventStore(db_path="data/telemetry.db")
         logger.info("TelemetryEventStore initialized at data/telemetry.db")
-        self.state_store = StateStore(db_path="data/state.db")
-        logger.info("StateStore initialized at data/state.db")
+        state_store_path = Path(str(config.runtime_capability_state_store_path or "data/state.db"))
+        if not state_store_path.is_absolute():
+            state_store_path = Path.cwd() / state_store_path
+        self.state_store = StateStore(db_path=str(state_store_path))
+        logger.info("StateStore initialized at %s", state_store_path)
         self._bootstrap_reservation_lifecycle_disabled(config)
 
         self.commander = Commander(
@@ -562,10 +730,19 @@ class SovereignHeartbeat:
             shadow_read_only=config.shadow_read_only,
         )
 
-        self._universe_resolution = resolve_runtime_universe(config)
+        self._universe_resolution = resolve_runtime_universe(
+            config,
+            state_store=self.state_store,
+            require_broker_catalog=self._execution_broker == ALPACA_PAPER_EXECUTION_BROKER,
+        )
         if not self._universe_resolution.symbols:
             raise RuntimeError(self._universe_resolution.reason)
+        if self._execution_broker == ALPACA_PAPER_EXECUTION_BROKER and not self._universe_resolution.execution_authorized:
+            raise RuntimeError("BROKER_CRYPTO_UNIVERSE_NOT_EXECUTION_AUTHORIZED")
         self._runtime_universe_symbols = self._universe_resolution.symbols
+        self._runtime_capability_registry = (
+            self._universe_resolution.capability_registry or build_default_capability_registry()
+        )
         self._primary_symbol = self._runtime_universe_symbols[0]
         primary_asset_class = InstrumentRegistry.get_asset_class(self._primary_symbol)
         primary_asset_class_value = primary_asset_class.value if primary_asset_class else "crypto"
@@ -620,15 +797,15 @@ class SovereignHeartbeat:
         )
         self._capability_candidates = get_active_capability_candidates(
             config,
+            registry=self._runtime_capability_registry,
             symbols=self._runtime_universe_symbols,
         )
         selected_provider_asset_classes = set(self._market_data_provider_selection.selected_provider.asset_classes)
-        self._feed_symbols = sorted(
-            symbol
-            for symbol in self._runtime_universe_symbols
-            if (
-                (asset_class := InstrumentRegistry.get_asset_class(symbol))
-                and asset_class.value in selected_provider_asset_classes
+        self._feed_symbols = list(
+            resolve_runtime_feed_symbols(
+                self._runtime_universe_symbols,
+                universe_resolution=self._universe_resolution,
+                provider_asset_classes=selected_provider_asset_classes,
             )
         )
         if not self._feed_symbols:
@@ -683,6 +860,7 @@ class SovereignHeartbeat:
             telemetry_store=self.telemetry_store,
             active_symbols=self._active_symbols,
             exposure_manager=self.exposure_manager,
+            capability_registry=self._runtime_capability_registry,
         )
         self._record_whole_bot_startup_attribution()
 

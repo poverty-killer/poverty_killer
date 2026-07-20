@@ -30,7 +30,13 @@ from app.execution.alpaca_paper_adapter import (
 )
 from app.execution.engine import ExecutionEngine
 from app.execution.order_router import OrderRouter
-from app.market.capability_registry import build_default_capability_registry
+from app.market.capability_registry import (
+    VenueCapabilityRegistry,
+    build_alpaca_crypto_capability_registry,
+    build_alpaca_crypto_universe,
+    build_default_capability_registry,
+    normalize_alpaca_crypto_catalog,
+)
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
     PortalEnvironment,
@@ -55,6 +61,60 @@ MAX_SPREAD_BPS = Decimal("50")
 MAX_QUOTE_AGE_NS = 120_000_000_000
 ACTIVE_ORDER_STATUSES = frozenset({"accepted", "new", "pending_new", "open", "accepted_for_bidding"})
 CURRENT_KNOWN_EXPOSURE = ("AAPL", "NVDA", "AMZN", "GOOGL", "TSLA", "SPY", "QQQ")
+
+
+def _mock_broker_catalog_registry(
+    symbols: tuple[str, ...],
+    *,
+    observed_at_ns: int,
+    min_order_size: str = "0.000001",
+) -> VenueCapabilityRegistry:
+    catalog = normalize_alpaca_crypto_catalog(
+        [
+            {
+                "id": f"asset-{symbol.replace('/', '').lower()}",
+                "class": "crypto",
+                "exchange": "CRYPTO",
+                "symbol": symbol,
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "marginable": False,
+                "shortable": False,
+                "min_order_size": min_order_size,
+                "min_trade_increment": "0.000001",
+                "price_increment": "0.01",
+            }
+            for symbol in symbols
+        ],
+        observed_at_ns=observed_at_ns - 1,
+        valid_until_ns=observed_at_ns + 1_000_000_000,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=observed_at_ns,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=symbols,
+    )
+    dynamic = build_alpaca_crypto_capability_registry(catalog, universe)
+    base = build_default_capability_registry()
+    preserved = tuple(
+        capability
+        for capability in base.capabilities
+        if not (capability.venue_id == "alpaca" and capability.asset_class == "crypto")
+    )
+    return VenueCapabilityRegistry((*preserved, *dynamic.capabilities))
 
 
 @dataclass(frozen=True)
@@ -225,8 +285,8 @@ def _quote_from_crypto_payload(symbol: str, payload: dict[str, Any], receive_ts_
     )
 
 
-def _registry_universe() -> tuple[tuple[str, str], ...]:
-    registry = build_default_capability_registry()
+def _registry_universe(registry: VenueCapabilityRegistry | None = None) -> tuple[tuple[str, str], ...]:
+    registry = registry or build_default_capability_registry()
     pairs: list[tuple[str, str]] = []
     for asset_class in ("equity", "etf", "crypto"):
         caps = [
@@ -277,8 +337,9 @@ def _evaluate_expansion_candidates(
     equity_market_open: bool,
     current_ts_ns: int,
     time_in_force_overrides: dict[str, str] | None = None,
+    capability_registry: VenueCapabilityRegistry | None = None,
 ) -> tuple[list[CandidateDecision], list[tuple[Decimal, str, str, Decimal, Decimal, Decimal, dict[str, Any]]]]:
-    registry = build_default_capability_registry()
+    registry = capability_registry or build_default_capability_registry()
     existing_symbols = {str(row.get("symbol") or "").upper() for row in positions if _decimal(row.get("qty")) != Decimal("0")}
     active_open_order_symbols = {str(row.get("symbol") or "").upper() for row in _active_open_orders(open_orders)}
     decisions: list[CandidateDecision] = []
@@ -532,7 +593,9 @@ def test_seam6_approval_gate_is_exact_and_not_live_authority(monkeypatch: pytest
 
 
 def test_seam6_candidate_universe_is_registry_driven_and_broad_enough_for_fifteen_new_symbols():
-    universe = _registry_universe()
+    universe = _registry_universe(
+        _mock_broker_catalog_registry(("BTC/USD",), observed_at_ns=1_779_230_000_000_000_000)
+    )
     existing = set(CURRENT_KNOWN_EXPOSURE)
     new_equity_etf = [symbol for symbol, asset_class in universe if asset_class in {"equity", "etf"} and symbol not in existing]
 
@@ -575,6 +638,7 @@ def test_seam6b_equity_market_closed_falls_through_to_valid_crypto_candidate():
         asset_truth={},
         equity_market_open=False,
         current_ts_ns=current_ts_ns,
+        capability_registry=_mock_broker_catalog_registry(("BTC/USD",), observed_at_ns=current_ts_ns),
     )
 
     skipped_by_symbol = {row.symbol: row for row in decisions}
@@ -602,6 +666,7 @@ def test_seam6b_equity_priority_is_preserved_when_equity_and_crypto_both_pass():
         asset_truth={},
         equity_market_open=True,
         current_ts_ns=current_ts_ns,
+        capability_registry=_mock_broker_catalog_registry(("BTC/USD",), observed_at_ns=current_ts_ns),
     )
 
     assert [row[1] for row in selected] == ["JPM", "BTC/USD"]
@@ -612,13 +677,13 @@ def test_seam6b_equity_priority_is_preserved_when_equity_and_crypto_both_pass():
     ("case_name", "quotes", "positions", "open_orders", "asset_truth", "tif_overrides", "expected_reason"),
     (
         (
-            "min_notional_precision",
+            "broker_minimum_quantity",
             {"BTC/USD": _fixture_quote("BTC/USD", bid="3333.32", ask="3333.33")},
             (),
             (),
             {},
             {},
-            "MIN_NOTIONAL_CANNOT_BE_MET_WITH_CAP_AND_PRECISION",
+            "MIN_QUANTITY_NOT_MET",
         ),
         ("quote_missing", {}, (), (), {}, {}, "QUOTE_MISSING"),
         (
@@ -688,6 +753,11 @@ def test_seam6b_crypto_fails_closed_for_required_crypto_gates(
         equity_market_open=False,
         current_ts_ns=current_ts_ns,
         time_in_force_overrides=tif_overrides,
+        capability_registry=_mock_broker_catalog_registry(
+            ("BTC/USD",),
+            observed_at_ns=current_ts_ns,
+            min_order_size="0.01" if case_name == "broker_minimum_quantity" else "0.000001",
+        ),
     )
 
     assert selected == [], case_name

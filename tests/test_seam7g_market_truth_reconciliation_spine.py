@@ -21,8 +21,14 @@ from app.execution.alpaca_paper_adapter import (
 )
 from app.execution.live_read_only_adapter import LiveReadOnlyBrokerAdapter, ReadOnlyAdapterConfig
 from app.instrument_registry import InstrumentRegistry
-from app.market.capability_registry import build_default_capability_registry
-from app.market.venue_capabilities import PortalSelectionRequest, classify_quote_session
+from app.market.capability_registry import (
+    VenueCapabilityRegistry,
+    build_alpaca_crypto_capability_registry,
+    build_alpaca_crypto_universe,
+    build_default_capability_registry,
+    normalize_alpaca_crypto_catalog,
+)
+from app.market.venue_capabilities import PortalPolicyMode, PortalSelectionRequest, classify_quote_session
 from app.models import Candle, OrderBookSnapshot
 from app.models.contracts import (
     ExchangePosition,
@@ -46,6 +52,54 @@ from app.utils.time_utils import now_ns
 
 
 T0_NS = 1_779_100_000_000_000_000
+
+
+def _broker_catalog_registry() -> VenueCapabilityRegistry:
+    catalog = normalize_alpaca_crypto_catalog(
+        [
+            {
+                "id": "asset-btcusd",
+                "class": "crypto",
+                "exchange": "CRYPTO",
+                "symbol": "BTC/USD",
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "marginable": False,
+                "shortable": False,
+                "min_order_size": "0.0001",
+                "min_trade_increment": "0.0001",
+                "price_increment": "0.01",
+            }
+        ],
+        observed_at_ns=T0_NS - 1,
+        valid_until_ns=T0_NS + 1_000_000_000,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=T0_NS,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=("BTC/USD",),
+    )
+    dynamic = build_alpaca_crypto_capability_registry(catalog, universe)
+    base = build_default_capability_registry()
+    preserved = tuple(
+        capability
+        for capability in base.capabilities
+        if not (capability.venue_id == "alpaca" and capability.asset_class == "crypto")
+    )
+    return VenueCapabilityRegistry((*preserved, *dynamic.capabilities))
 
 
 def _record(
@@ -252,8 +306,20 @@ def test_aggregator_uses_only_provided_ticks_and_instrument_metadata():
     assert stats["ghost_ticks_filtered"] == 0
 
 
-def test_venue_capability_and_instrument_registry_sign_truth_and_fail_closed():
-    registry = build_default_capability_registry()
+def test_broker_derived_venue_capability_and_static_instrument_reference_fail_closed():
+    static_registry = build_default_capability_registry()
+    static_alpaca = static_registry.resolve(
+        PortalSelectionRequest(
+            symbol="BTC/USD",
+            asset_class="crypto",
+            policy_mode=PortalPolicyMode.EXPLICIT_PREFERRED_VENUE.value,
+            preferred_venue="alpaca_paper",
+        )
+    )
+    assert static_alpaca.ready is False
+    assert any("BROKER_CATALOG_REQUIRED" in reasons for reasons in static_alpaca.rejected.values())
+
+    registry = _broker_catalog_registry()
     candidates = registry.build_candidate_identities(
         symbols=["AAPL", "BTC/USD"],
         active_markets=["equity", "crypto"],
@@ -280,9 +346,12 @@ def test_venue_capability_and_instrument_registry_sign_truth_and_fail_closed():
     )
     assert btc_session.tradable_now is True
 
-    assert InstrumentRegistry.get_instrument("BTC/USD") is not None
+    instrument = InstrumentRegistry.get_instrument("BTC/USD")
+    assert instrument is not None
+    assert instrument.execution_authorized is False
     valid, reason = InstrumentRegistry.validate_order("BTC/USD", quantity=0.001, price=10000.0, side="buy")
-    assert valid is True, reason
+    assert valid is False
+    assert "not execution-authorized" in reason
     valid_unknown, reason_unknown = InstrumentRegistry.validate_order("NOTREAL", quantity=1.0, price=1.0, side="buy")
     assert valid_unknown is False
     assert "Unknown symbol" in reason_unknown

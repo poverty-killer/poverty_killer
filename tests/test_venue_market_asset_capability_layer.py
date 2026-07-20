@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from app.config import Config
 from app.instrument_registry import InstrumentRegistry
-from app.market.capability_registry import build_default_capability_registry
+from app.market.capability_registry import (
+    VenueCapabilityRegistry,
+    build_alpaca_crypto_capability_registry,
+    build_alpaca_crypto_universe,
+    build_default_capability_registry,
+    normalize_alpaca_crypto_catalog,
+)
 from app.market.venue_capabilities import PortalSelectionRequest, classify_quote_session
 from main import (
     get_active_capability_candidates,
@@ -29,6 +37,56 @@ CONFIRMED_UNHELD_CRYPTO_SPECS = {
         "tick_size": 0.000000001,
     },
 }
+
+
+def _broker_catalog_registry(symbols=("BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "AVAX/USD", "LINK/USD")):
+    payload = [
+        {
+            "id": f"asset-{symbol.replace('/', '').lower()}",
+            "class": "crypto",
+            "exchange": "CRYPTO",
+            "symbol": symbol,
+            "status": "active",
+            "tradable": True,
+            "fractionable": True,
+            "marginable": False,
+            "shortable": False,
+            "min_order_size": "0.000000001",
+            "min_trade_increment": "0.000000001",
+            "price_increment": "0.000000001",
+        }
+        for symbol in symbols
+    ]
+    catalog = normalize_alpaca_crypto_catalog(
+        payload,
+        observed_at_ns=100,
+        valid_until_ns=1_000,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=200,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=symbols,
+    )
+    dynamic = build_alpaca_crypto_capability_registry(catalog, universe)
+    base = build_default_capability_registry()
+    preserved = tuple(
+        capability
+        for capability in base.capabilities
+        if not (capability.venue_id == "alpaca" and capability.asset_class == "crypto")
+    )
+    return VenueCapabilityRegistry((*preserved, *dynamic.capabilities))
 
 
 def test_kraken_crypto_preservation_for_current_runtime_symbols():
@@ -77,12 +135,18 @@ def test_confirmed_unheld_crypto_runtime_watchlist_resolves_to_alpaca_paper_capa
     )
 
     resolution = resolve_runtime_universe(config)
-    assert resolution.reason == "UNIVERSE_READY"
+    assert resolution.reason == "STATIC_UNIVERSE_REFERENCE_ONLY"
     assert resolution.symbols == watchlist
+    assert resolution.execution_authorized is False
     assert get_active_symbols(config) == set(watchlist)
 
     for symbol in CONFIRMED_UNHELD_CRYPTO_SPECS:
-        result = resolve_runtime_portal(config, symbol=symbol, asset_class="crypto")
+        result = resolve_runtime_portal(
+            config,
+            symbol=symbol,
+            asset_class="crypto",
+            registry=_broker_catalog_registry(),
+        )
 
         assert result.ready is True
         assert result.selected is not None
@@ -91,7 +155,8 @@ def test_confirmed_unheld_crypto_runtime_watchlist_resolves_to_alpaca_paper_capa
         assert result.selected.supported_actions == frozenset({"buy", "sell_to_close"})
         assert result.selected.default_order_type == "limit"
         assert result.selected.default_time_in_force == "GTC"
-        assert str(result.selected.min_notional) == "10.00"
+        assert result.selected.min_notional is None
+        assert result.selected.min_quantity == Decimal("0.000000001")
         assert result.selected.live_blocked is True
 
 
@@ -223,10 +288,23 @@ def test_alpaca_paper_crypto_capability_is_represented():
     assert alpaca_crypto[0].min_notional is not None
     assert str(alpaca_crypto[0].min_notional) == "10.00"
     assert alpaca_crypto[0].order_constraint_source == "alpaca_crypto_orders_support_gtc_ioc_not_day"
+    assert alpaca_crypto[0].enabled is False
+    assert alpaca_crypto[0].fail_closed_reason_code == "BROKER_CATALOG_REQUIRED"
 
 
-def test_alpaca_crypto_supports_sell_to_close_but_not_sell_short():
-    registry = build_default_capability_registry()
+def test_stage3_dynamic_alpaca_crypto_preserves_sell_to_close_capability_but_blocks_short():
+    registry = _broker_catalog_registry()
+    buy = registry.resolve(
+        PortalSelectionRequest(
+            symbol="ETH/USD",
+            asset_class="crypto",
+            action="buy",
+            order_type="limit",
+            time_in_force="GTC",
+            policy_mode="explicit_preferred_venue",
+            preferred_venue="alpaca_paper",
+        )
+    )
     sell_to_close = registry.resolve(
         PortalSelectionRequest(
             symbol="ETH/USD",
@@ -250,9 +328,11 @@ def test_alpaca_crypto_supports_sell_to_close_but_not_sell_short():
         )
     )
 
+    assert buy.ready is True
+    assert buy.selected is not None
+    assert buy.selected.portal_name == "alpaca_paper"
     assert sell_to_close.ready is True
     assert sell_to_close.selected is not None
-    assert sell_to_close.selected.portal_name == "alpaca_paper"
     assert sell_short.ready is False
     assert any("ACTION_UNSUPPORTED" in reasons for reasons in sell_short.rejected.values())
 
@@ -265,7 +345,7 @@ def test_session_aware_classification_keeps_closed_equity_visible_but_blocked():
         capability_discovery_mode="registry",
         capability_discovery_asset_classes=["equity"],
     )
-    candidates = get_active_capability_candidates(config)
+    candidates = get_active_capability_candidates(config, registry=_broker_catalog_registry())
     equity = next(candidate for candidate in candidates if candidate.normalized_symbol == "AAPL")
 
     classification = classify_quote_session(
@@ -292,7 +372,7 @@ def test_crypto_quote_classification_does_not_inherit_equity_market_close():
         capability_discovery_mode="registry",
         capability_discovery_asset_classes=["crypto"],
     )
-    candidates = get_active_capability_candidates(config)
+    candidates = get_active_capability_candidates(config, registry=_broker_catalog_registry())
     alpaca_crypto = next(candidate for candidate in candidates if candidate.venue_id == "alpaca")
 
     classification = classify_quote_session(
@@ -333,7 +413,7 @@ def test_alpaca_paper_equity_and_etf_can_use_buy_limit_day_when_supported():
 
 
 def test_alpaca_paper_crypto_blocks_buy_limit_day_and_selects_allowed_default_tif():
-    registry = build_default_capability_registry()
+    registry = _broker_catalog_registry()
     day_result = registry.resolve(
         PortalSelectionRequest(
             symbol="SOL/USD",
@@ -358,7 +438,12 @@ def test_alpaca_paper_crypto_blocks_buy_limit_day_and_selects_allowed_default_ti
         portal_selection_policy="explicit_preferred_venue",
         preferred_trading_portal="alpaca_paper",
     )
-    runtime_result = resolve_runtime_portal(config, symbol="SOL/USD", asset_class="crypto")
+    runtime_result = resolve_runtime_portal(
+        config,
+        symbol="SOL/USD",
+        asset_class="crypto",
+        registry=_broker_catalog_registry(),
+    )
 
     assert runtime_result.ready is True
     assert runtime_result.selected is not None
@@ -369,7 +454,7 @@ def test_alpaca_paper_crypto_blocks_buy_limit_day_and_selects_allowed_default_ti
 
 
 def test_multi_venue_crypto_identity_does_not_collapse_to_plain_symbol():
-    registry = build_default_capability_registry()
+    registry = _broker_catalog_registry()
     caps = registry.capabilities_for_symbol("BTC/USD", environment="paper")
     keys = {cap.capability_key for cap in caps if cap.asset_class == "crypto"}
 
@@ -387,7 +472,12 @@ def test_operator_preferred_alpaca_paper_selects_alpaca_when_supported():
         preferred_trading_portal="alpaca_paper",
     )
 
-    result = resolve_runtime_portal(config, symbol="BTC/USD", asset_class="crypto")
+    result = resolve_runtime_portal(
+        config,
+        symbol="BTC/USD",
+        asset_class="crypto",
+        registry=_broker_catalog_registry(),
+    )
 
     assert result.ready is True
     assert result.selected is not None
@@ -411,7 +501,7 @@ def test_unsupported_preferred_portal_fails_closed_without_fallback():
 
 
 def test_ambiguous_crypto_fails_closed_when_capability_first_has_no_tiebreak():
-    registry = build_default_capability_registry()
+    registry = _broker_catalog_registry()
     result = registry.resolve(
         PortalSelectionRequest(
             symbol="BTC/USD",

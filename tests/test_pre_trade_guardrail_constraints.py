@@ -13,7 +13,13 @@ from app.brain.data_validator import DataContinuityValidator
 from app.execution.alpaca_paper_adapter import AlpacaPaperBrokerAdapter, AlpacaPaperCredentials
 from app.execution.engine import ExecutionEngine
 from app.execution.order_router import OrderRouter
-from app.market.capability_registry import build_default_capability_registry
+from app.market.capability_registry import (
+    VenueCapabilityRegistry,
+    build_alpaca_crypto_capability_registry,
+    build_alpaca_crypto_universe,
+    build_default_capability_registry,
+    normalize_alpaca_crypto_catalog,
+)
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
     PortalEnvironment,
@@ -44,6 +50,54 @@ from app.utils.time_utils import now_ns
 T0_NS = 1_777_948_800_000_000_000
 
 
+def _broker_catalog_registry() -> VenueCapabilityRegistry:
+    catalog = normalize_alpaca_crypto_catalog(
+        [
+            {
+                "id": "asset-btcusd",
+                "class": "crypto",
+                "exchange": "CRYPTO",
+                "symbol": "BTC/USD",
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "marginable": False,
+                "shortable": False,
+                "min_order_size": "0.0001",
+                "min_trade_increment": "0.000000001",
+                "price_increment": "0.01",
+            }
+        ],
+        observed_at_ns=T0_NS - 1,
+        valid_until_ns=T0_NS + 1_000_000_000,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=T0_NS,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=("BTC/USD",),
+    )
+    dynamic = build_alpaca_crypto_capability_registry(catalog, universe)
+    base = build_default_capability_registry()
+    preserved = tuple(
+        capability
+        for capability in base.capabilities
+        if not (capability.venue_id == "alpaca" and capability.asset_class == "crypto")
+    )
+    return VenueCapabilityRegistry((*preserved, *dynamic.capabilities))
+
+
 class StubTransport:
     def __init__(self, response):
         self.response = response
@@ -66,7 +120,7 @@ class StubTransport:
 
 
 def _cap(symbol: str, *, asset_class: str, order_type: str = "limit", tif: str | None = None):
-    registry = build_default_capability_registry()
+    registry = _broker_catalog_registry() if asset_class == "crypto" else build_default_capability_registry()
     result = registry.resolve(
         PortalSelectionRequest(
             symbol=symbol,
@@ -251,14 +305,15 @@ def _ns_datetime(ns: int) -> datetime:
     return datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
 
 
-def test_alpaca_paper_crypto_internal_five_dollar_cap_blocks_before_broker_minimum():
+def test_alpaca_paper_crypto_broker_minimum_quantity_blocks_before_routing():
     verdict = _verdict()
 
     assert verdict.verdict == BLOCK
     assert verdict.route_permitted is False
-    assert "RISK_MAX_BELOW_BROKER_MIN" in verdict.reason_codes
-    assert verdict.broker_min_notional == Decimal("10.00")
-    assert any(item.module == "sizing/risk cap" for item in verdict.module_evidence)
+    assert "MIN_QUANTITY_NOT_MET" in verdict.reason_codes
+    assert verdict.broker_min_notional is None
+    constraint = next(item for item in verdict.module_evidence if item.module == "order constraint layer")
+    assert constraint.details["min_quantity"] == Decimal("0.0001")
 
 
 def test_internal_risk_cap_blocks_requested_notional_above_max():

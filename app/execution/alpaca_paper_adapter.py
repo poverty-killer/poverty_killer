@@ -31,6 +31,7 @@ from app.execution.broker_gateway import (
     NormalizedBrokerStatus,
 )
 from app.execution.broker_read_policy import (
+    BROKER_MUTATION_NOT_AUTHORIZED,
     BROKER_READ_NOT_AUTHORIZED,
     BrokerReadPermissionProfile,
     broker_read_family_for_get_path,
@@ -315,7 +316,9 @@ class AlpacaPaperBrokerAdapter:
     supported_asset_classes = frozenset({"equity", "us_equity", "etf", "crypto"})
     supported_methods = frozenset({"GET", "POST", "DELETE"})
 
-    _allowed_get_paths = frozenset({"/v2/account", "/v2/account/activities", "/v2/positions", "/v2/orders", "/v2/clock"})
+    _allowed_get_paths = frozenset(
+        {"/v2/account", "/v2/account/activities", "/v2/positions", "/v2/orders", "/v2/clock", "/v2/assets"}
+    )
     _allowed_get_prefixes = ("/v2/orders/", "/v2/assets/")
 
     def __init__(
@@ -356,6 +359,7 @@ class AlpacaPaperBrokerAdapter:
 
     @property
     def identity(self) -> BrokerAdapterIdentity:
+        effective_methods = self.supported_methods if self._read_profile.mutation_allowed else frozenset({"GET"})
         return BrokerAdapterIdentity(
             adapter_id=self.adapter_id,
             venue_id=self.venue_id,
@@ -363,7 +367,7 @@ class AlpacaPaperBrokerAdapter:
             environment=self.environment,
             base_url=EXPECTED_ALPACA_PAPER_BASE_URL,
             credential_status=self._credentials.status,
-            supported_methods=self.supported_methods,
+            supported_methods=effective_methods,
             supported_asset_classes=self.supported_asset_classes,
             live_blocked=True,
         )
@@ -439,6 +443,13 @@ class AlpacaPaperBrokerAdapter:
         if not safe_symbol:
             raise BrokerGatewayError("symbol_missing")
         return self._request("GET", f"/v2/assets/{urllib.parse.quote(safe_symbol, safe='')}")
+
+    def get_crypto_asset_catalog(self) -> BrokerGatewayResponse:
+        return self._request(
+            "GET",
+            "/v2/assets",
+            query={"status": "active", "asset_class": "crypto"},
+        )
 
     def get_order_status(self, order_id: str) -> BrokerGatewayResponse:
         safe_order_id = str(order_id or "").strip()
@@ -557,6 +568,8 @@ class AlpacaPaperBrokerAdapter:
         query: dict[str, str] | None,
         payload: dict[str, Any] | None,
     ) -> None:
+        if method != "GET" and not self._read_profile.mutation_allowed:
+            raise BrokerGatewayError(BROKER_MUTATION_NOT_AUTHORIZED)
         if method not in self.supported_methods:
             raise BrokerGatewayError("unsupported_method")
         if method == "GET":
@@ -566,6 +579,8 @@ class AlpacaPaperBrokerAdapter:
                 raise BrokerGatewayError("unsupported_get_path")
             if path == "/v2/orders" and (query or {}).get("status") != "open":
                 raise BrokerGatewayError("orders_get_must_be_open_status")
+            if path == "/v2/assets" and query != {"status": "active", "asset_class": "crypto"}:
+                raise BrokerGatewayError("asset_catalog_query_must_be_active_crypto")
             family = broker_read_family_for_get_path(path)
             activity_type = (query or {}).get("activity_types")
             if not self._read_profile.allows(family, activity_type):

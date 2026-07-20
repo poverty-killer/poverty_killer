@@ -8,7 +8,7 @@ from app.core.decision_compiler import DecisionCompiler
 from app.core.truth_kernel import TruthKernel, TruthKernelStateError
 from app.core.truth_reconciler import TruthReconciler
 from app.execution.engine import ExecutionSpineResult
-from app.market.capability_registry import build_default_capability_registry
+from app.market.capability_registry import VenueCapabilityRegistry, build_default_capability_registry
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
     PortalEnvironment,
@@ -330,6 +330,9 @@ class IntelligenceEvidenceAdapter:
 
 
 class SignalFusionCandidateSelector:
+    def __init__(self, *, capability_registry: VenueCapabilityRegistry | None = None) -> None:
+        self.capability_registry = capability_registry or build_default_capability_registry()
+
     def build_artifact(
         self,
         strategies: tuple[StrategyModuleEvidence, ...],
@@ -372,7 +375,7 @@ class SignalFusionCandidateSelector:
                 guardrail_verdict=None,
                 signal=None,
             )
-        registry = build_default_capability_registry()
+        registry = self.capability_registry
         capability_request = PortalSelectionRequest(
             symbol=fusion.selected_symbol,
             asset_class=asset_class,
@@ -445,13 +448,16 @@ class IntelligencePortfolioStateTruthSpine:
         strategy_adapter: StrategyEvidenceAdapter | None = None,
         intelligence_adapter: IntelligenceEvidenceAdapter | None = None,
         candidate_selector: SignalFusionCandidateSelector | None = None,
+        capability_registry: VenueCapabilityRegistry | None = None,
         truth_reconciler: TruthReconciler | None = None,
         truth_kernel: TruthKernel | None = None,
         invariant_checker: InvariantChecker | None = None,
     ) -> None:
         self.strategy_adapter = strategy_adapter or StrategyEvidenceAdapter()
         self.intelligence_adapter = intelligence_adapter or IntelligenceEvidenceAdapter()
-        self.candidate_selector = candidate_selector or SignalFusionCandidateSelector()
+        self.candidate_selector = candidate_selector or SignalFusionCandidateSelector(
+            capability_registry=capability_registry,
+        )
         self.truth_reconciler = truth_reconciler or TruthReconciler()
         self.truth_kernel = truth_kernel or TruthKernel()
         self.invariant_checker = invariant_checker or InvariantChecker()

@@ -26,6 +26,11 @@ from app.core.decision_frame import (
     resolve_active_threshold_profile,
 )
 from app.main_loop import MainLoop, _classify_candle_execution_truth
+from app.market.capability_registry import (
+    build_alpaca_crypto_capability_registry,
+    build_alpaca_crypto_universe,
+    normalize_alpaca_crypto_catalog,
+)
 from app.models import (
     ExchangeTruth,
     ExecutionTruth,
@@ -44,6 +49,47 @@ from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 LOGGER_NAME = "app.main_loop"
 T0_NS = 1_777_948_800_000_000_000
 NS_PER_SECOND = 1_000_000_000
+
+
+def _broker_catalog_registry():
+    catalog = normalize_alpaca_crypto_catalog(
+        [
+            {
+                "id": "asset-ethusd",
+                "class": "crypto",
+                "exchange": "CRYPTO",
+                "symbol": "ETH/USD",
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "marginable": False,
+                "shortable": False,
+                "min_order_size": "0.000000001",
+                "min_trade_increment": "0.000000001",
+                "price_increment": "0.000000001",
+            }
+        ],
+        observed_at_ns=T0_NS,
+        valid_until_ns=T0_NS + 300 * NS_PER_SECOND,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=T0_NS + NS_PER_SECOND,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=("ETH/USD",),
+    )
+    return build_alpaca_crypto_capability_registry(catalog, universe)
 
 
 def _snapshot() -> dict:
@@ -187,6 +233,7 @@ def _loop(*, config=None, submit_result=False):
         message="hard blocker for non-mutating test",
     )
     loop.exposure_manager = ExposureManager(initial_equity=Decimal("20000"))
+    loop.capability_registry = _broker_catalog_registry()
     loop._build_truth_frame = MagicMock(return_value=_truth_frame())
     loop._update_shadow_front_overlays = MagicMock()
     loop._generate_signal_and_vote = MagicMock(return_value=(None, None))

@@ -17,6 +17,7 @@ from app.operator_credentials.store import (
     ALPACA_PAPER_EXPECTED_ACCOUNT_SUFFIX,
     LocalCredentialStore,
 )
+from tests.paper_capability_test_support import install_mock_broker_crypto_capability_evidence
 from tests.test_operator_paper_supervisor import FakeRunner
 
 
@@ -177,6 +178,7 @@ def _provider_with_accepted_baseline(tmp_path, *, account_suffix: str):
         runner=runner,
         account_identity_checker=checker,
     )
+    install_mock_broker_crypto_capability_evidence(supervisor)
     provider = OperatorSnapshotProvider(
         supervisor=supervisor,
         runtime_config=runtime,

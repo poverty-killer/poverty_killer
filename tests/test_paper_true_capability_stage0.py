@@ -342,7 +342,7 @@ def test_authority_capability_module_and_source_fingerprints_match_frozen_baseli
     fixture = _load_fixture()
     baseline = fixture["baseline_fingerprints"]
     approved_deltas = fixture["approved_source_deltas"]
-    assert set(approved_deltas) == {"stage1", "stage2"}
+    assert set(approved_deltas) == {"stage1", "stage2", "stage3"}
     approved_delta = approved_deltas["stage1"]
     delta_hashes = approved_delta["source_sha256"]
 
@@ -381,9 +381,39 @@ def test_authority_capability_module_and_source_fingerprints_match_frozen_baseli
     for relative_path, hashes in stage2_hashes.items():
         assert set(hashes) == {"before", "after"}
         assert len(hashes["before"]) == len(hashes["after"]) == 64
-        assert _sha256(ROOT / Path(*relative_path.split("/"))) == hashes["after"]
     for relative_path in set(delta_hashes) & set(stage2_hashes):
         assert stage2_hashes[relative_path]["before"] == delta_hashes[relative_path]["after"]
+
+    stage3_delta = approved_deltas["stage3"]
+    stage3_hashes = stage3_delta["source_sha256"]
+    assert stage3_delta["stage_entry_head"] == (
+        "4b9b8ed13583d56bfc2120fbee291e3695b1a288"
+    )
+    assert stage3_delta["stage_entry_covenant"] == "PASS"
+    assert set(stage3_hashes) == {
+        "app/api/operator_paper_supervisor.py",
+        "app/api/operator_runtime_config.py",
+        "app/config.py",
+        "app/core/intelligence_portfolio_state_truth_spine.py",
+        "app/execution/alpaca_paper_adapter.py",
+        "app/execution/broker_gateway.py",
+        "app/execution/broker_read_policy.py",
+        "app/instrument_registry.py",
+        "app/main_loop.py",
+        "app/market/capability_registry.py",
+        "app/market/venue_capabilities.py",
+        "app/state/state_store.py",
+        "main.py",
+    }
+    stage3_report = ROOT / Path(*stage3_delta["report"].split("/"))
+    assert stage3_report.is_file()
+    assert "STAGE_ENTRY_COVENANT: PASS" in stage3_report.read_text(encoding="utf-8")
+    for relative_path, hashes in stage3_hashes.items():
+        assert set(hashes) == {"before", "after"}
+        assert len(hashes["before"]) == len(hashes["after"]) == 64
+        assert _sha256(ROOT / Path(*relative_path.split("/"))) == hashes["after"]
+    for relative_path in set(stage2_hashes) & set(stage3_hashes):
+        assert stage3_hashes[relative_path]["before"] == stage2_hashes[relative_path]["after"]
 
     graph = authority_graph_summary()
     actual_owners = {
@@ -398,9 +428,19 @@ def test_authority_capability_module_and_source_fingerprints_match_frozen_baseli
     assert graph["real_money_enabled"] is False
 
     capability_expected = baseline["alpaca_crypto_capability"]
+    static_contract_delta = stage3_delta["capability_contract_delta"]["static_alpaca_crypto"]
     capability = _alpaca_crypto_capability("BTC/USD")
     assert sorted(capability.supported_actions) == capability_expected["declared_actions"]
-    assert capability.paper_mutation is capability_expected["paper_mutation"] is True
+    assert static_contract_delta["classification"] == "COMMISSIONING_OR_TEST_SCAFFOLD"
+    assert static_contract_delta["before"] == {
+        "enabled": True,
+        "paper_mutation": capability_expected["paper_mutation"],
+        "execution_authority_source": None,
+    }
+    assert capability.enabled is static_contract_delta["after"]["enabled"] is False
+    assert capability.paper_mutation is static_contract_delta["after"]["paper_mutation"] is False
+    assert capability.execution_authority_source == static_contract_delta["after"]["execution_authority_source"]
+    assert capability.fail_closed_reason_code == static_contract_delta["after"]["fail_closed_reason_code"]
     assert capability.live_mutation is capability_expected["live_mutation"] is False
     assert capability.live_blocked is capability_expected["live_blocked"] is True
 
@@ -451,7 +491,7 @@ def test_authority_capability_module_and_source_fingerprints_match_frozen_baseli
     for relative_path, expected_hash in baseline["source_sha256"].items():
         path = ROOT / Path(*relative_path.split("/"))
         expected_current = expected_hash
-        for stage_hashes in (delta_hashes, stage2_hashes):
+        for stage_hashes in (delta_hashes, stage2_hashes, stage3_hashes):
             delta = stage_hashes.get(relative_path)
             if delta is None:
                 continue

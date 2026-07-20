@@ -991,5 +991,6 @@ def test_main_bootstrap_injects_state_store_into_order_router():
     source = Path("main.py").read_text(encoding="utf-8")
 
     assert "from app.state.state_store import StateStore" in source
-    assert 'self.state_store = StateStore(db_path="data/state.db")' in source
+    assert 'state_store_path = Path(str(config.runtime_capability_state_store_path or "data/state.db"))' in source
+    assert "self.state_store = StateStore(db_path=str(state_store_path))" in source
     assert "state_store=self.state_store" in source

@@ -116,6 +116,9 @@ class BrokerGatewayAdapter(Protocol):
     def get_asset(self, symbol: str) -> BrokerGatewayResponse:
         ...
 
+    def get_crypto_asset_catalog(self) -> BrokerGatewayResponse:
+        ...
+
     def get_order_status(self, order_id: str) -> BrokerGatewayResponse:
         ...
 

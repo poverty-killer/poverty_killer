@@ -1,4 +1,215 @@
-# Codex Session Handoff - PAPER True Capability Stage 2 Close
+# Codex Session Handoff - PAPER True Capability Stage 3 Close
+
+Date: 2026-07-19 America/Chicago
+Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
+Branch: `master`
+Stage-entry HEAD: `4b9b8ed13583d56bfc2120fbee291e3695b1a288`
+Stage report: `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_3_REPORT.md`
+
+## Current Stage 3 Verdict
+
+Shan directed `proceed stage 3`, opening Stage 3 only. Stage 3 is **PASS at the
+local offline test rung only**. A mocked complete Alpaca PAPER crypto catalog
+now produces a deterministic, reason-coded eligible universe with exact Decimal
+constraints, while static instrument rows and the operator priority list have
+zero execution authority.
+
+The highest proof rung is local offline tests. No browser, launched runtime,
+real broker catalog read, PAPER run, broker mutation, external order/fill/SELL,
+PnL/profitability, live action, real money, or arming result is claimed.
+
+## Stage 3 Implementation Truth
+
+- `broker_read_policy` owns a catalog-only GET profile. It accepts only
+  `/v2/assets?status=active&asset_class=crypto` and denies mutation methods
+  before transport.
+- Alpaca owns raw asset facts. `capability_registry` is the sole deterministic
+  normalization/derivation owner. `StateStore` persists immutable evidence but
+  does not decide eligibility or broker truth.
+- Size and price constraints remain exact Decimal text. Missing, float,
+  nonfinite, nonpositive, malformed, conflicting-alias, and duplicate-conflict
+  inputs fail closed.
+- Entry eligibility intersects broker asset facts, pinned account permission,
+  quote funding, adapter support, and market-data coverage. Every included or
+  excluded symbol carries explicit reasons.
+- Monitor-required membership remains independent. Reconciled held/open-order
+  symbols stay governed even when new entry is denied.
+- Snapshot evidence is endpoint/account/time/hash/count bound and atomically
+  restart-readable. Missing, future, stale, malformed, corrupt, or cross-account
+  evidence cannot fall back to static metadata.
+- Static Alpaca crypto rows remain preserved as reference/display fixtures, but
+  static validation refuses execution. The operator symbol list is ordering
+  priority only and cannot nominate an ineligible asset.
+- Supervisor start, the immediate pre-spawn check, child boot, MainLoop, and the
+  intelligence spine all consume the full pinned dynamic universe. Risk,
+  NetEdge, sizing, MarketTruthSnapshot, OMS, reconciliation, account pin,
+  no-short, and no-naked-SELL owners remain unchanged.
+- The adapter catalog operation is declared but has no production caller in
+  Stage 3. Real operator start therefore remains fail-closed until a later stage
+  installs the governed producer/acceptance path.
+
+## Mandatory Review Loop
+
+Review cycle 1 found and fixed three issues: direct static registry validation
+could still approve crypto; the child discarded priority ordering; and direct
+monitor-only/future-evidence refusal needed stronger tests. Every earlier result
+was invalidated.
+
+Review cycle 2 found and fixed four issue clusters: permissive string coercion
+of broker identity fields; permissive persisted identity/reason coercion;
+malformed priorities disappearing; and malformed suffix/held/open-order symbols
+disappearing. Every earlier result was invalidated again.
+
+Review cycle 3 re-read the fresh full diff and unhappy paths, checked authority,
+fallback, corruption, restart, dependency, deletion, secret, threshold, skip,
+and protected-file scope, and found no unresolved in-scope defect. The final
+35-file behavior manifest composite is:
+
+```text
+ee6a81105af15256fac596b691f87831902a45f14d7c8b96bc815e6071084929
+```
+
+Review cycle 4 found that the first cached audit's result was not yet written
+into the close report. That documentation-only omission was corrected without
+changing the 35 behavior files; governance markers, behavior fingerprint, and
+the exact cache were then revalidated.
+
+## Final Validation
+
+- Focused Stage 3/affected suite: `173 passed`, `0 failed`.
+- Seven named run-path files: `119 passed`, `0 failed`.
+- Stage 0/1/2/3 covenant suite: `150 passed`, `0 failed`.
+- Final configured offline suite: `1980 passed, 14 skipped, 420 warnings, 0
+  failed` in 216.50 seconds.
+- Exact skip audit: `54 passed, 14 skipped`. Seven skips require explicit Board
+  broker-read authorization, three lack mutation approval, and four legacy
+  optional read probes ended in `URLError`. No Stage 3 test skipped and no skip
+  is counted as a pass.
+- Relevant AST parse, JSON fixture parse, and import smoke: PASS.
+- Deleted files, added skip/xfail, external dependencies, changed risk-threshold
+  owners, and obvious secret/private-key markers: zero.
+- Final cached audit: 38 expected/staged paths, zero missing/extra, zero intended
+  unstaged deltas, whitespace check exit 0, and 5,441 insertions / 109 deletions.
+- Four assertion-intent relabels are fully logged in the report. They move stale
+  static-fixture expectations to broker-derived authority without weakening a
+  refusal or converting a surviving positive run path into refusal.
+
+## Safety and Proof Boundary
+
+No Risk, NetEdge, economics, sizing, stale/TTL, masking, strategy, OMS,
+reconciliation, account-pin, PAPER/live, no-short, or no-naked-SELL control
+weakened. No manual trade control, new mutation owner, fake broker truth/order/
+fill/PnL, module deletion, generic replacement, dependency, or subsystem was
+added. Alpaca execution remains BUY-only until Stage 8, and
+SovereignExecutionGuard remains dormant.
+
+No real request, POST, cancel, close, liquidation, position mutation, PAPER
+start, live action, or state authority change occurred. The result is not an
+arming claim.
+
+## Known Limitations
+
+- Actual Alpaca catalog content, pinned-account coverage, current eligible
+  count, and external connectivity are unknown because no real GET occurred.
+- Production catalog acquisition/acceptance is not wired yet; no silent fallback
+  exists.
+- Continuous refresh and in-run expiry, scalable feed batching/rate budgets,
+  and universe ranking belong to Stage 4.
+- Position-backed `sell_to_close` exists in dynamic capability truth, while the
+  Alpaca adapter remains BUY-only until Stage 8; no external SELL was proven.
+- Snapshot SHA-256 provides deterministic integrity, not signed/authenticated
+  provenance.
+- Fourteen conditional integration skips and 420 existing warnings remain.
+- Browser/runtime, long-duration, fault-recovery, latency, profitability,
+  cloud, and multi-tenant proof remain unperformed.
+
+## Protected Worktree
+
+Never clean, reset, stash, prune, edit, or stage:
+
+```text
+state/override_log.jsonl
+state/risk_state.backup
+state/risk_state.json
+state/risk_state.tmp
+state/session_journal.jsonl
+.pytest_tmp/
+AGENTS.prev.md
+POVERTY_KILLER_AUDIT_REPORT.txt
+reports/codex_handoff_2026-06-02_operator_truth_sync_ai_router.md
+reports/codex_handoff_2026-06-07_final_ai_provider_truth.md
+reports/codex_handoff_2026-06-12_operator_control_plane_fast_synced.md
+reports/codex_handoff_2026-06-20_p3n_24h_final_360.md
+reports/codex_handoff_2026-06-21_p3or_funded_revalidation_blocked.md
+reports/codex_handoff_2026-06-21_pk_ui1_operator_cockpit_build.md
+reports/completion/PAPER_AUTONOMY_RESTRICTIONS_REVIEW.md
+reports/completion/UI_NOVEL_OPERATOR_COCKPIT_BOARD_PACKET.md
+reports/completion/UI_WORLD_CLASS_REDESIGN_PACKET.md
+reports/operator_perf/
+scripts/_paper_audit_common.py
+scripts/audit_oms_shutdown.py
+scripts/audit_paper_run.py
+scripts/audit_safety_markers.py
+```
+
+## Exact Stage 3 Staging
+
+Stage these 38 paths individually:
+
+```text
+app/api/operator_paper_supervisor.py
+app/api/operator_runtime_config.py
+app/config.py
+app/core/intelligence_portfolio_state_truth_spine.py
+app/execution/alpaca_paper_adapter.py
+app/execution/broker_gateway.py
+app/execution/broker_read_policy.py
+app/instrument_registry.py
+app/main_loop.py
+app/market/capability_registry.py
+app/market/venue_capabilities.py
+app/state/state_store.py
+main.py
+tests/fixtures/paper_true_capability_stage0.json
+tests/paper_capability_test_support.py
+tests/test_broker_read_policy.py
+tests/test_decision_frame_orchestration_paper_exploration_alpha.py
+tests/test_intelligence_portfolio_state_truth_spine.py
+tests/test_operator_account_identity_pin.py
+tests/test_operator_ai_ask.py
+tests/test_operator_broker_preflight.py
+tests/test_operator_launch_readiness.py
+tests/test_operator_paper_baseline.py
+tests/test_operator_paper_supervisor.py
+tests/test_operator_readonly_api.py
+tests/test_order_id_mapping_authority.py
+tests/test_paper_true_capability_stage0.py
+tests/test_paper_true_capability_stage2.py
+tests/test_paper_true_capability_stage3.py
+tests/test_phase3_risk_gate_stress_proof.py
+tests/test_pre_trade_guardrail_constraints.py
+tests/test_runtime_dispatch_admission_telemetry.py
+tests/test_seam6_controlled_alpaca_paper_portfolio_expansion_machine.py
+tests/test_seam7g_market_truth_reconciliation_spine.py
+tests/test_venue_market_asset_capability_layer.py
+reports/completion/PAPER_TRUE_CAPABILITY_STAGE_3_REPORT.md
+CHECKPOINT_TRACKER.md
+reports/codex_handoff_latest.md
+```
+
+## Next Boundary
+
+Stop after the Stage 3 commit/push. Stage 4 is **NOT OPEN**. It requires a new
+governance re-read, entry manifest, truth map, red team, binary exit, and Board
+direction. Stage 12 broker reads and every Stage 13 PAPER campaign retain their
+separate approval gates.
+
+---
+
+The remaining content below is historical continuity. Its Stage 2 boundary was
+true when written and is superseded by the current Stage 3 section above.
+
+# Historical Continuity - PAPER True Capability Stage 2 Close
 
 Date: 2026-07-18 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`

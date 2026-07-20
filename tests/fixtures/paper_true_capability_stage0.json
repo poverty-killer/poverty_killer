@@ -205,6 +205,81 @@
           "after": "e089772d5142df5105ed3b837d259c5c16ac9bf7547e37eea49d7b10930644e5"
         }
       }
+    },
+    "stage3": {
+      "report": "reports/completion/PAPER_TRUE_CAPABILITY_STAGE_3_REPORT.md",
+      "stage_entry_head": "4b9b8ed13583d56bfc2120fbee291e3695b1a288",
+      "stage_entry_covenant": "PASS",
+      "capability_contract_delta": {
+        "static_alpaca_crypto": {
+          "classification": "COMMISSIONING_OR_TEST_SCAFFOLD",
+          "before": {
+            "enabled": true,
+            "paper_mutation": true,
+            "execution_authority_source": null
+          },
+          "after": {
+            "enabled": false,
+            "paper_mutation": false,
+            "execution_authority_source": "STATIC_REFERENCE_NEVER_EXECUTION_AUTHORITY",
+            "fail_closed_reason_code": "BROKER_CATALOG_REQUIRED"
+          }
+        }
+      },
+      "source_sha256": {
+        "app/execution/broker_read_policy.py": {
+          "before": "0f31e932f66c49cc269f26c6d181b17141f397af171a88128cbf03ed9417cbf0",
+          "after": "ad22ca9c02d02084f495eabe1ba52b8b05d66c3fb454a5acb1f44647f464b2bb"
+        },
+        "app/execution/alpaca_paper_adapter.py": {
+          "before": "f8e08c8234f3104929bace10989d908c3892d5ca66ce5aca7737dca24a5a3955",
+          "after": "6b016d03ae08cce1cbeb49f0697c0b920706f337d24e057c82909d391fb88ea0"
+        },
+        "app/execution/broker_gateway.py": {
+          "before": "d8a0b980d0d3a17507a977d988846f693c1b040e10dd479f2b0723cb2d8bf6c0",
+          "after": "bf2920a1a50c2b2bb3c15dcd1395b364afe1c2e88120223d3c09338731a0a829"
+        },
+        "app/market/venue_capabilities.py": {
+          "before": "38be75d584aacfca5680f96537158d954a6cda33a56904d6cdc68f90266d3c0d",
+          "after": "3027e60fbb14a09df132ce4731e8a7823b826a6291be250e3fcd7f4f7353fe17"
+        },
+        "app/market/capability_registry.py": {
+          "before": "9ecf7ebb866dcd284bd2b8c5cd1d168e332751bad3d2451c2d1085ad9b79e158",
+          "after": "d22f89019b9970488a3dcdc360023244388a40bfba6f6c041f69ff10b74e518c"
+        },
+        "app/instrument_registry.py": {
+          "before": "7a4145a73f1e664435605b523f49ca78ee8c99cd788a58f6ce5d2af2dd7a8fbd",
+          "after": "b3776fef7f595d2c7c7b0d90735b34ffdedae183459d83de38b40b24a6fa11ad"
+        },
+        "app/state/state_store.py": {
+          "before": "dae3ff16f2f8151af0db63e9c424995e6e45d77ffc7af214787e390523800c28",
+          "after": "3f8b3728521565ba8508f1dbefe7210d91583989320cdd0e3db0a1497b5b9495"
+        },
+        "app/config.py": {
+          "before": "348327083db97559e22933713be0f9bac9e9005a262633353af580f3396d452e",
+          "after": "72609f669eabbb248a910ee606dd1ecf9f855389fe73d91e1b862f21ac4e43a6"
+        },
+        "main.py": {
+          "before": "e089772d5142df5105ed3b837d259c5c16ac9bf7547e37eea49d7b10930644e5",
+          "after": "8db1a78eb0a9c4907c7f14727c6fdd3f5b4029523148a76ac8bdcd5de793a67a"
+        },
+        "app/api/operator_runtime_config.py": {
+          "before": "3f79b4cf63e58de7d01c60b327fd9a5737f0db0cd79932105f7eec2b0cd6ac95",
+          "after": "3abc4acc491ae440afcc14919a14c62490da03778f61955a5ec16d9ff37dfdc6"
+        },
+        "app/api/operator_paper_supervisor.py": {
+          "before": "90be76db49dd8145634eec6d499167c628ef1133ea15a9bf3f0311a1f0832b43",
+          "after": "dd4c0c843aaa3d8e4128af62f7f0a895f679256cbaae12fcfffb75f898452fcc"
+        },
+        "app/main_loop.py": {
+          "before": "f82f59d019e337a7840e94e0c1ebd9d4bbc3ed0b9b3a65d2910ee0d8f875070d",
+          "after": "f28bda44c07c956ff198b76340e842e4eb3e0f265bc0fdb7fd7fee3ce46e2acb"
+        },
+        "app/core/intelligence_portfolio_state_truth_spine.py": {
+          "before": "6f303ecb22e071c1cd278da477c476d7310d94c297014d4763590474e4739b46",
+          "after": "b5dd51e7a925984d9ca500dcd717702b92972537c2970ef87393bded861075d0"
+        }
+      }
     }
   },
   "activation_state_definitions": {
@@ -289,14 +364,14 @@
     {
       "invariant_id": "LIVE_MODE_DISABLED",
       "negative_test_nodes": [
-        "tests/test_operator_paper_supervisor.py::test_supervisor_rejects_live_real_money_unknown_profile_and_watchlist"
+        "tests/test_operator_paper_supervisor.py::test_supervisor_rejects_live_real_money_unknown_profile_and_ineligible_priority_symbol"
       ],
       "failure_contract": "The PAPER supervisor rejects live mode."
     },
     {
       "invariant_id": "REAL_MONEY_DISABLED",
       "negative_test_nodes": [
-        "tests/test_operator_paper_supervisor.py::test_supervisor_rejects_live_real_money_unknown_profile_and_watchlist"
+        "tests/test_operator_paper_supervisor.py::test_supervisor_rejects_live_real_money_unknown_profile_and_ineligible_priority_symbol"
       ],
       "failure_contract": "The PAPER supervisor rejects real-money mode."
     },

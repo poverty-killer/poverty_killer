@@ -32,6 +32,10 @@ from app.operator_activation.paper_baseline import (
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
 from app.main_loop import _build_pre_trade_guardrail_verdict
 from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
+from tests.paper_capability_test_support import (
+    install_mock_broker_crypto_capability_evidence,
+    mock_broker_crypto_capability_registry,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -280,6 +284,7 @@ def test_paper_control_state_allows_protected_position_baseline_when_runtime_gua
         portfolio_client=_PaperReadClient(snapshot),
         account_identity_checker=_account_pin_ok_assertion,
     )
+    install_mock_broker_crypto_capability_evidence(provider.supervisor)
     app = create_operator_app(provider=provider)
     accepted = _endpoint(app, "/operator/paper-baseline/accept", "POST")(
         {"preflight_snapshot": snapshot, "policy": BASELINE_POLICY_PROTECTED, "accepted_by_operator": "Shan/local operator"}
@@ -537,6 +542,7 @@ def test_runtime_context_does_not_baseline_block_unprotected_symbol() -> None:
             ),
         ),
         is_attack=False,
+        capability_registry=mock_broker_crypto_capability_registry(("LTC/USD",)),
     )
 
     assert PAPER_BASELINE_SYMBOL_PROTECTED not in verdict["reason_codes"]

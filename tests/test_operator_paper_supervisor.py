@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from app.execution.broker_read_policy import (
     FEE_HYDRATION_ALLOWED_ENV,
     PAPER_SMOKE_STRICT_READS,
 )
+from app.market.capability_registry import build_alpaca_crypto_universe, normalize_alpaca_crypto_catalog
 from app.operator_activation.paper_baseline import (
     BASELINE_POLICY_PROTECTED,
     PAPER_BASELINE_ENV_PATH,
@@ -37,6 +39,7 @@ from app.operator_activation.paper_baseline import (
     PAPER_BASELINE_RUNTIME_CONTEXT_REQUIRED,
     accept_existing_position_baseline,
 )
+from app.state.state_store import StateStore
 
 
 class FakeProcess:
@@ -141,6 +144,56 @@ def _paper_env() -> dict[str, str]:
 
 def _with_proven_broker_preflight(supervisor: OperatorPaperSupervisor) -> OperatorPaperSupervisor:
     """Place lifecycle-focused tests after the separately tested GET-only gate."""
+    symbols = tuple(_valid_request()["watchlist"])
+    now_ns = time.time_ns()
+    catalog = normalize_alpaca_crypto_catalog(
+        [
+            {
+                "id": f"asset-{symbol.replace('/', '').lower()}",
+                "class": "crypto",
+                "exchange": "CRYPTO",
+                "symbol": symbol,
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "marginable": False,
+                "shortable": False,
+                "min_order_size": "0.000000001",
+                "min_trade_increment": "0.000000001",
+                "price_increment": "0.000000001",
+            }
+            for symbol in symbols
+        ],
+        observed_at_ns=now_ns - 1_000_000,
+        valid_until_ns=now_ns + 3_600_000_000_000,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=now_ns,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=symbols,
+        priority_symbols=symbols,
+    )
+    state_path = supervisor._state_store_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_store = StateStore(str(state_path))
+    try:
+        assert state_store.persist_broker_crypto_catalog_universe(catalog, universe) in {"persisted", "duplicate"}
+    finally:
+        state_store.close()
+    supervisor.config.catalog_snapshot_id = catalog.catalog_snapshot_id
+    supervisor.config.universe_snapshot_id = universe.universe_snapshot_id
     supervisor._process_paper_broker_read_authorized = True
     supervisor._paper_broker_preflight = {
         "source": "TEST_PROVEN_PAPER_BROKER_PREFLIGHT",
@@ -412,19 +465,23 @@ def test_supervisor_rejects_duplicate_active_run():
     assert len(runner.started_specs) == 1
 
 
-def test_supervisor_rejects_live_real_money_unknown_profile_and_watchlist():
+def test_supervisor_rejects_live_real_money_unknown_profile_and_ineligible_priority_symbol():
     runner = FakeRunner()
     supervisor = OperatorPaperSupervisor(config=PaperSupervisorConfig(repo_root=runner.repo_root), runner=runner)
 
     live = dict(_valid_request(), mode="LIVE")
     real_money = dict(_valid_request(), real_money=True)
     profile = dict(_valid_request(), profile="DEFAULT")
-    watchlist = dict(_valid_request(), watchlist=["AAPL"])
 
     assert supervisor.start_paper(live)["reason_code"] == "LIVE_NOT_APPROVED"
     assert supervisor.start_paper(real_money)["reason_code"] == "REAL_MONEY_NOT_APPROVED"
     assert supervisor.start_paper(profile)["reason_code"] == "UNSUPPORTED_PAPER_PROFILE"
-    assert supervisor.start_paper(watchlist)["reason_code"] == "UNSUPPORTED_WATCHLIST_SYMBOL"
+
+    capability_supervisor = _with_proven_broker_preflight(
+        OperatorPaperSupervisor(config=_supervisor_config(runner), runner=runner)
+    )
+    watchlist = dict(_valid_request(), watchlist=["AAPL"])
+    assert capability_supervisor.start_paper(watchlist)["reason_code"] == "PRIORITY_SYMBOL_NOT_ENTRY_ELIGIBLE"
     assert runner.started_specs == []
 
 

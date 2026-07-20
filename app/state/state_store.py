@@ -378,6 +378,101 @@ class StateStore:
                 )
             """)
 
+            # Immutable Alpaca crypto catalog and derived-universe evidence.
+            # StateStore persists and integrity-checks facts; capability_registry
+            # remains the sole owner of normalization and entry eligibility.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_asset_catalog_snapshots (
+                    catalog_snapshot_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL,
+                    broker TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    endpoint_family TEXT NOT NULL,
+                    expected_account_suffix TEXT NOT NULL,
+                    actual_account_suffix TEXT NOT NULL,
+                    observed_at_ns INTEGER NOT NULL,
+                    valid_until_ns INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    snapshot_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason_codes TEXT NOT NULL,
+                    item_count INTEGER NOT NULL,
+                    created_at_ns INTEGER NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_asset_catalog_items (
+                    catalog_snapshot_id TEXT NOT NULL,
+                    record_key TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    raw_symbol TEXT NOT NULL,
+                    normalized_symbol TEXT NOT NULL,
+                    aliases TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    tradable INTEGER,
+                    fractionable INTEGER,
+                    marginable INTEGER,
+                    shortable INTEGER,
+                    min_order_size TEXT,
+                    min_trade_increment TEXT,
+                    price_increment TEXT,
+                    exchange TEXT NOT NULL,
+                    asset_class TEXT NOT NULL,
+                    observed_at_ns INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    capability_valid INTEGER NOT NULL,
+                    reason_codes TEXT NOT NULL,
+                    PRIMARY KEY (catalog_snapshot_id, record_key)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_crypto_universe_snapshots (
+                    universe_snapshot_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL,
+                    catalog_snapshot_id TEXT NOT NULL,
+                    broker TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    endpoint_family TEXT NOT NULL,
+                    account_suffix TEXT NOT NULL,
+                    account_status TEXT NOT NULL,
+                    crypto_status TEXT NOT NULL,
+                    trading_blocked INTEGER,
+                    account_blocked INTEGER,
+                    trade_suspended_by_user INTEGER,
+                    execution_adapter TEXT NOT NULL,
+                    execution_adapter_available INTEGER,
+                    funded_quote_currencies TEXT NOT NULL,
+                    market_data_symbols TEXT NOT NULL,
+                    priority_symbols TEXT NOT NULL,
+                    held_symbols TEXT NOT NULL,
+                    open_order_symbols TEXT NOT NULL,
+                    observed_at_ns INTEGER NOT NULL,
+                    valid_until_ns INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    reason_codes TEXT NOT NULL,
+                    universe_hash TEXT NOT NULL,
+                    membership_count INTEGER NOT NULL,
+                    created_at_ns INTEGER NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS broker_crypto_universe_memberships (
+                    universe_snapshot_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    record_key TEXT,
+                    asset_id TEXT,
+                    included_for_entry INTEGER NOT NULL,
+                    monitor_required INTEGER NOT NULL,
+                    priority_rank INTEGER,
+                    reason_codes TEXT NOT NULL,
+                    PRIMARY KEY (universe_snapshot_id, symbol)
+                )
+            """)
+
             # Portfolio snapshots table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -482,6 +577,11 @@ class StateStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_snapshots_account ON broker_inventory_snapshots(account_suffix, observed_at_ns)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_positions_symbol ON broker_inventory_snapshot_positions(symbol)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventory_lots_symbol ON broker_inventory_lot_projections(symbol)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_asset_catalog_account ON broker_asset_catalog_snapshots(actual_account_suffix, observed_at_ns)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_asset_catalog_symbol ON broker_asset_catalog_items(normalized_symbol)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_crypto_universe_account ON broker_crypto_universe_snapshots(account_suffix, observed_at_ns)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_crypto_universe_catalog ON broker_crypto_universe_snapshots(catalog_snapshot_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_crypto_universe_symbol ON broker_crypto_universe_memberships(symbol)")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_ledger_active_dedupe ON reservation_ledger(reservation_dedupe_key) WHERE is_active = 1")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_client ON reservation_ledger(client_order_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_active ON reservation_ledger(is_active)")
@@ -1005,6 +1105,10 @@ class StateStore:
             "broker_inventory_snapshots",
             "broker_inventory_snapshot_positions",
             "broker_inventory_lot_projections",
+            "broker_asset_catalog_snapshots",
+            "broker_asset_catalog_items",
+            "broker_crypto_universe_snapshots",
+            "broker_crypto_universe_memberships",
         }
         if table not in allowed:
             raise ValueError(f"unsupported_state_table:{table}")
@@ -1133,6 +1237,94 @@ class StateStore:
             default=str,
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _json_list_or_empty(value: Any) -> List[Any]:
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        if not value:
+            return []
+        try:
+            parsed = json.loads(str(value))
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return list(parsed) if isinstance(parsed, list) else []
+
+    @staticmethod
+    def _nullable_bool_to_sql(value: Any) -> Optional[int]:
+        if type(value) is bool:
+            return 1 if value else 0
+        return None
+
+    @staticmethod
+    def _nullable_bool_from_sql(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        return bool(value)
+
+    @staticmethod
+    def _capability_decimal_text(value: Any, *, field_name: str) -> Optional[str]:
+        if value is None or str(value).strip() == "":
+            return None
+        if isinstance(value, bool) or isinstance(value, float):
+            raise ValueError(f"crypto_catalog_{field_name}_invalid")
+        try:
+            parsed = Decimal(str(value).strip())
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise ValueError(f"crypto_catalog_{field_name}_invalid") from exc
+        if not parsed.is_finite() or parsed <= Decimal("0"):
+            raise ValueError(f"crypto_catalog_{field_name}_invalid")
+        return format(parsed, "f")
+
+    @classmethod
+    def _broker_asset_catalog_hash(cls, snapshot: Dict[str, Any], assets: List[Dict[str, Any]]) -> str:
+        stable = {
+            "schema_version": snapshot.get("schema_version"),
+            "broker": snapshot.get("broker"),
+            "environment": snapshot.get("environment"),
+            "endpoint_family": snapshot.get("endpoint_family"),
+            "expected_account_suffix": snapshot.get("expected_account_suffix"),
+            "actual_account_suffix": snapshot.get("actual_account_suffix"),
+            "observed_at_ns": int(snapshot.get("observed_at_ns") or 0),
+            "valid_until_ns": int(snapshot.get("valid_until_ns") or 0),
+            "source": snapshot.get("source"),
+            "source_hash": snapshot.get("source_hash"),
+            "assets": assets,
+        }
+        return cls._stable_hash(stable)
+
+    @classmethod
+    def _broker_crypto_universe_hash(
+        cls,
+        snapshot: Dict[str, Any],
+        memberships: List[Dict[str, Any]],
+    ) -> str:
+        stable = {
+            "schema_version": snapshot.get("schema_version"),
+            "catalog_snapshot_id": snapshot.get("catalog_snapshot_id"),
+            "broker": snapshot.get("broker"),
+            "environment": snapshot.get("environment"),
+            "endpoint_family": snapshot.get("endpoint_family"),
+            "account_suffix": snapshot.get("account_suffix"),
+            "account_status": snapshot.get("account_status"),
+            "crypto_status": snapshot.get("crypto_status"),
+            "trading_blocked": snapshot.get("trading_blocked"),
+            "account_blocked": snapshot.get("account_blocked"),
+            "trade_suspended_by_user": snapshot.get("trade_suspended_by_user"),
+            "execution_adapter": snapshot.get("execution_adapter"),
+            "execution_adapter_available": snapshot.get("execution_adapter_available"),
+            "funded_quote_currencies": cls._json_list_or_empty(snapshot.get("funded_quote_currencies")),
+            "market_data_symbols": cls._json_list_or_empty(snapshot.get("market_data_symbols")),
+            "priority_symbols": cls._json_list_or_empty(snapshot.get("priority_symbols")),
+            "held_symbols": cls._json_list_or_empty(snapshot.get("held_symbols")),
+            "open_order_symbols": cls._json_list_or_empty(snapshot.get("open_order_symbols")),
+            "observed_at_ns": int(snapshot.get("observed_at_ns") or 0),
+            "valid_until_ns": int(snapshot.get("valid_until_ns") or 0),
+            "status": snapshot.get("status"),
+            "reason_codes": cls._json_list_or_empty(snapshot.get("reason_codes")),
+            "memberships": memberships,
+        }
+        return cls._stable_hash(stable)
 
     @classmethod
     def _broker_inventory_book_hash(
@@ -1806,6 +1998,555 @@ class StateStore:
         except Exception as e:
             logger.error("Failed to upsert broker fill ledger %s: %s", fill.get("fill_id"), e)
             return "failed"
+
+    def persist_broker_crypto_catalog_universe(self, catalog: Any, universe: Any) -> str:
+        """Atomically persist immutable catalog and derived-universe evidence."""
+        if self._read_only:
+            raise RuntimeError("state_store_read_only")
+        catalog_value = catalog.to_dict() if callable(getattr(catalog, "to_dict", None)) else catalog
+        universe_value = universe.to_dict() if callable(getattr(universe, "to_dict", None)) else universe
+        if not isinstance(catalog_value, dict) or not isinstance(universe_value, dict):
+            raise ValueError("crypto_catalog_universe_mapping_required")
+
+        catalog_header = {
+            key: catalog_value.get(key)
+            for key in (
+                "catalog_snapshot_id",
+                "schema_version",
+                "broker",
+                "environment",
+                "endpoint_family",
+                "expected_account_suffix",
+                "actual_account_suffix",
+                "observed_at_ns",
+                "valid_until_ns",
+                "source",
+                "source_hash",
+                "snapshot_hash",
+                "status",
+            )
+        }
+        for field_name in (
+            "catalog_snapshot_id",
+            "schema_version",
+            "broker",
+            "environment",
+            "endpoint_family",
+            "expected_account_suffix",
+            "actual_account_suffix",
+            "source",
+            "source_hash",
+            "snapshot_hash",
+            "status",
+        ):
+            if type(catalog_header.get(field_name)) is not str:
+                raise ValueError(f"crypto_catalog_{field_name}_invalid")
+        if not isinstance(catalog_value.get("reason_codes") or (), (list, tuple)):
+            raise ValueError("crypto_catalog_reason_codes_invalid")
+        if not all(type(item) is str for item in catalog_value.get("reason_codes") or ()):
+            raise ValueError("crypto_catalog_reason_code_invalid")
+        catalog_header["reason_codes"] = list(catalog_value.get("reason_codes") or ())
+        assets: List[Dict[str, Any]] = []
+        record_keys: set[str] = set()
+        for raw in catalog_value.get("assets") or ():
+            if not isinstance(raw, dict):
+                raise ValueError("crypto_catalog_asset_mapping_required")
+            for field_name in (
+                "record_key",
+                "asset_id",
+                "raw_symbol",
+                "normalized_symbol",
+                "status",
+                "exchange",
+                "asset_class",
+                "source",
+            ):
+                if type(raw.get(field_name)) is not str:
+                    raise ValueError(f"crypto_catalog_{field_name}_invalid")
+            record_key = raw["record_key"].strip()
+            if not record_key or record_key in record_keys:
+                raise ValueError("crypto_catalog_record_key_invalid_or_duplicate")
+            record_keys.add(record_key)
+            decimal_values: Dict[str, Optional[str]] = {}
+            for field_name in ("min_order_size", "min_trade_increment", "price_increment"):
+                decimal_values[field_name] = self._capability_decimal_text(
+                    raw.get(field_name),
+                    field_name=field_name,
+                )
+            for field_name in ("tradable", "fractionable", "marginable", "shortable"):
+                if raw.get(field_name) is not None and type(raw.get(field_name)) is not bool:
+                    raise ValueError(f"crypto_catalog_{field_name}_invalid")
+            if type(raw.get("capability_valid")) is not bool:
+                raise ValueError("crypto_catalog_capability_valid_invalid")
+            if not isinstance(raw.get("aliases") or (), (list, tuple)):
+                raise ValueError("crypto_catalog_aliases_invalid")
+            if not all(type(item) is str for item in raw.get("aliases") or ()):
+                raise ValueError("crypto_catalog_alias_invalid")
+            if not isinstance(raw.get("reason_codes") or (), (list, tuple)):
+                raise ValueError("crypto_catalog_asset_reason_codes_invalid")
+            if not all(type(item) is str for item in raw.get("reason_codes") or ()):
+                raise ValueError("crypto_catalog_asset_reason_code_invalid")
+            if type(raw.get("observed_at_ns")) is not int:
+                raise ValueError("crypto_catalog_observed_at_ns_invalid")
+            assets.append(
+                {
+                    "record_key": record_key,
+                    "asset_id": raw["asset_id"],
+                    "raw_symbol": raw["raw_symbol"],
+                    "normalized_symbol": raw["normalized_symbol"],
+                    "aliases": list(raw.get("aliases") or ()),
+                    "status": raw["status"],
+                    "tradable": raw.get("tradable"),
+                    "fractionable": raw.get("fractionable"),
+                    "marginable": raw.get("marginable"),
+                    "shortable": raw.get("shortable"),
+                    **decimal_values,
+                    "exchange": raw["exchange"],
+                    "asset_class": raw["asset_class"],
+                    "observed_at_ns": raw["observed_at_ns"],
+                    "source": raw["source"],
+                    "capability_valid": raw.get("capability_valid") is True,
+                    "reason_codes": list(raw.get("reason_codes") or ()),
+                }
+            )
+        assets.sort(key=lambda row: (row["normalized_symbol"], row["record_key"]))
+        catalog_header["observed_at_ns"] = int(catalog_header.get("observed_at_ns") or 0)
+        catalog_header["valid_until_ns"] = int(catalog_header.get("valid_until_ns") or 0)
+        expected_catalog_hash = self._broker_asset_catalog_hash(catalog_header, assets)
+        if str(catalog_header.get("snapshot_hash") or "") != expected_catalog_hash:
+            raise ValueError("broker_asset_catalog_hash_invalid")
+        if str(catalog_header.get("catalog_snapshot_id") or "") != f"catalog-{expected_catalog_hash[:24]}":
+            raise ValueError("broker_asset_catalog_id_invalid")
+
+        universe_header = {
+            key: universe_value.get(key)
+            for key in (
+                "universe_snapshot_id",
+                "schema_version",
+                "catalog_snapshot_id",
+                "broker",
+                "environment",
+                "endpoint_family",
+                "account_suffix",
+                "account_status",
+                "crypto_status",
+                "trading_blocked",
+                "account_blocked",
+                "trade_suspended_by_user",
+                "execution_adapter",
+                "execution_adapter_available",
+                "funded_quote_currencies",
+                "market_data_symbols",
+                "priority_symbols",
+                "held_symbols",
+                "open_order_symbols",
+                "observed_at_ns",
+                "valid_until_ns",
+                "status",
+                "universe_hash",
+            )
+        }
+        for field_name in (
+            "universe_snapshot_id",
+            "schema_version",
+            "catalog_snapshot_id",
+            "broker",
+            "environment",
+            "endpoint_family",
+            "account_suffix",
+            "account_status",
+            "crypto_status",
+            "execution_adapter",
+            "status",
+            "universe_hash",
+        ):
+            if type(universe_header.get(field_name)) is not str:
+                raise ValueError(f"crypto_universe_{field_name}_invalid")
+        if not isinstance(universe_value.get("reason_codes") or (), (list, tuple)):
+            raise ValueError("crypto_universe_reason_codes_invalid")
+        if not all(type(item) is str for item in universe_value.get("reason_codes") or ()):
+            raise ValueError("crypto_universe_reason_code_invalid")
+        universe_header["reason_codes"] = list(universe_value.get("reason_codes") or ())
+        for field_name in (
+            "trading_blocked",
+            "account_blocked",
+            "trade_suspended_by_user",
+            "execution_adapter_available",
+        ):
+            if universe_header.get(field_name) is not None and type(universe_header.get(field_name)) is not bool:
+                raise ValueError(f"crypto_universe_{field_name}_invalid")
+        for field_name in (
+            "funded_quote_currencies",
+            "market_data_symbols",
+            "priority_symbols",
+            "held_symbols",
+            "open_order_symbols",
+        ):
+            raw_values = universe_header.get(field_name)
+            if not isinstance(raw_values, (list, tuple)):
+                raise ValueError(f"crypto_universe_{field_name}_invalid")
+            if not all(type(item) is str for item in raw_values):
+                raise ValueError(f"crypto_universe_{field_name}_item_invalid")
+            universe_header[field_name] = list(raw_values)
+        memberships: List[Dict[str, Any]] = []
+        symbols: set[str] = set()
+        for raw in universe_value.get("memberships") or ():
+            if not isinstance(raw, dict):
+                raise ValueError("crypto_universe_membership_mapping_required")
+            if type(raw.get("symbol")) is not str:
+                raise ValueError("crypto_universe_symbol_invalid_or_duplicate")
+            symbol = raw["symbol"].strip().upper()
+            if not symbol or symbol in symbols:
+                raise ValueError("crypto_universe_symbol_invalid_or_duplicate")
+            symbols.add(symbol)
+            if type(raw.get("included_for_entry")) is not bool or type(raw.get("monitor_required")) is not bool:
+                raise ValueError("crypto_universe_membership_boolean_invalid")
+            priority_rank = raw.get("priority_rank")
+            if priority_rank is not None and (type(priority_rank) is not int or priority_rank < 0):
+                raise ValueError("crypto_universe_priority_rank_invalid")
+            if not isinstance(raw.get("reason_codes") or (), (list, tuple)):
+                raise ValueError("crypto_universe_membership_reason_codes_invalid")
+            if not all(type(item) is str for item in raw.get("reason_codes") or ()):
+                raise ValueError("crypto_universe_membership_reason_code_invalid")
+            for field_name in ("record_key", "asset_id"):
+                if raw.get(field_name) is not None and type(raw.get(field_name)) is not str:
+                    raise ValueError(f"crypto_universe_membership_{field_name}_invalid")
+            memberships.append(
+                {
+                    "record_key": raw.get("record_key"),
+                    "asset_id": raw.get("asset_id"),
+                    "symbol": symbol,
+                    "included_for_entry": raw.get("included_for_entry") is True,
+                    "monitor_required": raw.get("monitor_required") is True,
+                    "priority_rank": int(priority_rank) if priority_rank is not None else None,
+                    "reason_codes": list(raw.get("reason_codes") or ()),
+                }
+            )
+        memberships.sort(key=lambda row: row["symbol"])
+        universe_header["observed_at_ns"] = int(universe_header.get("observed_at_ns") or 0)
+        universe_header["valid_until_ns"] = int(universe_header.get("valid_until_ns") or 0)
+        if universe_header.get("catalog_snapshot_id") != catalog_header.get("catalog_snapshot_id"):
+            raise ValueError("crypto_universe_catalog_lineage_mismatch")
+        if universe_header.get("account_suffix") != catalog_header.get("actual_account_suffix"):
+            raise ValueError("crypto_universe_account_lineage_mismatch")
+        if universe_header.get("endpoint_family") != catalog_header.get("endpoint_family"):
+            raise ValueError("crypto_universe_endpoint_lineage_mismatch")
+        expected_universe_hash = self._broker_crypto_universe_hash(universe_header, memberships)
+        if str(universe_header.get("universe_hash") or "") != expected_universe_hash:
+            raise ValueError("broker_crypto_universe_hash_invalid")
+        if str(universe_header.get("universe_snapshot_id") or "") != f"universe-{expected_universe_hash[:24]}":
+            raise ValueError("broker_crypto_universe_id_invalid")
+
+        created_at_ns = now_ns()
+        catalog_id = str(catalog_header["catalog_snapshot_id"])
+        universe_id = str(universe_header["universe_snapshot_id"])
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute(
+                    "SELECT snapshot_hash FROM broker_asset_catalog_snapshots WHERE catalog_snapshot_id = ?",
+                    (catalog_id,),
+                )
+                existing_catalog = cursor.fetchone()
+                if existing_catalog is not None and str(existing_catalog[0]) != expected_catalog_hash:
+                    conn.rollback()
+                    return "conflict"
+                if existing_catalog is None:
+                    cursor.execute(
+                        """
+                        INSERT INTO broker_asset_catalog_snapshots (
+                            catalog_snapshot_id, schema_version, broker, environment, endpoint_family,
+                            expected_account_suffix, actual_account_suffix, observed_at_ns, valid_until_ns,
+                            source, source_hash, snapshot_hash, status, reason_codes, item_count, created_at_ns
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            catalog_id,
+                            catalog_header["schema_version"],
+                            catalog_header["broker"],
+                            catalog_header["environment"],
+                            catalog_header["endpoint_family"],
+                            catalog_header["expected_account_suffix"],
+                            catalog_header["actual_account_suffix"],
+                            catalog_header["observed_at_ns"],
+                            catalog_header["valid_until_ns"],
+                            catalog_header["source"],
+                            catalog_header["source_hash"],
+                            expected_catalog_hash,
+                            catalog_header["status"],
+                            json.dumps(catalog_header["reason_codes"], separators=(",", ":")),
+                            len(assets),
+                            created_at_ns,
+                        ),
+                    )
+                    for asset in assets:
+                        cursor.execute(
+                            """
+                            INSERT INTO broker_asset_catalog_items (
+                                catalog_snapshot_id, record_key, asset_id, raw_symbol, normalized_symbol,
+                                aliases, status, tradable, fractionable, marginable, shortable,
+                                min_order_size, min_trade_increment, price_increment, exchange, asset_class,
+                                observed_at_ns, source, capability_valid, reason_codes
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                catalog_id,
+                                asset["record_key"],
+                                asset["asset_id"],
+                                asset["raw_symbol"],
+                                asset["normalized_symbol"],
+                                json.dumps(asset["aliases"], separators=(",", ":")),
+                                asset["status"],
+                                self._nullable_bool_to_sql(asset["tradable"]),
+                                self._nullable_bool_to_sql(asset["fractionable"]),
+                                self._nullable_bool_to_sql(asset["marginable"]),
+                                self._nullable_bool_to_sql(asset["shortable"]),
+                                asset["min_order_size"],
+                                asset["min_trade_increment"],
+                                asset["price_increment"],
+                                asset["exchange"],
+                                asset["asset_class"],
+                                asset["observed_at_ns"],
+                                asset["source"],
+                                1 if asset["capability_valid"] else 0,
+                                json.dumps(asset["reason_codes"], separators=(",", ":")),
+                            ),
+                        )
+
+                cursor.execute(
+                    "SELECT universe_hash FROM broker_crypto_universe_snapshots WHERE universe_snapshot_id = ?",
+                    (universe_id,),
+                )
+                existing_universe = cursor.fetchone()
+                if existing_universe is not None:
+                    if str(existing_universe[0]) != expected_universe_hash:
+                        conn.rollback()
+                        return "conflict"
+                    conn.commit()
+                    return "duplicate"
+                cursor.execute(
+                    """
+                    INSERT INTO broker_crypto_universe_snapshots (
+                        universe_snapshot_id, schema_version, catalog_snapshot_id, broker, environment,
+                        endpoint_family, account_suffix, account_status, crypto_status,
+                        trading_blocked, account_blocked, trade_suspended_by_user,
+                        execution_adapter, execution_adapter_available, funded_quote_currencies,
+                        market_data_symbols, priority_symbols, held_symbols, open_order_symbols,
+                        observed_at_ns, valid_until_ns, status, reason_codes, universe_hash,
+                        membership_count, created_at_ns
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        universe_id,
+                        universe_header["schema_version"],
+                        catalog_id,
+                        universe_header["broker"],
+                        universe_header["environment"],
+                        universe_header["endpoint_family"],
+                        universe_header["account_suffix"],
+                        universe_header["account_status"],
+                        universe_header["crypto_status"],
+                        self._nullable_bool_to_sql(universe_header["trading_blocked"]),
+                        self._nullable_bool_to_sql(universe_header["account_blocked"]),
+                        self._nullable_bool_to_sql(universe_header["trade_suspended_by_user"]),
+                        universe_header["execution_adapter"],
+                        self._nullable_bool_to_sql(universe_header["execution_adapter_available"]),
+                        json.dumps(universe_header["funded_quote_currencies"], separators=(",", ":")),
+                        json.dumps(universe_header["market_data_symbols"], separators=(",", ":")),
+                        json.dumps(universe_header["priority_symbols"], separators=(",", ":")),
+                        json.dumps(universe_header["held_symbols"], separators=(",", ":")),
+                        json.dumps(universe_header["open_order_symbols"], separators=(",", ":")),
+                        universe_header["observed_at_ns"],
+                        universe_header["valid_until_ns"],
+                        universe_header["status"],
+                        json.dumps(universe_header["reason_codes"], separators=(",", ":")),
+                        expected_universe_hash,
+                        len(memberships),
+                        created_at_ns,
+                    ),
+                )
+                for membership in memberships:
+                    cursor.execute(
+                        """
+                        INSERT INTO broker_crypto_universe_memberships (
+                            universe_snapshot_id, symbol, record_key, asset_id, included_for_entry,
+                            monitor_required, priority_rank, reason_codes
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            universe_id,
+                            membership["symbol"],
+                            membership["record_key"],
+                            membership["asset_id"],
+                            1 if membership["included_for_entry"] else 0,
+                            1 if membership["monitor_required"] else 0,
+                            membership["priority_rank"],
+                            json.dumps(membership["reason_codes"], separators=(",", ":")),
+                        ),
+                    )
+                conn.commit()
+                return "persisted"
+        except Exception as exc:
+            logger.error("Failed to persist broker crypto catalog/universe %s: %s", universe_id, exc)
+            raise RuntimeError("broker_crypto_catalog_universe_persist_failed") from exc
+
+    def get_broker_asset_catalog_snapshot(
+        self,
+        catalog_snapshot_id: str,
+        *,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        safe_id = str(catalog_snapshot_id or "").strip()
+        if not safe_id:
+            if strict:
+                raise RuntimeError("broker_asset_catalog_id_required")
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM broker_asset_catalog_snapshots WHERE catalog_snapshot_id = ?", (safe_id,))
+                header_row = cursor.fetchone()
+                if header_row is None:
+                    return None
+                result = dict(header_row)
+                result["reason_codes"] = self._json_list_or_empty(result.get("reason_codes"))
+                cursor.execute(
+                    """
+                    SELECT * FROM broker_asset_catalog_items
+                    WHERE catalog_snapshot_id = ?
+                    ORDER BY normalized_symbol, record_key
+                    """,
+                    (safe_id,),
+                )
+                assets: List[Dict[str, Any]] = []
+                for row in cursor.fetchall():
+                    asset = dict(row)
+                    asset.pop("catalog_snapshot_id", None)
+                    asset["aliases"] = self._json_list_or_empty(asset.get("aliases"))
+                    asset["reason_codes"] = self._json_list_or_empty(asset.get("reason_codes"))
+                    for field_name in ("tradable", "fractionable", "marginable", "shortable"):
+                        asset[field_name] = self._nullable_bool_from_sql(asset.get(field_name))
+                    asset["capability_valid"] = bool(asset.get("capability_valid"))
+                    assets.append(asset)
+                result["assets"] = assets
+                result["asset_count"] = len(assets)
+                if strict:
+                    if int(result.get("item_count") or 0) != len(assets):
+                        raise RuntimeError("broker_asset_catalog_item_count_integrity_failed")
+                    actual_hash = self._broker_asset_catalog_hash(result, assets)
+                    expected_hash = str(result.get("snapshot_hash") or "")
+                    if actual_hash != expected_hash or safe_id != f"catalog-{actual_hash[:24]}":
+                        raise RuntimeError("broker_asset_catalog_hash_integrity_failed")
+                return result
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to get broker asset catalog %s: %s", safe_id, exc)
+            if strict:
+                raise RuntimeError("broker_asset_catalog_read_failed") from exc
+            return None
+
+    def get_broker_crypto_universe_snapshot(
+        self,
+        universe_snapshot_id: str,
+        *,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        safe_id = str(universe_snapshot_id or "").strip()
+        if not safe_id:
+            if strict:
+                raise RuntimeError("broker_crypto_universe_id_required")
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM broker_crypto_universe_snapshots WHERE universe_snapshot_id = ?",
+                    (safe_id,),
+                )
+                header_row = cursor.fetchone()
+                if header_row is None:
+                    return None
+                result = dict(header_row)
+                result["reason_codes"] = self._json_list_or_empty(result.get("reason_codes"))
+                for field_name in (
+                    "trading_blocked",
+                    "account_blocked",
+                    "trade_suspended_by_user",
+                    "execution_adapter_available",
+                ):
+                    result[field_name] = self._nullable_bool_from_sql(result.get(field_name))
+                for field_name in (
+                    "funded_quote_currencies",
+                    "market_data_symbols",
+                    "priority_symbols",
+                    "held_symbols",
+                    "open_order_symbols",
+                ):
+                    result[field_name] = self._json_list_or_empty(result.get(field_name))
+                cursor.execute(
+                    """
+                    SELECT * FROM broker_crypto_universe_memberships
+                    WHERE universe_snapshot_id = ? ORDER BY symbol
+                    """,
+                    (safe_id,),
+                )
+                memberships: List[Dict[str, Any]] = []
+                for row in cursor.fetchall():
+                    membership = dict(row)
+                    membership.pop("universe_snapshot_id", None)
+                    membership["included_for_entry"] = bool(membership.get("included_for_entry"))
+                    membership["monitor_required"] = bool(membership.get("monitor_required"))
+                    membership["reason_codes"] = self._json_list_or_empty(membership.get("reason_codes"))
+                    memberships.append(membership)
+                result["memberships"] = memberships
+                result["entry_symbols"] = [row["symbol"] for row in sorted(
+                    (row for row in memberships if row["included_for_entry"]),
+                    key=lambda row: (row["priority_rank"] is None, row["priority_rank"] or 0, row["symbol"]),
+                )]
+                result["monitor_symbols"] = sorted(row["symbol"] for row in memberships if row["monitor_required"])
+                result["runtime_symbols"] = list(dict.fromkeys([*result["entry_symbols"], *result["monitor_symbols"]]))
+                if strict:
+                    if int(result.get("membership_count") or 0) != len(memberships):
+                        raise RuntimeError("broker_crypto_universe_membership_count_integrity_failed")
+                    actual_hash = self._broker_crypto_universe_hash(result, memberships)
+                    expected_hash = str(result.get("universe_hash") or "")
+                    if actual_hash != expected_hash or safe_id != f"universe-{actual_hash[:24]}":
+                        raise RuntimeError("broker_crypto_universe_hash_integrity_failed")
+                return result
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to get broker crypto universe %s: %s", safe_id, exc)
+            if strict:
+                raise RuntimeError("broker_crypto_universe_read_failed") from exc
+            return None
+
+    def get_broker_crypto_capability_evidence(
+        self,
+        *,
+        catalog_snapshot_id: str,
+        universe_snapshot_id: str,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        catalog = self.get_broker_asset_catalog_snapshot(catalog_snapshot_id, strict=strict)
+        universe = self.get_broker_crypto_universe_snapshot(universe_snapshot_id, strict=strict)
+        if catalog is None or universe is None:
+            return None
+        if universe.get("catalog_snapshot_id") != catalog.get("catalog_snapshot_id"):
+            if strict:
+                raise RuntimeError("broker_crypto_capability_lineage_integrity_failed")
+            return None
+        if universe.get("account_suffix") != catalog.get("actual_account_suffix"):
+            if strict:
+                raise RuntimeError("broker_crypto_capability_account_integrity_failed")
+            return None
+        if universe.get("endpoint_family") != catalog.get("endpoint_family"):
+            if strict:
+                raise RuntimeError("broker_crypto_capability_endpoint_integrity_failed")
+            return None
+        return {"catalog": catalog, "universe": universe}
 
     def record_broker_inventory_event(self, event: Dict[str, Any]) -> str:
         """Persist one immutable inventory-affecting lifecycle fact.

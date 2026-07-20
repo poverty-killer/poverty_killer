@@ -14,6 +14,7 @@ from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.api.operator_session_store import OperatorSessionStore
 from app.operator_activation.paper_baseline import BASELINE_POLICY_CLEAN_ONLY, BASELINE_POLICY_PROTECTED
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
+from tests.paper_capability_test_support import install_mock_broker_crypto_capability_evidence
 from tests.test_operator_paper_supervisor import FakeRunner
 
 
@@ -136,6 +137,7 @@ def _paper_read_confirmations() -> dict[str, object]:
 
 
 def _accept_and_verify_ready_baseline(provider: OperatorSnapshotProvider, *, existing_positions: bool = False) -> None:
+    install_mock_broker_crypto_capability_evidence(provider.supervisor)
     snapshot = _paper_preflight_snapshot(existing_positions=existing_positions)
     provider.portfolio_client = _PaperReadClient(snapshot)
     accepted = provider.paper_baseline_accept(
@@ -216,6 +218,7 @@ def _ready_app_with_historical_duplicate(tmp_path):
         runner=runner,
         session_store=OperatorSessionStore(path=store_path),
     )
+    install_mock_broker_crypto_capability_evidence(reloaded)
     provider = OperatorSnapshotProvider(
         runtime_config=OperatorRuntimeConfig.from_env({}, repo_root=repo_root),
         supervisor=reloaded,

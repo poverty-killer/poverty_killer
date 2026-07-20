@@ -134,6 +134,19 @@ class VenueCapability:
     order_constraint_source: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     portal_quality_metrics: Mapping[str, str] = field(default_factory=lambda: dict(UNKNOWN_PORTAL_QUALITY))
+    broker_asset_id: str | None = None
+    broker_status: str | None = None
+    broker_tradable: bool | None = None
+    broker_fractionable: bool | None = None
+    broker_marginable: bool | None = None
+    broker_shortable: bool | None = None
+    price_increment: Decimal | None = None
+    broker_exchange: str | None = None
+    observed_at_ns: int | None = None
+    valid_until_ns: int | None = None
+    catalog_snapshot_id: str | None = None
+    capability_source_hash: str | None = None
+    execution_authority_source: str | None = None
 
     @property
     def portal_key(self) -> str:
@@ -224,6 +237,15 @@ class CapabilityAwareCandidate:
     fail_closed_reason_code: str | None
     capability_key: str
     mutation_authorized: bool = False
+    broker_asset_id: str | None = None
+    broker_status: str | None = None
+    broker_marginable: bool | None = None
+    broker_shortable: bool | None = None
+    price_increment: Decimal | None = None
+    observed_at_ns: int | None = None
+    valid_until_ns: int | None = None
+    catalog_snapshot_id: str | None = None
+    execution_authority_source: str | None = None
 
     @classmethod
     def from_capability(cls, capability: VenueCapability, *, tradable: bool, reasons: tuple[str, ...] = ()) -> "CapabilityAwareCandidate":
@@ -257,6 +279,15 @@ class CapabilityAwareCandidate:
             fail_closed_reason_code=capability.fail_closed_reason_code,
             capability_key=capability.capability_key,
             mutation_authorized=capability.mutation_authorized_by_default,
+            broker_asset_id=capability.broker_asset_id,
+            broker_status=capability.broker_status,
+            broker_marginable=capability.broker_marginable,
+            broker_shortable=capability.broker_shortable,
+            price_increment=capability.price_increment,
+            observed_at_ns=capability.observed_at_ns,
+            valid_until_ns=capability.valid_until_ns,
+            catalog_snapshot_id=capability.catalog_snapshot_id,
+            execution_authority_source=capability.execution_authority_source,
         )
 
 

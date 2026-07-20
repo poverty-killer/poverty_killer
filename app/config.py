@@ -474,7 +474,19 @@ class Config(BaseSettings):
     )
     runtime_watchlist: List[str] = Field(
         default=[],
-        description="Explicit runtime watchlist. Empty watchlist fails closed before feed startup.",
+        description="Non-authoritative symbol priority hint; broker universe membership owns Alpaca crypto eligibility.",
+    )
+    runtime_catalog_snapshot_id: str = Field(
+        default="",
+        description="Pinned immutable broker crypto catalog snapshot ID required by Alpaca PAPER runtime.",
+    )
+    runtime_universe_snapshot_id: str = Field(
+        default="",
+        description="Pinned immutable derived crypto universe snapshot ID required by Alpaca PAPER runtime.",
+    )
+    runtime_capability_state_store_path: str = Field(
+        default="data/state.db",
+        description="Existing StateStore path containing pinned catalog and universe evidence.",
     )
     paper_baseline_runtime_context: Dict[str, Any] = Field(
         default_factory=dict,
@@ -643,6 +655,14 @@ class Config(BaseSettings):
         for env_key, field_name in env_to_field.items():
             if env_key in os.environ:
                 overrides[field_name] = _env_list(os.environ.get(env_key))
+        scalar_env_to_field = {
+            "POVERTY_KILLER_CATALOG_SNAPSHOT_ID": "runtime_catalog_snapshot_id",
+            "POVERTY_KILLER_UNIVERSE_SNAPSHOT_ID": "runtime_universe_snapshot_id",
+            "POVERTY_KILLER_CAPABILITY_STATE_STORE_PATH": "runtime_capability_state_store_path",
+        }
+        for env_key, field_name in scalar_env_to_field.items():
+            if env_key in os.environ:
+                overrides[field_name] = str(os.environ.get(env_key) or "").strip()
         return cls(**overrides)
 
     def get_class_limit(self, asset_class: str) -> float:

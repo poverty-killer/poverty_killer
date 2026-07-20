@@ -14,6 +14,13 @@ from app.core.intelligence_portfolio_state_truth_spine import (
     STRATEGY_MISSING_FEED_TRUTH,
 )
 from app.execution.engine import ExecutionSpineResult
+from app.market.capability_registry import (
+    VenueCapabilityRegistry,
+    build_alpaca_crypto_capability_registry,
+    build_alpaca_crypto_universe,
+    build_default_capability_registry,
+    normalize_alpaca_crypto_catalog,
+)
 from app.models.signals import StrategySignal
 from app.risk.exposure_manager import ExposureManager
 from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
@@ -28,7 +35,52 @@ def _store(tmp_path) -> StateStore:
 
 
 def _spine() -> IntelligencePortfolioStateTruthSpine:
-    return IntelligencePortfolioStateTruthSpine()
+    catalog = normalize_alpaca_crypto_catalog(
+        [
+            {
+                "id": "asset-btcusd",
+                "class": "crypto",
+                "exchange": "CRYPTO",
+                "symbol": "BTC/USD",
+                "status": "active",
+                "tradable": True,
+                "fractionable": True,
+                "marginable": False,
+                "shortable": False,
+                "min_order_size": "0.0001",
+                "min_trade_increment": "0.000000001",
+                "price_increment": "0.01",
+            }
+        ],
+        observed_at_ns=T0_NS - 1,
+        valid_until_ns=T0_NS + 1_000_000_000,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+    )
+    universe = build_alpaca_crypto_universe(
+        catalog,
+        as_of_ns=T0_NS,
+        expected_account_suffix="045ded",
+        actual_account_suffix="045ded",
+        account_status="ACTIVE",
+        crypto_status="ACTIVE",
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        execution_adapter="alpaca_paper_rest",
+        execution_adapter_available=True,
+        funded_quote_currencies=("USD",),
+        market_data_symbols=("BTC/USD",),
+    )
+    dynamic = build_alpaca_crypto_capability_registry(catalog, universe)
+    base = build_default_capability_registry()
+    preserved = tuple(
+        capability
+        for capability in base.capabilities
+        if not (capability.venue_id == "alpaca" and capability.asset_class == "crypto")
+    )
+    registry = VenueCapabilityRegistry((*preserved, *dynamic.capabilities))
+    return IntelligencePortfolioStateTruthSpine(capability_registry=registry)
 
 
 def _signal(symbol: str = "AAPL", qty: Decimal = Decimal("0.02")) -> StrategySignal:
@@ -129,7 +181,7 @@ def test_seam4_guardrail_blocks_unsafe_crypto_candidate_before_route(tmp_path):
     )
 
     assert result.candidate.status == "CANDIDATE_GUARDRAIL_BLOCKED"
-    assert "RISK_MAX_BELOW_BROKER_MIN" in result.guardrail_verdict["reason_codes"]
+    assert "MIN_QUANTITY_NOT_MET" in result.guardrail_verdict["reason_codes"]
     assert result.execution_status == "blocked"
     assert store.list_events(event_type="seam5.candidate_blocked")
 

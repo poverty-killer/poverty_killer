@@ -100,7 +100,7 @@ from app.operator_activation.paper_baseline import (
     PAPER_BASELINE_SYMBOL_PROTECTED,
     evaluate_protected_baseline_trade,
 )
-from app.market.capability_registry import build_default_capability_registry
+from app.market.capability_registry import VenueCapabilityRegistry, build_default_capability_registry
 from app.market.venue_capabilities import (
     CapabilityAwareCandidate,
     PortalAssetClass,
@@ -1180,6 +1180,7 @@ def _build_pre_trade_guardrail_verdict(
     runtime: Any,
     is_attack: bool,
     exposure_manager: Any = None,
+    capability_registry: VenueCapabilityRegistry | None = None,
 ) -> Dict[str, Any]:
     metadata = getattr(signal, "metadata", None)
     if not isinstance(metadata, dict):
@@ -1286,7 +1287,7 @@ def _build_pre_trade_guardrail_verdict(
             sell_intent_classification=sell_intent_classification or "SELL_AUTHORITY_MISSING",
         )
 
-    registry = build_default_capability_registry()
+    registry = capability_registry or build_default_capability_registry()
     preferred_portal = _preferred_portal_for_guardrail(config, symbol)
     policy_mode = getattr(config, "portal_selection_policy", None)
     if not policy_mode:
@@ -1514,6 +1515,7 @@ def create_main_loop(
     telemetry_store: Optional[TelemetryEventStore] = None,
     active_symbols: Optional[Set[str]] = None,
     exposure_manager: Optional[Any] = None,
+    capability_registry: Optional[VenueCapabilityRegistry] = None,
 ) -> "MainLoop":
     """
     Factory function for MainLoop assembly.
@@ -1566,6 +1568,7 @@ def create_main_loop(
         active_symbols=active_symbols or {symbol},
         safety_gate=safety_gate,
         exposure_manager=exposure_manager,
+        capability_registry=capability_registry,
     )
 
 
@@ -1681,6 +1684,7 @@ class MainLoop:
         active_symbols: Optional[Set[str]] = None,
         safety_gate: Optional[SafetyGate] = None,
         exposure_manager: Optional[Any] = None,
+        capability_registry: Optional[VenueCapabilityRegistry] = None,
     ):
         self.config = config
         self.commander = commander
@@ -1703,6 +1707,7 @@ class MainLoop:
         self.telemetry_store = telemetry_store
         self.safety_gate = safety_gate
         self.exposure_manager = exposure_manager
+        self.capability_registry = capability_registry or build_default_capability_registry()
 
         # Active symbols set (all symbols that can participate in paper trading)
         self.active_symbols: Set[str] = active_symbols or {symbol}
@@ -4465,6 +4470,7 @@ class MainLoop:
             runtime=runtime,
             is_attack=aggression_contract.execution_is_attack,
             exposure_manager=getattr(self, "exposure_manager", None),
+            capability_registry=getattr(self, "capability_registry", None),
         )
         if isinstance(signal_metadata, dict):
             signal_metadata["pre_trade_guardrail_verdict"] = pre_trade_guardrail_verdict

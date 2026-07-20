@@ -34,6 +34,7 @@ from app.risk.exposure_manager import ExposureManager
 from app.risk.reservation_lifecycle_coordinator import ReservationLifecycleCoordinator
 from app.risk.stale_data_guard import StaleDataGuard, TemporalInput
 from app.state.state_store import StateStore
+from tests.paper_capability_test_support import mock_broker_crypto_capability_registry
 
 
 ACCOUNT_ID = "paper-account-045ded"
@@ -1372,6 +1373,7 @@ def test_same_symbol_buy_is_not_blocked_by_opening_baseline_after_complete_recon
         runtime=runtime,
         is_attack=False,
         exposure_manager=manager,
+        capability_registry=mock_broker_crypto_capability_registry(("AVAX/USD",)),
     )
 
     assert "PAPER_BASELINE_SYMBOL_PROTECTED" not in verdict["reason_codes"]

@@ -9,6 +9,7 @@ Whale threshold in USD ($500k minimum).
 import logging
 import math
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Optional, List, Any, Tuple
 from dataclasses import dataclass, field
 
@@ -52,6 +53,12 @@ class InstrumentSpec:
     # Risk multipliers
     volatility_multiplier: float = 1.0
     liquidity_multiplier: float = 1.0
+    execution_authorized: bool = False
+    constraint_source: str = "static_reference_non_authoritative"
+    min_size_exact: Decimal = field(init=False)
+    step_size_exact: Decimal = field(init=False)
+    tick_size_exact: Decimal = field(init=False)
+    min_notional_exact: Optional[Decimal] = field(init=False)
     
     def __post_init__(self):
         """Validate instrument specification."""
@@ -61,6 +68,20 @@ class InstrumentSpec:
             raise ValueError(f"step_size must be positive for {self.symbol}")
         if self.tick_size <= 0:
             raise ValueError(f"tick_size must be positive for {self.symbol}")
+        try:
+            self.min_size_exact = Decimal(str(self.min_size))
+            self.step_size_exact = Decimal(str(self.step_size))
+            self.tick_size_exact = Decimal(str(self.tick_size))
+            self.min_notional_exact = Decimal(str(self.min_notional)) if self.min_notional is not None else None
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"invalid exact Decimal constraints for {self.symbol}") from exc
+        exact_values = (self.min_size_exact, self.step_size_exact, self.tick_size_exact)
+        if any(not value.is_finite() or value <= Decimal("0") for value in exact_values):
+            raise ValueError(f"nonpositive or nonfinite exact constraints for {self.symbol}")
+        if self.min_notional_exact is not None and (
+            not self.min_notional_exact.is_finite() or self.min_notional_exact <= Decimal("0")
+        ):
+            raise ValueError(f"nonpositive or nonfinite exact min_notional for {self.symbol}")
 
 
 class InstrumentRegistry:
@@ -79,11 +100,11 @@ class InstrumentRegistry:
         cls.INSTRUMENTS["BTC/USD"] = InstrumentSpec(
             symbol="BTC/USD",
             asset_class=AssetClass.CRYPTO,
-            exchange=ExchangeType.KRAKEN,
+            exchange=ExchangeType.ALPACA,
             min_size=0.0001,
             step_size=0.0001,
             tick_size=0.01,
-            margin_available=True,
+            margin_available=False,
             session=MarketSession.CRYPTO_24_7,
             description="Bitcoin / US Dollar",
             whale_threshold_usd=500000.0,  # $500,000 USD
@@ -96,11 +117,11 @@ class InstrumentRegistry:
         cls.INSTRUMENTS["ETH/USD"] = InstrumentSpec(
             symbol="ETH/USD",
             asset_class=AssetClass.CRYPTO,
-            exchange=ExchangeType.KRAKEN,
+            exchange=ExchangeType.ALPACA,
             min_size=0.001,
             step_size=0.001,
             tick_size=0.01,
-            margin_available=True,
+            margin_available=False,
             session=MarketSession.CRYPTO_24_7,
             description="Ethereum / US Dollar",
             whale_threshold_usd=500000.0,  # $500,000 USD
@@ -113,11 +134,11 @@ class InstrumentRegistry:
         cls.INSTRUMENTS["SOL/USD"] = InstrumentSpec(
             symbol="SOL/USD",
             asset_class=AssetClass.CRYPTO,
-            exchange=ExchangeType.KRAKEN,
+            exchange=ExchangeType.ALPACA,
             min_size=0.01,
             step_size=0.01,
             tick_size=0.01,
-            margin_available=True,
+            margin_available=False,
             session=MarketSession.CRYPTO_24_7,
             description="Solana / US Dollar",
             whale_threshold_usd=500000.0,  # $500,000 USD
@@ -168,7 +189,7 @@ class InstrumentRegistry:
             cls.INSTRUMENTS[symbol] = InstrumentSpec(
                 symbol=symbol,
                 asset_class=AssetClass.CRYPTO,
-                exchange=ExchangeType.KRAKEN,
+                exchange=ExchangeType.ALPACA,
                 min_size=min_order_size,
                 step_size=min_trade_increment,
                 tick_size=price_increment,
@@ -573,6 +594,11 @@ class InstrumentRegistry:
         inst = cls.get_instrument(symbol)
         if not inst:
             return False, f"Unknown symbol: {symbol}"
+        if not inst.execution_authorized:
+            return False, (
+                f"Static instrument reference is not execution-authorized: {symbol} "
+                f"({inst.constraint_source})"
+            )
         
         # Check minimum size
         if quantity < inst.min_size:

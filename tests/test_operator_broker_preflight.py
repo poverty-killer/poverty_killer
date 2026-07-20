@@ -7,6 +7,7 @@ from app.api.operator_readonly_api import OperatorSnapshotProvider, create_opera
 from app.api.operator_runtime_config import OperatorRuntimeConfig
 from app.operator_activation.paper_baseline import BASELINE_POLICY_PROTECTED
 from app.operator_credentials.store import ALPACA_PAPER_ENV_PATH_ENV_KEY, LocalCredentialStore
+from tests.paper_capability_test_support import install_mock_broker_crypto_capability_evidence
 from tests.test_operator_paper_supervisor import FakeRunner
 
 
@@ -155,6 +156,7 @@ def _provider(tmp_path, client: FakePaperReadClient, *, account_suffix: str = "0
         runner=runner,
         account_identity_checker=_account_pin(account_suffix),
     )
+    install_mock_broker_crypto_capability_evidence(supervisor)
     provider = OperatorSnapshotProvider(
         supervisor=supervisor,
         runtime_config=runtime,
