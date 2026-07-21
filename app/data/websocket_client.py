@@ -1,10 +1,10 @@
 ﻿"""
-WebSocket Client - Kraken Real-Time Market Data Connector
+WebSocket Clients - Kraken and Alpaca Real-Time Market Data Connectors
 Async WebSocket client with Sovereign Grade features:
 - Auto-reconnect with exponential backoff
 - Heartbeat monitoring with SovereignSentinel integration
 - Backpressure handling with bounded queue
-- Kraken-specific subscription and message parsing
+- Venue-specific subscription and message parsing
 - L2 order book and trade feed
 
 TIMESTAMP TRUTH (STRICT AUTHORITATIVE PATH):
@@ -15,11 +15,15 @@ TIMESTAMP TRUTH (STRICT AUTHORITATIVE PATH):
 """
 
 import asyncio
+import calendar
+import hashlib
 import json
 import logging
+import math
 import time
-from datetime import datetime
-from typing import Dict, List, Optional, Callable, Any, Tuple
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Dict, List, Optional, Callable, Any, Tuple, Mapping
 from collections import deque
 
 import websockets
@@ -1015,6 +1019,768 @@ class KrakenWebSocketClient:
         """Stop the WebSocket client."""
         self._running = False
         await self.disconnect()
+
+
+class AlpacaCryptoWebSocketClient:
+    """Bounded Alpaca crypto deep-stream adapter with strict source truth."""
+
+    ws_url = "wss://stream.data.alpaca.markets/v1beta3/crypto/us"
+
+    def __init__(
+        self,
+        *,
+        symbols: List[str],
+        key_id: str,
+        secret_key: str,
+        on_order_book: Optional[Callable] = None,
+        on_trade: Optional[Callable] = None,
+        on_quote: Optional[Callable] = None,
+        on_candle: Optional[Callable] = None,
+        on_feed_truth: Optional[Callable] = None,
+        on_health: Optional[Callable[[int, int], Any]] = None,
+        max_queue_size: int = 10000,
+        ping_interval: int = 30,
+        ping_timeout: int = 10,
+        close_timeout: int = 5,
+        callback_timeout_seconds: float = 5.0,
+        quote_freshness_policy_ms: float = 10_000.0,
+        order_book_freshness_policy_ms: float = 10_000.0,
+        candle_freshness_policy_ms: float = 60_000.0,
+        dedupe_history_size: int = 10000,
+        order_book_level_limit: int = 1000,
+        connect_factory: Optional[Callable] = None,
+    ) -> None:
+        normalized = tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
+        if not normalized:
+            raise ValueError("alpaca_crypto_stream_symbols_required")
+        if not str(key_id).strip() or not str(secret_key).strip():
+            raise ValueError("alpaca_crypto_stream_credentials_required")
+        self.symbols = normalized
+        self._key_id = str(key_id)
+        self._secret_key = str(secret_key)
+        self.on_order_book = on_order_book
+        self.on_trade = on_trade
+        self.on_quote = on_quote
+        self.on_candle = on_candle
+        self.on_feed_truth = on_feed_truth
+        self.on_health = on_health
+        self.max_queue_size = max(1, int(max_queue_size))
+        self.ping_interval = max(1, int(ping_interval))
+        self.ping_timeout = max(1, int(ping_timeout))
+        self.close_timeout = max(1, int(close_timeout))
+        self.callback_timeout_seconds = max(0.1, float(callback_timeout_seconds))
+        self.quote_freshness_policy_ms = float(quote_freshness_policy_ms)
+        self.order_book_freshness_policy_ms = float(order_book_freshness_policy_ms)
+        self.candle_freshness_policy_ms = float(candle_freshness_policy_ms)
+        for field_name, value in (
+            ("quote", self.quote_freshness_policy_ms),
+            ("order_book", self.order_book_freshness_policy_ms),
+            ("candle", self.candle_freshness_policy_ms),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"alpaca_{field_name}_freshness_policy_invalid")
+        if isinstance(dedupe_history_size, bool) or not isinstance(dedupe_history_size, int) or dedupe_history_size <= 0:
+            raise ValueError("alpaca_websocket_dedupe_history_size_invalid")
+        if isinstance(order_book_level_limit, bool) or not isinstance(order_book_level_limit, int) or order_book_level_limit <= 0:
+            raise ValueError("alpaca_order_book_level_limit_invalid")
+        self.dedupe_history_size = dedupe_history_size
+        self.order_book_level_limit = order_book_level_limit
+        self._connect_factory = connect_factory or websockets.connect
+        self._websocket = None
+        self._running = False
+        self._connected = False
+        self._authenticated = False
+        self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=self.max_queue_size)
+        self._tasks: list[asyncio.Task] = []
+        self._messages_received = 0
+        self._messages_processed = 0
+        self._messages_rejected = 0
+        self._queue_drops = 0
+        self._queue_high_water = 0
+        self._last_message_time_ns = 0
+        self._last_event_time_ns_by_channel_symbol: Dict[Tuple[str, str], int] = {}
+        self._last_candle_time_ns_by_symbol: Dict[str, int] = {}
+        self._order_book_levels_by_symbol: Dict[str, Dict[str, Dict[Decimal, Decimal]]] = {}
+        self._event_identities: deque[bytes] = deque()
+        self._event_identity_set: set[bytes] = set()
+        self._duplicate_events_rejected = 0
+        self._last_failure: Dict[str, Any] = {}
+        self._subscriptions: Dict[str, tuple[str, ...]] = {}
+        self._subscription_lock = asyncio.Lock()
+        self._subscription_waiter: Optional[asyncio.Future] = None
+        self._pending_subscription_symbols: Optional[frozenset[str]] = None
+        self._subscription_transition_allowed_symbols: Optional[frozenset[str]] = None
+        self._subscription_transition_target_symbols: Optional[frozenset[str]] = None
+        self._subscription_transition_events_dropped = 0
+        self._fatal_truth_emitted = False
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected and self._authenticated
+
+    async def connect(self) -> bool:
+        self._fatal_truth_emitted = False
+        try:
+            self._websocket = await self._connect_factory(
+                self.ws_url,
+                ping_interval=self.ping_interval,
+                ping_timeout=self.ping_timeout,
+                close_timeout=self.close_timeout,
+            )
+            connected_raw = await asyncio.wait_for(self._websocket.recv(), timeout=float(self.ping_timeout))
+            if not self._success_message(connected_raw, "connected"):
+                raise RuntimeError("alpaca_crypto_stream_connection_greeting_failed")
+            await self._websocket.send(json.dumps({"action": "auth", "key": self._key_id, "secret": self._secret_key}))
+            auth_raw = await asyncio.wait_for(self._websocket.recv(), timeout=float(self.ping_timeout))
+            if not self._authentication_succeeded(auth_raw):
+                raise RuntimeError("alpaca_crypto_stream_authentication_failed")
+            self._authenticated = True
+            await self._subscribe(self.symbols)
+            subscription_raw = await asyncio.wait_for(self._websocket.recv(), timeout=float(self.ping_timeout))
+            subscription_received_ns = now_ns()
+            subscriptions = self._subscription_from_raw(subscription_raw)
+            self._validate_subscriptions(subscriptions, expected_symbols=self.symbols)
+            self._subscriptions = subscriptions
+            self._connected = True
+            self._last_message_time_ns = subscription_received_ns
+            handshake_events = [
+                message
+                for message in self._decoded_messages(subscription_raw)
+                if str(message.get("T") or "") != "subscription"
+            ]
+            if handshake_events:
+                await self._process_message(handshake_events, subscription_received_ns)
+            await self._emit_truth("WEBSOCKET_ACTIVE", executable_truth=False)
+            return True
+        except Exception as exc:
+            self._connected = False
+            self._authenticated = False
+            websocket = self._websocket
+            self._websocket = None
+            if websocket is not None:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+            try:
+                await self._emit_truth("WEBSOCKET_UNAVAILABLE", exc=exc, executable_truth=False)
+            except Exception:
+                logger.error("Alpaca WebSocket failure callback failed: %s", exc.__class__.__name__)
+            return False
+
+    @staticmethod
+    def _decoded_messages(raw: Any) -> list[Mapping[str, Any]]:
+        try:
+            payload = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+        except json.JSONDecodeError as exc:
+            raise ValueError("alpaca_websocket_json_invalid") from exc
+        messages = payload if isinstance(payload, list) else [payload]
+        if not all(isinstance(item, Mapping) for item in messages):
+            raise ValueError("alpaca_websocket_message_mapping_required")
+        return list(messages)
+
+    @classmethod
+    def _success_message(cls, raw: Any, expected: str) -> bool:
+        try:
+            messages = cls._decoded_messages(raw)
+        except ValueError:
+            return False
+        return not any(item.get("T") == "error" for item in messages) and any(
+            item.get("T") == "success" and str(item.get("msg") or "").lower() == expected
+            for item in messages
+        )
+
+    def _authentication_succeeded(self, raw: Any) -> bool:
+        try:
+            messages = self._decoded_messages(raw)
+        except ValueError:
+            return False
+        return not any(item.get("T") == "error" for item in messages) and any(
+            item.get("T") == "success"
+            and str(item.get("msg") or "").lower() == "authenticated"
+            for item in messages
+        )
+
+    @classmethod
+    def _subscription_from_raw(cls, raw: Any) -> Dict[str, tuple[str, ...]]:
+        messages = cls._decoded_messages(raw)
+        error = next((item for item in messages if item.get("T") == "error"), None)
+        if error is not None:
+            raise RuntimeError(f"alpaca_websocket_provider_error:{error.get('code')}")
+        subscription = next((item for item in messages if item.get("T") == "subscription"), None)
+        if subscription is None:
+            raise RuntimeError("alpaca_websocket_subscription_ack_required")
+        normalized: Dict[str, tuple[str, ...]] = {}
+        for channel in ("trades", "quotes", "orderbooks", "bars", "updatedBars", "dailyBars"):
+            values = subscription.get(channel)
+            if not isinstance(values, list) or any(not isinstance(item, str) or not item.strip() for item in values):
+                raise RuntimeError("alpaca_websocket_subscription_ack_invalid")
+            normalized[channel] = tuple(dict.fromkeys(item.strip().upper() for item in values))
+        return normalized
+
+    @staticmethod
+    def _validate_subscriptions(
+        subscriptions: Mapping[str, tuple[str, ...]],
+        *,
+        expected_symbols: tuple[str, ...],
+    ) -> None:
+        expected = set(expected_symbols)
+        if any(set(subscriptions.get(channel, ())) != expected for channel in ("trades", "quotes", "orderbooks", "bars")):
+            raise RuntimeError("alpaca_websocket_subscription_ack_mismatch")
+        if subscriptions.get("updatedBars") or subscriptions.get("dailyBars"):
+            raise RuntimeError("alpaca_websocket_unrequested_subscription_ack")
+
+    async def _subscribe(self, symbols: tuple[str, ...]) -> None:
+        if self._websocket is None or not self._authenticated:
+            raise RuntimeError("alpaca_crypto_stream_not_authenticated")
+        request = {
+            "action": "subscribe",
+            "trades": list(symbols),
+            "quotes": list(symbols),
+            "orderbooks": list(symbols),
+            "bars": list(symbols),
+        }
+        await self._websocket.send(json.dumps(request))
+
+    async def _request_subscription_change(
+        self,
+        *,
+        action: str,
+        symbols: tuple[str, ...],
+        expected_symbols: tuple[str, ...],
+    ) -> None:
+        if self._websocket is None or not self.is_connected:
+            raise RuntimeError("alpaca_crypto_stream_not_connected")
+        if self._subscription_waiter is not None and not self._subscription_waiter.done():
+            raise RuntimeError("alpaca_subscription_change_already_pending")
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        self._subscription_waiter = waiter
+        self._pending_subscription_symbols = frozenset(expected_symbols)
+        request = {"action": action}
+        for channel in ("trades", "quotes", "orderbooks", "bars"):
+            request[channel] = list(symbols)
+        try:
+            await self._websocket.send(json.dumps(request))
+            subscriptions = await asyncio.wait_for(waiter, timeout=float(self.ping_timeout))
+            self._validate_subscriptions(subscriptions, expected_symbols=expected_symbols)
+            self._subscriptions = dict(subscriptions)
+        finally:
+            if self._subscription_waiter is waiter:
+                self._subscription_waiter = None
+            self._pending_subscription_symbols = None
+
+    async def update_symbols(self, symbols: List[str]) -> tuple[str, ...]:
+        normalized = tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
+        if not normalized:
+            raise ValueError("alpaca_crypto_stream_symbols_required")
+        async with self._subscription_lock:
+            previous_order = tuple(self.symbols)
+            previous = set(previous_order)
+            requested = set(normalized)
+            removed = tuple(sorted(previous - requested))
+            added = tuple(sorted(requested - previous))
+            intermediate = tuple(item for item in previous_order if item not in removed)
+            self._subscription_transition_allowed_symbols = frozenset(previous | requested)
+            self._subscription_transition_target_symbols = frozenset(requested)
+            try:
+                if removed:
+                    await self._request_subscription_change(
+                        action="unsubscribe",
+                        symbols=removed,
+                        expected_symbols=intermediate,
+                    )
+                    self.symbols = intermediate
+                if added:
+                    await self._request_subscription_change(
+                        action="subscribe",
+                        symbols=added,
+                        expected_symbols=normalized,
+                    )
+                self.symbols = normalized
+            except Exception as exc:
+                # Provider subscription state is uncertain after any failed ack;
+                # continuing would create a second, implicit symbol authority.
+                self._connected = False
+                self._authenticated = False
+                await self._emit_truth(
+                    "WEBSOCKET_SUBSCRIPTION_FAILED",
+                    exc=exc,
+                    executable_truth=False,
+                )
+                raise
+            finally:
+                self._subscription_transition_allowed_symbols = None
+                self._subscription_transition_target_symbols = None
+            for channel_symbol in tuple(self._last_event_time_ns_by_channel_symbol):
+                if channel_symbol[1] in removed:
+                    self._last_event_time_ns_by_channel_symbol.pop(channel_symbol, None)
+            for symbol in removed:
+                self._last_candle_time_ns_by_symbol.pop(symbol, None)
+                self._order_book_levels_by_symbol.pop(symbol, None)
+            return normalized
+
+    async def _receive_messages(self) -> None:
+        while self._running and self._connected and self._websocket is not None:
+            try:
+                raw = await self._websocket.recv()
+                receive_ts_ns = now_ns()
+                self._last_message_time_ns = receive_ts_ns
+                self._messages_received += 1
+                try:
+                    self._message_queue.put_nowait((raw, receive_ts_ns))
+                    self._queue_high_water = max(self._queue_high_water, self._message_queue.qsize())
+                except asyncio.QueueFull:
+                    self._queue_drops += 1
+                    self._connected = False
+                    self._authenticated = False
+                    await self._emit_truth("WEBSOCKET_BACKPRESSURE", executable_truth=False)
+                    return
+            except asyncio.CancelledError:
+                raise
+            except (ConnectionClosed, WebSocketException, OSError) as exc:
+                self._connected = False
+                self._authenticated = False
+                await self._emit_truth("WEBSOCKET_UNAVAILABLE", exc=exc, executable_truth=False)
+                return
+            except Exception as exc:
+                self._connected = False
+                self._authenticated = False
+                await self._emit_truth("WEBSOCKET_UNAVAILABLE", exc=exc, executable_truth=False)
+                return
+
+    async def _process_queue(self) -> None:
+        while self._running:
+            try:
+                raw, receive_ts_ns = await self._message_queue.get()
+                try:
+                    await self._process_message(raw, receive_ts_ns)
+                finally:
+                    self._message_queue.task_done()
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError as exc:
+                self._messages_rejected += 1
+                self._connected = False
+                self._authenticated = False
+                await self._emit_truth("WEBSOCKET_SLOW_CONSUMER", exc=exc, executable_truth=False)
+                return
+            except Exception as exc:
+                self._messages_rejected += 1
+                self._connected = False
+                self._authenticated = False
+                await self._emit_truth("MALFORMED_WEBSOCKET_PAYLOAD", exc=exc, executable_truth=False)
+                return
+
+    async def _heartbeat_loop(self) -> None:
+        while self._running and self._connected and self._websocket is not None:
+            try:
+                await asyncio.sleep(float(self.ping_interval))
+                ping_ns = now_ns()
+                pong_waiter = await self._websocket.ping()
+                await asyncio.wait_for(pong_waiter, timeout=float(self.ping_timeout))
+                pong_ns = now_ns()
+                if self.on_health is not None:
+                    result = self.on_health(ping_ns, pong_ns)
+                    if asyncio.iscoroutine(result):
+                        await result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._connected = False
+                self._authenticated = False
+                await self._emit_truth("WEBSOCKET_UNAVAILABLE", exc=exc, executable_truth=False)
+                return
+
+    async def _process_message(self, raw: Any, receive_ts_ns: int) -> None:
+        messages = self._decoded_messages(raw)
+        for message in messages:
+            message_type = str(message.get("T") or "")
+            if message_type == "success":
+                continue
+            if message_type == "subscription":
+                subscriptions = self._subscription_from_raw([message])
+                waiter = self._subscription_waiter
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(subscriptions)
+                else:
+                    self._validate_subscriptions(subscriptions, expected_symbols=self.symbols)
+                    self._subscriptions = subscriptions
+                continue
+            if message_type == "error":
+                waiter = self._subscription_waiter
+                error = RuntimeError(f"alpaca_websocket_provider_error:{message.get('code')}")
+                if waiter is not None and not waiter.done():
+                    waiter.set_exception(error)
+                raise ValueError("alpaca_websocket_provider_error")
+            symbol = str(message.get("S") or "").strip().upper()
+            transition_allowed = self._subscription_transition_allowed_symbols
+            transition_target = self._subscription_transition_target_symbols
+            permitted_symbols = transition_allowed or frozenset(self.symbols)
+            if symbol not in permitted_symbols:
+                raise ValueError("alpaca_websocket_unsubscribed_symbol")
+            if transition_target is not None and symbol not in transition_target:
+                # An unsubscribe acknowledgement cannot prevent an already
+                # queued event for the removed symbol. It is known transition
+                # traffic, but it must not reach the new deep-universe owner.
+                self._subscription_transition_events_dropped += 1
+                continue
+            identity = hashlib.sha256(
+                json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+            ).digest()
+            if identity in self._event_identity_set:
+                self._duplicate_events_rejected += 1
+                continue
+            event_ts_ns = self._parse_rfc3339_ns(message.get("t"))
+            if event_ts_ns > receive_ts_ns:
+                raise ValueError("alpaca_websocket_future_event_refused")
+            if message_type in {"t", "q"} and receive_ts_ns - event_ts_ns > int(
+                self.quote_freshness_policy_ms * 1_000_000.0
+            ):
+                raise ValueError("alpaca_websocket_stale_quote_or_trade_refused")
+            if message_type == "o" and receive_ts_ns - event_ts_ns > int(
+                self.order_book_freshness_policy_ms * 1_000_000.0
+            ):
+                raise ValueError("alpaca_websocket_stale_order_book_refused")
+            channel_key = (message_type, symbol)
+            previous = self._last_event_time_ns_by_channel_symbol.get(channel_key, 0)
+            if event_ts_ns < previous:
+                raise ValueError("alpaca_websocket_out_of_order_event")
+            if message_type == "t":
+                trade = {
+                    "symbol": symbol,
+                    "price": self._positive_float(message.get("p"), "trade_price"),
+                    "volume": self._positive_float(message.get("s"), "trade_size"),
+                    "side": self._taker_side_direction(message.get("tks")),
+                    "exchange_ts_ns": event_ts_ns,
+                    "receive_ts_ns": receive_ts_ns,
+                    "trade_id": str(message.get("i") or ""),
+                    "provider_id": "alpaca_crypto_stream",
+                    "execution_location": "alpaca",
+                }
+                await self._callback(self.on_trade, trade)
+            elif message_type == "q":
+                bid = self._positive_float(message.get("bp"), "bid_price")
+                ask = self._positive_float(message.get("ap"), "ask_price")
+                if bid >= ask:
+                    raise ValueError("alpaca_crossed_or_locked_quote_refused")
+                quote = {
+                    "symbol": symbol,
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_size": self._nonnegative_float(message.get("bs"), "bid_size"),
+                    "ask_size": self._nonnegative_float(message.get("as"), "ask_size"),
+                    "exchange_ts_ns": event_ts_ns,
+                    "receive_ts_ns": receive_ts_ns,
+                    "provider_id": "alpaca_crypto_stream",
+                    "execution_location": "alpaca",
+                }
+                await self._callback(self.on_quote, quote)
+            elif message_type == "o":
+                book, candidate_levels = self._build_order_book_snapshot(
+                    message,
+                    symbol=symbol,
+                    event_ts_ns=event_ts_ns,
+                    receive_ts_ns=receive_ts_ns,
+                )
+                await self._callback(self.on_order_book, book)
+                self._order_book_levels_by_symbol[symbol] = candidate_levels
+            elif message_type == "b":
+                if event_ts_ns <= self._last_candle_time_ns_by_symbol.get(symbol, 0):
+                    raise ValueError("alpaca_duplicate_or_out_of_order_candle")
+                candle_close_ts_ns = event_ts_ns + 60_000_000_000
+                if candle_close_ts_ns > receive_ts_ns:
+                    raise ValueError("alpaca_in_progress_minute_bar_refused")
+                if receive_ts_ns - candle_close_ts_ns > int(self.candle_freshness_policy_ms * 1_000_000.0):
+                    raise ValueError("alpaca_websocket_stale_closed_minute_bar_refused")
+                await self._callback(
+                    self.on_candle,
+                    Candle(
+                        symbol=symbol,
+                        exchange_ts_ns=event_ts_ns,
+                        open=self._positive_float(message.get("o"), "bar_open"),
+                        high=self._positive_float(message.get("h"), "bar_high"),
+                        low=self._positive_float(message.get("l"), "bar_low"),
+                        close=self._positive_float(message.get("c"), "bar_close"),
+                        volume=self._nonnegative_float(message.get("v"), "bar_volume"),
+                        timeframe="1m",
+                        data_source_type="runtime",
+                        provider_id="alpaca_crypto_stream",
+                        latest_batch_candle=True,
+                        latest_provider_batch_candle=True,
+                        latest_closed_batch_candle=True,
+                        provider_batch_head_ts_ns=event_ts_ns,
+                        candle_close_ts_ns=candle_close_ts_ns,
+                        candle_closed_at_receive=True,
+                        candle_batch_received_ns=receive_ts_ns,
+                        candle_freshness_policy_ms=self.candle_freshness_policy_ms,
+                    ),
+                )
+            else:
+                raise ValueError("alpaca_websocket_message_type_unsupported")
+            self._last_event_time_ns_by_channel_symbol[channel_key] = event_ts_ns
+            if message_type == "b":
+                self._last_candle_time_ns_by_symbol[symbol] = event_ts_ns
+            self._event_identities.append(identity)
+            self._event_identity_set.add(identity)
+            if len(self._event_identities) > self.dedupe_history_size:
+                expired = self._event_identities.popleft()
+                self._event_identity_set.discard(expired)
+            self._messages_processed += 1
+
+    async def _callback(self, callback: Optional[Callable], value: Any) -> None:
+        if callback is None:
+            return
+        started = time.monotonic()
+        result = callback(value)
+        if asyncio.iscoroutine(result):
+            result = await asyncio.wait_for(result, timeout=self.callback_timeout_seconds)
+        elif time.monotonic() - started > self.callback_timeout_seconds:
+            raise asyncio.TimeoutError("alpaca_websocket_callback_timeout")
+        if result is False:
+            raise ValueError("alpaca_websocket_callback_rejected")
+
+    async def _emit_truth(self, status: str, *, exc: Optional[Exception] = None, executable_truth: bool) -> None:
+        terminal = status != "WEBSOCKET_ACTIVE"
+        if terminal and self._fatal_truth_emitted:
+            return
+        if terminal:
+            self._fatal_truth_emitted = True
+        truth = {
+            "status": status,
+            "provider_id": "alpaca_crypto_stream",
+            "execution_location": "alpaca",
+            "transport_adapter": "alpaca_crypto_websocket",
+            "connected": self._connected,
+            "authenticated": self._authenticated,
+            "transport_active": self.is_connected,
+            "executable_truth": bool(executable_truth and self.is_connected),
+            "timestamp_ns": now_ns(),
+            "exception_type": exc.__class__.__name__ if exc is not None else None,
+        }
+        if terminal:
+            self._last_failure = truth
+        if self.on_feed_truth:
+            await self._callback(self.on_feed_truth, truth)
+
+    @staticmethod
+    def _parse_rfc3339_ns(value: Any) -> int:
+        if not value:
+            raise ValueError("alpaca_source_timestamp_required")
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        fraction_ns = 0
+        main = text
+        if "." in text:
+            prefix, suffix = text.split(".", 1)
+            timezone_index = next(
+                (index for index, character in enumerate(suffix) if character in "+-"),
+                len(suffix),
+            )
+            fraction = suffix[:timezone_index]
+            offset = suffix[timezone_index:]
+            if not fraction.isdigit() or len(fraction) > 9:
+                raise ValueError("alpaca_source_timestamp_fraction_invalid")
+            fraction_ns = int(fraction.ljust(9, "0"))
+            main = f"{prefix}{offset}"
+        parsed = datetime.fromisoformat(main)
+        if parsed.tzinfo is None:
+            raise ValueError("alpaca_source_timestamp_timezone_required")
+        parsed_utc = parsed.astimezone(timezone.utc)
+        return calendar.timegm(parsed_utc.utctimetuple()) * 1_000_000_000 + fraction_ns
+
+    @staticmethod
+    def _positive_float(value: Any, field_name: str) -> float:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name}_numeric_required")
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise ValueError(f"{field_name}_positive_finite_required")
+        return parsed
+
+    @staticmethod
+    def _nonnegative_float(value: Any, field_name: str) -> float:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name}_numeric_required")
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0:
+            raise ValueError(f"{field_name}_nonnegative_finite_required")
+        return parsed
+
+    @staticmethod
+    def _taker_side_direction(value: Any) -> int:
+        if not isinstance(value, str):
+            raise ValueError("alpaca_trade_taker_side_required")
+        side = value.strip().upper()
+        if side == "B":
+            return 1
+        if side == "S":
+            return -1
+        raise ValueError("alpaca_trade_taker_side_invalid")
+
+    @staticmethod
+    def _book_decimal(value: Any, field_name: str, *, allow_zero: bool) -> Decimal:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name}_numeric_required")
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name}_numeric_required") from exc
+        if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
+            qualifier = "nonnegative_finite" if allow_zero else "positive_finite"
+            raise ValueError(f"{field_name}_{qualifier}_required")
+        return parsed
+
+    @classmethod
+    def _parse_book_updates(cls, value: Any) -> tuple[tuple[Decimal, Decimal], ...]:
+        if not isinstance(value, list):
+            raise ValueError("alpaca_order_book_levels_list_required")
+        updates: list[tuple[Decimal, Decimal]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise ValueError("alpaca_order_book_level_mapping_required")
+            updates.append(
+                (
+                    cls._book_decimal(item.get("p"), "level_price", allow_zero=False),
+                    cls._book_decimal(item.get("s"), "level_size", allow_zero=True),
+                )
+            )
+        return tuple(updates)
+
+    def _build_order_book_snapshot(
+        self,
+        message: Mapping[str, Any],
+        *,
+        symbol: str,
+        event_ts_ns: int,
+        receive_ts_ns: int,
+    ) -> tuple[OrderBookSnapshot, Dict[str, Dict[Decimal, Decimal]]]:
+        reset_value = message.get("r", False)
+        if type(reset_value) is not bool:
+            raise ValueError("alpaca_order_book_reset_flag_invalid")
+        previous = self._order_book_levels_by_symbol.get(symbol)
+        if not reset_value and previous is None:
+            raise ValueError("alpaca_order_book_incremental_before_reset")
+        candidate = {
+            "bids": {} if reset_value else dict(previous["bids"]),
+            "asks": {} if reset_value else dict(previous["asks"]),
+        }
+        for side_name, field_name in (("bids", "b"), ("asks", "a")):
+            for price, size in self._parse_book_updates(message.get(field_name)):
+                if size == 0:
+                    candidate[side_name].pop(price, None)
+                else:
+                    candidate[side_name][price] = size
+        candidate["bids"] = dict(
+            sorted(candidate["bids"].items(), key=lambda item: item[0], reverse=True)[
+                : self.order_book_level_limit
+            ]
+        )
+        candidate["asks"] = dict(
+            sorted(candidate["asks"].items(), key=lambda item: item[0])[
+                : self.order_book_level_limit
+            ]
+        )
+        if not candidate["bids"] or not candidate["asks"]:
+            raise ValueError("alpaca_order_book_two_sided_truth_required")
+        best_bid = next(iter(candidate["bids"]))
+        best_ask = next(iter(candidate["asks"]))
+        if best_bid >= best_ask:
+            raise ValueError("alpaca_order_book_invalid_or_crossed")
+        book = OrderBookSnapshot(
+            symbol=symbol,
+            exchange_ts_ns=event_ts_ns,
+            receive_ts_ns=receive_ts_ns,
+            bids=[(float(price), float(size)) for price, size in candidate["bids"].items()],
+            asks=[(float(price), float(size)) for price, size in candidate["asks"].items()],
+        )
+        return book, candidate
+
+    def _parse_levels(self, value: Any, *, reverse: bool) -> List[Tuple[float, float]]:
+        if not isinstance(value, list):
+            return []
+        levels: list[Tuple[float, float]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                return []
+            levels.append((self._positive_float(item.get("p"), "level_price"), self._positive_float(item.get("s"), "level_size")))
+        return sorted(levels, key=lambda item: item[0], reverse=reverse)[:50]
+
+    async def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        if not await self.connect():
+            self._running = False
+            raise RuntimeError("alpaca_crypto_stream_start_failed")
+        self._tasks = [
+            asyncio.create_task(self._receive_messages()),
+            asyncio.create_task(self._process_queue()),
+            asyncio.create_task(self._heartbeat_loop()),
+        ]
+
+    async def stop(self) -> None:
+        self._running = False
+        self._connected = False
+        self._authenticated = False
+        waiter = self._subscription_waiter
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
+        self._subscription_waiter = None
+        self._pending_subscription_symbols = None
+        self._subscription_transition_allowed_symbols = None
+        self._subscription_transition_target_symbols = None
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+        if self._websocket is not None:
+            await self._websocket.close()
+        self._websocket = None
+        while True:
+            try:
+                self._message_queue.get_nowait()
+                self._message_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        self._subscriptions = {}
+        self._last_event_time_ns_by_channel_symbol.clear()
+        self._last_candle_time_ns_by_symbol.clear()
+        self._order_book_levels_by_symbol.clear()
+        self._event_identities.clear()
+        self._event_identity_set.clear()
+
+    def get_feed_truth_status(self) -> Dict[str, Any]:
+        return {
+            "status": "WEBSOCKET_ACTIVE" if self.is_connected else "WEBSOCKET_INACTIVE",
+            "provider_id": "alpaca_crypto_stream",
+            "execution_location": "alpaca",
+            "endpoint": self.ws_url,
+            "connected": self._connected,
+            "authenticated": self._authenticated,
+            "transport_active": self.is_connected,
+            "executable_truth": False,
+            "symbols": self.symbols,
+            "subscriptions": dict(self._subscriptions),
+            "subscription_transition_events_dropped": self._subscription_transition_events_dropped,
+            "messages_received": self._messages_received,
+            "messages_processed": self._messages_processed,
+            "messages_rejected": self._messages_rejected,
+            "duplicate_events_rejected": self._duplicate_events_rejected,
+            "dedupe_history_size": len(self._event_identities),
+            "dedupe_history_limit": self.dedupe_history_size,
+            "order_book_level_limit": self.order_book_level_limit,
+            "quote_freshness_policy_ms": self.quote_freshness_policy_ms,
+            "order_book_freshness_policy_ms": self.order_book_freshness_policy_ms,
+            "candle_freshness_policy_ms": self.candle_freshness_policy_ms,
+            "queue_size": self._message_queue.qsize(),
+            "queue_high_water": self._queue_high_water,
+            "queue_drops": self._queue_drops,
+            "last_message_time_ns": self._last_message_time_ns,
+            "last_failure": dict(self._last_failure),
+        }
 
 
 # ============================================

@@ -74,6 +74,7 @@ from app.data.feed_provider_router import (
 )
 from app.data.polling_client import PollingClient
 from app.data.websocket_client import KrakenWebSocketClient
+from app.data.market_feeds import MarketFeeds
 from app.execution.alpaca_paper_adapter import AlpacaPaperBrokerAdapter
 from app.execution.broker_gateway import BrokerCredentialStatus, BrokerEnvironment, BrokerGatewayError
 from app.execution.broker_read_policy import broker_read_profile_from_env
@@ -138,6 +139,8 @@ SUPPORTED_EXECUTION_BROKERS = frozenset(
 )
 
 _FEED_PROVIDER_TO_VENUE = {
+    "alpaca_crypto_stream": "alpaca",
+    "alpaca_crypto_rest": "alpaca",
     "coinbase_public": "coinbase",
     "kraken_public": "kraken",
 }
@@ -162,11 +165,49 @@ class RuntimeUniverseResolution:
     execution_authorized: bool = False
     entry_symbols: tuple[str, ...] = ()
     monitor_symbols: tuple[str, ...] = ()
+    held_symbols: tuple[str, ...] = ()
+    open_order_symbols: tuple[str, ...] = ()
+    market_data_constraints: tuple[tuple[str, str, str, str, str, bool], ...] = ()
     catalog_snapshot_id: str | None = None
     universe_snapshot_id: str | None = None
     observed_at_ns: int | None = None
     valid_until_ns: int | None = None
     capability_registry: VenueCapabilityRegistry | None = None
+
+
+def resolve_initial_market_data_deep_symbols(
+    *,
+    protected_symbols: Set[str],
+    entry_symbols: tuple[str, ...],
+    primary_symbol: str,
+    candidate_limit: int,
+    subscription_limit: int,
+) -> tuple[str, ...]:
+    """Allocate initial deep capacity with non-evictable lifecycle priority."""
+    if (
+        isinstance(candidate_limit, bool)
+        or not isinstance(candidate_limit, int)
+        or candidate_limit < 0
+        or isinstance(subscription_limit, bool)
+        or not isinstance(subscription_limit, int)
+        or subscription_limit <= 0
+    ):
+        raise ValueError("MARKET_DATA_DEEP_CAPACITY_INVALID")
+    protected = tuple(sorted(set(protected_symbols)))
+    if len(protected) > subscription_limit:
+        raise RuntimeError("PROTECTED_DEEP_CAPACITY_EXCEEDED")
+    available_candidates = min(candidate_limit, subscription_limit - len(protected))
+    candidates = tuple(
+        symbol
+        for symbol in dict.fromkeys(entry_symbols)
+        if symbol not in protected_symbols
+    )[:available_candidates]
+    selected = tuple(dict.fromkeys((*protected, *candidates)))
+    if not selected:
+        selected = (primary_symbol,)
+    if len(selected) > subscription_limit:
+        raise RuntimeError("MARKET_DATA_DEEP_CAPACITY_EXCEEDED")
+    return selected
 
 
 def get_configured_execution_broker(config: Config) -> str:
@@ -399,6 +440,27 @@ def resolve_runtime_universe(
         monitor_set = set(persisted_monitors)
         entry_symbols = tuple(symbol for symbol in runtime_symbols if symbol in entry_set)
         monitor_symbols = tuple(symbol for symbol in runtime_symbols if symbol in monitor_set)
+        held_set = {normalize_alpaca_crypto_symbol(symbol) for symbol in universe.get("held_symbols") or ()}
+        open_order_set = {normalize_alpaca_crypto_symbol(symbol) for symbol in universe.get("open_order_symbols") or ()}
+        held_symbols = tuple(symbol for symbol in runtime_symbols if symbol in held_set)
+        open_order_symbols = tuple(symbol for symbol in runtime_symbols if symbol in open_order_set)
+        funded_quotes = {str(item).strip().upper() for item in universe.get("funded_quote_currencies") or ()}
+        constraints: list[tuple[str, str, str, str, str, bool]] = []
+        for asset in catalog.get("assets") or ():
+            if not isinstance(asset, dict):
+                continue
+            symbol = normalize_alpaca_crypto_symbol(asset.get("normalized_symbol") or asset.get("raw_symbol"))
+            if symbol not in runtime_set:
+                continue
+            minimum = str(asset.get("min_order_size") or "").strip()
+            quantity_step = str(asset.get("min_trade_increment") or "").strip()
+            price_step = str(asset.get("price_increment") or "").strip()
+            quote_currency = symbol.split("/", 1)[1] if "/" in symbol else ""
+            if not all((minimum, quantity_step, price_step, quote_currency)):
+                continue
+            constraints.append(
+                (symbol, minimum, quantity_step, price_step, quote_currency, quote_currency in funded_quotes)
+            )
         return RuntimeUniverseResolution(
             runtime_symbols,
             source,
@@ -406,6 +468,9 @@ def resolve_runtime_universe(
             execution_authorized=True,
             entry_symbols=entry_symbols,
             monitor_symbols=monitor_symbols,
+            held_symbols=held_symbols,
+            open_order_symbols=open_order_symbols,
+            market_data_constraints=tuple(sorted(constraints)),
             catalog_snapshot_id=catalog_id,
             universe_snapshot_id=universe_id,
             observed_at_ns=observed_at,
@@ -760,7 +825,7 @@ class SovereignHeartbeat:
                 asset_class=primary_asset_class_value,
                 required_data_type="order_book",
                 provider_lane=provider_lane_for_asset_class(primary_asset_class_value),
-                execution_required=True,
+                execution_required=self._execution_broker == ALPACA_PAPER_EXECUTION_BROKER,
             )
         )
         selected_market_data_provider = self._market_data_provider_selection.selected_provider_id
@@ -777,7 +842,12 @@ class SovereignHeartbeat:
         self._primary_feed_venue = selected_feed_venue
         self._selected_market_data_provider_id = selected_market_data_provider
         if hasattr(self.order_router, "set_market_data_latency_source"):
-            latency_source = "websocket" if self._primary_feed_venue == "kraken" else "rest_polling"
+            selected_descriptor = self._market_data_provider_selection.selected_provider
+            latency_source = (
+                "websocket"
+                if selected_descriptor is not None and selected_descriptor.transport_mode in {"stream", "stream_and_rest"}
+                else "rest_polling"
+            )
             self.order_router.set_market_data_latency_source(latency_source)
             logger.info(
                 "Market-data latency source selected: provider=%s venue=%s source=%s",
@@ -811,9 +881,34 @@ class SovereignHeartbeat:
         if not self._feed_symbols:
             raise RuntimeError("MISSING_MARKET_DATA_COVERAGE_FOR_UNIVERSE")
 
-        # Get active symbols set for multi-symbol support
-        self._active_symbols = set(self._feed_symbols)
-        logger.info("Active symbols for paper trading: %s", self._active_symbols)
+        # Stage 4 ranks the broker catalog as observe-only transport evidence.
+        # Only broker-held/open-order lifecycle symbols may reach MainLoop until
+        # the later activation stages explicitly replace this boundary.
+        if (
+            self._execution_broker == ALPACA_PAPER_EXECUTION_BROKER
+            and self._universe_resolution.source == BROKER_CRYPTO_UNIVERSE_SOURCE
+        ):
+            self._execution_callback_symbols = set(self._universe_resolution.monitor_symbols)
+            deep_limit = int(getattr(config.data, "market_data_deep_subscription_limit", 30))
+            candidate_limit = int(getattr(config.data, "market_data_deep_candidate_limit", 12))
+            self._initial_deep_symbols = resolve_initial_market_data_deep_symbols(
+                protected_symbols=self._execution_callback_symbols,
+                entry_symbols=self._universe_resolution.entry_symbols,
+                primary_symbol=self._primary_symbol,
+                candidate_limit=candidate_limit,
+                subscription_limit=deep_limit,
+            )
+            self._active_symbols = set(self._execution_callback_symbols) or {self._primary_symbol}
+        else:
+            self._execution_callback_symbols = set(self._feed_symbols)
+            self._initial_deep_symbols = tuple(self._feed_symbols)
+            self._active_symbols = set(self._feed_symbols)
+        logger.info(
+            "Stage 4 market-data enrollment: breadth=%d deep=%d lifecycle_callbacks=%d dynamic_mode=OBSERVE_ONLY",
+            len(self._feed_symbols),
+            len(self._initial_deep_symbols),
+            len(self._execution_callback_symbols),
+        )
         logger.info(
             "Capability-aware runtime candidates: %s",
             [
@@ -870,6 +965,9 @@ class SovereignHeartbeat:
         self._shutdown_reason_code: str | None = None
         self._broker_flatten_performed_on_shutdown = False
         self._threads: list[threading.Thread] = []
+        self._market_feeds: MarketFeeds | None = None
+        self._market_feeds_loop: asyncio.AbstractEventLoop | None = None
+        self._market_feeds_task: asyncio.Task | None = None
         self._health_check_interval = 5.0
         self._signal_handlers_registered = False
         self._stop_event = threading.Event()
@@ -924,6 +1022,16 @@ class SovereignHeartbeat:
 
     def _mark_runtime_error(self, exc: BaseException) -> None:
         self._last_error = exc.__class__.__name__
+
+    def _request_market_data_fail_closed_shutdown(self, exc: BaseException) -> None:
+        """Terminate a run whose executable market-data authority is gone."""
+        self._mark_runtime_error(exc)
+        self._shutdown_reason_code = (
+            self._shutdown_reason_code
+            or "MARKET_DATA_EXECUTABLE_TRUTH_FAILED_CLOSED_NO_FLATTEN"
+        )
+        self._running = False
+        self._stop_event.set()
 
     def _write_runtime_heartbeat(
         self,
@@ -1152,6 +1260,7 @@ class SovereignHeartbeat:
 
         self._running = False
         self._stop_event.set()
+        self._request_market_feeds_stop()
 
         try:
             self.main_loop.stop()
@@ -1168,12 +1277,22 @@ class SovereignHeartbeat:
         except Exception as exc:
             logger.exception("Error emitting OMS shutdown accounting: %s", exc)
 
-        try:
-            self.state_store.close()
-        except Exception as exc:
-            logger.exception("Error closing state store: %s", exc)
-
         self._join_background_threads()
+        market_data_thread_alive = any(
+            thread.name == "pk-market-feeds" and thread.is_alive()
+            for thread in self._threads
+        )
+        if market_data_thread_alive:
+            self._mark_runtime_error(RuntimeError("MARKET_DATA_SHUTDOWN_TIMEOUT"))
+            logger.error(
+                "MarketFeeds did not stop before its shutdown timeout; durable state remains open"
+            )
+        else:
+            try:
+                self.state_store.close()
+            except Exception as exc:
+                logger.exception("Error closing state store: %s", exc)
+
         self._write_runtime_heartbeat(run_state="STOPPED")
         self._shutdown_complete = True
         logger.info(
@@ -1212,8 +1331,107 @@ class SovereignHeartbeat:
         health_thread.start()
         self._threads.append(health_thread)
 
-        self._start_whale_websocket()
-        self._start_polling_client()
+        if self._execution_broker == ALPACA_PAPER_EXECUTION_BROKER:
+            self._start_market_feeds()
+        else:
+            self._start_whale_websocket()
+            self._start_polling_client()
+
+    def _start_market_feeds(self) -> None:
+        """Run the centralized two-tier market-data owner in one event loop."""
+        running_ref = self
+
+        async def _feeds_run() -> None:
+            ranking_constraints = {
+                symbol: {
+                    "min_order_size": min_order_size,
+                    "min_trade_increment": min_trade_increment,
+                    "price_increment": price_increment,
+                    "quote_currency": quote_currency,
+                    "quote_currency_fundable": quote_currency_fundable,
+                    "listing_started_ns": None,
+                    "listing_age_source": None,
+                }
+                for (
+                    symbol,
+                    min_order_size,
+                    min_trade_increment,
+                    price_increment,
+                    quote_currency,
+                    quote_currency_fundable,
+                ) in running_ref._universe_resolution.market_data_constraints
+            }
+            lifecycle_symbols = tuple(
+                sorted(
+                    running_ref._execution_callback_symbols
+                    - set(running_ref._universe_resolution.held_symbols)
+                    - set(running_ref._universe_resolution.open_order_symbols)
+                )
+            )
+            feeds = MarketFeeds(
+                running_ref.config,
+                symbols=list(running_ref._feed_symbols),
+                deep_symbols=list(running_ref._initial_deep_symbols),
+                protected_symbols=list(running_ref._execution_callback_symbols),
+                env=os.environ,
+                feed_provider_router=running_ref._feed_provider_router,
+                initial_selection=running_ref._market_data_provider_selection,
+                ranking_constraints=ranking_constraints,
+                ranking_state_store=running_ref.state_store,
+                ranking_catalog_snapshot_id=running_ref._universe_resolution.catalog_snapshot_id,
+                ranking_broker_universe_snapshot_id=running_ref._universe_resolution.universe_snapshot_id,
+                held_symbols=list(running_ref._universe_resolution.held_symbols),
+                open_order_symbols=list(running_ref._universe_resolution.open_order_symbols),
+                lifecycle_symbols=list(lifecycle_symbols),
+            )
+            feeds.register_candle_callback(running_ref._on_candle)
+            feeds.register_order_book_callback(running_ref._on_order_book)
+            feeds.register_trade_callback(running_ref._on_trade)
+            feeds.register_transport_truth_callback(running_ref._on_market_transport_truth)
+            feeds.register_rest_latency_callback(running_ref._on_rest_latency)
+            feeds.register_websocket_health_callback(running_ref.order_router.update_websocket_health)
+            running_ref._market_feeds = feeds
+            try:
+                await feeds.start()
+                while running_ref._running:
+                    await asyncio.sleep(1.0)
+            except Exception as exc:
+                running_ref._request_market_data_fail_closed_shutdown(exc)
+                logger.exception("MarketFeeds run error: %s", exc)
+            finally:
+                await feeds.stop()
+
+        def _thread_main() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            task = loop.create_task(_feeds_run())
+            running_ref._market_feeds_loop = loop
+            running_ref._market_feeds_task = task
+            try:
+                loop.run_until_complete(task)
+            except asyncio.CancelledError:
+                logger.info("MarketFeeds task cancelled for governed shutdown")
+            except Exception as exc:
+                running_ref._request_market_data_fail_closed_shutdown(exc)
+                logger.exception("MarketFeeds thread error: %s", exc)
+            finally:
+                running_ref._market_feeds_task = None
+                running_ref._market_feeds_loop = None
+                loop.close()
+
+        market_feeds_thread = threading.Thread(
+            target=_thread_main,
+            name="pk-market-feeds",
+            daemon=True,
+        )
+        market_feeds_thread.start()
+        self._threads.append(market_feeds_thread)
+        logger.info(
+            "MarketFeeds thread started: breadth=%d deep=%d lifecycle_callbacks=%d",
+            len(self._feed_symbols),
+            len(self._initial_deep_symbols),
+            len(self._execution_callback_symbols),
+        )
 
     def _start_bounded_duration_timer(self) -> None:
         if self.bounded_duration_seconds is None:
@@ -1262,13 +1480,36 @@ class SovereignHeartbeat:
             if thread is current:
                 continue
             if thread.is_alive():
-                thread.join(timeout=2.0)
+                timeout = 2.0
+                if thread.name == "pk-market-feeds":
+                    data_config = getattr(getattr(self, "config", None), "data", None)
+                    timeout = float(
+                        getattr(data_config, "market_data_shutdown_timeout_seconds", 10.0)
+                    )
+                thread.join(timeout=timeout)
             if thread.is_alive():
                 live_threads.append(thread)
 
         self._threads = live_threads
 
-    def _on_trade(self, trade_info: dict) -> None:
+    def _request_market_feeds_stop(self) -> None:
+        """Cancel the owned feed task on its event loop before other owners stop."""
+        loop = getattr(self, "_market_feeds_loop", None)
+        task = getattr(self, "_market_feeds_task", None)
+        if (
+            loop is None
+            or task is None
+            or task.done()
+            or not loop.is_running()
+            or threading.current_thread().name == "pk-market-feeds"
+        ):
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            logger.info("MarketFeeds loop already closed during governed shutdown")
+
+    def _on_trade(self, trade_info: dict) -> bool:
         """
         Feed callback from KrakenWebSocketClient.
 
@@ -1287,8 +1528,8 @@ class SovereignHeartbeat:
             receive_ts_ns = int(trade_info.get("receive_ts_ns") or time.time_ns())
             symbol = trade_info.get("symbol", self._primary_symbol)
 
-            if ts_ns <= 0 or volume <= 0:
-                return
+            if ts_ns <= 0 or volume <= 0 or not math.isfinite(price) or price <= 0:
+                return False
 
             alert = self.main_loop.on_trade_with_whale(
                 symbol,
@@ -1300,7 +1541,7 @@ class SovereignHeartbeat:
             )
             if alert is None:
                 self._mark_loop_event()
-                return
+                return True
 
             # Insider observation uses the real symbol from trade_info
             if side == 1:
@@ -1343,12 +1584,14 @@ class SovereignHeartbeat:
             except Exception as exc_inner:
                 logger.debug("insider ingest_observation error: %s", exc_inner)
             self._mark_loop_event()
+            return True
 
         except Exception as exc:
             self._mark_runtime_error(exc)
             logger.exception("_on_trade error: %s", exc)
+            return False
 
-    def _on_candle(self, candle: Candle) -> None:
+    def _on_candle(self, candle: Candle) -> bool:
         """Feed callback routing authoritative candles into MainLoop."""
         self._candle_recv_count += 1
         if self._candle_recv_count <= 3 or self._candle_recv_count % 100 == 0:
@@ -1361,9 +1604,11 @@ class SovereignHeartbeat:
         try:
             self.main_loop.on_candle(candle)
             self._mark_loop_event()
+            return True
         except Exception as exc:
             self._mark_runtime_error(exc)
             logger.exception("_on_candle error: %s", exc)
+            return False
 
     def _on_feed_truth(self, feed_truth: dict) -> None:
         """
@@ -1386,7 +1631,7 @@ class SovereignHeartbeat:
                 asset_class="crypto",
                 required_data_type=str(feed_truth.get("feed_type") or "order_book"),
                 provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
-                execution_required=True,
+                execution_required=self._execution_broker == ALPACA_PAPER_EXECUTION_BROKER,
             ),
             provider_status={self._selected_market_data_provider_id: provider_status},
         )
@@ -1404,6 +1649,39 @@ class SovereignHeartbeat:
                 selection.selected_provider_id,
             )
 
+    def _on_market_transport_truth(self, transport_truth: dict) -> None:
+        """Consume confirmed MarketFeeds activation/failure truth for runtime status."""
+        status = str(transport_truth.get("status") or "")
+        if status in {"FAILED_CLOSED", "EXECUTION_CONSUMER_REJECTED"}:
+            if status == "FAILED_CLOSED":
+                last_selection = self._feed_provider_router.last_selection
+                if last_selection is not None and last_selection.selected_provider_id is None:
+                    self._market_data_provider_selection = last_selection
+                    self._selected_market_data_provider_id = ""
+            self._request_market_data_fail_closed_shutdown(
+                RuntimeError("MARKET_DATA_EXECUTABLE_TRUTH_FAILED_CLOSED")
+            )
+            return
+        selected = str(
+            transport_truth.get("selected_provider_id")
+            or transport_truth.get("active_provider_id")
+            or ""
+        )
+        activated = transport_truth.get("transport_activated") is True or transport_truth.get("executable_truth") is True
+        if selected and activated:
+            self._selected_market_data_provider_id = selected
+            last_selection = self._feed_provider_router.last_selection
+            if last_selection is not None and last_selection.selected_provider_id == selected:
+                self._market_data_provider_selection = last_selection
+            selected_descriptor = self._feed_provider_router.providers.get(selected)
+            latency_source = (
+                "websocket"
+                if selected_descriptor is not None and selected_descriptor.transport_mode in {"stream", "stream_and_rest"}
+                else "rest_polling"
+            )
+            if hasattr(self.order_router, "set_market_data_latency_source"):
+                self.order_router.set_market_data_latency_source(latency_source)
+
     def _on_rest_latency(self, latency_truth: dict) -> None:
         """Route REST polling latency truth into the execution latency authority."""
         try:
@@ -1411,7 +1689,7 @@ class SovereignHeartbeat:
                 request_start_ns=int(latency_truth.get("request_start_ns") or 0),
                 response_received_ns=int(latency_truth.get("response_received_ns") or 0),
                 exchange=str(latency_truth.get("exchange") or self._primary_feed_venue),
-                provider_id=self._selected_market_data_provider_id,
+                provider_id=str(latency_truth.get("provider_id") or ""),
                 symbol=str(latency_truth.get("symbol") or ""),
                 feed_type=str(latency_truth.get("feed_type") or ""),
             )
@@ -1490,7 +1768,7 @@ class SovereignHeartbeat:
             ws_symbols,
         )
 
-    def _on_order_book(self, snapshot) -> None:
+    def _on_order_book(self, snapshot) -> bool:
         """Feed callback routing order books into MainLoop."""
         self._book_recv_count += 1
         if self._book_recv_count <= 3 or self._book_recv_count % 100 == 0:
@@ -1503,9 +1781,11 @@ class SovereignHeartbeat:
         try:
             self.main_loop.on_order_book(snapshot)
             self._mark_loop_event()
+            return True
         except Exception as exc:
             self._mark_runtime_error(exc)
             logger.exception("_on_order_book error: %s", exc)
+            return False
 
     def _start_polling_client(self) -> None:
         """
@@ -1607,7 +1887,7 @@ class SovereignHeartbeat:
 
         ws_connected = status["order_router"]["websocket_connected"]
         latency_source = status["order_router"].get("market_data_latency_source")
-        if self._primary_feed_venue == "kraken" and not ws_connected:
+        if latency_source == "websocket" and not ws_connected:
             logger.warning("HEALTH ALERT: WebSocket disconnected!")
         elif latency_source == "rest_polling" and not math.isfinite(
             float(status["order_router"].get("rest_market_data_rtt_ms", float("inf")))
@@ -1641,6 +1921,8 @@ class SovereignHeartbeat:
         """Get system status."""
         return {
             "running": self._running,
+            "shutdown_reason_code": getattr(self, "_shutdown_reason_code", None),
+            "last_runtime_error_type": getattr(self, "_last_error", None),
             "attack_mode": self.commander.is_attack_mode(),
             "execution": self.execution_engine.get_status(),
             "risk": self.risk_guard.get_status(),
@@ -1669,9 +1951,23 @@ class SovereignHeartbeat:
             "market_data_provider_selection": self._market_data_provider_selection.to_telemetry(),
             "provider_priority_list": self._configured_market_data_providers,
             "fallback_used": self._market_data_provider_selection.reason == "FALLBACK_SELECTED",
+            "market_data_transport": (
+                self._market_feeds.get_feed_truth_status()
+                if self._market_feeds is not None
+                else {"status": "NOT_STARTED", "executable_truth": False}
+            ),
+            "market_data_breadth_symbols": list(self._feed_symbols),
+            "market_data_deep_symbols": list(
+                self._market_feeds.deep_symbols
+                if self._market_feeds is not None
+                else self._initial_deep_symbols
+            ),
+            "market_data_lifecycle_callback_symbols": sorted(self._execution_callback_symbols),
+            "dynamic_market_data_activation_mode": "OBSERVE_ONLY",
+            "dynamic_market_data_execution_authorized": False,
             "missing_universe_feed_truth_reason": (
                 None
-                if self._universe_resolution.reason == "UNIVERSE_READY"
+                if self._universe_resolution.reason == "UNIVERSE_READY_FROM_BROKER_CATALOG"
                 else self._universe_resolution.reason
             ),
             "execution_broker": self._execution_broker,

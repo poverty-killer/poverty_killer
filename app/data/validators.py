@@ -56,6 +56,25 @@ class DataValidator:
         age_sec = age_ns / 1_000_000_000.0
         return age_sec > self.stale_threshold_seconds
 
+    @staticmethod
+    def _timeframe_ns(timeframe: Any) -> Optional[int]:
+        text = str(timeframe or "").strip().lower()
+        if len(text) < 2:
+            return None
+        unit_ns = {
+            "s": 1_000_000_000,
+            "m": 60_000_000_000,
+            "h": 3_600_000_000_000,
+            "d": 86_400_000_000_000,
+        }.get(text[-1])
+        try:
+            amount = int(text[:-1])
+        except ValueError:
+            return None
+        if unit_ns is None or amount <= 0:
+            return None
+        return amount * unit_ns
+
     def validate_candle(
         self,
         candle: Candle,
@@ -94,10 +113,28 @@ class DataValidator:
         if candle.low > candle.open and candle.low > candle.close:
             warnings.append(f"Low ({candle.low}) above both open and close")
 
-        # 3. Check for stale data (authoritative path)
+        # 3. Check for future/in-progress and stale data (authoritative path).
+        # Aggregated bars carry their exchange bar-start as exchange_ts_ns; a
+        # validated deterministic close is the lawful freshness reference.
         if current_time_ns is not None:
-            if self._is_stale_ns(candle.exchange_ts_ns, current_time_ns):
-                age_sec = (current_time_ns - candle.exchange_ts_ns) / 1_000_000_000.0
+            freshness_ts_ns = candle.exchange_ts_ns
+            recorded_close = getattr(candle, "candle_close_ts_ns", None)
+            if recorded_close is not None:
+                if isinstance(recorded_close, bool) or not isinstance(recorded_close, int):
+                    errors.append("Candle close timestamp must be an integer nanosecond value")
+                else:
+                    timeframe_ns = self._timeframe_ns(getattr(candle, "timeframe", None))
+                    expected_close = candle.exchange_ts_ns + timeframe_ns if timeframe_ns is not None else None
+                    if expected_close is None or recorded_close != expected_close:
+                        errors.append("Candle close timestamp is inconsistent with exchange start/timeframe")
+                    elif getattr(candle, "candle_closed_at_receive", None) is not True:
+                        errors.append("Candle was not closed at transport receipt")
+                    else:
+                        freshness_ts_ns = recorded_close
+            if freshness_ts_ns > current_time_ns:
+                errors.append("Future or in-progress candle timestamp")
+            elif self._is_stale_ns(freshness_ts_ns, current_time_ns):
+                age_sec = (current_time_ns - freshness_ts_ns) / 1_000_000_000.0
                 errors.append(f"Stale candle: {age_sec:.1f}s old (threshold {self.stale_threshold_seconds}s)")
         else:
             # Telemetry fallback — wall-clock permitted
@@ -178,7 +215,9 @@ class DataValidator:
 
         # 1. Check for stale data (authoritative path)
         if current_time_ns is not None:
-            if self._is_stale_ns(order_book.exchange_ts_ns, current_time_ns):
+            if order_book.exchange_ts_ns > current_time_ns:
+                errors.append("Future order book timestamp")
+            elif self._is_stale_ns(order_book.exchange_ts_ns, current_time_ns):
                 age_sec = (current_time_ns - order_book.exchange_ts_ns) / 1_000_000_000.0
                 errors.append(f"Stale order book: {age_sec:.1f}s old")
         else:

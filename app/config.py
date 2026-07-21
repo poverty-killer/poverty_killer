@@ -252,8 +252,89 @@ class DataConfig(BaseModel):
     websocket_max_queue_size: int = Field(default=10000, ge=100, le=100000, description="Maximum queued messages before dropping")
     websocket_ping_interval: int = Field(default=30, ge=10, le=120, description="WebSocket ping interval seconds")
     polling_interval_seconds: float = Field(default=1.0, ge=0.1, le=60, description="REST polling interval for non-WS symbols")
+    breadth_poll_interval_seconds: float = Field(default=15.0, ge=1.0, le=300.0, description="Batched full-catalog observation cadence")
+    market_data_batch_size: int = Field(default=50, ge=1, le=200, description="Maximum symbols in one provider batch request")
+    market_data_max_concurrency: int = Field(default=4, ge=1, le=32, description="Maximum simultaneous market-data REST requests")
+    market_data_global_requests_per_minute: int = Field(default=180, ge=1, le=10000, description="Process-wide REST market-data request budget")
+    market_data_provider_requests_per_minute: int = Field(default=180, ge=1, le=10000, description="Per-provider REST market-data request budget")
+    market_data_request_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60.0)
+    market_data_callback_timeout_seconds: float = Field(default=5.0, ge=0.1, le=60.0)
+    market_data_shutdown_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    market_data_max_retries: int = Field(default=3, ge=0, le=10)
+    market_data_backoff_base_seconds: float = Field(default=0.5, ge=0.01, le=30.0)
+    market_data_backoff_max_seconds: float = Field(default=30.0, ge=0.1, le=300.0)
+    market_data_circuit_failure_threshold: int = Field(default=5, ge=1, le=100)
+    market_data_circuit_cooldown_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
+    market_data_job_queue_size: int = Field(default=128, ge=4, le=10000)
+    market_data_failure_history_size: int = Field(default=100, ge=10, le=10000)
+    market_data_event_dedupe_history_size: int = Field(default=10000, ge=100, le=1000000)
+    market_data_order_book_levels_per_side: int = Field(default=1000, ge=10, le=10000)
+    market_data_observations_per_symbol: int = Field(default=120, ge=10, le=10000)
+    market_data_rank_min_observations: int = Field(default=8, ge=3, le=1000)
+    market_data_rank_refresh_seconds: int = Field(default=300, ge=15, le=86400)
+    market_data_rank_observation_max_age_seconds: float = Field(default=45.0, ge=1.0, le=3600.0)
+    market_data_deep_candidate_limit: int = Field(default=12, ge=1, le=100, description="Observe-only ranked symbols admitted after protected symbols")
+    market_data_deep_subscription_limit: int = Field(default=30, ge=1, le=1000, description="Provider deep-stream capacity; protected symbols are never silently evicted")
+    market_data_min_residence_seconds: int = Field(default=900, ge=0, le=86400, description="Minimum observe-only deep membership residence")
     feature_window_slow: int = Field(default=50, ge=10, description="Slow feature window size")
     feature_window_fast: int = Field(default=10, ge=3, description="Fast feature window size")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_boolean_market_data_limits(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        numeric_fields = {
+            "breadth_poll_interval_seconds",
+            "market_data_batch_size",
+            "market_data_max_concurrency",
+            "market_data_global_requests_per_minute",
+            "market_data_provider_requests_per_minute",
+            "market_data_request_timeout_seconds",
+            "market_data_callback_timeout_seconds",
+            "market_data_shutdown_timeout_seconds",
+            "market_data_max_retries",
+            "market_data_backoff_base_seconds",
+            "market_data_backoff_max_seconds",
+            "market_data_circuit_failure_threshold",
+            "market_data_circuit_cooldown_seconds",
+            "market_data_job_queue_size",
+            "market_data_failure_history_size",
+            "market_data_event_dedupe_history_size",
+            "market_data_order_book_levels_per_side",
+            "market_data_observations_per_symbol",
+            "market_data_rank_min_observations",
+            "market_data_rank_refresh_seconds",
+            "market_data_rank_observation_max_age_seconds",
+            "market_data_deep_candidate_limit",
+            "market_data_deep_subscription_limit",
+            "market_data_min_residence_seconds",
+        }
+        boolean_fields = sorted(
+            field_name
+            for field_name in numeric_fields
+            if type(values.get(field_name)) is bool
+        )
+        if boolean_fields:
+            raise ValueError(
+                "boolean values are invalid for numeric market-data controls:"
+                + ",".join(boolean_fields)
+            )
+        return values
+
+    @model_validator(mode="after")
+    def validate_market_data_capacity(self) -> "DataConfig":
+        if self.market_data_backoff_base_seconds > self.market_data_backoff_max_seconds:
+            raise ValueError("market_data_backoff_base_seconds must not exceed maximum")
+        if self.market_data_provider_requests_per_minute > self.market_data_global_requests_per_minute:
+            raise ValueError("per-provider request budget must not exceed global budget")
+        if self.market_data_deep_candidate_limit > self.market_data_deep_subscription_limit:
+            raise ValueError("deep candidate limit must not exceed deep subscription limit")
+        if self.market_data_rank_min_observations > self.market_data_observations_per_symbol:
+            raise ValueError("rank minimum observations must not exceed retained observations")
+        if self.market_data_rank_observation_max_age_seconds < self.breadth_poll_interval_seconds:
+            raise ValueError("rank observation maximum age must cover at least one breadth interval")
+        return self
 
     model_config = ConfigDict(extra="forbid")
 

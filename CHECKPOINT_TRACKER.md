@@ -290,9 +290,9 @@ red-team, and adjusted plan are in
 `reports/completion/PAPER_TRUE_CAPABILITY_MASTER_PLAN.md`.
 
 - **HISTORICAL PLANNING BASELINE** - the planning artifact itself changed no
-  source, runtime state, broker state, or trading authority. Stages 0 through 3
+  source, runtime state, broker state, or trading authority. Stages 0 through 4
   have since completed under their own Board approvals, stage-entry covenants,
-  and close reports; Stage 4 is not open.
+  and close reports; Stage 5 is not open.
 - Repo inspection found causal and authority prerequisites that must precede
   wider trading: cross-symbol fusion state, future-evidence acceptance,
   incomplete broker-book hydration, pre-fill strategy state, a declared-but-
@@ -572,7 +572,61 @@ in `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_3_REPORT.md`.
   No file/module was deleted, no dependency/subsystem was added,
   SovereignExecutionGuard remains dormant, and protected state remains unstaged.
 
-Current boundary: **STOP after the Stage 3 close commit/push. Stage 4 is NOT
+## PAPER True Capability Stage 4
+
+Shan directed `ok. Proceed with stage 4` on 2026-07-19. Stage 4 is complete and
+**PASS at the deterministic offline test rung only**. Full entry manifest,
+research, restriction ledger, implementation record, nineteen-finding review
+loop, exact proof, limitations, and staging scope are in
+`reports/completion/PAPER_TRUE_CAPABILITY_STAGE_4_REPORT.md`.
+
+- PASS - Alpaca stream/REST are the only providers that can satisfy an Alpaca
+  execution-required market-data request. Kraken/Coinbase remain explicit
+  advisory/reference providers and cannot repair missing Alpaca executable
+  truth.
+- PASS - bounded full-catalog breadth uses multi-symbol Alpaca REST batches,
+  fixed concurrency, shared provider budget, bounded queue/history, retry/
+  backoff, Retry-After circuit, cancellation, and secret-safe diagnostics.
+- PASS - authenticated Alpaca WebSocket activation requires greeting, auth, and
+  full acknowledged subscriptions; ordered trade/quote/bar/book processing,
+  stateful reset/delta/delete books, backpressure, and subscription races fail
+  closed.
+- PASS - `MarketFeeds` is the single transport lifecycle owner. It stops prior
+  generations before fallback, requires current complete protected truth, and
+  propagates terminal transport or execution-consumer refusal to governed
+  no-flatten runtime shutdown.
+- PASS - causal robust rank snapshots use quantiles, winsorization, median/MAD,
+  exact Decimal broker constraints, empirical percentiles, nondominated Pareto
+  fronts, uncertainty, and minimum residence. Held/open-order/lifecycle symbols
+  are non-evictable; all dynamic symbols remain `OBSERVE_ONLY` with zero
+  execution authority.
+- PASS - immutable rank snapshots persist/reload with catalog, universe, role,
+  clock, and content-hash lineage; malformed, future, stale, tampered, or
+  cross-role state fails closed.
+- Binary exit PASS - the exact 600-symbol, 20-cycle synthetic soak issued 260
+  batched GET jobs; in-flight work stayed at or below 4, queue high-water at or
+  below 8, bounded histories at or below 7, all 600 symbols stayed classified,
+  16 occupied deep capacity, and every membership remained observe-only.
+- Final gates: focused `135 passed`; compatibility `26 passed`; Stage 0-4
+  covenants `251 passed`; named run path `119 passed`; configured offline suite
+  `2084 passed, 14 skipped, 0 failed`; skip audit `54 passed, 14 skipped`.
+- The 14 skips remain explicit external/mutation deferrals: seven Board-gated
+  broker reads, three absent mutation approvals, and four legacy optional reads
+  ending in `URLError`. No Stage 4 test skipped and no skip is counted as pass.
+- Review findings 1-18 were fixed and rerun. Finding 19 is an existing,
+  out-of-scope test-isolation defect: `tests/test_g0_hook_verification.py`
+  invokes the governance hook, which appended eight records to protected
+  `state/override_log.jsonl`. The records are preserved, not reverted, and not
+  staged; the governance owner must isolate that test in a separate scoped seam.
+- Highest proof rung: local deterministic tests and mocked runtime wiring. No
+  browser, launched runtime, provider network request, broker read, PAPER run,
+  broker mutation, external order/fill/SELL, profitability, live action, real
+  money, latency, or endurance proof occurred.
+- No Risk, NetEdge, sizing, stale/TTL value, strategy, masking, OMS,
+  reconciliation, account-pin, no-short, or no-naked-SELL control weakened. No
+  module/dependency/subsystem/manual-trade authority was deleted or added.
+
+Current boundary: **STOP after the Stage 4 close commit/push. Stage 5 is NOT
 OPEN.** It requires a fresh governance re-read, entry manifest, truth map,
 red-team, binary exit, and Board direction. Stage 12 broker reads and every
 Stage 13 PAPER campaign remain separately gated.
@@ -691,3 +745,9 @@ clean/stash/reset.
   final reviewed suite passed `1980 passed, 14 skipped, 0 failed`. No broker
   read, PAPER run, mutation, live action, Stage 4 work, or campaign was
   authorized or performed.
+- Shan directed `ok. Proceed with stage 4` on 2026-07-19. Result: the Alpaca
+  execution-location market-data path gained bounded breadth/deep transports,
+  robust observe-only ranking, durable lineage, and governed runtime lifecycle;
+  the final offline suite passed `2084 passed, 14 skipped, 0 failed`. No
+  provider/broker request, PAPER run, mutation, live action, Stage 5 work, or
+  campaign was authorized or performed.

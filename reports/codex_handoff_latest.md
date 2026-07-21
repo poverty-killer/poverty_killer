@@ -1,4 +1,178 @@
-# Codex Session Handoff - PAPER True Capability Stage 3 Close
+# Codex Session Handoff - PAPER True Capability Stage 4 Close
+
+Date: 2026-07-19 America/Chicago
+Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`
+Branch: `master`
+Stage-entry HEAD: `6340bae4aff24d272f3ba4270c641d896de10278`
+Stage report: `reports/completion/PAPER_TRUE_CAPABILITY_STAGE_4_REPORT.md`
+
+## Current Stage 4 Verdict
+
+Shan directed `ok. Proceed with stage 4`, opening Stage 4 only. Stage 4 is
+**PASS at the deterministic offline test rung only**. Alpaca stream/REST are the
+only providers allowed to satisfy Alpaca executable market-data truth; bounded
+breadth and protected/ranked deep transport are wired; every dynamically ranked
+symbol remains observe-only with zero execution authority.
+
+The highest proof rung is local tests plus mocked runtime wiring. No browser,
+launched runtime, real provider request, broker read, PAPER run, broker mutation,
+external order/fill/SELL, PnL/profitability, live action, real money, latency, or
+multi-day endurance result is claimed.
+
+## Stage 4 Implementation Truth
+
+- `FeedProviderRouter` owns selection/failover. `alpaca_crypto_stream` and
+  `alpaca_crypto_rest` are executable only at the Alpaca execution location;
+  Kraken/Coinbase are advisory/reference and refuse execution-required use.
+- `BatchedAlpacaPollingClient` uses multi-symbol snapshots/books, one shared
+  request budget, bounded concurrency/queue/history, Retry-After circuit,
+  cancellation, and secret-safe reason-coded failure.
+- `AlpacaCryptoWebSocketClient` requires greeting, auth, and complete
+  subscription acknowledgement; channels are ordered independently; reset/
+  incremental/size-zero book semantics and bounded backpressure are enforced.
+- `MarketFeeds` owns actual activation, protected-truth probes, stop-before-
+  fallback, stale-generation purge, breadth/deep separation, callbacks, and
+  terminal failure truth.
+- Held/open-order/lifecycle symbols are non-evictable. Dynamic candidates may
+  contribute observations but cannot reach execution callbacks.
+- `build_market_data_universe_snapshot` uses causal robust quantiles,
+  winsorization, median/MAD, exact Decimal broker increments, empirical
+  percentiles, Pareto fronts, uncertainty, and residence hysteresis. No fixed
+  weighted score or profitability claim was introduced.
+- `StateStore` persists immutable rank snapshots with strict catalog, universe,
+  role, clock, and hash lineage and rejects tampering/future/cross-role state.
+- `SovereignHeartbeat` starts the centralized Alpaca owner, retains the legacy
+  internal-harness path, exports transport truth, and cancels/joins feeds before
+  durable state closes. Terminal market-data loss stops without flattening.
+- `DataValidator` evaluates verified bar close time under the existing stale
+  threshold and rejects future/in-progress/inconsistent metadata.
+
+## Mandatory Review Loop
+
+Fresh self-review produced nineteen recorded findings. Eighteen in-scope
+transport, causal-ranking, lifecycle, schema, exact-math, and test-fixture
+defects were fixed and rerun. The full finding table with file/function, root
+cause, impact, and disposition is in the Stage 4 report. No independent reviewer
+is claimed.
+
+Finding 19 is out of Stage 4 scope and remains open: the existing
+`tests/test_g0_hook_verification.py` invokes
+`.claude/hooks/pre_tool_use.py::log_override_attempt`, which hardcodes
+`state/override_log.jsonl`. The full suite appended exactly eight audit records.
+Do not revert or stage that protected file. A later governance-test seam must
+route the hook audit log to an isolated temp path without weakening hook law.
+
+## Final Validation
+
+- Scoped `py_compile`: PASS, zero errors.
+- Focused Stage 4/provider/runtime lifecycle: `135 passed`, `0 failed`.
+- Compatibility set: `26 passed`, `0 failed`.
+- Stage 0-4 covenant set: `251 passed`, `0 failed`.
+- Seven named run-path files: `119 passed`, `0 failed`.
+- Exact 600-symbol binary soak: `1 passed`; 260 batched jobs over 20 cycles,
+  max in-flight <=4, queue high-water <=8, histories <=7, all dynamic
+  memberships observe-only.
+- Full configured offline suite: `2084 passed, 14 skipped, 420 warnings, 0
+  failed` in 205.61 seconds.
+- Exact skip audit: `54 passed, 14 skipped`. Seven require Board broker-read
+  authorization, three lack mutation approval, four legacy optional probes end
+  in `URLError`; no skip is a pass.
+- No deleted file, added skip/xfail, external dependency, changed Risk/OMS/
+  execution owner, obvious secret, or added broker mutation surface.
+
+## Safety and Proof Boundary
+
+No Risk, NetEdge, economics, sizing, stale/TTL value, masking, strategy, OMS,
+reconciliation, account-pin, PAPER/live, no-short, or no-naked-SELL control
+weakened. Dynamic data remains observe-only; cross-venue data remains advisory.
+No manual trade control, new mutation owner, fake broker truth/order/fill/PnL,
+module deletion, dependency, or subsystem was added. SovereignExecutionGuard
+remains dormant.
+
+No real request, POST, cancel, close, liquidation, position mutation, PAPER
+start, live action, or state authority change was authorized. The full-suite
+governance audit records are protected dirty evidence, not bot state authority.
+
+## Known Limitations
+
+- Real Alpaca payloads, entitlements, catalog throughput, clocks, latency,
+  disconnect/reconnect behavior, and current market truth remain unknown.
+- Pareto sorting is quadratic and runs on the feed loop; the 600-symbol offline
+  case passed, but sustained real CPU behavior is unmeasured.
+- Sync callback timeout detects only after return and cannot preempt a hung sync
+  callback.
+- Minute bars may repeat across 15-second breadth observations.
+- Rank-snapshot DB retention/compaction and multi-day growth are not yet proven.
+- No production caller currently feeds cross-venue advisory observations;
+  missing basis remains explicit uncertainty.
+- Fourteen conditional integration skips and 420 existing warnings remain.
+- Browser/runtime, external, long-duration, profitability, cloud, and
+  multi-tenant proof remain unperformed.
+
+## Protected Worktree
+
+Never clean, reset, stash, prune, edit, or stage:
+
+```text
+state/override_log.jsonl
+state/risk_state.backup
+state/risk_state.json
+state/risk_state.tmp
+state/session_journal.jsonl
+.pytest_tmp/
+AGENTS.prev.md
+POVERTY_KILLER_AUDIT_REPORT.txt
+reports/codex_handoff_2026-06-02_operator_truth_sync_ai_router.md
+reports/codex_handoff_2026-06-07_final_ai_provider_truth.md
+reports/codex_handoff_2026-06-12_operator_control_plane_fast_synced.md
+reports/codex_handoff_2026-06-20_p3n_24h_final_360.md
+reports/codex_handoff_2026-06-21_p3or_funded_revalidation_blocked.md
+reports/codex_handoff_2026-06-21_pk_ui1_operator_cockpit_build.md
+reports/completion/PAPER_AUTONOMY_RESTRICTIONS_REVIEW.md
+reports/completion/UI_NOVEL_OPERATOR_COCKPIT_BOARD_PACKET.md
+reports/completion/UI_WORLD_CLASS_REDESIGN_PACKET.md
+reports/operator_perf/
+scripts/_paper_audit_common.py
+scripts/audit_oms_shutdown.py
+scripts/audit_paper_run.py
+scripts/audit_safety_markers.py
+```
+
+## Exact Stage 4 Staging
+
+Stage these 18 paths individually:
+
+```text
+app/config.py
+app/data/feed_provider_router.py
+app/data/market_feeds.py
+app/data/polling_client.py
+app/data/validators.py
+app/data/websocket_client.py
+app/market/capability_registry.py
+app/operator_providers/registry.py
+app/state/state_store.py
+main.py
+scripts/run_bounded_paper.ps1
+tests/test_paper_true_capability_stage4.py
+tests/test_feed_provider_router_failover.py
+tests/fixtures/paper_true_capability_stage0.json
+tests/test_paper_true_capability_stage0.py
+reports/completion/PAPER_TRUE_CAPABILITY_STAGE_4_REPORT.md
+CHECKPOINT_TRACKER.md
+reports/codex_handoff_latest.md
+```
+
+## Next Boundary
+
+Stop after the Stage 4 commit/push. Stage 5 is **NOT OPEN**. It requires a new
+governance re-read, entry manifest, truth map, red team, binary exit, and Board
+direction. Stage 12 broker reads and every Stage 13 PAPER campaign retain their
+separate approval gates.
+
+---
+
+# Historical Continuity - PAPER True Capability Stage 3 Close
 
 Date: 2026-07-19 America/Chicago
 Repo: `C:\Users\shahn\OneDrive\Desktop\poverty_killer`

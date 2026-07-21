@@ -95,6 +95,8 @@ class FeedProviderDescriptor:
     provider_health: str = FeedProviderHealth.UNKNOWN.value
     last_error: str | None = None
     reason_codes: tuple[str, ...] = ()
+    execution_location: str | None = None
+    transport_mode: str | None = None
 
     def supports_asset_class(self, asset_class: str) -> bool:
         requested = _normalize_asset_class(asset_class)
@@ -137,6 +139,8 @@ class FeedProviderDescriptor:
             "provider_health": self.provider_health,
             "last_error": self.last_error,
             "reason_codes": self.reason_codes,
+            "execution_location": self.execution_location,
+            "transport_mode": self.transport_mode,
         }
 
 
@@ -306,14 +310,12 @@ class FeedProviderRouter:
             if descriptor_reason in PROVIDER_FAILURE_REASON_CODES:
                 reasons.append(descriptor_reason)
         if request.execution_required:
-            required = _normalize_capability(request.required_data_type)
-            if required in EXECUTABLE_DATA_CAPABILITIES:
-                if provider.advisory_only:
-                    reasons.append("ADVISORY_ONLY")
-                if provider.provider_type != FeedProviderType.EXECUTABLE_MARKET_DATA.value:
-                    reasons.append("REFERENCE_OR_ADVISORY_NOT_EXECUTABLE")
-                if not provider.execution_eligible:
-                    reasons.append("NOT_EXECUTION_ELIGIBLE")
+            if provider.advisory_only:
+                reasons.append("ADVISORY_ONLY")
+            if provider.provider_type != FeedProviderType.EXECUTABLE_MARKET_DATA.value:
+                reasons.append("REFERENCE_OR_ADVISORY_NOT_EXECUTABLE")
+            if not provider.execution_eligible:
+                reasons.append("NOT_EXECUTION_ELIGIBLE")
 
         if status:
             runtime_reasons = status.failure_reasons()
@@ -401,8 +403,48 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
     alpaca_creds_present = bool(env.get("APCA_API_KEY_ID") and env.get("APCA_API_SECRET_KEY"))
     return (
         FeedProviderDescriptor(
-            provider_id="kraken_public",
+            provider_id="alpaca_crypto_stream",
             provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
+            asset_classes=("crypto",),
+            data_capabilities=("trades", "order_book", "ticker", "candles"),
+            auth_required=True,
+            credentials_present=alpaca_creds_present,
+            rate_limit_policy="alpaca_account_market_data_limits_respected",
+            freshness_policy={"quote_stale_seconds": 10, "order_book_stale_seconds": 10, "candle_stale_seconds": 60},
+            quality_checks=("execution_location_required", "timestamp_required", "crossed_book_reject"),
+            execution_eligible=True,
+            advisory_only=False,
+            priority=1,
+            coverage_scope="alpaca_crypto_us_realtime_stream",
+            signup_or_entitlement="alpaca_credentials_and_stream_entitlement_required",
+            transport_adapter="alpaca_crypto_websocket",
+            execution_location="alpaca",
+            transport_mode="stream",
+        ),
+        FeedProviderDescriptor(
+            provider_id="alpaca_crypto_rest",
+            provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
+            asset_classes=("crypto",),
+            data_capabilities=("trades", "order_book", "ticker", "candles"),
+            auth_required=True,
+            credentials_present=alpaca_creds_present,
+            rate_limit_policy="alpaca_account_market_data_limits_respected",
+            freshness_policy={"quote_stale_seconds": 10, "order_book_stale_seconds": 10, "candle_stale_seconds": 60},
+            quality_checks=("execution_location_required", "timestamp_required", "crossed_book_reject"),
+            execution_eligible=True,
+            advisory_only=False,
+            priority=2,
+            coverage_scope="alpaca_crypto_us_batched_rest",
+            signup_or_entitlement="alpaca_credentials_and_data_entitlement_required",
+            transport_adapter="alpaca_crypto_rest",
+            execution_location="alpaca",
+            transport_mode="rest",
+        ),
+        FeedProviderDescriptor(
+            provider_id="kraken_public",
+            provider_type=FeedProviderType.REFERENCE_MARKET_DATA.value,
             provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
             asset_classes=("crypto",),
             data_capabilities=("trades", "order_book", "ticker", "candles"),
@@ -411,17 +453,19 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             rate_limit_policy="public_exchange_limits_respected",
             freshness_policy={"order_book_stale_seconds": 10, "candle_stale_seconds": 60},
             quality_checks=("crossed_book_reject", "duplicate_candle_dedupe", "timestamp_required"),
-            execution_eligible=True,
-            advisory_only=False,
+            execution_eligible=False,
+            advisory_only=True,
             priority=10,
-            coverage_scope="public_crypto_spot_market_data",
+            coverage_scope="cross_venue_crypto_basis_and_resilience_advisory",
             public_no_signup=True,
             transport_adapter="kraken_public_ws_rest",
             provider_health=FeedProviderHealth.UNKNOWN.value,
+            execution_location="kraken",
+            transport_mode="stream_and_rest",
         ),
         FeedProviderDescriptor(
             provider_id="coinbase_public",
-            provider_type=FeedProviderType.EXECUTABLE_MARKET_DATA.value,
+            provider_type=FeedProviderType.REFERENCE_MARKET_DATA.value,
             provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
             asset_classes=("crypto",),
             data_capabilities=("order_book", "candles"),
@@ -430,13 +474,15 @@ def build_default_feed_provider_registry(env: Mapping[str, str] | None = None) -
             rate_limit_policy="coinbase_exchange_public_market_data_limits_respected",
             freshness_policy={"order_book_stale_seconds": 10, "candle_stale_seconds": 60},
             quality_checks=("crossed_book_reject", "duplicate_candle_dedupe", "timestamp_required"),
-            execution_eligible=True,
-            advisory_only=False,
+            execution_eligible=False,
+            advisory_only=True,
             priority=20,
-            coverage_scope="coinbase_exchange_public_crypto_rest_order_book_candles",
+            coverage_scope="cross_venue_crypto_basis_advisory_rest",
             public_no_signup=True,
             transport_adapter="coinbase_exchange_public_rest",
             provider_health=FeedProviderHealth.UNKNOWN.value,
+            execution_location="coinbase",
+            transport_mode="rest",
         ),
         FeedProviderDescriptor(
             provider_id="binance_us_public",

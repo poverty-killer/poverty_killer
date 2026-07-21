@@ -16,18 +16,23 @@ from app.data.feed_provider_router import (
 )
 
 
-def _request(data_type: str = "order_book") -> FeedProviderRequest:
+def _request(data_type: str = "order_book", *, execution_required: bool = True) -> FeedProviderRequest:
     return FeedProviderRequest(
         symbol="BTC/USD",
         asset_class="crypto",
         required_data_type=data_type,
         provider_lane=FeedProviderLane.CRYPTO_MARKET_DATA.value,
-        execution_required=True,
+        execution_required=execution_required,
     )
 
 
-def _router(provider_ids: tuple[str, ...] = ("coinbase_public", "binance_us_public", "kraken_public")):
-    return build_feed_provider_router(configured_provider_ids=provider_ids, env={})
+def _router(
+    provider_ids: tuple[str, ...] = ("coinbase_public", "binance_us_public", "kraken_public"),
+    *,
+    alpaca_credentials: bool = False,
+):
+    env = {"APCA_API_KEY_ID": "present", "APCA_API_SECRET_KEY": "present"} if alpaca_credentials else {}
+    return build_feed_provider_router(configured_provider_ids=provider_ids, env=env)
 
 
 def _conflict_router(trusted_source_priority: tuple[str, ...] = ()) -> FeedProviderRouter:
@@ -66,8 +71,56 @@ def test_missing_provider_config_fails_closed_without_hidden_kraken_default():
     assert result.selected_provider is None
 
 
-def test_configured_provider_priority_is_respected_when_transport_is_available():
-    result = _router(("kraken_public",)).select_provider(_request())
+def test_alpaca_execution_location_stream_is_positive_primary_twin():
+    result = _router(
+        ("alpaca_crypto_stream", "alpaca_crypto_rest", "coinbase_public", "kraken_public"),
+        alpaca_credentials=True,
+    ).select_provider(_request())
+
+    assert result.status == "SELECTED"
+    assert result.reason == "PRIMARY_SELECTED"
+    assert result.selected_provider_id == "alpaca_crypto_stream"
+    assert result.selected_provider.execution_location == "alpaca"
+    assert result.selected_provider.transport_adapter == "alpaca_crypto_websocket"
+    assert result.selected_provider.execution_eligible is True
+    assert result.selected_provider.advisory_only is False
+
+
+def test_failed_alpaca_stream_selects_alpaca_rest_executable_fallback():
+    result = _router(
+        ("alpaca_crypto_stream", "alpaca_crypto_rest", "coinbase_public", "kraken_public"),
+        alpaca_credentials=True,
+    ).select_provider(
+        _request(),
+        provider_status={
+            "alpaca_crypto_stream": ProviderRuntimeStatus(
+                provider_id="alpaca_crypto_stream",
+                health=FeedProviderHealth.FAILED.value,
+                reason_codes=("WEBSOCKET_UNAVAILABLE",),
+            )
+        },
+    )
+
+    assert result.status == "SELECTED"
+    assert result.reason == "FALLBACK_SELECTED"
+    assert result.selected_provider_id == "alpaca_crypto_rest"
+    assert result.selected_provider.execution_location == "alpaca"
+    assert result.skipped["alpaca_crypto_stream"] == ("WEBSOCKET_UNAVAILABLE",)
+
+
+def test_cross_venue_public_sources_cannot_satisfy_execution_required_request():
+    result = _router(("coinbase_public", "kraken_public")).select_provider(_request())
+
+    assert result.status == "FAILED_CLOSED"
+    assert result.selected_provider is None
+    for provider_id in ("coinbase_public", "kraken_public"):
+        assert "ADVISORY_ONLY" in result.skipped[provider_id]
+        assert "REFERENCE_OR_ADVISORY_NOT_EXECUTABLE" in result.skipped[provider_id]
+        assert "NOT_EXECUTION_ELIGIBLE" in result.skipped[provider_id]
+
+
+def test_configured_advisory_provider_priority_is_respected_when_transport_is_available():
+    result = _router(("kraken_public",)).select_provider(_request(execution_required=False))
 
     assert result.status == "SELECTED"
     assert result.reason == "PRIMARY_SELECTED"
@@ -85,8 +138,8 @@ def test_missing_fallback_transport_does_not_fake_market_data():
     assert "MISSING_TRANSPORT" in result.skipped["binance_us_public"]
 
 
-def test_safe_crypto_priority_selects_coinbase_public_before_kraken():
-    result = _router().select_provider(_request())
+def test_advisory_crypto_priority_selects_coinbase_public_before_kraken():
+    result = _router().select_provider(_request(execution_required=False))
 
     assert result.status == "SELECTED"
     assert result.reason == "PRIMARY_SELECTED"
@@ -95,9 +148,9 @@ def test_safe_crypto_priority_selects_coinbase_public_before_kraken():
     assert "MISSING_TRANSPORT" in result.skipped["binance_us_public"]
 
 
-def test_degraded_kraken_is_skipped_after_coinbase_public_selected():
+def test_degraded_kraken_is_skipped_after_coinbase_advisory_selected():
     result = _router().select_provider(
-        _request(),
+        _request(execution_required=False),
         provider_status={
             "kraken_public": ProviderRuntimeStatus(
                 provider_id="kraken_public",
@@ -114,9 +167,9 @@ def test_degraded_kraken_is_skipped_after_coinbase_public_selected():
     assert "MISSING_TRANSPORT" in result.skipped["binance_us_public"]
 
 
-def test_primary_crossed_book_is_quarantined_and_fallback_attempted():
+def test_crossed_kraken_advisory_book_is_quarantined_while_coinbase_is_selected():
     result = _router().select_provider(
-        _request(),
+        _request(execution_required=False),
         provider_status={
             "kraken_public": ProviderRuntimeStatus(
                 provider_id="kraken_public",
@@ -131,9 +184,9 @@ def test_primary_crossed_book_is_quarantined_and_fallback_attempted():
     assert result.skipped["kraken_public"] == ("CROSSED_BOOK",)
 
 
-def test_primary_duplicate_candle_is_rejected_and_fallback_attempted():
+def test_duplicate_kraken_advisory_candle_is_rejected_while_coinbase_is_selected():
     result = _router().select_provider(
-        _request("candles"),
+        _request("candles", execution_required=False),
         provider_status={
             "kraken_public": ProviderRuntimeStatus(
                 provider_id="kraken_public",
@@ -237,9 +290,9 @@ def test_no_available_provider_returns_missing_market_truth():
     assert result.skipped["missing_provider"] == ("PROVIDER_NOT_REGISTERED",)
 
 
-def test_selected_provider_and_fallback_reason_are_recorded():
+def test_selected_advisory_provider_and_fallback_reason_are_recorded():
     result = _router().select_provider(
-        _request(),
+        _request(execution_required=False),
         provider_status={
             "kraken_public": ProviderRuntimeStatus(
                 provider_id="kraken_public",
@@ -259,19 +312,20 @@ def test_selected_provider_and_fallback_reason_are_recorded():
 
 
 def test_router_telemetry_does_not_touch_broker_mutation_path():
-    result = _router(("kraken_public",)).select_provider(_request())
+    result = _router(("kraken_public",)).select_provider(_request(execution_required=False))
     telemetry = result.to_telemetry()
     serialized = repr(telemetry).lower()
 
     assert "order_router" not in serialized
     assert "broker_gateway" not in serialized
     assert "broker mutation" not in serialized
-    assert telemetry["selected_provider"]["provider_type"] == "executable_market_data"
+    assert telemetry["selected_provider"]["provider_type"] == "reference_market_data"
+    assert telemetry["selected_provider"]["advisory_only"] is True
 
 
 def test_coinbase_public_does_not_advertise_unsupported_trades_or_ticker():
-    trades = _router(("coinbase_public",)).select_provider(_request("trades"))
-    ticker = _router(("coinbase_public",)).select_provider(_request("ticker"))
+    trades = _router(("coinbase_public",)).select_provider(_request("trades", execution_required=False))
+    ticker = _router(("coinbase_public",)).select_provider(_request("ticker", execution_required=False))
 
     assert trades.status == "FAILED_CLOSED"
     assert trades.reason == "MISSING_MARKET_TRUTH"

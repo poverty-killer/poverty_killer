@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, replace
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import unquote
 
@@ -56,6 +57,8 @@ ALPACA_PAPER_ENDPOINT_FAMILY = "alpaca_paper"
 ALPACA_PAPER_EXECUTION_ADAPTER = "alpaca_paper_rest"
 ALPACA_CRYPTO_CATALOG_SOURCE = "alpaca_paper_get_v2_assets_active_crypto"
 BROKER_CATALOG_REQUIRED = "BROKER_CATALOG_REQUIRED"
+MARKET_DATA_UNIVERSE_SCHEMA = "market_data_universe_v1"
+MARKET_DATA_OBSERVE_ONLY = "OBSERVE_ONLY"
 
 
 def _stable_hash(value: Any) -> str:
@@ -455,6 +458,1205 @@ class BrokerCryptoUniverseSnapshot:
             universe_hash=str(value.get("universe_hash") or ""),
             memberships=memberships,
         )
+
+
+def _decimal_tuple(values: Any, *, field_name: str) -> tuple[Decimal, ...]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{field_name}_sequence_required")
+    normalized: list[Decimal] = []
+    for value in values:
+        if isinstance(value, bool) or isinstance(value, float):
+            raise ValueError(f"{field_name}_exact_decimal_required")
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{field_name}_invalid") from exc
+        if not parsed.is_finite() or parsed < Decimal("0"):
+            raise ValueError(f"{field_name}_nonfinite_or_negative")
+        normalized.append(parsed)
+    return tuple(normalized)
+
+
+def _strict_int(value: Any, *, field_name: str, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{field_name}_integer_domain_invalid")
+    return value
+
+
+def _strict_bool(value: Any, *, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{field_name}_boolean_required")
+    return value
+
+
+def _strict_text(
+    value: Any,
+    *,
+    field_name: str,
+    optional: bool = False,
+    case: str | None = None,
+) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name}_nonempty_string_required")
+    normalized = value.strip()
+    if case == "lower":
+        return normalized.lower()
+    if case == "upper":
+        return normalized.upper()
+    return normalized
+
+
+def _normalized_symbol_sequence(value: Any, *, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name}_sequence_required")
+    normalized = tuple(normalize_alpaca_crypto_symbol(item) for item in value)
+    if any(not item for item in normalized):
+        raise ValueError(f"{field_name}_symbol_invalid")
+    if normalized != tuple(sorted(set(normalized))):
+        raise ValueError(f"{field_name}_must_be_sorted_unique")
+    return normalized
+
+
+def _finite_float_tuple(values: Any, *, field_name: str, nonnegative: bool = False) -> tuple[float, ...]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{field_name}_sequence_required")
+    normalized: list[float] = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name}_numeric_required")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name}_invalid") from exc
+        if not math.isfinite(parsed) or (nonnegative and parsed < 0.0):
+            raise ValueError(f"{field_name}_domain_invalid")
+        normalized.append(parsed)
+    return tuple(normalized)
+
+
+_MARKET_DATA_METRIC_FIELDS = frozenset(
+    {
+        "completeness",
+        "clock_quality",
+        "log_dollar_volume",
+        "log_trade_count",
+        "spread_median_bps",
+        "spread_mad_bps",
+        "log_depth_usd",
+        "depth_mad_usd",
+        "relative_depth_dispersion",
+        "relative_spread_dispersion",
+        "estimated_min_order_impact_bps",
+        "robust_log_return_volatility",
+        "jump_ratio",
+        "gap_median_seconds",
+        "gap_mad_seconds",
+        "observation_span_seconds",
+        "listing_age_seconds",
+        "listing_age_known",
+        "continuity",
+        "fundable",
+        "cross_venue_basis_bps",
+        "cross_venue_basis_age_ms",
+        "cross_venue_basis_available",
+        "capacity_multiple",
+        "uncertainty",
+    }
+)
+_MARKET_DATA_HIGHER_IS_BETTER = frozenset(
+    {
+        "completeness",
+        "clock_quality",
+        "log_dollar_volume",
+        "log_trade_count",
+        "log_depth_usd",
+        "observation_span_seconds",
+        "listing_age_seconds",
+        "listing_age_known",
+        "continuity",
+        "fundable",
+        "cross_venue_basis_available",
+        "capacity_multiple",
+    }
+)
+_MARKET_DATA_LOWER_IS_BETTER = frozenset(
+    {
+        "spread_median_bps",
+        "spread_mad_bps",
+        "relative_depth_dispersion",
+        "relative_spread_dispersion",
+        "estimated_min_order_impact_bps",
+        "robust_log_return_volatility",
+        "jump_ratio",
+        "gap_median_seconds",
+        "gap_mad_seconds",
+        "cross_venue_basis_bps",
+        "cross_venue_basis_age_ms",
+        "uncertainty",
+    }
+)
+_MARKET_DATA_PERCENTILE_FIELDS = frozenset(
+    _MARKET_DATA_HIGHER_IS_BETTER | _MARKET_DATA_LOWER_IS_BETTER
+)
+_MARKET_DATA_PARETO_FIELDS = (
+    "completeness",
+    "clock_quality",
+    "log_dollar_volume",
+    "log_trade_count",
+    "spread_median_bps",
+    "log_depth_usd",
+    "estimated_min_order_impact_bps",
+    "robust_log_return_volatility",
+    "jump_ratio",
+    "gap_median_seconds",
+    "listing_age_seconds",
+    "listing_age_known",
+    "continuity",
+    "fundable",
+    "cross_venue_basis_available",
+    "cross_venue_basis_bps",
+    "cross_venue_basis_age_ms",
+    "capacity_multiple",
+)
+_MARKET_DATA_UNIT_INTERVAL_METRICS = frozenset(
+    {
+        "completeness",
+        "clock_quality",
+        "listing_age_known",
+        "continuity",
+        "fundable",
+        "cross_venue_basis_available",
+        "uncertainty",
+    }
+)
+
+
+def _quantile(values: Sequence[float], quantile: float) -> float:
+    if not values:
+        raise ValueError("quantile_requires_values")
+    ordered = sorted(float(value) for value in values)
+    if not 0.0 <= quantile <= 1.0:
+        raise ValueError("quantile_out_of_range")
+    position = (len(ordered) - 1) * quantile
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _median(values: Sequence[float]) -> float:
+    return _quantile(values, 0.5)
+
+
+def _median_mad(values: Sequence[float]) -> tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    center = _median(values)
+    mad = _median([abs(float(value) - center) for value in values])
+    return center, mad
+
+
+def _winsorized(values: Sequence[float]) -> tuple[float, ...]:
+    if not values:
+        return ()
+    lower = _quantile(values, 0.05)
+    upper = _quantile(values, 0.95)
+    return tuple(min(upper, max(lower, float(value))) for value in values)
+
+
+@dataclass(frozen=True)
+class MarketBreadthObservation:
+    """Causal per-symbol evidence used only for observe-only transport ranking."""
+
+    symbol: str
+    provider_id: str
+    execution_location: str
+    observed_at_ns: int
+    latest_source_event_ns: int
+    expected_samples: int
+    received_samples: int
+    dollar_volumes: tuple[Decimal, ...]
+    trade_counts: tuple[int, ...]
+    spreads_bps: tuple[float, ...]
+    depth_usd: tuple[Decimal, ...]
+    log_returns: tuple[float, ...]
+    event_lag_ms: tuple[float, ...]
+    gap_seconds: tuple[float, ...]
+    observation_started_ns: int
+    listing_started_ns: int | None
+    listing_age_source: str | None
+    quote_currency: str
+    quote_currency_fundable: bool
+    execution_mid: Decimal
+    cross_venue_mid: Decimal | None
+    cross_venue_provider_id: str | None
+    cross_venue_source_event_ns: int | None
+    cross_venue_received_at_ns: int | None
+    min_order_size: Decimal
+    min_trade_increment: Decimal
+    price_increment: Decimal
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "provider_id": self.provider_id,
+            "execution_location": self.execution_location,
+            "observed_at_ns": self.observed_at_ns,
+            "latest_source_event_ns": self.latest_source_event_ns,
+            "expected_samples": self.expected_samples,
+            "received_samples": self.received_samples,
+            "dollar_volumes": [_decimal_text(value) for value in self.dollar_volumes],
+            "trade_counts": list(self.trade_counts),
+            "spreads_bps": list(self.spreads_bps),
+            "depth_usd": [_decimal_text(value) for value in self.depth_usd],
+            "log_returns": list(self.log_returns),
+            "event_lag_ms": list(self.event_lag_ms),
+            "gap_seconds": list(self.gap_seconds),
+            "observation_started_ns": self.observation_started_ns,
+            "listing_started_ns": self.listing_started_ns,
+            "listing_age_source": self.listing_age_source,
+            "quote_currency": self.quote_currency,
+            "quote_currency_fundable": self.quote_currency_fundable,
+            "execution_mid": _decimal_text(self.execution_mid),
+            "cross_venue_mid": _decimal_text(self.cross_venue_mid),
+            "cross_venue_provider_id": self.cross_venue_provider_id,
+            "cross_venue_source_event_ns": self.cross_venue_source_event_ns,
+            "cross_venue_received_at_ns": self.cross_venue_received_at_ns,
+            "min_order_size": _decimal_text(self.min_order_size),
+            "min_trade_increment": _decimal_text(self.min_trade_increment),
+            "price_increment": _decimal_text(self.price_increment),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "MarketBreadthObservation":
+        exact_fields = ("execution_mid", "min_order_size", "min_trade_increment", "price_increment")
+        exact: dict[str, Decimal] = {}
+        for field_name in exact_fields:
+            parsed = _decimal_tuple((value.get(field_name),), field_name=field_name)[0]
+            if parsed <= 0:
+                raise ValueError(f"{field_name}_must_be_positive")
+            exact[field_name] = parsed
+        cross_value = value.get("cross_venue_mid")
+        cross_mid = None
+        if cross_value is not None:
+            cross_mid = _decimal_tuple((cross_value,), field_name="cross_venue_mid")[0]
+            if cross_mid <= 0:
+                raise ValueError("cross_venue_mid_must_be_positive")
+        trade_counts_value = value.get("trade_counts")
+        if not isinstance(trade_counts_value, (list, tuple)) or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in trade_counts_value
+        ):
+            raise ValueError("trade_counts_nonnegative_integer_sequence_required")
+        return cls(
+            symbol=normalize_alpaca_crypto_symbol(value.get("symbol")),
+            provider_id=_strict_text(value.get("provider_id"), field_name="provider_id"),
+            execution_location=_strict_text(
+                value.get("execution_location"),
+                field_name="execution_location",
+                case="lower",
+            ),
+            observed_at_ns=_strict_int(value.get("observed_at_ns"), field_name="observed_at_ns", minimum=1),
+            latest_source_event_ns=_strict_int(
+                value.get("latest_source_event_ns"), field_name="latest_source_event_ns", minimum=1
+            ),
+            expected_samples=_strict_int(value.get("expected_samples"), field_name="expected_samples", minimum=1),
+            received_samples=_strict_int(value.get("received_samples"), field_name="received_samples"),
+            dollar_volumes=_decimal_tuple(value.get("dollar_volumes") or (), field_name="dollar_volumes"),
+            trade_counts=tuple(trade_counts_value),
+            spreads_bps=_finite_float_tuple(value.get("spreads_bps") or (), field_name="spreads_bps", nonnegative=True),
+            depth_usd=_decimal_tuple(value.get("depth_usd") or (), field_name="depth_usd"),
+            log_returns=_finite_float_tuple(value.get("log_returns") or (), field_name="log_returns"),
+            event_lag_ms=_finite_float_tuple(value.get("event_lag_ms") or (), field_name="event_lag_ms", nonnegative=True),
+            gap_seconds=_finite_float_tuple(value.get("gap_seconds") or (), field_name="gap_seconds", nonnegative=True),
+            observation_started_ns=_strict_int(
+                value.get("observation_started_ns"), field_name="observation_started_ns", minimum=1
+            ),
+            listing_started_ns=(
+                _strict_int(value["listing_started_ns"], field_name="listing_started_ns", minimum=1)
+                if value.get("listing_started_ns") is not None
+                else None
+            ),
+            listing_age_source=_strict_text(
+                value.get("listing_age_source"),
+                field_name="listing_age_source",
+                optional=True,
+            ),
+            quote_currency=_strict_text(
+                value.get("quote_currency"),
+                field_name="quote_currency",
+                case="upper",
+            ),
+            quote_currency_fundable=_strict_bool(
+                value.get("quote_currency_fundable"), field_name="quote_currency_fundable"
+            ),
+            execution_mid=exact["execution_mid"],
+            cross_venue_mid=cross_mid,
+            cross_venue_provider_id=(
+                _strict_text(
+                    value.get("cross_venue_provider_id"),
+                    field_name="cross_venue_provider_id",
+                    optional=True,
+                )
+            ),
+            cross_venue_source_event_ns=(
+                _strict_int(
+                    value["cross_venue_source_event_ns"],
+                    field_name="cross_venue_source_event_ns",
+                    minimum=1,
+                )
+                if value.get("cross_venue_source_event_ns") is not None
+                else None
+            ),
+            cross_venue_received_at_ns=(
+                _strict_int(
+                    value["cross_venue_received_at_ns"],
+                    field_name="cross_venue_received_at_ns",
+                    minimum=1,
+                )
+                if value.get("cross_venue_received_at_ns") is not None
+                else None
+            ),
+            min_order_size=exact["min_order_size"],
+            min_trade_increment=exact["min_trade_increment"],
+            price_increment=exact["price_increment"],
+        )
+
+
+@dataclass(frozen=True)
+class MarketDataRankedMembership:
+    symbol: str
+    rank: int
+    pareto_front: int
+    percentile_median: float
+    uncertainty: float
+    protected: bool
+    deep_selected: bool
+    residence_started_ns: int | None
+    execution_authorized: bool
+    activation_mode: str
+    listing_started_ns: int | None
+    listing_age_source: str | None
+    cross_venue_provider_id: str | None
+    cross_venue_source_event_ns: int | None
+    cross_venue_received_at_ns: int | None
+    metrics: tuple[tuple[str, float], ...]
+    percentiles: tuple[tuple[str, float], ...]
+    reason_codes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "rank": self.rank,
+            "pareto_front": self.pareto_front,
+            "percentile_median": self.percentile_median,
+            "uncertainty": self.uncertainty,
+            "protected": self.protected,
+            "deep_selected": self.deep_selected,
+            "residence_started_ns": self.residence_started_ns,
+            "execution_authorized": self.execution_authorized,
+            "activation_mode": self.activation_mode,
+            "listing_started_ns": self.listing_started_ns,
+            "listing_age_source": self.listing_age_source,
+            "cross_venue_provider_id": self.cross_venue_provider_id,
+            "cross_venue_source_event_ns": self.cross_venue_source_event_ns,
+            "cross_venue_received_at_ns": self.cross_venue_received_at_ns,
+            "metrics": {key: value for key, value in self.metrics},
+            "percentiles": {key: value for key, value in self.percentiles},
+            "reason_codes": list(self.reason_codes),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "MarketDataRankedMembership":
+        metrics = value.get("metrics") or {}
+        percentiles = value.get("percentiles") or {}
+        if not isinstance(metrics, Mapping) or not isinstance(percentiles, Mapping):
+            raise ValueError("market_data_membership_metrics_mapping_required")
+        if set(metrics) != _MARKET_DATA_METRIC_FIELDS or set(percentiles) != _MARKET_DATA_PERCENTILE_FIELDS:
+            raise ValueError("market_data_membership_metric_schema_invalid")
+        if any(isinstance(number, bool) for number in (*metrics.values(), *percentiles.values())):
+            raise ValueError("market_data_membership_boolean_metric_invalid")
+        normalized_metrics = tuple(sorted((str(key), float(number)) for key, number in metrics.items()))
+        normalized_percentiles = tuple(sorted((str(key), float(number)) for key, number in percentiles.items()))
+        if any(not math.isfinite(number) for _, number in (*normalized_metrics, *normalized_percentiles)):
+            raise ValueError("market_data_membership_nonfinite_metric")
+        if any(number < 0.0 for _, number in normalized_metrics):
+            raise ValueError("market_data_membership_negative_metric")
+        if any(not 0.0 <= number <= 1.0 for _, number in normalized_percentiles):
+            raise ValueError("market_data_membership_percentile_domain_invalid")
+        if isinstance(value.get("percentile_median"), bool) or isinstance(value.get("uncertainty"), bool):
+            raise ValueError("market_data_membership_boolean_summary_invalid")
+        percentile_median = float(value.get("percentile_median") or 0.0)
+        uncertainty = float(value.get("uncertainty") or 0.0)
+        if not math.isfinite(percentile_median) or not 0.0 <= percentile_median <= 1.0:
+            raise ValueError("market_data_membership_percentile_median_invalid")
+        if not math.isfinite(uncertainty) or not 0.0 <= uncertainty <= 1.0:
+            raise ValueError("market_data_membership_uncertainty_invalid")
+        reason_codes_value = value.get("reason_codes") or ()
+        if (
+            not isinstance(reason_codes_value, (list, tuple))
+            or not reason_codes_value
+            or any(not isinstance(item, str) or not item.strip() for item in reason_codes_value)
+            or len(set(reason_codes_value)) != len(reason_codes_value)
+        ):
+            raise ValueError("market_data_membership_reason_codes_invalid")
+        return cls(
+            symbol=normalize_alpaca_crypto_symbol(value.get("symbol")),
+            rank=_strict_int(value.get("rank"), field_name="market_data_membership_rank", minimum=1),
+            pareto_front=_strict_int(
+                value.get("pareto_front"), field_name="market_data_membership_pareto_front", minimum=1
+            ),
+            percentile_median=percentile_median,
+            uncertainty=uncertainty,
+            protected=_strict_bool(value.get("protected"), field_name="market_data_membership_protected"),
+            deep_selected=_strict_bool(
+                value.get("deep_selected"), field_name="market_data_membership_deep_selected"
+            ),
+            residence_started_ns=(
+                _strict_int(
+                    value["residence_started_ns"],
+                    field_name="market_data_membership_residence_started_ns",
+                    minimum=1,
+                )
+                if value.get("residence_started_ns") is not None
+                else None
+            ),
+            execution_authorized=_strict_bool(
+                value.get("execution_authorized"),
+                field_name="market_data_membership_execution_authorized",
+            ),
+            activation_mode=_strict_text(
+                value.get("activation_mode"),
+                field_name="market_data_membership_activation_mode",
+            ),
+            listing_started_ns=(
+                _strict_int(
+                    value["listing_started_ns"],
+                    field_name="market_data_membership_listing_started_ns",
+                    minimum=1,
+                )
+                if value.get("listing_started_ns") is not None
+                else None
+            ),
+            listing_age_source=_strict_text(
+                value.get("listing_age_source"),
+                field_name="market_data_membership_listing_age_source",
+                optional=True,
+            ),
+            cross_venue_provider_id=(
+                _strict_text(
+                    value.get("cross_venue_provider_id"),
+                    field_name="market_data_membership_cross_venue_provider_id",
+                    optional=True,
+                )
+            ),
+            cross_venue_source_event_ns=(
+                _strict_int(
+                    value["cross_venue_source_event_ns"],
+                    field_name="market_data_membership_cross_venue_source_event_ns",
+                    minimum=1,
+                )
+                if value.get("cross_venue_source_event_ns") is not None
+                else None
+            ),
+            cross_venue_received_at_ns=(
+                _strict_int(
+                    value["cross_venue_received_at_ns"],
+                    field_name="market_data_membership_cross_venue_received_at_ns",
+                    minimum=1,
+                )
+                if value.get("cross_venue_received_at_ns") is not None
+                else None
+            ),
+            metrics=normalized_metrics,
+            percentiles=normalized_percentiles,
+            reason_codes=tuple(reason_codes_value),
+        )
+
+
+@dataclass(frozen=True)
+class MarketDataUniverseSnapshot:
+    snapshot_id: str
+    schema_version: str
+    catalog_snapshot_id: str
+    broker_universe_snapshot_id: str
+    as_of_ns: int
+    observation_cutoff_ns: int
+    created_at_ns: int
+    activation_mode: str
+    execution_authorized: bool
+    provider_id: str
+    execution_location: str
+    held_symbols: tuple[str, ...]
+    open_order_symbols: tuple[str, ...]
+    lifecycle_symbols: tuple[str, ...]
+    deep_candidate_limit: int
+    deep_subscription_limit: int
+    min_residence_ns: int
+    unranked_symbols: tuple[str, ...]
+    memberships: tuple[MarketDataRankedMembership, ...]
+    snapshot_hash: str
+
+    @property
+    def deep_symbols(self) -> tuple[str, ...]:
+        return tuple(item.symbol for item in self.memberships if item.deep_selected)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "snapshot_id": self.snapshot_id,
+            "schema_version": self.schema_version,
+            "catalog_snapshot_id": self.catalog_snapshot_id,
+            "broker_universe_snapshot_id": self.broker_universe_snapshot_id,
+            "as_of_ns": self.as_of_ns,
+            "observation_cutoff_ns": self.observation_cutoff_ns,
+            "created_at_ns": self.created_at_ns,
+            "activation_mode": self.activation_mode,
+            "execution_authorized": self.execution_authorized,
+            "provider_id": self.provider_id,
+            "execution_location": self.execution_location,
+            "held_symbols": list(self.held_symbols),
+            "open_order_symbols": list(self.open_order_symbols),
+            "lifecycle_symbols": list(self.lifecycle_symbols),
+            "deep_candidate_limit": self.deep_candidate_limit,
+            "deep_subscription_limit": self.deep_subscription_limit,
+            "min_residence_ns": self.min_residence_ns,
+            "unranked_symbols": list(self.unranked_symbols),
+            "memberships": [item.to_dict() for item in self.memberships],
+            "snapshot_hash": self.snapshot_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "MarketDataUniverseSnapshot":
+        memberships_value = value.get("memberships") or ()
+        if not isinstance(memberships_value, (list, tuple)):
+            raise ValueError("market_data_memberships_sequence_required")
+        held_symbols = _normalized_symbol_sequence(
+            value.get("held_symbols"), field_name="market_data_universe_held_symbols"
+        )
+        open_order_symbols = _normalized_symbol_sequence(
+            value.get("open_order_symbols"), field_name="market_data_universe_open_order_symbols"
+        )
+        lifecycle_symbols = _normalized_symbol_sequence(
+            value.get("lifecycle_symbols"), field_name="market_data_universe_lifecycle_symbols"
+        )
+        unranked_symbols = _normalized_symbol_sequence(
+            value.get("unranked_symbols"), field_name="market_data_universe_unranked_symbols"
+        )
+        snapshot = cls(
+            snapshot_id=_strict_text(
+                value.get("snapshot_id"), field_name="market_data_universe_snapshot_id"
+            ),
+            schema_version=_strict_text(
+                value.get("schema_version"), field_name="market_data_universe_schema_version"
+            ),
+            catalog_snapshot_id=_strict_text(
+                value.get("catalog_snapshot_id"), field_name="market_data_universe_catalog_snapshot_id"
+            ),
+            broker_universe_snapshot_id=_strict_text(
+                value.get("broker_universe_snapshot_id"),
+                field_name="market_data_universe_broker_universe_snapshot_id",
+            ),
+            as_of_ns=_strict_int(value.get("as_of_ns"), field_name="market_data_universe_as_of_ns", minimum=1),
+            observation_cutoff_ns=_strict_int(
+                value.get("observation_cutoff_ns"), field_name="market_data_universe_observation_cutoff_ns", minimum=1
+            ),
+            created_at_ns=_strict_int(
+                value.get("created_at_ns"), field_name="market_data_universe_created_at_ns", minimum=1
+            ),
+            activation_mode=_strict_text(
+                value.get("activation_mode"), field_name="market_data_universe_activation_mode"
+            ),
+            execution_authorized=_strict_bool(
+                value.get("execution_authorized"), field_name="market_data_universe_execution_authorized"
+            ),
+            provider_id=_strict_text(
+                value.get("provider_id"), field_name="market_data_universe_provider_id"
+            ),
+            execution_location=_strict_text(
+                value.get("execution_location"),
+                field_name="market_data_universe_execution_location",
+                case="lower",
+            ),
+            held_symbols=held_symbols,
+            open_order_symbols=open_order_symbols,
+            lifecycle_symbols=lifecycle_symbols,
+            deep_candidate_limit=_strict_int(
+                value.get("deep_candidate_limit"), field_name="market_data_universe_deep_candidate_limit", minimum=1
+            ),
+            deep_subscription_limit=_strict_int(
+                value.get("deep_subscription_limit"),
+                field_name="market_data_universe_deep_subscription_limit",
+                minimum=1,
+            ),
+            min_residence_ns=_strict_int(
+                value.get("min_residence_ns"), field_name="market_data_universe_min_residence_ns"
+            ),
+            unranked_symbols=unranked_symbols,
+            memberships=tuple(MarketDataRankedMembership.from_dict(item) for item in memberships_value),
+            snapshot_hash=_strict_text(
+                value.get("snapshot_hash"), field_name="market_data_universe_snapshot_hash"
+            ),
+        )
+        stable = snapshot.to_dict()
+        stable.pop("snapshot_id", None)
+        stable.pop("snapshot_hash", None)
+        expected_hash = _stable_hash(stable)
+        if snapshot.schema_version != MARKET_DATA_UNIVERSE_SCHEMA:
+            raise ValueError("market_data_universe_schema_invalid")
+        if snapshot.snapshot_hash != expected_hash or snapshot.snapshot_id != f"market-universe-{expected_hash[:24]}":
+            raise ValueError("market_data_universe_integrity_invalid")
+        if snapshot.activation_mode != MARKET_DATA_OBSERVE_ONLY or snapshot.execution_authorized:
+            raise ValueError("market_data_universe_observe_only_required")
+        if not snapshot.catalog_snapshot_id or not snapshot.broker_universe_snapshot_id:
+            raise ValueError("market_data_universe_lineage_required")
+        if snapshot.as_of_ns <= 0 or snapshot.created_at_ns < snapshot.as_of_ns:
+            raise ValueError("market_data_universe_time_invalid")
+        if snapshot.observation_cutoff_ns <= 0 or snapshot.observation_cutoff_ns > snapshot.as_of_ns:
+            raise ValueError("market_data_universe_observation_cutoff_invalid")
+        if snapshot.execution_location != "alpaca" or not snapshot.provider_id.startswith("alpaca_crypto_"):
+            raise ValueError("market_data_universe_execution_location_invalid")
+        if (
+            snapshot.deep_candidate_limit <= 0
+            or snapshot.deep_subscription_limit <= 0
+            or snapshot.deep_candidate_limit > snapshot.deep_subscription_limit
+            or snapshot.min_residence_ns < 0
+        ):
+            raise ValueError("market_data_universe_capacity_invalid")
+        symbols = tuple(item.symbol for item in snapshot.memberships)
+        if not symbols or any(not symbol for symbol in symbols) or len(set(symbols)) != len(symbols):
+            raise ValueError("market_data_universe_membership_symbols_invalid")
+        if set(symbols) & set(snapshot.unranked_symbols):
+            raise ValueError("market_data_universe_ranked_unranked_overlap")
+        ranks = tuple(item.rank for item in snapshot.memberships)
+        if ranks != tuple(range(1, len(ranks) + 1)):
+            raise ValueError("market_data_universe_membership_ranks_invalid")
+        protected = frozenset((*snapshot.held_symbols, *snapshot.open_order_symbols, *snapshot.lifecycle_symbols))
+        if not protected.issubset(symbols):
+            raise ValueError("market_data_universe_protected_symbol_missing")
+        if len(snapshot.deep_symbols) > snapshot.deep_subscription_limit:
+            raise ValueError("market_data_universe_deep_capacity_exceeded")
+        if len(set(snapshot.deep_symbols) - protected) > snapshot.deep_candidate_limit:
+            raise ValueError("market_data_universe_dynamic_deep_capacity_exceeded")
+        percentiles_by_symbol = {item.symbol: dict(item.percentiles) for item in snapshot.memberships}
+        expected_fronts = _pareto_fronts(percentiles_by_symbol)
+        expected_order = sorted(
+            snapshot.memberships,
+            key=lambda item: (
+                expected_fronts[item.symbol],
+                item.uncertainty,
+                -item.percentile_median,
+                item.symbol,
+            ),
+        )
+        if tuple(item.symbol for item in expected_order) != symbols:
+            raise ValueError("market_data_universe_membership_order_invalid")
+        for membership in snapshot.memberships:
+            if membership.activation_mode != MARKET_DATA_OBSERVE_ONLY or membership.execution_authorized:
+                raise ValueError("market_data_universe_membership_authority_invalid")
+            if membership.protected != (membership.symbol in protected):
+                raise ValueError("market_data_universe_membership_protection_invalid")
+            if membership.protected and not membership.deep_selected:
+                raise ValueError("market_data_universe_protected_symbol_not_deep")
+            if membership.deep_selected != (membership.residence_started_ns is not None):
+                raise ValueError("market_data_universe_residence_state_invalid")
+            if membership.residence_started_ns is not None and not 0 < membership.residence_started_ns <= snapshot.as_of_ns:
+                raise ValueError("market_data_universe_residence_time_invalid")
+            metrics = dict(membership.metrics)
+            percentiles = dict(membership.percentiles)
+            if membership.pareto_front != expected_fronts[membership.symbol]:
+                raise ValueError("market_data_universe_pareto_front_invalid")
+            if not math.isclose(
+                membership.percentile_median,
+                _median(tuple(percentiles.values())),
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            ):
+                raise ValueError("market_data_universe_percentile_median_invalid")
+            if not math.isclose(membership.uncertainty, metrics["uncertainty"], rel_tol=0.0, abs_tol=1e-15):
+                raise ValueError("market_data_universe_uncertainty_mismatch")
+            if any(not 0.0 <= metrics[field_name] <= 1.0 for field_name in _MARKET_DATA_UNIT_INTERVAL_METRICS):
+                raise ValueError("market_data_universe_unit_interval_metric_invalid")
+            if "DYNAMIC_MEMBERSHIP_OBSERVE_ONLY" not in membership.reason_codes:
+                raise ValueError("market_data_universe_observe_only_reason_missing")
+            if membership.protected != ("PROTECTED_LIFECYCLE_DEEP_REQUIRED" in membership.reason_codes):
+                raise ValueError("market_data_universe_protection_reason_invalid")
+            listing_fields_present = membership.listing_started_ns is not None or membership.listing_age_source is not None
+            if listing_fields_present and (
+                membership.listing_started_ns is None
+                or not membership.listing_age_source
+                or not 0 < membership.listing_started_ns <= snapshot.observation_cutoff_ns
+            ):
+                raise ValueError("market_data_universe_listing_provenance_invalid")
+            cross_fields_present = (
+                membership.cross_venue_provider_id is not None
+                or membership.cross_venue_source_event_ns is not None
+                or membership.cross_venue_received_at_ns is not None
+            )
+            if cross_fields_present and (
+                not membership.cross_venue_provider_id
+                or membership.cross_venue_provider_id.startswith("alpaca_crypto_")
+                or membership.cross_venue_source_event_ns is None
+                or membership.cross_venue_received_at_ns is None
+                or not 0
+                < membership.cross_venue_source_event_ns
+                <= membership.cross_venue_received_at_ns
+                <= snapshot.as_of_ns
+                or membership.cross_venue_source_event_ns > snapshot.observation_cutoff_ns
+            ):
+                raise ValueError("market_data_universe_cross_venue_provenance_invalid")
+            if (metrics["cross_venue_basis_available"] == 1.0) != cross_fields_present:
+                raise ValueError("market_data_universe_cross_venue_metric_mismatch")
+            if (metrics["listing_age_known"] == 1.0) != listing_fields_present:
+                raise ValueError("market_data_universe_listing_metric_mismatch")
+        return snapshot
+
+
+def _observation_metrics(observation: MarketBreadthObservation, *, as_of_ns: int) -> dict[str, float]:
+    if (
+        not observation.symbol
+        or observation.execution_location != "alpaca"
+        or observation.provider_id != "alpaca_crypto_rest"
+    ):
+        raise ValueError("execution_location_observation_required")
+    if observation.observed_at_ns <= 0 or observation.latest_source_event_ns <= 0:
+        raise ValueError("observation_timestamp_required")
+    if observation.observed_at_ns > as_of_ns or observation.latest_source_event_ns > as_of_ns:
+        raise ValueError("future_market_observation_refused")
+    if observation.latest_source_event_ns > observation.observed_at_ns:
+        raise ValueError("source_event_after_observation_refused")
+    if observation.expected_samples <= 0 or not 1 <= observation.received_samples <= observation.expected_samples:
+        raise ValueError("observation_sample_counts_invalid")
+    if (
+        not observation.quote_currency
+        or observation.observation_started_ns <= 0
+        or observation.observation_started_ns > observation.latest_source_event_ns
+    ):
+        raise ValueError("observation_history_or_quote_truth_invalid")
+    listing_fields_present = observation.listing_started_ns is not None or observation.listing_age_source is not None
+    if listing_fields_present and (
+        observation.listing_started_ns is None
+        or not observation.listing_age_source
+        or observation.listing_started_ns <= 0
+        or observation.listing_started_ns > observation.latest_source_event_ns
+    ):
+        raise ValueError("listing_age_provenance_invalid")
+    cross_fields_present = any(
+        value is not None
+        for value in (
+            observation.cross_venue_mid,
+            observation.cross_venue_provider_id,
+            observation.cross_venue_source_event_ns,
+            observation.cross_venue_received_at_ns,
+        )
+    )
+    if cross_fields_present and (
+        observation.cross_venue_mid is None
+        or not observation.cross_venue_provider_id
+        or observation.cross_venue_provider_id.startswith("alpaca_crypto_")
+        or observation.cross_venue_source_event_ns is None
+        or observation.cross_venue_received_at_ns is None
+        or observation.cross_venue_source_event_ns <= 0
+        or not observation.cross_venue_source_event_ns
+        <= observation.cross_venue_received_at_ns
+        <= observation.observed_at_ns
+        <= as_of_ns
+    ):
+        raise ValueError("cross_venue_advisory_provenance_invalid")
+    if observation.execution_mid <= 0 or any(
+        value <= 0 for value in (observation.min_order_size, observation.min_trade_increment, observation.price_increment)
+    ):
+        raise ValueError("observation_execution_constraints_invalid")
+
+    dollar_volume = [float(value) for value in observation.dollar_volumes]
+    depth_usd = [float(value) for value in observation.depth_usd]
+    if any(not math.isfinite(value) or value < 0.0 for value in (*dollar_volume, *depth_usd)):
+        raise ValueError("observation_decimal_conversion_invalid")
+    if any(count < 0 for count in observation.trade_counts):
+        raise ValueError("observation_trade_count_invalid")
+    spreads = _finite_float_tuple(observation.spreads_bps, field_name="spreads_bps", nonnegative=True)
+    returns = _finite_float_tuple(observation.log_returns, field_name="log_returns")
+    lags = _finite_float_tuple(observation.event_lag_ms, field_name="event_lag_ms", nonnegative=True)
+    gaps = _finite_float_tuple(observation.gap_seconds, field_name="gap_seconds", nonnegative=True)
+    primary_lengths = {
+        len(dollar_volume),
+        len(observation.trade_counts),
+        len(spreads),
+        len(depth_usd),
+        len(lags),
+    }
+    expected_derived_length = max(0, observation.received_samples - 1)
+    if primary_lengths != {observation.received_samples} or len(returns) != expected_derived_length or len(gaps) != expected_derived_length:
+        raise ValueError("observation_sample_array_lengths_invalid")
+
+    winsor_volume = _winsorized(dollar_volume)
+    winsor_trades = _winsorized([float(value) for value in observation.trade_counts])
+    spread_median, spread_mad = _median_mad(spreads)
+    depth_median, depth_mad = _median_mad(depth_usd)
+    return_median, return_mad = _median_mad(returns)
+    lag_median, lag_mad = _median_mad(lags)
+    gap_median, gap_mad = _median_mad(gaps)
+    minimum_quantity_lots = (
+        observation.min_order_size / observation.min_trade_increment
+    ).to_integral_value(rounding=ROUND_CEILING)
+    minimum_executable_quantity = max(Decimal("1"), minimum_quantity_lots) * observation.min_trade_increment
+    reference_price_ticks = (
+        observation.execution_mid / observation.price_increment
+    ).to_integral_value(rounding=ROUND_CEILING)
+    executable_reference_price = max(Decimal("1"), reference_price_ticks) * observation.price_increment
+    min_order_notional = float(executable_reference_price * minimum_executable_quantity)
+    capacity_multiple = depth_median / max(min_order_notional, 1e-12)
+    impact_bps = min_order_notional / max(depth_median, 1e-12) * 10_000.0
+    basis_bps = 0.0
+    if observation.cross_venue_mid is not None:
+        basis_bps = float(abs(observation.cross_venue_mid - observation.execution_mid) / observation.execution_mid * Decimal("10000"))
+    basis_age_ms = (
+        max(0.0, (observation.observed_at_ns - int(observation.cross_venue_source_event_ns or 0)) / 1_000_000.0)
+        if observation.cross_venue_source_event_ns is not None
+        else 0.0
+    )
+    effective_samples = min(observation.received_samples, len(returns), len(gaps))
+    completeness = observation.received_samples / observation.expected_samples
+    continuity = min(1.0, effective_samples / max(1.0, float(observation.expected_samples)))
+    robust_volatility = 1.4826 * return_mad
+    jump_ratio = max((abs(value - return_median) for value in returns), default=0.0) / max(robust_volatility, 1e-12)
+    relative_depth_dispersion = depth_mad / max(depth_median, 1e-12)
+    relative_spread_dispersion = spread_mad / max(spread_median, 1e-12)
+    uncertainty = min(
+        1.0,
+        max(
+            1.0 - completeness,
+            1.0 / math.sqrt(max(1, effective_samples)),
+            min(1.0, relative_depth_dispersion + relative_spread_dispersion),
+            0.0 if observation.listing_started_ns is not None else 1.0,
+            0.0 if observation.cross_venue_mid is not None else 1.0,
+        ),
+    )
+    metrics = {
+        "completeness": completeness,
+        "clock_quality": 1.0 / (1.0 + (lag_median + lag_mad) / 1000.0),
+        "log_dollar_volume": _median([math.log1p(value) for value in winsor_volume]) if winsor_volume else 0.0,
+        "log_trade_count": _median([math.log1p(value) for value in winsor_trades]) if winsor_trades else 0.0,
+        "spread_median_bps": spread_median,
+        "spread_mad_bps": spread_mad,
+        "log_depth_usd": math.log1p(max(0.0, depth_median)),
+        "depth_mad_usd": depth_mad,
+        "relative_depth_dispersion": relative_depth_dispersion,
+        "relative_spread_dispersion": relative_spread_dispersion,
+        "estimated_min_order_impact_bps": impact_bps,
+        "robust_log_return_volatility": robust_volatility,
+        "jump_ratio": jump_ratio,
+        "gap_median_seconds": gap_median,
+        "gap_mad_seconds": gap_mad,
+        "observation_span_seconds": (observation.latest_source_event_ns - observation.observation_started_ns) / 1_000_000_000.0,
+        "listing_age_seconds": (
+            (as_of_ns - int(observation.listing_started_ns or as_of_ns)) / 1_000_000_000.0
+        ),
+        "listing_age_known": 1.0 if observation.listing_started_ns is not None else 0.0,
+        "continuity": continuity,
+        "fundable": 1.0 if observation.quote_currency_fundable else 0.0,
+        "cross_venue_basis_bps": basis_bps,
+        "cross_venue_basis_age_ms": basis_age_ms,
+        "cross_venue_basis_available": 1.0 if observation.cross_venue_mid is not None else 0.0,
+        "capacity_multiple": capacity_multiple,
+        "uncertainty": uncertainty,
+    }
+    if set(metrics) != _MARKET_DATA_METRIC_FIELDS:
+        raise RuntimeError("market_data_metric_schema_internal_mismatch")
+    if any(not math.isfinite(value) or value < 0.0 for value in metrics.values()):
+        raise ValueError("market_data_observation_metric_domain_invalid")
+    if any(not 0.0 <= metrics[field_name] <= 1.0 for field_name in _MARKET_DATA_UNIT_INTERVAL_METRICS):
+        raise ValueError("market_data_observation_unit_interval_metric_invalid")
+    return metrics
+
+
+def _empirical_percentiles(
+    metrics_by_symbol: Mapping[str, Mapping[str, float]],
+) -> dict[str, dict[str, float]]:
+    fields = tuple(sorted(_MARKET_DATA_PERCENTILE_FIELDS))
+    result = {symbol: {} for symbol in metrics_by_symbol}
+    for field_name in fields:
+        basis_field = field_name in {"cross_venue_basis_bps", "cross_venue_basis_age_ms"}
+        ordered = sorted(
+            (float(metrics[field_name]), symbol)
+            for symbol, metrics in metrics_by_symbol.items()
+            if not basis_field or metrics["cross_venue_basis_available"] == 1.0
+        )
+        if basis_field:
+            for symbol, metrics in metrics_by_symbol.items():
+                if metrics["cross_venue_basis_available"] == 0.0:
+                    result[symbol][field_name] = 0.0
+        if not ordered:
+            continue
+        denominator = max(1, len(ordered) - 1)
+        index_by_value: dict[float, list[int]] = {}
+        for index, (value, _) in enumerate(ordered):
+            index_by_value.setdefault(value, []).append(index)
+        for value, symbol in ordered:
+            average_index = sum(index_by_value[value]) / len(index_by_value[value])
+            percentile = average_index / denominator if len(ordered) > 1 else 1.0
+            result[symbol][field_name] = (
+                percentile if field_name in _MARKET_DATA_HIGHER_IS_BETTER else 1.0 - percentile
+            )
+    return result
+
+
+def _pareto_fronts(percentiles: Mapping[str, Mapping[str, float]]) -> dict[str, int]:
+    fields = _MARKET_DATA_PARETO_FIELDS
+    symbols = tuple(sorted(percentiles))
+    dominates: list[list[int]] = [[] for _ in symbols]
+    domination_count = [0 for _ in symbols]
+
+    def relation(left: int, right: int) -> int:
+        left_vector = percentiles[symbols[left]]
+        right_vector = percentiles[symbols[right]]
+        left_no_worse = all(left_vector[field] >= right_vector[field] for field in fields)
+        right_no_worse = all(right_vector[field] >= left_vector[field] for field in fields)
+        if left_no_worse and any(left_vector[field] > right_vector[field] for field in fields):
+            return 1
+        if right_no_worse and any(right_vector[field] > left_vector[field] for field in fields):
+            return -1
+        return 0
+
+    for left in range(len(symbols)):
+        for right in range(left + 1, len(symbols)):
+            comparison = relation(left, right)
+            if comparison > 0:
+                dominates[left].append(right)
+                domination_count[right] += 1
+            elif comparison < 0:
+                dominates[right].append(left)
+                domination_count[left] += 1
+
+    current = [index for index, count in enumerate(domination_count) if count == 0]
+    fronts: dict[str, int] = {}
+    front_number = 1
+    while current:
+        next_front: list[int] = []
+        for index in sorted(current, key=lambda item: symbols[item]):
+            fronts[symbols[index]] = front_number
+            for dominated_index in dominates[index]:
+                domination_count[dominated_index] -= 1
+                if domination_count[dominated_index] == 0:
+                    next_front.append(dominated_index)
+        current = next_front
+        front_number += 1
+    if len(fronts) != len(symbols):
+        raise ValueError("pareto_front_construction_failed")
+    return fronts
+
+
+def build_market_data_universe_snapshot(
+    observations: Sequence[MarketBreadthObservation | Mapping[str, Any]],
+    *,
+    catalog_snapshot_id: str,
+    broker_universe_snapshot_id: str,
+    as_of_ns: int,
+    created_at_ns: int,
+    held_symbols: Sequence[str] = (),
+    open_order_symbols: Sequence[str] = (),
+    lifecycle_symbols: Sequence[str] = (),
+    prior_snapshot: MarketDataUniverseSnapshot | Mapping[str, Any] | None = None,
+    deep_candidate_limit: int = 12,
+    deep_subscription_limit: int = 30,
+    min_residence_ns: int = 900_000_000_000,
+    unranked_symbols: Sequence[str] = (),
+) -> MarketDataUniverseSnapshot:
+    """Build an immutable, causal, observe-only deep-membership snapshot."""
+    if not catalog_snapshot_id or not broker_universe_snapshot_id:
+        raise ValueError("market_data_universe_lineage_required")
+    if as_of_ns <= 0 or created_at_ns < as_of_ns:
+        raise ValueError("market_data_universe_time_invalid")
+    if deep_candidate_limit <= 0 or deep_subscription_limit <= 0 or deep_candidate_limit > deep_subscription_limit:
+        raise ValueError("market_data_universe_capacity_invalid")
+    if min_residence_ns < 0:
+        raise ValueError("market_data_universe_residence_invalid")
+
+    normalized = tuple(
+        MarketBreadthObservation.from_dict(item.to_dict() if isinstance(item, MarketBreadthObservation) else item)
+        for item in observations
+    )
+    if not normalized:
+        raise ValueError("market_data_observations_required")
+    if len({item.symbol for item in normalized}) != len(normalized) or any(not item.symbol for item in normalized):
+        raise ValueError("market_data_observation_symbol_invalid_or_duplicate")
+    normalized_unranked = tuple(
+        sorted(
+            {
+                normalized_symbol
+                for symbol in unranked_symbols
+                if (normalized_symbol := normalize_alpaca_crypto_symbol(symbol))
+            }
+        )
+    )
+    if len(normalized_unranked) != len(tuple(unranked_symbols)):
+        raise ValueError("market_data_unranked_symbols_invalid_or_duplicate")
+    if set(normalized_unranked) & {item.symbol for item in normalized}:
+        raise ValueError("market_data_ranked_unranked_overlap")
+    provider_ids = {item.provider_id for item in normalized}
+    locations = {item.execution_location for item in normalized}
+    if len(provider_ids) != 1 or locations != {"alpaca"}:
+        raise ValueError("single_execution_location_provider_required")
+
+    metrics_by_symbol = {item.symbol: _observation_metrics(item, as_of_ns=as_of_ns) for item in normalized}
+    observation_by_symbol = {item.symbol: item for item in normalized}
+    percentiles = _empirical_percentiles(metrics_by_symbol)
+    fronts = _pareto_fronts(percentiles)
+    median_percentile = {
+        symbol: _median(tuple(values.values())) for symbol, values in percentiles.items()
+    }
+    ordered_symbols = sorted(
+        metrics_by_symbol,
+        key=lambda symbol: (
+            fronts[symbol],
+            metrics_by_symbol[symbol]["uncertainty"],
+            -median_percentile[symbol],
+            symbol,
+        ),
+    )
+    rank_by_symbol = {symbol: index + 1 for index, symbol in enumerate(ordered_symbols)}
+
+    protected = {
+        normalize_alpaca_crypto_symbol(symbol)
+        for symbol in (*held_symbols, *open_order_symbols, *lifecycle_symbols)
+    }
+    protected.discard("")
+    missing_protected = protected - set(metrics_by_symbol)
+    if missing_protected:
+        raise ValueError("protected_symbol_observation_missing:" + ",".join(sorted(missing_protected)))
+    if protected & set(normalized_unranked):
+        raise ValueError("protected_symbol_cannot_be_unranked")
+    if len(protected) > deep_subscription_limit:
+        raise ValueError("protected_deep_capacity_exceeded")
+
+    prior = None
+    if prior_snapshot is not None:
+        prior = MarketDataUniverseSnapshot.from_dict(
+            prior_snapshot.to_dict() if isinstance(prior_snapshot, MarketDataUniverseSnapshot) else prior_snapshot
+        )
+        if prior.as_of_ns > as_of_ns or prior.created_at_ns > as_of_ns:
+            raise ValueError("future_prior_universe_refused")
+        if prior.catalog_snapshot_id != catalog_snapshot_id or prior.broker_universe_snapshot_id != broker_universe_snapshot_id:
+            raise ValueError("prior_market_data_universe_lineage_mismatch")
+        prior_scope = {item.symbol for item in prior.memberships} | set(prior.unranked_symbols)
+        current_scope = set(metrics_by_symbol) | set(normalized_unranked)
+        if prior_scope != current_scope:
+            raise ValueError("prior_market_data_universe_symbol_scope_mismatch")
+        if (
+            prior.deep_candidate_limit != deep_candidate_limit
+            or prior.deep_subscription_limit != deep_subscription_limit
+            or prior.min_residence_ns != min_residence_ns
+        ):
+            raise ValueError("prior_market_data_universe_config_mismatch")
+    prior_by_symbol = {item.symbol: item for item in prior.memberships} if prior else {}
+    selected = set(protected)
+    candidate_capacity = min(deep_candidate_limit, deep_subscription_limit - len(selected))
+    resident_candidates = [
+        symbol
+        for symbol in ordered_symbols
+        if symbol not in protected
+        and symbol in prior_by_symbol
+        and prior_by_symbol[symbol].deep_selected
+        and prior_by_symbol[symbol].residence_started_ns is not None
+        and as_of_ns - int(prior_by_symbol[symbol].residence_started_ns or 0) < min_residence_ns
+    ]
+    for symbol in resident_candidates[:candidate_capacity]:
+        selected.add(symbol)
+    for symbol in ordered_symbols:
+        if len(selected - protected) >= candidate_capacity:
+            break
+        selected.add(symbol)
+
+    memberships: list[MarketDataRankedMembership] = []
+    for symbol in ordered_symbols:
+        previous = prior_by_symbol.get(symbol)
+        residence_started_ns = None
+        if symbol in selected:
+            residence_started_ns = (
+                previous.residence_started_ns
+                if previous is not None and previous.deep_selected and previous.residence_started_ns is not None
+                else as_of_ns
+            )
+        reasons = ["DYNAMIC_MEMBERSHIP_OBSERVE_ONLY"]
+        if symbol in protected:
+            reasons.append("PROTECTED_LIFECYCLE_DEEP_REQUIRED")
+        elif symbol in resident_candidates and symbol in selected:
+            reasons.append("MINIMUM_RESIDENCE_RETAINED")
+        elif symbol in selected:
+            reasons.append("PARETO_RANKED_DEEP_OBSERVATION")
+        else:
+            reasons.append("BREADTH_OBSERVATION_ONLY")
+        memberships.append(
+            MarketDataRankedMembership(
+                symbol=symbol,
+                rank=rank_by_symbol[symbol],
+                pareto_front=fronts[symbol],
+                percentile_median=median_percentile[symbol],
+                uncertainty=metrics_by_symbol[symbol]["uncertainty"],
+                protected=symbol in protected,
+                deep_selected=symbol in selected,
+                residence_started_ns=residence_started_ns,
+                execution_authorized=False,
+                activation_mode=MARKET_DATA_OBSERVE_ONLY,
+                listing_started_ns=observation_by_symbol[symbol].listing_started_ns,
+                listing_age_source=observation_by_symbol[symbol].listing_age_source,
+                cross_venue_provider_id=observation_by_symbol[symbol].cross_venue_provider_id,
+                cross_venue_source_event_ns=observation_by_symbol[symbol].cross_venue_source_event_ns,
+                cross_venue_received_at_ns=observation_by_symbol[symbol].cross_venue_received_at_ns,
+                metrics=tuple(sorted(metrics_by_symbol[symbol].items())),
+                percentiles=tuple(sorted(percentiles[symbol].items())),
+                reason_codes=tuple(reasons),
+            )
+        )
+
+    stable = {
+        "schema_version": MARKET_DATA_UNIVERSE_SCHEMA,
+        "catalog_snapshot_id": catalog_snapshot_id,
+        "broker_universe_snapshot_id": broker_universe_snapshot_id,
+        "as_of_ns": as_of_ns,
+        "observation_cutoff_ns": max(
+            max(item.latest_source_event_ns, int(item.cross_venue_source_event_ns or 0))
+            for item in normalized
+        ),
+        "created_at_ns": created_at_ns,
+        "activation_mode": MARKET_DATA_OBSERVE_ONLY,
+        "execution_authorized": False,
+        "provider_id": next(iter(provider_ids)),
+        "execution_location": "alpaca",
+        "held_symbols": sorted({normalize_alpaca_crypto_symbol(item) for item in held_symbols if normalize_alpaca_crypto_symbol(item)}),
+        "open_order_symbols": sorted({normalize_alpaca_crypto_symbol(item) for item in open_order_symbols if normalize_alpaca_crypto_symbol(item)}),
+        "lifecycle_symbols": sorted({normalize_alpaca_crypto_symbol(item) for item in lifecycle_symbols if normalize_alpaca_crypto_symbol(item)}),
+        "deep_candidate_limit": deep_candidate_limit,
+        "deep_subscription_limit": deep_subscription_limit,
+        "min_residence_ns": min_residence_ns,
+        "unranked_symbols": list(normalized_unranked),
+        "memberships": [item.to_dict() for item in memberships],
+    }
+    snapshot_hash = _stable_hash(stable)
+    return MarketDataUniverseSnapshot(
+        snapshot_id=f"market-universe-{snapshot_hash[:24]}",
+        snapshot_hash=snapshot_hash,
+        memberships=tuple(memberships),
+        schema_version=str(stable["schema_version"]),
+        catalog_snapshot_id=str(stable["catalog_snapshot_id"]),
+        broker_universe_snapshot_id=str(stable["broker_universe_snapshot_id"]),
+        as_of_ns=int(stable["as_of_ns"]),
+        observation_cutoff_ns=int(stable["observation_cutoff_ns"]),
+        created_at_ns=int(stable["created_at_ns"]),
+        activation_mode=str(stable["activation_mode"]),
+        execution_authorized=False,
+        provider_id=str(stable["provider_id"]),
+        execution_location=str(stable["execution_location"]),
+        held_symbols=tuple(stable["held_symbols"]),
+        open_order_symbols=tuple(stable["open_order_symbols"]),
+        lifecycle_symbols=tuple(stable["lifecycle_symbols"]),
+        deep_candidate_limit=int(stable["deep_candidate_limit"]),
+        deep_subscription_limit=int(stable["deep_subscription_limit"]),
+        min_residence_ns=int(stable["min_residence_ns"]),
+        unranked_symbols=tuple(stable["unranked_symbols"]),
+    )
 
 
 def _normalize_alpaca_crypto_asset_row(

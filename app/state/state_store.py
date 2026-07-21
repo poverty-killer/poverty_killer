@@ -473,6 +473,25 @@ class StateStore:
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS market_data_universe_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL,
+                    catalog_snapshot_id TEXT NOT NULL,
+                    broker_universe_snapshot_id TEXT NOT NULL,
+                    as_of_ns INTEGER NOT NULL,
+                    observation_cutoff_ns INTEGER NOT NULL,
+                    created_at_ns INTEGER NOT NULL,
+                    activation_mode TEXT NOT NULL,
+                    execution_authorized INTEGER NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    execution_location TEXT NOT NULL,
+                    snapshot_hash TEXT NOT NULL,
+                    membership_count INTEGER NOT NULL,
+                    payload TEXT NOT NULL
+                )
+            """)
+
             # Portfolio snapshots table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -582,6 +601,7 @@ class StateStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_crypto_universe_account ON broker_crypto_universe_snapshots(account_suffix, observed_at_ns)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_crypto_universe_catalog ON broker_crypto_universe_snapshots(catalog_snapshot_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_crypto_universe_symbol ON broker_crypto_universe_memberships(symbol)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_data_universe_lineage ON market_data_universe_snapshots(catalog_snapshot_id, broker_universe_snapshot_id, as_of_ns)")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reservation_ledger_active_dedupe ON reservation_ledger(reservation_dedupe_key) WHERE is_active = 1")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_client ON reservation_ledger(client_order_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reservation_ledger_active ON reservation_ledger(is_active)")
@@ -1109,6 +1129,7 @@ class StateStore:
             "broker_asset_catalog_items",
             "broker_crypto_universe_snapshots",
             "broker_crypto_universe_memberships",
+            "market_data_universe_snapshots",
         }
         if table not in allowed:
             raise ValueError(f"unsupported_state_table:{table}")
@@ -2547,6 +2568,207 @@ class StateStore:
                 raise RuntimeError("broker_crypto_capability_endpoint_integrity_failed")
             return None
         return {"catalog": catalog, "universe": universe}
+
+    @staticmethod
+    def _validate_market_data_universe_columns(stored: Dict[str, Any], normalized: Any) -> None:
+        memberships = normalized.memberships
+        expected = {
+            "snapshot_id": normalized.snapshot_id,
+            "schema_version": normalized.schema_version,
+            "catalog_snapshot_id": normalized.catalog_snapshot_id,
+            "broker_universe_snapshot_id": normalized.broker_universe_snapshot_id,
+            "as_of_ns": normalized.as_of_ns,
+            "observation_cutoff_ns": normalized.observation_cutoff_ns,
+            "created_at_ns": normalized.created_at_ns,
+            "activation_mode": normalized.activation_mode,
+            "execution_authorized": 0,
+            "provider_id": normalized.provider_id,
+            "execution_location": normalized.execution_location,
+            "snapshot_hash": normalized.snapshot_hash,
+            "membership_count": len(memberships),
+        }
+        integer_fields = {
+            "as_of_ns",
+            "observation_cutoff_ns",
+            "created_at_ns",
+            "execution_authorized",
+            "membership_count",
+        }
+        for field_name, expected_value in expected.items():
+            stored_value = stored.get(field_name)
+            if field_name in integer_fields:
+                try:
+                    stored_value = int(stored_value)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"market_data_universe_column_integrity_failed:{field_name}"
+                    ) from exc
+            else:
+                stored_value = str(stored_value or "")
+            if stored_value != expected_value:
+                raise RuntimeError(f"market_data_universe_column_integrity_failed:{field_name}")
+
+    def persist_market_data_universe_snapshot(self, snapshot: Any) -> str:
+        """Persist one immutable observe-only market-data universe snapshot."""
+        if self._read_only:
+            raise RuntimeError("state_store_read_only")
+        value = snapshot.to_dict() if callable(getattr(snapshot, "to_dict", None)) else snapshot
+        if not isinstance(value, dict):
+            raise ValueError("market_data_universe_mapping_required")
+        from app.market.capability_registry import MarketDataUniverseSnapshot
+
+        normalized = MarketDataUniverseSnapshot.from_dict(value)
+        value = normalized.to_dict()
+        memberships = value["memberships"]
+        snapshot_id = normalized.snapshot_id
+        snapshot_hash = normalized.snapshot_hash
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute(
+                    "SELECT * FROM market_data_universe_snapshots WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    stored = dict(existing)
+                    if str(stored.get("snapshot_hash") or "") != snapshot_hash or str(stored.get("payload") or "") != payload:
+                        conn.rollback()
+                        raise RuntimeError("market_data_universe_snapshot_conflict")
+                    self._validate_market_data_universe_columns(stored, normalized)
+                    conn.rollback()
+                    return "duplicate"
+                cursor.execute(
+                    """
+                    INSERT INTO market_data_universe_snapshots (
+                        snapshot_id, schema_version, catalog_snapshot_id,
+                        broker_universe_snapshot_id, as_of_ns, observation_cutoff_ns,
+                        created_at_ns, activation_mode, execution_authorized,
+                        provider_id, execution_location, snapshot_hash,
+                        membership_count, payload
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        value["schema_version"],
+                        value["catalog_snapshot_id"],
+                        value["broker_universe_snapshot_id"],
+                        value["as_of_ns"],
+                        value["observation_cutoff_ns"],
+                        value["created_at_ns"],
+                        value["activation_mode"],
+                        0,
+                        value["provider_id"],
+                        value["execution_location"],
+                        snapshot_hash,
+                        len(memberships),
+                        payload,
+                    ),
+                )
+                conn.commit()
+                return "persisted"
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to persist market-data universe %s: %s", snapshot_id, exc)
+            raise RuntimeError("market_data_universe_persist_failed") from exc
+
+    def get_market_data_universe_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        safe_id = str(snapshot_id or "").strip()
+        if not safe_id:
+            if strict:
+                raise RuntimeError("market_data_universe_snapshot_id_required")
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM market_data_universe_snapshots WHERE snapshot_id = ?",
+                    (safe_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                stored = dict(row)
+                try:
+                    value = json.loads(str(stored.get("payload") or ""))
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError("market_data_universe_payload_invalid") from exc
+                if not isinstance(value, dict):
+                    raise RuntimeError("market_data_universe_payload_invalid")
+                if strict:
+                    memberships = value.get("memberships")
+                    if not isinstance(memberships, list) or len(memberships) != int(stored.get("membership_count") or 0):
+                        raise RuntimeError("market_data_universe_membership_count_integrity_failed")
+                    from app.market.capability_registry import MarketDataUniverseSnapshot
+
+                    try:
+                        normalized = MarketDataUniverseSnapshot.from_dict(value)
+                    except ValueError as exc:
+                        raise RuntimeError("market_data_universe_semantic_integrity_failed") from exc
+                    if normalized.snapshot_id != safe_id or str(stored.get("snapshot_hash") or "") != normalized.snapshot_hash:
+                        raise RuntimeError("market_data_universe_hash_integrity_failed")
+                    self._validate_market_data_universe_columns(stored, normalized)
+                return value
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to get market-data universe %s: %s", safe_id, exc)
+            if strict:
+                raise RuntimeError("market_data_universe_read_failed") from exc
+            return None
+
+    def get_latest_market_data_universe_snapshot(
+        self,
+        *,
+        catalog_snapshot_id: str,
+        broker_universe_snapshot_id: str,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the newest immutable ranking snapshot for exact broker lineage."""
+        catalog_id = str(catalog_snapshot_id or "").strip()
+        universe_id = str(broker_universe_snapshot_id or "").strip()
+        if not catalog_id or not universe_id:
+            if strict:
+                raise RuntimeError("market_data_universe_lineage_required")
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT snapshot_id
+                    FROM market_data_universe_snapshots
+                    WHERE catalog_snapshot_id = ? AND broker_universe_snapshot_id = ?
+                    ORDER BY as_of_ns DESC, created_at_ns DESC, snapshot_id DESC
+                    LIMIT 1
+                    """,
+                    (catalog_id, universe_id),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                return None
+            value = self.get_market_data_universe_snapshot(str(row[0]), strict=strict)
+            if strict and value is not None and (
+                value.get("catalog_snapshot_id") != catalog_id
+                or value.get("broker_universe_snapshot_id") != universe_id
+            ):
+                raise RuntimeError("market_data_universe_lineage_integrity_failed")
+            return value
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to get latest market-data universe snapshot: %s", exc)
+            if strict:
+                raise RuntimeError("market_data_universe_latest_read_failed") from exc
+            return None
 
     def record_broker_inventory_event(self, event: Dict[str, Any]) -> str:
         """Persist one immutable inventory-affecting lifecycle fact.

@@ -280,6 +280,63 @@
           "after": "b5dd51e7a925984d9ca500dcd717702b92972537c2970ef87393bded861075d0"
         }
       }
+    },
+    "stage4": {
+      "report": "reports/completion/PAPER_TRUE_CAPABILITY_STAGE_4_REPORT.md",
+      "stage_entry_head": "6340bae4aff24d272f3ba4270c641d896de10278",
+      "stage_entry_covenant": "PASS",
+      "market_data_authority_delta": {
+        "execution_location": "alpaca",
+        "dynamic_activation_mode": "OBSERVE_ONLY",
+        "dynamic_execution_authorized": false,
+        "cross_venue_role": "ADVISORY_ONLY"
+      },
+      "source_sha256": {
+        "app/config.py": {
+          "before": "72609f669eabbb248a910ee606dd1ecf9f855389fe73d91e1b862f21ac4e43a6",
+          "after": "4d22c8f7b111e519b5500024bb71841672fcfede081964939e889278c3884e8d"
+        },
+        "app/data/feed_provider_router.py": {
+          "before": "c2e7bd46bb739a4b9d93efcd1e8a6d5bdf292f8272d735631997dd89a8afb544",
+          "after": "4fd6fa76be89d8bbf0a61d392aa8bcb1e1657e212fdb3cc92ff1ba1543e7110b"
+        },
+        "app/data/polling_client.py": {
+          "before": "49a8a335883d8b60270e0c4265ead7b809fe0534521b773b86c4b2f1a7aa5e24",
+          "after": "c80e1206cfba9e58593b290e34e48efca14ad5a7a71b0307121eb3f25abbde15"
+        },
+        "app/data/validators.py": {
+          "before": "b3471f80353ce0dd1c2b59364bae3fbea553c5143b1457f8c81d450cdee9cbbd",
+          "after": "fa773259adb4cf81bb3e520e6e0dcf7b9d6acbd88731e2bb11ec55495335d6c0"
+        },
+        "app/data/websocket_client.py": {
+          "before": "8ed521fc4f6d518d11c2a4eddea461a1fb9b711536943702ccb7d943db8d911f",
+          "after": "ae94ff34c3f73aa3dc8082316bf5c0f700c06106f9f0adb9f12fc2447a0dbcab"
+        },
+        "app/data/market_feeds.py": {
+          "before": "6a2466c111ddc0237b5b87e4e3ba4ae489496758ecd015741e58ba8d6578b7b0",
+          "after": "7e921b5d1f168397ae651a3504c1fa532eb76ab80a4c923129a6ef5bca36dc2b"
+        },
+        "app/market/capability_registry.py": {
+          "before": "d22f89019b9970488a3dcdc360023244388a40bfba6f6c041f69ff10b74e518c",
+          "after": "145e3bd4a4e1d0ef89fde59d56ab0a60eed2c15b25761b9a3c94b9204203748c"
+        },
+        "app/state/state_store.py": {
+          "before": "3f8b3728521565ba8508f1dbefe7210d91583989320cdd0e3db0a1497b5b9495",
+          "after": "c8526b2aa047b02174003cdf99f345f619281088e93e7df61fe8a35cc770485e"
+        },
+        "app/operator_providers/registry.py": {
+          "before": "2a8453f7b1c1318c0cc8e27ba7d5d5456e71dbd43467fce830955160290d6bc7",
+          "after": "dbe5bed672f9b189d23eb7cfef54a4227c2f60ecdf7e6cb1780f836cf9c2d07f"
+        },
+        "main.py": {
+          "before": "8db1a78eb0a9c4907c7f14727c6fdd3f5b4029523148a76ac8bdcd5de793a67a",
+          "after": "cc5a697fb0d58d78d9f37f58bdbe03edabde5f0c1cfb9a27936f1598ed464b90"
+        },
+        "scripts/run_bounded_paper.ps1": {
+          "before": "75a2c9f1e54350a78e2f328810b79b6a414f99b8a41a02836a5729b04ed79383",
+          "after": "a11d23676d13a0be0799a588b0d9e1dcec5348607e5e962e8fd7f193112c5f27"
+        }
+      }
     }
   },
   "activation_state_definitions": {
